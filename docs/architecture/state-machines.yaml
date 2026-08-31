@@ -1,0 +1,281 @@
+schema_version: "0.1"
+status: draft_implementation_baseline
+owner: crates/core
+
+semantics:
+  terminal_states_are_immutable: true
+  illegal_transition_error: invalid_state_transition
+  transition_and_event_commit_together: true
+  external_side_effects_start_after_commit: true
+  duplicate_result_commands_are_idempotent: true
+  event_names_are_protocol_contracts: true
+
+machines:
+  Run:
+    initial: queued
+    terminal: [completed, failed, cancelled]
+    states:
+      queued:
+        meaning: accepted_and_waiting_for_execution_claim
+      running:
+        meaning: execution_claimed_and_provider_work_active
+      waiting_for_approval:
+        meaning: provider_work_paused_for_one_or_more_tool_approvals
+      cancelling:
+        meaning: cancellation_committed_and_external_stop_in_progress
+      completed:
+        meaning: successful_terminal_result_committed
+      failed:
+        meaning: unsuccessful_terminal_result_committed
+      cancelled:
+        meaning: cancellation_finished_or_queued_work_cancelled
+    transitions:
+      - { from: queued, to: running, command: ClaimRun, event: run.state_changed }
+      - { from: queued, to: cancelled, command: RequestRunCancellation, event: run.state_changed }
+      - { from: running, to: waiting_for_approval, command: DecideToolCallPolicy, event: run.state_changed }
+      - { from: waiting_for_approval, to: running, command: DecideApproval, guard: decision_delivered_to_provider, event: run.state_changed }
+      - { from: running, to: cancelling, command: RequestRunCancellation, event: run.state_changed }
+      - { from: waiting_for_approval, to: cancelling, command: RequestRunCancellation, event: run.state_changed }
+      - { from: cancelling, to: cancelled, command: FinishRun, event: run.state_changed }
+      - { from: running, to: completed, command: FinishRun, event: run.state_changed }
+      - { from: running, to: failed, command: FinishRun, event: run.state_changed }
+    invariants:
+      - child_run_thread_equals_parent_thread
+      - child_run_has_exactly_one_parent
+      - parent_links_are_acyclic
+      - terminal_result_is_committed_once
+      - cancelling_child_does_not_cancel_parent_or_siblings
+      - cancelling_parent_requests_cancellation_for_descendants
+
+  Task:
+    initial: pending
+    terminal: [completed, failed, cancelled]
+    states:
+      pending:
+        meaning: accepted_but_dependencies_not_ready
+      ready:
+        meaning: all_dependencies_satisfied
+      running:
+        meaning: assigned_run_is_running
+      blocked:
+        meaning: a_dependency_failed_or_an_explicit_blocker_prevents_progress
+      completed:
+        meaning: objective_completed
+      failed:
+        meaning: objective_failed
+      cancelled:
+        meaning: work_will_not_start_or_continue
+    transitions:
+      - { from: pending, to: ready, command: TransitionTask, guard: dependencies_completed, event: task.state_changed }
+      - { from: pending, to: blocked, command: TransitionTask, guard: dependency_failed, event: task.state_changed }
+      - { from: blocked, to: pending, command: UpdateTask, guard: blocker_removed, event: task.state_changed }
+      - { from: blocked, to: ready, command: TransitionTask, guard: dependencies_completed, event: task.state_changed }
+      - { from: ready, to: running, command: TransitionTask, guard: assigned_run_running, event: task.state_changed }
+      - { from: running, to: completed, command: TransitionTask, event: task.state_changed }
+      - { from: running, to: failed, command: TransitionTask, event: task.state_changed }
+      - { from: pending, to: cancelled, command: TransitionTask, event: task.state_changed }
+      - { from: ready, to: cancelled, command: TransitionTask, event: task.state_changed }
+      - { from: blocked, to: cancelled, command: TransitionTask, event: task.state_changed }
+      - { from: running, to: cancelled, command: TransitionTask, guard: assigned_run_cancelled, event: task.state_changed }
+    invariants:
+      - parent_and_dependency_links_are_acyclic
+      - task_and_assigned_run_share_thread
+      - at_most_one_active_assigned_run
+      - hierarchy_does_not_determine_readiness
+
+  ToolCall:
+    initial: requested
+    terminal: [completed, failed, cancelled, denied]
+    states:
+      requested:
+        meaning: capability_and_requested_scope_recorded
+      awaiting_approval:
+        meaning: policy_requires_a_decision
+      ready:
+        meaning: effective_scope_granted_and_waiting_for_claim
+      running:
+        meaning: external_tool_work_claimed
+      completed:
+        meaning: successful_result_committed
+      failed:
+        meaning: unsuccessful_result_committed
+      cancelled:
+        meaning: active_or_queued_tool_work_cancelled
+      denied:
+        meaning: policy_or_approval_denied_execution
+    transitions:
+      - { from: requested, to: awaiting_approval, command: DecideToolCallPolicy, guard: approval_required, event: approval.requested }
+      - { from: requested, to: ready, command: DecideToolCallPolicy, guard: grant_exists, event: tool_call.state_changed }
+      - { from: requested, to: denied, command: DecideToolCallPolicy, guard: policy_denied, event: tool_call.denied }
+      - { from: awaiting_approval, to: ready, command: DecideApproval, guard: approved, event: tool_call.state_changed }
+      - { from: awaiting_approval, to: denied, command: DecideApproval, guard: rejected, event: tool_call.denied }
+      - { from: ready, to: running, command: ClaimToolCall, event: tool_call.state_changed }
+      - { from: ready, to: cancelled, command: RequestRunCancellation, event: tool_call.state_changed }
+      - { from: running, to: completed, command: FinishToolCall, event: tool_call.state_changed }
+      - { from: running, to: failed, command: FinishToolCall, event: tool_call.state_changed }
+      - { from: running, to: cancelled, command: FinishToolCall, guard: cancellation_confirmed, event: tool_call.state_changed }
+    invariants:
+      - exactly_one_capability
+      - exactly_one_effective_scope_before_execution
+      - effective_scope_is_not_wider_than_request_or_grants
+      - external_work_starts_only_from_running
+
+  Approval:
+    initial: pending
+    terminal: [approved, rejected, expired]
+    states:
+      pending:
+        meaning: decision_required
+      approved:
+        meaning: requested_effective_scope_approved
+      rejected:
+        meaning: execution_denied
+      expired:
+        meaning: accepted_deadline_passed_before_a_decision
+    transitions:
+      - { from: pending, to: approved, command: DecideApproval, event: approval.decided }
+      - { from: pending, to: rejected, command: DecideApproval, event: approval.decided }
+      - { from: pending, to: expired, command: ExpireApproval, guard: accepted_deadline_passed, event: approval.decided }
+    invariants:
+      - first_committed_decision_wins
+      - decision_cannot_widen_effective_scope
+
+  MessageDelivery:
+    initial: queued
+    terminal: [delivered, failed, cancelled]
+    states:
+      queued:
+        meaning: durable_message_waits_for_target_run_delivery
+      delivered:
+        meaning: owning_runtime_acknowledged_delivery
+      failed:
+        meaning: delivery_cannot_complete
+      cancelled:
+        meaning: target_became_terminal_before_delivery
+    transitions:
+      - { from: queued, to: delivered, command: RecordRunInputDelivery, event: run.input_delivered }
+      - { from: queued, to: failed, command: RecordRunInputDelivery, event: run.input_failed }
+      - { from: queued, to: cancelled, command: RecordRunInputDelivery, guard: target_run_terminal, event: run.input_cancelled }
+    invariants:
+      - message_is_immutable
+      - target_run_shares_message_thread
+      - default_mode_is_queued
+      - interrupt_mode_requires_explicit_user_request
+
+  ProviderRequest:
+    initial: committed
+    terminal: [completed, failed, cancelled]
+    owner: crates/providers
+    states:
+      committed:
+        meaning: outbox_work_exists_but_network_work_not_started
+      active:
+        meaning: adapter_claimed_request_and_streaming_may_occur
+      cancelling:
+        meaning: stop_requested
+      completed:
+        meaning: provider_reported_success
+      failed:
+        meaning: provider_or_recovery_reported_failure
+      cancelled:
+        meaning: provider_stop_confirmed
+    transitions:
+      - { from: committed, to: active, cause: adapter_claim, event: provider.request_started }
+      - { from: committed, to: cancelled, cause: run_cancelled_before_claim, event: provider.request_cancelled }
+      - { from: active, to: cancelling, cause: cancellation_committed, event: provider.cancellation_requested }
+      - { from: active, to: completed, cause: provider_success, event: provider.request_completed }
+      - { from: active, to: failed, cause: provider_failure, event: provider.request_failed }
+      - { from: cancelling, to: cancelled, cause: provider_stop_confirmed, event: provider.request_cancelled }
+      - { from: cancelling, to: failed, cause: provider_stop_failed, event: provider.request_failed }
+    invariants:
+      - provider_sdk_state_does_not_enter_core
+      - normalized_updates_use_stable_work_id
+      - retry_does_not_create_second_logical_request
+
+  PluginProcess:
+    initial: stopped
+    terminal: []
+    owner: crates/plugin-host
+    states:
+      stopped: { meaning: no_plugin_process_owned }
+      starting: { meaning: manifest_and_grants_validated_before_initialize }
+      ready: { meaning: initialized_with_effective_grants }
+      stopping: { meaning: shutdown_requested }
+      failed: { meaning: start_protocol_or_process_failure_recorded }
+    transitions:
+      - { from: stopped, to: starting, cause: start_requested, event: plugin.starting }
+      - { from: starting, to: ready, cause: initialize_succeeded, event: plugin.ready }
+      - { from: starting, to: failed, cause: initialize_failed, event: plugin.failed }
+      - { from: ready, to: stopping, cause: stop_requested, event: plugin.stopping }
+      - { from: ready, to: failed, cause: crash_or_protocol_error, event: plugin.failed }
+      - { from: stopping, to: stopped, cause: process_exited, event: plugin.stopped }
+      - { from: stopping, to: failed, cause: shutdown_failed, event: plugin.failed }
+      - { from: failed, to: stopped, cause: operator_reset, event: plugin.stopped }
+    invariants:
+      - no_silent_restart
+      - stdout_is_protocol_only
+      - process_receives_only_effective_grants
+
+  McpConnection:
+    initial: disconnected
+    terminal: []
+    owner: crates/mcp
+    states:
+      disconnected: { meaning: no_active_transport }
+      connecting: { meaning: transport_and_capabilities_being_negotiated }
+      ready: { meaning: tools_discovered_and_connection_usable }
+      stopping: { meaning: disconnect_requested }
+      failed: { meaning: transport_protocol_or_discovery_failure }
+    transitions:
+      - { from: disconnected, to: connecting, cause: connect_requested, event: mcp.connecting }
+      - { from: connecting, to: ready, cause: negotiation_succeeded, event: mcp.ready }
+      - { from: connecting, to: failed, cause: negotiation_failed, event: mcp.failed }
+      - { from: ready, to: stopping, cause: disconnect_requested, event: mcp.stopping }
+      - { from: ready, to: failed, cause: connection_lost, event: mcp.failed }
+      - { from: stopping, to: disconnected, cause: transport_closed, event: mcp.disconnected }
+      - { from: failed, to: disconnected, cause: operator_reset, event: mcp.disconnected }
+    invariants:
+      - discovered_tool_is_not_a_capability_grant
+      - all_tool_calls_cross_permission_engine
+      - no_silent_reconnect_after_failure
+
+  TerminalSession:
+    initial: requested
+    terminal: [exited, failed]
+    owner: crates/core
+    runtime_owner: crates/adapters
+    states:
+      requested: { meaning: durable_scoped_request_committed }
+      starting: { meaning: adapter_claimed_start_work }
+      running: { meaning: pty_process_active }
+      detached: { meaning: process_active_without_client_attachment }
+      stopping: { meaning: stop_committed_and_signal_in_progress }
+      exited: { meaning: exit_status_committed }
+      failed: { meaning: start_runtime_or_recovery_failure_committed }
+    transitions:
+      - { from: requested, to: starting, command: ClaimTerminalStart, event: terminal.state_changed }
+      - { from: starting, to: running, command: RecordTerminalStarted, guard: process_started, event: terminal.state_changed }
+      - { from: starting, to: failed, command: RecordTerminalExit, guard: start_failed, event: terminal.state_changed }
+      - { from: running, to: detached, command: DetachTerminalSession, event: terminal.detached }
+      - { from: detached, to: running, cause: client_attach, event: terminal.attached }
+      - { from: running, to: stopping, command: RequestTerminalStop, event: terminal.stop_requested }
+      - { from: detached, to: stopping, command: RequestTerminalStop, event: terminal.stop_requested }
+      - { from: stopping, to: exited, command: RecordTerminalExit, event: terminal.state_changed }
+      - { from: running, to: exited, command: RecordTerminalExit, guard: natural_exit, event: terminal.state_changed }
+      - { from: detached, to: exited, command: RecordTerminalExit, guard: natural_exit, event: terminal.state_changed }
+    invariants:
+      - session_has_one_workspace_root
+      - root_scope_is_checked_before_start
+      - byte_stream_is_not_a_durable_event_payload
+      - detach_does_not_stop_process
+
+open_decisions:
+  - id: provider_resume_capability
+    blocks: provider_recovery
+    question: how_each_provider_reports_or_resumes_work_after_daemon_restart
+  - id: plugin_restart_policy
+    blocks: plugin_supervision
+    question: whether_restart_is_ever_automatic_after_an_explicit_user_policy_is_added
+  - id: terminal_backend
+    blocks: terminal_implementation
+    question: which_pty_backend_and_platform_rules_are_used

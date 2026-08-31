@@ -1,0 +1,28 @@
+{
+  "events": [
+    {
+      "event_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "cursor": "1",
+      "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "event": {
+        "type": "session.created",
+        "workspace_id": "wsp_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+      }
+    },
+    {
+      "event_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "cursor": "2",
+      "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "event": {
+        "type": "message.appended",
+        "message": {
+          "message_id": "msg_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "role": "user",
+          "content": "Inspect the Workspace event model."
+        }
+      }
+    }
+  ],
+  "current_event_cursor": "2"
+}

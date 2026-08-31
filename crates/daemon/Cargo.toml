@@ -1,0 +1,23 @@
+[package]
+name = "kiln-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kilnd"
+path = "src/main.rs"
+
+[dependencies]
+kiln-core = { path = "../core" }
+kiln-infrastructure = { path = "../infrastructure" }
+kiln-server = { path = "../server" }
+kiln-protocol = { path = "../protocol" }
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tokio-tungstenite.workspace = true

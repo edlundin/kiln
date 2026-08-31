@@ -1,0 +1,11 @@
+{
+  "min_version": "0.4.0",
+  "max_version": "0.4.0",
+  "client": {
+    "name": "fixture-client",
+    "build": "fixture"
+  },
+  "requested_capabilities": [
+    "kiln.events.websocket"
+  ]
+}

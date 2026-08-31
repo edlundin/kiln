@@ -1,0 +1,164 @@
+schema_version: "1.0"
+kind: target_monorepo
+status: proposed
+source: docs/spec/kiln.md
+
+roots:
+  - path: apps/desktop
+    type: rust_gpui_application
+    owns: native_graphical_client
+  - path: apps/cli
+    type: rust_application
+    owns: official_cli_client
+  - path: crates
+    type: rust_workspace
+    owns: daemon_core_and_rust_client
+  - path: plugins
+    type: external_plugin_catalog
+    owns: plugin_examples_and_first_party_plugins
+  - path: schemas
+    type: contract_sources
+    owns: data_and_installation_schemas
+  - path: protocol
+    type: protocol_sources
+    owns: openapi_events_examples_and_conformance
+  - path: tests
+    type: integration_workspace
+    owns: real_daemon_and_scenario_tests
+  - path: tools
+    type: repository_tools
+    owns: generators_and_validation_commands
+
+components:
+  - id: protocol
+    path: crates/protocol
+    role: public_wire_types
+    depends_on: []
+    forbidden_dependencies:
+      - database
+      - http_server
+      - ui
+      - provider_sdk
+  - id: client
+    path: crates/client
+    role: typed_rust_http_and_websocket_client
+    depends_on:
+      - protocol
+    forbidden_dependencies:
+      - core
+      - adapters
+      - server
+      - provider_sdk
+  - id: core
+    path: crates/core
+    role: domain_and_application_operations
+    depends_on:
+      - protocol
+    forbidden_dependencies:
+      - server
+      - adapters
+      - ui
+      - provider_sdk
+      - sqlx
+  - id: adapters
+    path: crates/adapters
+    role: persistence_processes_artifacts_and_runtime_adapters
+    depends_on:
+      - core
+      - protocol
+  - id: providers
+    path: crates/providers
+    role: direct_and_harness_model_adapters
+    depends_on:
+      - core
+      - protocol
+  - id: mcp
+    path: crates/mcp
+    role: brokered_mcp_tool_provider
+    depends_on:
+      - core
+      - protocol
+  - id: plugin_host
+    path: crates/plugin-host
+    role: external_plugin_process_boundary
+    depends_on:
+      - core
+      - protocol
+  - id: server
+    path: crates/server
+    role: http_and_websocket_transport
+    depends_on:
+      - core
+      - protocol
+  - id: daemon
+    path: crates/daemon
+    role: process_composition_and_lifecycle
+    depends_on:
+      - core
+      - adapters
+      - providers
+      - mcp
+      - plugin_host
+      - server
+  - id: desktop
+    path: apps/desktop
+    role: native_gpui_graphical_client
+    depends_on:
+      - client
+  - id: cli
+    path: apps/cli
+    role: official_command_line_client
+    depends_on:
+      - client
+
+relations:
+  - from: desktop
+    to: server
+    through: versioned_http_and_websocket_protocol
+  - from: desktop
+    to: daemon
+    through: local_process_discovery_and_launch_only
+  - from: cli
+    to: server
+    through: versioned_http_and_websocket_protocol
+  - from: daemon
+    to: sqlite
+    through: adapter_trait
+  - from: daemon
+    to: artifact_store
+    through: adapter_trait
+  - from: core
+    to: provider_runtime
+    through: provider_trait
+  - from: core
+    to: tool_runtime
+    through: permission_checked_tool_trait
+  - from: tool_runtime
+    to: mcp
+    through: brokered_tool_call
+  - from: tool_runtime
+    to: plugin_host
+    through: capability_checked_json_rpc
+
+source_of_truth:
+  core_contract: docs/spec/core-contract.md
+  state_machines: docs/architecture/state-machines.yaml
+  trust_perimeter: docs/architecture/perimeter.md
+  http: docs/protocol/openapi.yaml
+  events: docs/architecture/event-envelope.schema.json
+  plugin_installation: docs/plugins/plugin-manifest.schema.json
+  product_and_phases: docs/spec/kiln.md
+  user_interface: docs/ui/README.md
+
+planned_contract_locations:
+  http: protocol/openapi.yaml
+  persisted_data: schemas/data-model.schema.json
+  plugin_installation: schemas/plugin-manifest.schema.json
+
+implementation_order:
+  - contracts
+  - core_completion
+  - native_gpui_desktop_client
+  - providers_mcp_plugins
+  - native_development_surfaces
+  - remote_and_mobile

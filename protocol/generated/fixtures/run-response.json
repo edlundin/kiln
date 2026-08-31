@@ -1,0 +1,16 @@
+{
+  "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "state": "completed",
+  "tool_calls": [
+    {
+      "tool_call_id": "tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "capability": "kiln.deterministic.subprocess",
+      "state": "completed",
+      "stdout": "Kiln deterministic subprocess completed.\n",
+      "stderr": "",
+      "exit_code": 0
+    }
+  ]
+}

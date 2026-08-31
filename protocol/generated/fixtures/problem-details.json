@@ -1,0 +1,7 @@
+{
+  "type": "about:blank",
+  "title": "Invalid request",
+  "status": 400,
+  "code": "invalid_request",
+  "detail": "request fields are invalid"
+}

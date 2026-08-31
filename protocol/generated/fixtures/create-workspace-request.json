@@ -1,0 +1,13 @@
+{
+  "name": "fixture-workspace",
+  "roots": [
+    {
+      "name": "first",
+      "path": "/tmp/first"
+    },
+    {
+      "name": "second",
+      "path": "/tmp/second"
+    }
+  ]
+}

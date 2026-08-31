@@ -1,0 +1,261 @@
+openapi: 3.1.1
+info:
+  title: Kiln daemon protocol
+  version: 0.4.0
+  description: Kiln loopback protocol contract.
+paths:
+  /v1/protocol/negotiate:
+    post:
+      operationId: negotiate_protocol
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NegotiateRequest'
+      responses:
+        '200':
+          description: Negotiated protocol and capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NegotiateResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '405':
+          $ref: '#/components/responses/Problem'
+  /v1/events:
+    get:
+      operationId: event_stream
+      parameters:
+        - name: version
+          in: query
+          required: true
+          schema: {type: string}
+        - name: capability
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '101':
+          description: WebSocket protocol switch.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '405':
+          $ref: '#/components/responses/Problem'
+        '426':
+          $ref: '#/components/responses/Problem'
+  /v1/workspaces:
+    post:
+      operationId: create_workspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkspaceRequest'
+      responses:
+        '201':
+          description: Created workspace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/workspaces/{workspace_id}:
+    get:
+      operationId: get_workspace
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Stored workspace snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkspaceResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/workspaces/{workspace_id}/sessions:
+    post:
+      operationId: create_session
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '201':
+          description: Created Session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/sessions/{session_id}:
+    get:
+      operationId: get_session
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Stored Session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/sessions/{session_id}/messages:
+    post:
+      operationId: append_message
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppendMessageRequest'
+      responses:
+        '201':
+          description: Appended immutable user Message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/sessions/{session_id}/events:
+    get:
+      operationId: list_session_events
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: after
+          in: query
+          required: false
+          schema: {type: string, default: "0"}
+      responses:
+        '200':
+          description: Committed Session events after the requested cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionEventsResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/sessions/{session_id}/runs:
+    post:
+      operationId: start_run
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '202':
+          description: Accepted queued root Run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/runs/{run_id}:
+    get:
+      operationId: get_run
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Durable Run and ToolCall result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+components:
+  responses:
+    Problem:
+      description: Stable public error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+  schemas:
+    ClientIdentity: {"additionalProperties":false,"properties":{"build":{"type":"string"},"name":{"type":"string"}},"required":["name","build"],"type":"object"}
+    NegotiateRequest: {"additionalProperties":false,"properties":{"client":{"$ref":"#/components/schemas/ClientIdentity"},"max_version":{"type":"string"},"min_version":{"type":"string"},"requested_capabilities":{"items":{"type":"string"},"type":"array"}},"required":["min_version","max_version","client","requested_capabilities"],"type":"object"}
+    StoreIdentity: {"properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id","name"],"type":"object"}
+    NegotiateResponse: {"properties":{"current_event_cursor":{"type":["string","null"]},"event_websocket_endpoint":{"type":"string"},"selected_capabilities":{"items":{"type":"string"},"type":"array"},"selected_version":{"type":"string"},"store_identity":{"$ref":"#/components/schemas/StoreIdentity"},"supported_capabilities":{"items":{"type":"string"},"type":"array"}},"required":["selected_version","supported_capabilities","selected_capabilities","store_identity","current_event_cursor","event_websocket_endpoint"],"type":"object"}
+    WebSocketFrame: {"oneOf":[{"properties":{"capability":{"type":"string"},"current_event_cursor":{"type":["string","null"]},"type":{"const":"ack","type":"string"},"version":{"type":"string"}},"required":["type","version","capability","current_event_cursor"],"type":"object"},{"properties":{"code":{"type":"string"},"message":{"type":"string"},"type":{"const":"error","type":"string"}},"required":["type","code","message"],"type":"object"},{"properties":{"event":{"$ref":"#/components/schemas/SessionEventResponse"},"type":{"const":"event","type":"string"}},"required":["type","event"],"type":"object"}]}
+    ProblemDetails: {"properties":{"code":{"type":"string"},"detail":{"type":"string"},"status":{"format":"uint16","maximum":65535,"minimum":0,"type":"integer"},"title":{"type":"string"},"type":{"type":"string"}},"required":["type","title","status","code","detail"],"type":"object"}
+    CreateWorkspaceRequest: {"additionalProperties":false,"properties":{"name":{"type":"string"},"roots":{"items":{"$ref":"#/components/schemas/WorkspaceRootRequest"},"type":"array"}},"required":["name","roots"],"type":"object"}
+    WorkspaceRootRequest: {"additionalProperties":false,"properties":{"name":{"type":"string"},"path":{"type":"string"}},"required":["name","path"],"type":"object"}
+    WorkspaceRootResponse: {"properties":{"canonical_path":{"type":"string"},"display_path":{"type":"string"},"git_common_directory_path":{"type":"string"},"name":{"type":"string"},"position":{"format":"uint","minimum":0,"type":"integer"},"state":{"type":"string"},"workspace_root_id":{"type":"string"}},"required":["workspace_root_id","name","display_path","canonical_path","git_common_directory_path","position","state"],"type":"object"}
+    WorkspaceResponse: {"properties":{"name":{"type":"string"},"roots":{"items":{"$ref":"#/components/schemas/WorkspaceRootResponse"},"type":"array"},"workspace_id":{"type":"string"}},"required":["workspace_id","name","roots"],"type":"object"}
+    AppendMessageRequest: {"additionalProperties":false,"properties":{"content":{"type":"string"}},"required":["content"],"type":"object"}
+    SessionResponse: {"properties":{"session_id":{"type":"string"},"workspace_id":{"type":"string"}},"required":["session_id","workspace_id"],"type":"object"}
+    MessageRole: {"enum":["user"],"type":"string"}
+    MessageResponse: {"properties":{"content":{"type":"string"},"message_id":{"type":"string"},"role":{"$ref":"#/components/schemas/MessageRole"},"session_id":{"type":"string"}},"required":["message_id","session_id","role","content"],"type":"object"}
+    RunState: {"enum":["queued","running","completed","failed"],"type":"string"}
+    ToolCallState: {"enum":["requested","running","completed","failed"],"type":"string"}
+    ToolOutputStream: {"enum":["stdout","stderr"],"type":"string"}
+    ToolCallResponse: {"properties":{"capability":{"type":"string"},"exit_code":{"format":"int32","type":["integer","null"]},"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/ToolCallState"},"stderr":{"type":["string","null"]},"stdout":{"type":["string","null"]},"tool_call_id":{"type":"string"}},"required":["tool_call_id","run_id","capability","state","stdout","stderr","exit_code"],"type":"object"}
+    RunResponse: {"properties":{"run_id":{"type":"string"},"session_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"tool_calls":{"items":{"$ref":"#/components/schemas/ToolCallResponse"},"type":"array"}},"required":["run_id","session_id","state","tool_calls"],"type":"object"}
+    SessionEventDataResponse: {"oneOf":[{"properties":{"type":{"const":"session.created","type":"string"},"workspace_id":{"type":"string"}},"required":["type","workspace_id"],"type":"object"},{"properties":{"message":{"$ref":"#/components/schemas/MessageResponse"},"type":{"const":"message.appended","type":"string"}},"required":["type","message"],"type":"object"},{"properties":{"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"type":{"const":"run.created","type":"string"}},"required":["type","run_id","state"],"type":"object"},{"properties":{"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"type":{"const":"run.state_changed","type":"string"}},"required":["type","run_id","state"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.requested","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.state_changed","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"content":{"type":"string"},"run_id":{"type":"string"},"stream":{"$ref":"#/components/schemas/ToolOutputStream"},"tool_call_id":{"type":"string"},"type":{"const":"tool_call.output","type":"string"}},"required":["type","run_id","tool_call_id","stream","content"],"type":"object"}]}
+    SessionEventResponse: {"properties":{"cursor":{"type":"string"},"event":{"$ref":"#/components/schemas/SessionEventDataResponse"},"event_id":{"type":"string"},"session_id":{"type":"string"}},"required":["event_id","cursor","session_id","event"],"type":"object"}
+    SessionEventsResponse: {"properties":{"current_event_cursor":{"type":"string"},"events":{"items":{"$ref":"#/components/schemas/SessionEventResponse"},"type":"array"}},"required":["events","current_event_cursor"],"type":"object"}

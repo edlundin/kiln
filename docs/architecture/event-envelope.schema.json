@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kiln.dev/schemas/event-envelope-0.1.json",
+  "title": "Kiln Event Envelope",
+  "description": "Versioned event shape used for persisted thread events and replayable client streams.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "thread_id",
+    "cursor",
+    "event_type",
+    "occurred_at",
+    "payload"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "thread_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "cursor": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "project.created",
+        "project.updated",
+        "workspace_root.added",
+        "workspace_root.removed",
+        "thread.created",
+        "thread.updated",
+        "message.appended",
+        "artifact.registered",
+        "task.created",
+        "task.updated",
+        "task.assigned",
+        "task.state_changed",
+        "run.created",
+        "run.queued",
+        "run.child_added",
+        "run.state_changed",
+        "run.input_queued",
+        "run.interrupt_requested",
+        "run.input_delivered",
+        "run.input_failed",
+        "run.input_cancelled",
+        "run.cancellation_requested",
+        "tool_call.requested",
+        "tool_call.state_changed",
+        "tool_call.denied",
+        "approval.requested",
+        "approval.decided",
+        "permission.granted",
+        "permission.revoked",
+        "agent.registered",
+        "provider.registered",
+        "provider.request_started",
+        "provider.cancellation_requested",
+        "provider.request_completed",
+        "provider.request_failed",
+        "provider.request_cancelled",
+        "plugin.installed",
+        "plugin.grant_changed",
+        "plugin.starting",
+        "plugin.ready",
+        "plugin.stopping",
+        "plugin.stopped",
+        "plugin.failed",
+        "mcp_server.registered",
+        "mcp.connecting",
+        "mcp.ready",
+        "mcp.stopping",
+        "mcp.disconnected",
+        "mcp.failed",
+        "terminal.requested",
+        "terminal.state_changed",
+        "terminal.attached",
+        "terminal.detached",
+        "terminal.stop_requested"
+      ]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tool_call_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "run_started"
+          }
+        }
+      },
+      "then": {
+        "required": ["run_id"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "tool_call_requested"
+          }
+        }
+      },
+      "then": {
+        "required": ["run_id", "tool_call_id"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "const": "tool_call_output"
+          }
+        }
+      },
+      "then": {
+        "required": ["run_id", "tool_call_id"]
+      }
+    }
+  ]
+}

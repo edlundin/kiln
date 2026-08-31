@@ -1,0 +1,166 @@
+schema_version: "1.0"
+kind: feature_interactions
+status: proposed
+source: docs/spec/kiln.md
+
+features:
+  - id: project_roots
+    owner: core
+    phase: 1
+    status: current_partial
+    consumes: [project_command, workspace_root_input]
+    produces: [project, workspace_root, permission_scope]
+  - id: thread_event_log
+    owner: core
+    phase: 1
+    status: current_partial
+    consumes: [project, message, run_transition]
+    produces: [durable_event, cursor]
+  - id: run_scheduler
+    owner: core
+    phase: 1
+    status: planned
+    consumes: [thread, agent, task_graph]
+    produces: [run_state, task_state]
+  - id: subagent_orchestration
+    owner: core
+    phase: 1
+    status: planned
+    consumes: [parent_run, task, agent, targeted_input]
+    produces: [child_run, run_lineage, task_assignment, child_run_state]
+  - id: context_builder
+    owner: core
+    phase: 1
+    status: planned
+    consumes: [thread_history, instructions, workspace_roots, artifacts]
+    produces: [provider_request]
+  - id: provider_runtime
+    owner: providers
+    phase: 3
+    status: planned
+    consumes: [provider_request]
+    produces: [model_text, tool_request]
+  - id: permission_engine
+    owner: core
+    phase: 1
+    status: current_partial
+    consumes: [tool_request, capability, scope, policy]
+    produces: [allow, deny, approval_request]
+  - id: tool_router
+    owner: adapters
+    phase: 1
+    status: current_partial
+    consumes: [approved_tool_call]
+    produces: [tool_output, tool_error]
+  - id: artifact_store
+    owner: adapters
+    phase: 1
+    status: current_partial
+    consumes: [tool_output, upload_stream, thread, media_type, display_name]
+    produces: [artifact]
+  - id: mcp_broker
+    owner: mcp
+    phase: 3
+    status: planned
+    consumes: [mcp_server, tool_search, permission_grant]
+    produces: [normalized_tool, normalized_result]
+  - id: plugin_host
+    owner: plugin-host
+    phase: 3
+    status: planned
+    consumes: [plugin_manifest, permission_grant, json_rpc_call]
+    produces: [plugin_result, plugin_health]
+  - id: event_transport
+    owner: server
+    phase: 1
+    status: current_partial
+    consumes: [command, cursor, durable_event]
+    produces: [http_response, websocket_event]
+  - id: agent_workspace
+    owner: web
+    phase: 2
+    status: planned
+    consumes: [message, http_response, websocket_event, artifact]
+    produces: [user_prompt, attachment_upload, user_command, approval_decision, cursor]
+  - id: terminal_session
+    owner: adapters
+    phase: 4
+    status: planned
+    consumes: [terminal_command, terminal_input, terminal_resize]
+    produces: [terminal_output, terminal_state]
+
+flows:
+  - id: start_and_approve_run
+    trigger: user_start_run
+    steps:
+      - project_roots
+      - thread_event_log
+      - run_scheduler
+      - context_builder
+      - provider_runtime
+      - permission_engine
+      - event_transport
+      - agent_workspace
+      - permission_engine
+      - tool_router
+      - artifact_store
+      - thread_event_log
+  - id: reconnect_and_replay
+    trigger: client_reconnect
+    steps:
+      - agent_workspace
+      - event_transport
+      - thread_event_log
+      - event_transport
+      - agent_workspace
+  - id: delegate_and_steer_subagent
+    trigger: parent_run_delegates_task
+    steps:
+      - run_scheduler
+      - subagent_orchestration
+      - thread_event_log
+      - event_transport
+      - agent_workspace
+      - event_transport
+      - subagent_orchestration
+      - thread_event_log
+  - id: attach_and_send_prompt
+    trigger: user_sends_composer
+    steps:
+      - agent_workspace
+      - event_transport
+      - artifact_store
+      - event_transport
+      - agent_workspace
+      - event_transport
+      - thread_event_log
+      - context_builder
+  - id: external_tool_call
+    trigger: selected_external_tool
+    steps:
+      - permission_engine
+      - mcp_broker
+      - plugin_host
+      - tool_router
+      - artifact_store
+      - thread_event_log
+  - id: terminal_attach
+    trigger: user_opens_terminal
+    steps:
+      - agent_workspace
+      - event_transport
+      - terminal_session
+      - thread_event_log
+
+invariants:
+  - "Every tool call has one capability and one effective scope."
+  - "Every durable event has one thread cursor and one event ID."
+  - "A client observes state through HTTP responses and durable events."
+  - "A plugin or MCP server cannot grant itself a capability."
+  - "Large outputs become artifacts before they enter a durable event payload."
+  - "A composer file name is display metadata and never becomes a trusted path."
+  - "The client projects durable events into the conversation without changing their IDs or cursors."
+  - "Every child run belongs to the same thread as its parent and has exactly one parent run."
+  - "Run and task parent links are acyclic."
+  - "Guidance is queued unless the user explicitly requests interrupt delivery."
+  - "Cancelling a child run does not cancel its parent or siblings."

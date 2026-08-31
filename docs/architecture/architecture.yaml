@@ -1,0 +1,116 @@
+schema_version: "0.1"
+status: superseded_by_target_monorepo
+canonical_source: target-monorepo.yaml
+system: kiln
+purpose: headless_agentic_development_environment
+deployment:
+  process: kilnd
+  owns:
+    - api_server
+    - event_log
+    - scheduler
+    - agent_runs
+    - mcp_server_processes
+    - plugin_processes
+    - terminal_processes
+components:
+  - name: protocol
+    kind: public_boundary
+    owns:
+      - versioned_http_types
+      - versioned_websocket_types
+      - event_envelopes
+      - cursor_contracts
+      - capability_negotiation
+      - public_error_shapes
+    depends_on: []
+  - name: core
+    kind: domain_and_application
+    owns:
+      - projects
+      - workspace_roots
+      - threads
+      - runs
+      - tasks
+      - agents
+      - tool_calls
+      - approvals
+      - artifacts
+      - permissions
+      - client_cursors
+      - state_transitions
+      - application_operations
+    depends_on:
+      - protocol
+    must_not_depend_on:
+      - server
+      - adapters
+  - name: adapters
+    kind: infrastructure_boundary
+    owns:
+      - memory_repositories
+      - sqlite_repositories
+      - artifact_store
+      - deterministic_executor
+      - provider_adapters
+      - process_supervisor
+    depends_on:
+      - core
+    hides:
+      - sqlx_transaction_types
+      - provider_specific_types
+      - operating_system_process_details
+  - name: server
+    kind: transport_boundary
+    owns:
+      - http_routes
+      - websocket_sessions
+      - request_decoding
+      - response_encoding
+    depends_on:
+      - protocol
+      - core
+    must_not_own:
+      - domain_state_transitions
+      - provider_logic
+      - database_transactions
+  - name: daemon
+    kind: composition_and_lifecycle
+    owns:
+      - dependency_assembly
+      - startup
+      - shutdown
+      - local_endpoint_binding
+    depends_on:
+      - server
+      - adapters
+      - core
+  - name: plugin_sdk
+    kind: optional_external_boundary
+    owns:
+      - plugin_manifest_types
+      - framed_json_rpc_contract
+      - capability_request_types
+    depends_on:
+      - protocol
+    initial_slice: deferred
+clients:
+  - desktop
+  - cli
+  - third_party_protocol_client
+future_clients:
+  - web
+  - mobile
+client_rules:
+  - clients_use_http_and_websocket
+  - clients_do_not_import_core_domain_types
+  - desktop_uses_gpui_and_gpui_component
+  - desktop_and_cli_share_the_rust_protocol_client
+  - desktop_owns_terminal_rendering
+  - core_owns_terminal_process_identity_and_io
+dependency_rules:
+  - internal_operations_use_direct_calls
+  - new_crates_require_real_boundaries
+  - public_api_types_convert_explicitly_to_domain_types
+  - large_content_moves_through_artifacts
+  - remote_access_requires_explicit_authentication_design

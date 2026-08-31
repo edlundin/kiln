@@ -1,0 +1,10 @@
+/target/
+/.kiln-artifacts/
+/kiln.db
+/kiln.db-shm
+/kiln.db-wal
+node_modules/
+.pnpm-store/
+dist/
+.turbo/
+.DS_Store

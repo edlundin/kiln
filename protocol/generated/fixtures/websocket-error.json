@@ -1,0 +1,5 @@
+{
+  "type": "error",
+  "code": "unsupported_input",
+  "message": "The event WebSocket accepts control frames only."
+}

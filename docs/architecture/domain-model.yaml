@@ -1,0 +1,116 @@
+schema_version: "0.1"
+status: design_input_until_persisted_schema_is_accepted
+identifiers:
+  format: uuid
+  client_semantics: opaque
+  stable_across_restart: true
+entities:
+  Project:
+    required:
+      - id
+      - name
+      - workspace_root_ids
+    relationships:
+      workspace_root_ids: one_or_more_WorkspaceRoot
+      thread_ids: many_Thread
+  WorkspaceRoot:
+    required:
+      - id
+      - project_id
+      - kind
+      - location
+      - permission_scope
+    kinds:
+      - local_directory
+      - remote_mount
+      - artifact_root
+    initial_slice_kinds:
+      - local_directory
+  Thread:
+    required:
+      - id
+      - project_id
+      - event_cursor
+    relationships:
+      event_cursor: ClientCursor
+      run_ids: many_Run
+      message_ids: many_Message
+  Message:
+    required:
+      - id
+      - thread_id
+      - role
+      - content
+    relationships:
+      run_id: optional_target_Run
+      artifact_ids: many_Artifact
+  Run:
+    required:
+      - id
+      - thread_id
+      - agent_id
+      - state
+    relationships:
+      parent_run_id: optional_parent_Run
+      child_run_ids: many_Run
+      task_id: optional_assigned_Task
+      tool_call_ids: many_ToolCall
+      approval_ids: many_Approval
+  Task:
+    required:
+      - id
+      - thread_id
+      - state
+      - dependency_ids
+    relationships:
+      parent_task_id: optional_parent_Task
+      child_task_ids: many_Task
+      run_id: optional_assigned_Run
+    initial_slice: represented_only
+  Agent:
+    required:
+      - id
+      - provider
+      - model
+      - instructions
+      - tool_capabilities
+  ToolCall:
+    required:
+      - id
+      - run_id
+      - capability
+      - scope
+      - state
+    result:
+      inline_or_artifact: true
+  Approval:
+    required:
+      - id
+      - tool_call_id
+      - decision
+    decisions:
+      - pending
+      - approved
+      - rejected
+      - expired
+  Artifact:
+    required:
+      - id
+      - content_hash
+      - media_type
+      - size
+      - storage_reference
+  Permission:
+    required:
+      - capability
+      - scope
+      - decision
+    decisions:
+      - granted
+      - denied
+  ClientCursor:
+    required:
+      - thread_id
+      - position
+state_machine_source: state-machines.yaml
+core_contract_source: ../spec/core-contract.md

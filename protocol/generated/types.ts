@@ -26,9 +26,9 @@ export type MessageRole = "user";
 
 export type MessageResponse = { message_id: string, session_id: string, role: MessageRole, content: string, };
 
-export type RunState = "queued" | "running" | "completed" | "failed";
+export type RunState = "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled";
 
-export type ToolCallState = "requested" | "running" | "completed" | "failed";
+export type ToolCallState = "requested" | "running" | "completed" | "failed" | "cancelled";
 
 export type ToolOutputStream = "stdout" | "stderr";
 
@@ -36,7 +36,7 @@ export type ToolCallResponse = { tool_call_id: string, run_id: string, capabilit
 
 export type RunResponse = { run_id: string, session_id: string, state: RunState, tool_calls: Array<ToolCallResponse>, };
 
-export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "run.created", run_id: string, state: RunState, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, };
+export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "run.created", run_id: string, state: RunState, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "run.cancellation_requested", run_id: string, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, };
 
 export type SessionEventResponse = { event_id: string, cursor: string, session_id: string, event: SessionEventDataResponse, };
 

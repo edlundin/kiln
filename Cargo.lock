@@ -828,6 +828,7 @@ dependencies = [
  "kiln-protocol",
  "kiln-server",
  "reqwest",
+ "rustix",
  "serde_json",
  "tempfile",
  "tokio",
@@ -840,6 +841,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "kiln-core",
+ "rustix",
  "sqlx",
  "tempfile",
  "tokio",

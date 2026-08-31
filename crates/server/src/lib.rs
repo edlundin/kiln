@@ -24,11 +24,12 @@ use kiln_core::{
 use kiln_protocol::{
     AppendMessageRequest, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
     MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
-    PROTOCOL_VERSION, ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SessionEventDataResponse,
-    SessionEventResponse, SessionEventsResponse, SessionResponse, StoreIdentity, ToolCallResponse,
-    ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
-    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse, error_code,
+    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
+    StoreIdentity, ToolCallResponse, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY,
+    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    WorkspaceRootResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -43,6 +44,145 @@ pub trait RunOperations: Send + Sync {
     ) -> impl Future<Output = Result<kiln_core::StartRunMutation, RunError>> + Send;
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
+
+    fn cancel_run(
+        &self,
+        run_id: RunId,
+    ) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecyclePhase {
+    Running,
+    Quiescing,
+}
+
+#[derive(Debug)]
+struct LifecycleState {
+    phase: LifecyclePhase,
+    in_flight_commands: usize,
+}
+
+#[derive(Debug)]
+struct LifecycleInner {
+    state: std::sync::Mutex<LifecycleState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Debug, Clone)]
+pub struct LifecycleCoordinator {
+    inner: Arc<LifecycleInner>,
+}
+
+impl Default for LifecycleCoordinator {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(LifecycleInner {
+                state: std::sync::Mutex::new(LifecycleState {
+                    phase: LifecyclePhase::Running,
+                    in_flight_commands: 0,
+                }),
+                changed: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+}
+
+impl LifecycleCoordinator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn begin_command(&self) -> Result<CommandPermit, PublicError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("lifecycle state lock is not poisoned");
+        if state.phase == LifecyclePhase::Quiescing {
+            return Err(PublicError::DaemonShuttingDown);
+        }
+        state.in_flight_commands += 1;
+        Ok(CommandPermit {
+            lifecycle: self.clone(),
+        })
+    }
+
+    pub fn request_shutdown(&self) -> bool {
+        let changed = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("lifecycle state lock is not poisoned");
+            if state.phase == LifecyclePhase::Quiescing {
+                false
+            } else {
+                state.phase = LifecyclePhase::Quiescing;
+                true
+            }
+        };
+        if changed {
+            self.inner.changed.notify_waiters();
+        }
+        changed
+    }
+
+    pub async fn wait_for_shutdown_request(&self) {
+        loop {
+            let changed = self.inner.changed.notified();
+            if self
+                .inner
+                .state
+                .lock()
+                .expect("lifecycle state lock is not poisoned")
+                .phase
+                == LifecyclePhase::Quiescing
+            {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub async fn wait_for_commands(&self) {
+        loop {
+            let changed = self.inner.changed.notified();
+            if self
+                .inner
+                .state
+                .lock()
+                .expect("lifecycle state lock is not poisoned")
+                .in_flight_commands
+                == 0
+            {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+struct CommandPermit {
+    lifecycle: LifecycleCoordinator,
+}
+
+impl Drop for CommandPermit {
+    fn drop(&mut self) {
+        let became_idle = {
+            let mut state = self
+                .lifecycle
+                .inner
+                .state
+                .lock()
+                .expect("lifecycle state lock is not poisoned");
+            state.in_flight_commands -= 1;
+            state.in_flight_commands == 0
+        };
+        if became_idle {
+            self.lifecycle.inner.changed.notify_waiters();
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -86,6 +226,7 @@ pub struct AppState<W, S, R> {
     session_operations: Arc<S>,
     run_operations: Arc<R>,
     event_broadcaster: EventBroadcaster,
+    lifecycle: LifecycleCoordinator,
 }
 
 impl<W, S, R> Clone for AppState<W, S, R> {
@@ -97,6 +238,7 @@ impl<W, S, R> Clone for AppState<W, S, R> {
             session_operations: Arc::clone(&self.session_operations),
             run_operations: Arc::clone(&self.run_operations),
             event_broadcaster: self.event_broadcaster.clone(),
+            lifecycle: self.lifecycle.clone(),
         }
     }
 }
@@ -117,7 +259,12 @@ impl<W, S, R> AppState<W, S, R> {
             session_operations: Arc::new(session_operations),
             run_operations: Arc::new(run_operations),
             event_broadcaster,
+            lifecycle: LifecycleCoordinator::new(),
         }
+    }
+
+    pub fn lifecycle(&self) -> LifecycleCoordinator {
+        self.lifecycle.clone()
     }
 }
 
@@ -137,6 +284,7 @@ where
         .route(SESSION_EVENTS_PATH, get(list_session_events))
         .route(SESSION_RUNS_PATH, post(start_run))
         .route(RUN_PATH, get(get_run))
+        .route(RUN_CANCEL_PATH, post(cancel_run))
         .route(EVENTS_WEBSOCKET_PATH, get(events))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
@@ -155,6 +303,21 @@ where
     axum::serve(listener, router(state)).await
 }
 
+pub async fn serve_with_shutdown<W, S, R>(
+    listener: tokio::net::TcpListener,
+    state: AppState<W, S, R>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), std::io::Error>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown)
+        .await
+}
+
 async fn create_workspace<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     StrictJson(request): StrictJson<CreateWorkspaceRequest>,
@@ -164,6 +327,7 @@ where
     S: SessionOperations + 'static,
     R: RunOperations + 'static,
 {
+    let _command = state.lifecycle.begin_command()?;
     let workspace = state
         .workspace_operations
         .create_workspace(CreateWorkspace {
@@ -228,6 +392,7 @@ where
     S: SessionOperations + 'static,
     R: RunOperations + 'static,
 {
+    let _command = state.lifecycle.begin_command()?;
     let workspace_id = WorkspaceId::parse(workspace_id).map_err(|_| PublicError::InvalidRequest)?;
     let session = state
         .session_operations
@@ -266,6 +431,7 @@ where
     S: SessionOperations + 'static,
     R: RunOperations + 'static,
 {
+    let _command = state.lifecycle.begin_command()?;
     let session_id = SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?;
     let message = state
         .session_operations
@@ -289,6 +455,7 @@ where
     S: SessionOperations + 'static,
     R: RunOperations + 'static,
 {
+    let _command = state.lifecycle.begin_command()?;
     let session_id = SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?;
     let idempotency_key = headers
         .get(IDEMPOTENCY_KEY_HEADER)
@@ -319,6 +486,26 @@ where
     let run = state
         .run_operations
         .get_run(run_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(run_response(&run)))
+}
+
+async fn cancel_run<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(run_id): Path<String>,
+) -> Result<Json<RunResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let command = state.lifecycle.begin_command()?;
+    let run_id = RunId::parse(run_id).map_err(|_| PublicError::InvalidRequest)?;
+    drop(command);
+    let run = state
+        .run_operations
+        .cancel_run(run_id)
         .await
         .map_err(PublicError::from)?;
     Ok(Json(run_response(&run)))
@@ -401,8 +588,10 @@ fn run_state_response(state: CoreRunState) -> RunState {
     match state {
         CoreRunState::Queued => RunState::Queued,
         CoreRunState::Running => RunState::Running,
+        CoreRunState::Cancelling => RunState::Cancelling,
         CoreRunState::Completed => RunState::Completed,
         CoreRunState::Failed => RunState::Failed,
+        CoreRunState::Cancelled => RunState::Cancelled,
     }
 }
 
@@ -412,6 +601,7 @@ fn tool_call_state_response(state: CoreToolCallState) -> ToolCallState {
         CoreToolCallState::Running => ToolCallState::Running,
         CoreToolCallState::Completed => ToolCallState::Completed,
         CoreToolCallState::Failed => ToolCallState::Failed,
+        CoreToolCallState::Cancelled => ToolCallState::Cancelled,
     }
 }
 
@@ -442,6 +632,11 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
             SessionEventDataResponse::RunStateChanged {
                 run_id: run_id.as_str().to_owned(),
                 state: run_state_response(*state),
+            }
+        }
+        SessionEventPayload::RunCancellationRequested { run_id } => {
+            SessionEventDataResponse::RunCancellationRequested {
+                run_id: run_id.as_str().to_owned(),
             }
         }
         SessionEventPayload::ToolCallRequested { tool_call } => {
@@ -754,6 +949,8 @@ enum PublicError {
     Session(SessionError),
     #[error("run operation failed")]
     Run(RunError),
+    #[error("daemon is shutting down")]
+    DaemonShuttingDown,
 }
 
 impl From<WorkspaceError> for PublicError {
@@ -833,6 +1030,11 @@ impl PublicError {
                 "Method not allowed",
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, error_code::NOT_FOUND, "Not found"),
+            Self::DaemonShuttingDown => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                error_code::DAEMON_SHUTTING_DOWN,
+                "Daemon shutting down",
+            ),
             Self::Workspace(error) => match error {
                 WorkspaceError::WorkspaceNameRequired => (
                     StatusCode::BAD_REQUEST,
@@ -948,6 +1150,11 @@ impl PublicError {
                     StatusCode::CONFLICT,
                     error_code::INVALID_RUN_STATE,
                     "Invalid run state",
+                ),
+                RunError::CancellationFailed => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::RUN_CANCELLATION_FAILED,
+                    "Run cancellation failed",
                 ),
                 RunError::RunStoreUnavailable => (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1068,6 +1275,7 @@ mod tests {
                 run_id: run_id(),
                 state: CoreRunState::Running,
             },
+            SessionEventPayload::RunCancellationRequested { run_id: run_id() },
             SessionEventPayload::ToolCallRequested {
                 tool_call: tool_call.clone(),
             },
@@ -1106,14 +1314,18 @@ mod tests {
         ));
         assert!(matches!(
             events[4].event,
-            SessionEventDataResponse::ToolCallRequested { .. }
+            SessionEventDataResponse::RunCancellationRequested { .. }
         ));
         assert!(matches!(
             events[5].event,
-            SessionEventDataResponse::ToolCallStateChanged { .. }
+            SessionEventDataResponse::ToolCallRequested { .. }
         ));
         assert!(matches!(
             events[6].event,
+            SessionEventDataResponse::ToolCallStateChanged { .. }
+        ));
+        assert!(matches!(
+            events[7].event,
             SessionEventDataResponse::ToolCallOutput { .. }
         ));
     }
@@ -1140,6 +1352,11 @@ mod tests {
                 RunError::InvalidTransition,
                 StatusCode::CONFLICT,
                 error_code::INVALID_RUN_STATE,
+            ),
+            (
+                RunError::CancellationFailed,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                error_code::RUN_CANCELLATION_FAILED,
             ),
             (
                 RunError::RunStoreUnavailable,
@@ -1174,5 +1391,31 @@ mod tests {
             },
         )]);
         assert_eq!(receiver.try_recv(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_rejects_new_commands_and_drains_accepted_commands() {
+        let lifecycle = LifecycleCoordinator::new();
+        let accepted = lifecycle.begin_command().expect("command is accepted");
+
+        assert!(lifecycle.request_shutdown());
+        assert!(!lifecycle.request_shutdown());
+        assert!(matches!(
+            lifecycle.begin_command(),
+            Err(PublicError::DaemonShuttingDown)
+        ));
+        let problem = PublicError::DaemonShuttingDown.problem();
+        assert_eq!(problem.status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(problem.code, error_code::DAEMON_SHUTTING_DOWN);
+        lifecycle.wait_for_shutdown_request().await;
+
+        let mut draining = Box::pin(lifecycle.wait_for_commands());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            draining.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
+        drop(accepted);
+        draining.await;
     }
 }

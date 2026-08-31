@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.5.0";
+pub const PROTOCOL_VERSION: &str = "0.6.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -24,6 +24,7 @@ pub const SESSION_MESSAGES_PATH: &str = "/v1/sessions/{session_id}/messages";
 pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
+pub const RUN_CANCEL_PATH: &str = "/v1/runs/{run_id}/cancel";
 pub const NEGOTIATE_OPERATION_ID: &str = "negotiate_protocol";
 pub const EVENT_STREAM_OPERATION_ID: &str = "event_stream";
 pub const CREATE_WORKSPACE_OPERATION_ID: &str = "create_workspace";
@@ -34,6 +35,7 @@ pub const APPEND_MESSAGE_OPERATION_ID: &str = "append_message";
 pub const LIST_SESSION_EVENTS_OPERATION_ID: &str = "list_session_events";
 pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
+pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 
 pub mod error_code {
     pub const INVALID_JSON: &str = "invalid_json";
@@ -67,6 +69,8 @@ pub mod error_code {
     pub const ACTIVE_ROOT_RUN_EXISTS: &str = "active_root_run_exists";
     pub const INVALID_RUN_STATE: &str = "invalid_run_state";
     pub const RUN_STORE_UNAVAILABLE: &str = "run_store_unavailable";
+    pub const RUN_CANCELLATION_FAILED: &str = "run_cancellation_failed";
+    pub const DAEMON_SHUTTING_DOWN: &str = "daemon_shutting_down";
 
     pub const ALL: &[&str] = &[
         INVALID_JSON,
@@ -100,6 +104,8 @@ pub mod error_code {
         ACTIVE_ROOT_RUN_EXISTS,
         INVALID_RUN_STATE,
         RUN_STORE_UNAVAILABLE,
+        RUN_CANCELLATION_FAILED,
+        DAEMON_SHUTTING_DOWN,
     ];
 }
 
@@ -221,8 +227,10 @@ pub struct MessageResponse {
 pub enum RunState {
     Queued,
     Running,
+    Cancelling,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -232,6 +240,7 @@ pub enum ToolCallState {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -276,6 +285,8 @@ pub enum SessionEventDataResponse {
     RunCreated { run_id: String, state: RunState },
     #[serde(rename = "run.state_changed")]
     RunStateChanged { run_id: String, state: RunState },
+    #[serde(rename = "run.cancellation_requested")]
+    RunCancellationRequested { run_id: String },
     #[serde(rename = "tool_call.requested")]
     ToolCallRequested { tool_call: ToolCallResponse },
     #[serde(rename = "tool_call.state_changed")]

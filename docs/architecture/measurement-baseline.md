@@ -2,7 +2,9 @@
 
 Date: 2026-08-06
 
-Toolchain: Rust 1.97.1, Cargo 1.97.1
+Performance toolchain: Rust 1.97.1, Cargo 1.97.1
+
+EDL-213 functional verification: Rust 1.98.0, Cargo 1.98.0 on 2026-08-31.
 
 The measurements use the local macOS development machine. They are a baseline, not a performance target.
 
@@ -13,8 +15,8 @@ The measurements use the local macOS development machine. They are a baseline, n
 | Debug daemon executable | 24,348,192 bytes | `stat -f %z target/debug/kiln-daemon` |
 | Idle daemon RSS | 12,752 KB | Started daemon with SQLite and file artifacts, then sampled `ps` after capabilities became available |
 | Running daemon RSS | 13,696 KB | Same daemon while a deterministic 30-second sleep tool run was active |
-| Cancellation | Passed | HTTP cancel command returned, then graceful shutdown completed |
-| Graceful shutdown exit | 0 | HTTP shutdown state change followed by SIGINT |
+| Cancellation | Passed | The daemon black-box test cancelled one active Run, stopped its process group, and recovered the durable terminal result after restart |
+| Graceful signal shutdown | Passed | The daemon black-box tests sent SIGINT and SIGTERM, then checked clean exit and durable cancellation of active work |
 
 The RSS values are one-process samples. They do not represent a capacity limit. Repeat them on the target host before setting operational limits.
 

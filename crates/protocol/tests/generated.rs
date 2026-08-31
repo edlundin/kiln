@@ -1,15 +1,15 @@
 use kiln_protocol::{
-    APPEND_MESSAGE_OPERATION_ID, AppendMessageRequest, CREATE_SESSION_OPERATION_ID,
-    CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateWorkspaceRequest,
-    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
-    GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse,
-    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse,
-    SessionEventsResponse, SessionResponse, StoreIdentity, ToolCallState, ToolOutputStream,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
-    WorkspaceResponse, error_code,
+    APPEND_MESSAGE_OPERATION_ID, AppendMessageRequest, CANCEL_RUN_OPERATION_ID,
+    CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
+    CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
+    EVENTS_WEBSOCKET_PATH, GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID,
+    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
+    MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
+    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse, SessionResponse,
+    StoreIdentity, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, error_code,
 };
 use serde_json::json;
 
@@ -420,7 +420,7 @@ fn start_run_contract_requires_opaque_idempotency_key() {
     assert!(start_run.contains("in: header"));
     assert!(start_run.contains("required: true"));
     assert!(start_run.contains("type: string"));
-    assert!(openapi.contains("version: 0.5.0"));
+    assert!(openapi.contains(&format!("version: {PROTOCOL_VERSION}")));
 }
 
 #[test]
@@ -469,6 +469,9 @@ fn run_fixtures_match_json_schema_typescript_and_openapi() {
             run_id: run.run_id.clone(),
             state: RunState::Running,
         },
+        SessionEventDataResponse::RunCancellationRequested {
+            run_id: run.run_id.clone(),
+        },
         SessionEventDataResponse::ToolCallRequested {
             tool_call: run.tool_calls[0].clone(),
         },
@@ -488,6 +491,7 @@ fn run_fixtures_match_json_schema_typescript_and_openapi() {
         [
             "run.created",
             "run.state_changed",
+            "run.cancellation_requested",
             "tool_call.requested",
             "tool_call.state_changed",
             "tool_call.output",
@@ -502,6 +506,7 @@ fn run_fixtures_match_json_schema_typescript_and_openapi() {
     for (path, operation) in [
         (SESSION_RUNS_PATH, START_RUN_OPERATION_ID),
         (RUN_PATH, GET_RUN_OPERATION_ID),
+        (RUN_CANCEL_PATH, CANCEL_RUN_OPERATION_ID),
     ] {
         assert!(openapi.contains(&format!("  {path}:")));
         assert!(openapi.contains(&format!("operationId: {operation}")));

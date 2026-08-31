@@ -9,13 +9,14 @@ use kiln_protocol::{
     AppendMessageRequest, ClientIdentity, CreateWorkspaceRequest,
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
     MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, SessionEventDataResponse, SessionEventResponse,
-    SessionEventsResponse, SessionResponse, ToolCallState, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
-    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
-    WorkspaceRootRequest, error_code,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
+    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, ToolCallState,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
+    WorkspaceResponse, WorkspaceRootRequest, error_code,
 };
 use reqwest::StatusCode;
+use rustix::process::{Pid, test_kill_process, test_kill_process_group};
 use serde_json::Value;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -30,12 +31,33 @@ impl Daemon {
     }
 
     fn start_with_outcome(binary: &str, data_directory: &Path, outcome: Option<&str>) -> Self {
+        Self::start_with_configuration(binary, data_directory, outcome, None)
+    }
+
+    fn start_with_pid_file(
+        binary: &str,
+        data_directory: &Path,
+        outcome: &str,
+        pid_file: &Path,
+    ) -> Self {
+        Self::start_with_configuration(binary, data_directory, Some(outcome), Some(pid_file))
+    }
+
+    fn start_with_configuration(
+        binary: &str,
+        data_directory: &Path,
+        outcome: Option<&str>,
+        pid_file: Option<&Path>,
+    ) -> Self {
         let mut command = std::process::Command::new(binary);
         command
             .env("KILN_LISTEN_ADDR", "127.0.0.1:0")
             .env("KILN_DATA_DIR", data_directory);
         if let Some(outcome) = outcome {
             command.env("KILN_DETERMINISTIC_SUBPROCESS_OUTCOME", outcome);
+        }
+        if let Some(pid_file) = pid_file {
+            command.env("KILN_DETERMINISTIC_PID_FILE", pid_file);
         }
         let mut child = command
             .stdout(Stdio::piped())
@@ -58,6 +80,19 @@ impl Daemon {
                 .expect("readiness address")
                 .to_owned(),
         }
+    }
+
+    fn signal(&self, signal: &str) {
+        let status = std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(self.child.id().to_string())
+            .status()
+            .expect("daemon signal command runs");
+        assert!(status.success(), "daemon signal is delivered");
+    }
+
+    fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+        self.child.wait().expect("daemon exits")
     }
 }
 
@@ -91,6 +126,34 @@ fn canonical_string(path: &Path) -> String {
         .to_str()
         .expect("test path is UTF-8")
         .to_owned()
+}
+
+async fn fixture_pids(path: &Path) -> (u32, u32) {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(value) = serde_json::from_str::<Value>(&contents)
+            && let (Some(parent), Some(child)) =
+                (value["parent_pid"].as_u64(), value["child_pid"].as_u64())
+            && let (Ok(parent), Ok(child)) = (u32::try_from(parent), u32::try_from(child))
+        {
+            return (parent, child);
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
+fn process_exists(pid: u32) -> bool {
+    i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .is_some_and(|pid| test_kill_process(pid).is_ok())
+}
+
+fn process_group_exists(pid: u32) -> bool {
+    i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .is_some_and(|pid| test_kill_process_group(pid).is_ok())
 }
 
 async fn create_run_session(
@@ -130,9 +193,27 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::MessageAppended { .. } => "message.appended",
         SessionEventDataResponse::RunCreated { .. } => "run.created",
         SessionEventDataResponse::RunStateChanged { .. } => "run.state_changed",
+        SessionEventDataResponse::RunCancellationRequested { .. } => "run.cancellation_requested",
         SessionEventDataResponse::ToolCallRequested { .. } => "tool_call.requested",
         SessionEventDataResponse::ToolCallStateChanged { .. } => "tool_call.state_changed",
         SessionEventDataResponse::ToolCallOutput { .. } => "tool_call.output",
+    }
+}
+
+fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> bool {
+    match &event.event {
+        SessionEventDataResponse::RunCreated { run_id, .. }
+        | SessionEventDataResponse::RunStateChanged { run_id, .. }
+        | SessionEventDataResponse::RunCancellationRequested { run_id } => {
+            run_id == expected_run_id
+        }
+        SessionEventDataResponse::ToolCallRequested { tool_call }
+        | SessionEventDataResponse::ToolCallStateChanged { tool_call } => {
+            tool_call.run_id == expected_run_id
+        }
+        SessionEventDataResponse::ToolCallOutput { run_id, .. } => run_id == expected_run_id,
+        SessionEventDataResponse::SessionCreated { .. }
+        | SessionEventDataResponse::MessageAppended { .. } => false,
     }
 }
 
@@ -1032,6 +1113,21 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     );
     assert_eq!(tool_call.exit_code, Some(0));
 
+    let cancel_path = RUN_CANCEL_PATH.replace("{run_id}", &completed.run_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, cancel_path))
+        .send()
+        .await
+        .expect("completed Run cancellation response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .json::<RunResponse>()
+            .await
+            .expect("completed Run cancellation JSON"),
+        completed
+    );
+
     let duplicate_response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "run-success")
@@ -1128,6 +1224,173 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
             .expect("recovered Run JSON"),
         completed
     );
+}
+
+#[tokio::test]
+async fn cancellation_is_shared_kills_the_process_group_and_survives_restart() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary cancellation test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("cancellation repository parent");
+    let data_directory = sandbox.path().join("data");
+    let pid_file = sandbox.path().join("subprocess-pids.json");
+    let http = reqwest::Client::new();
+    let daemon = Daemon::start_with_pid_file(binary, &data_directory, "blocking-tree", &pid_file);
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "cancel-tree")
+        .send()
+        .await
+        .expect("blocking Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response.json().await.expect("blocking Run JSON");
+    let (parent_pid, child_pid) = fixture_pids(&pid_file).await;
+    assert!(process_exists(parent_pid));
+    assert!(process_exists(child_pid));
+    assert!(process_group_exists(parent_pid));
+
+    let cancel_path = RUN_CANCEL_PATH.replace("{run_id}", &queued.run_id);
+    let (first, second) = tokio::join!(
+        http.post(format!("http://{}{}", daemon.address, cancel_path))
+            .send(),
+        http.post(format!("http://{}{}", daemon.address, cancel_path))
+            .send(),
+    );
+    let first = first.expect("first cancellation response");
+    let second = second.expect("second cancellation response");
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    let cancelled: RunResponse = first.json().await.expect("first cancellation JSON");
+    assert_eq!(
+        second
+            .json::<RunResponse>()
+            .await
+            .expect("second cancellation JSON"),
+        cancelled
+    );
+    assert_eq!(cancelled.state, RunState::Cancelled);
+    assert_eq!(cancelled.tool_calls.len(), 1);
+    assert_eq!(cancelled.tool_calls[0].state, ToolCallState::Cancelled);
+    assert!(cancelled.tool_calls[0].stdout.is_some());
+    assert!(cancelled.tool_calls[0].stderr.is_some());
+    assert_eq!(cancelled.tool_calls[0].exit_code, None);
+    assert!(!process_exists(parent_pid));
+    assert!(!process_exists(child_pid));
+    assert!(!process_group_exists(parent_pid));
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .get(format!("http://{}{}", daemon.address, events_path))
+        .send()
+        .await
+        .expect("cancelled Run Event history response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: SessionEventsResponse = response.json().await.expect("cancel history JSON");
+    let run_events = history
+        .events
+        .iter()
+        .filter(|event| event_belongs_to_run(event, &queued.run_id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        run_events
+            .iter()
+            .filter(|event| event_kind(event) == "run.cancellation_requested")
+            .count(),
+        1
+    );
+    assert_eq!(
+        run_events
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEventDataResponse::RunStateChanged { state, .. } => Some(state.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [RunState::Running, RunState::Cancelling, RunState::Cancelled,]
+    );
+    assert!(matches!(
+        &run_events
+            .last()
+            .expect("terminal cancellation Event")
+            .event,
+        SessionEventDataResponse::RunStateChanged {
+            state: RunState::Cancelled,
+            ..
+        }
+    ));
+
+    let run_path = RUN_PATH.replace("{run_id}", &queued.run_id);
+    drop(daemon);
+    let restarted = Daemon::start(binary, &data_directory);
+    let response = http
+        .get(format!("http://{}{}", restarted.address, run_path))
+        .send()
+        .await
+        .expect("recovered cancelled Run response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .json::<RunResponse>()
+            .await
+            .expect("recovered cancelled Run JSON"),
+        cancelled
+    );
+}
+
+#[tokio::test]
+async fn sigterm_gracefully_cancels_active_work_before_exit() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary graceful shutdown test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("shutdown repository parent");
+    let data_directory = sandbox.path().join("data");
+    let pid_file = sandbox.path().join("shutdown-pids.json");
+    let http = reqwest::Client::new();
+    let mut daemon =
+        Daemon::start_with_pid_file(binary, &data_directory, "blocking-tree", &pid_file);
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "shutdown-tree")
+        .send()
+        .await
+        .expect("shutdown Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response.json().await.expect("shutdown Run JSON");
+    let (parent_pid, child_pid) = fixture_pids(&pid_file).await;
+
+    daemon.signal("TERM");
+    assert!(daemon.wait_for_exit().success());
+    assert!(!process_exists(parent_pid));
+    assert!(!process_exists(child_pid));
+    assert!(!process_group_exists(parent_pid));
+
+    let restarted = Daemon::start(binary, &data_directory);
+    let run_path = RUN_PATH.replace("{run_id}", &queued.run_id);
+    let response = http
+        .get(format!("http://{}{}", restarted.address, run_path))
+        .send()
+        .await
+        .expect("Run after graceful shutdown response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let cancelled: RunResponse = response.json().await.expect("Run after shutdown JSON");
+    assert_eq!(cancelled.state, RunState::Cancelled);
+    assert_eq!(cancelled.tool_calls[0].state, ToolCallState::Cancelled);
+}
+
+#[test]
+fn sigint_gracefully_stops_an_idle_daemon() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary SIGINT test directory");
+    let data_directory = sandbox.path().join("data");
+    let mut daemon = Daemon::start(binary, &data_directory);
+
+    daemon.signal("INT");
+    assert!(daemon.wait_for_exit().success());
 }
 
 #[tokio::test]

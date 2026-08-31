@@ -2,11 +2,21 @@
 
 ## 2026-08-31 — `feat`
 
+- Added durable, naturally idempotent `POST /v1/runs/{run_id}/cancel`.
+- Persisted Run cancellation states, cancelled ToolCall state, and cancellation events.
+- Added Unix process-group termination with captured output and completion-versus-cancel ordering.
+- Added graceful SIGINT/SIGTERM shutdown that quiesces mutations, drains accepted commands, cancels active work, and waits for durable terminal state.
+- Added protocol 0.6.0 contracts, a SQLite migration, and regression and black-box tests.
+
+[Commit](pending)
+
+## 2026-08-31 — `feat`
+
 - Added durable WebSocket reconnect replay after an exclusive cursor.
 - Made start-run retry-safe with required `Idempotency-Key`, atomic SQLite storage, and no duplicate Run/subprocess.
 - Added protocol 0.5.0 contracts and regression tests.
 
-[Commit](pending)
+[Commit](../../commit/faa9006855ba6dec6a655094586c585d1f4318f5)
 
 ## 2026-08-31 — `feat`
 

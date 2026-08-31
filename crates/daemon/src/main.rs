@@ -1,17 +1,25 @@
-use std::{env, io::Write, net::SocketAddr, process::ExitCode, str::FromStr};
+use std::{
+    env,
+    io::Write,
+    net::SocketAddr,
+    process::{ExitCode, Stdio},
+    str::FromStr,
+};
 
 use kiln_core::{RunApplication, SessionApplication, StoreMetadata, WorkspaceApplication};
 use kiln_infrastructure::{
-    DETERMINISTIC_FAILURE_ARGUMENT, DETERMINISTIC_SUBPROCESS_ARGUMENT,
-    DETERMINISTIC_SUCCESS_ARGUMENT, DeterministicOutcome, DeterministicSubprocessExecutor,
-    GitWorkspaceRootDiscovery, SqliteStore, UlidIdGenerator,
+    DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
+    DETERMINISTIC_SUBPROCESS_ARGUMENT, DETERMINISTIC_SUCCESS_ARGUMENT, DeterministicOutcome,
+    DeterministicSubprocessExecutor, GitWorkspaceRootDiscovery, SqliteStore, UlidIdGenerator,
 };
 use kiln_protocol::PROTOCOL_VERSION;
-use kiln_server::{AppState, EventBroadcaster, serve};
+use kiln_server::{AppState, EventBroadcaster, serve_with_shutdown};
 
 use crate::run_service::RunService;
 
 mod run_service;
+
+const DETERMINISTIC_BLOCKING_CHILD_ARGUMENT: &str = "blocking-child";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -80,19 +88,30 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    match serve(
-        listener,
-        AppState::with_operations(
-            StoreMetadata::default(),
-            bound_address,
-            workspaces,
-            sessions,
-            runs,
-            events,
-        ),
-    )
-    .await
-    {
+    let state = AppState::with_operations(
+        StoreMetadata::default(),
+        bound_address,
+        workspaces,
+        sessions,
+        runs.clone(),
+        events,
+    );
+    let lifecycle = state.lifecycle();
+    let signal_lifecycle = lifecycle.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        signal_lifecycle.request_shutdown();
+    });
+    let graceful_shutdown = async move {
+        lifecycle.wait_for_shutdown_request().await;
+        lifecycle.wait_for_commands().await;
+        if let Err(error) = runs.shutdown().await {
+            eprintln!("kilnd: graceful shutdown could not persist all terminal Runs: {error:?}");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    match serve_with_shutdown(listener, state, graceful_shutdown).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("kilnd: server stopped: {error}");
@@ -123,6 +142,10 @@ fn deterministic_subprocess_fixture() -> Option<ExitCode> {
             eprintln!("kiln deterministic subprocess failure");
             Some(ExitCode::FAILURE)
         }
+        Some(DETERMINISTIC_BLOCKING_TREE_ARGUMENT) => Some(blocking_tree_fixture()),
+        Some(DETERMINISTIC_BLOCKING_CHILD_ARGUMENT) => loop {
+            std::thread::park();
+        },
         _ => {
             eprintln!("kilnd: invalid deterministic subprocess outcome");
             Some(ExitCode::FAILURE)
@@ -134,13 +157,85 @@ fn configured_subprocess_outcome() -> Result<DeterministicOutcome, String> {
     match env::var("KILN_DETERMINISTIC_SUBPROCESS_OUTCOME") {
         Ok(value) if value == DETERMINISTIC_SUCCESS_ARGUMENT => Ok(DeterministicOutcome::Success),
         Ok(value) if value == DETERMINISTIC_FAILURE_ARGUMENT => Ok(DeterministicOutcome::Failure),
+        Ok(value) if value == DETERMINISTIC_BLOCKING_TREE_ARGUMENT => {
+            Ok(DeterministicOutcome::BlockingTree)
+        }
         Ok(_) => {
-            Err("KILN_DETERMINISTIC_SUBPROCESS_OUTCOME must be `success` or `failure`".to_owned())
+            Err(
+                "KILN_DETERMINISTIC_SUBPROCESS_OUTCOME must be `success`, `failure`, or `blocking-tree`"
+                    .to_owned(),
+            )
         }
         Err(env::VarError::NotPresent) => Ok(DeterministicOutcome::Success),
         Err(env::VarError::NotUnicode(_)) => {
             Err("KILN_DETERMINISTIC_SUBPROCESS_OUTCOME must be UTF-8".to_owned())
         }
+    }
+}
+
+fn blocking_tree_fixture() -> ExitCode {
+    let executable = match env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            eprintln!("kilnd: cannot locate deterministic descendant fixture: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut child = match std::process::Command::new(executable)
+        .arg(DETERMINISTIC_SUBPROCESS_ARGUMENT)
+        .arg(DETERMINISTIC_BLOCKING_CHILD_ARGUMENT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("kilnd: cannot start deterministic descendant fixture: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(pid_file) = env::var_os("KILN_DETERMINISTIC_PID_FILE") else {
+        eprintln!("kilnd: KILN_DETERMINISTIC_PID_FILE is required for blocking-tree");
+        stop_fixture_child(&mut child);
+        return ExitCode::FAILURE;
+    };
+    let pids = serde_json::json!({
+        "parent_pid": std::process::id(),
+        "child_pid": child.id(),
+    });
+    if let Err(error) = std::fs::write(&pid_file, pids.to_string()) {
+        eprintln!("kilnd: cannot write deterministic PID file: {error}");
+        stop_fixture_child(&mut child);
+        return ExitCode::FAILURE;
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
+fn stop_fixture_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+async fn wait_for_shutdown_signal() {
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(terminate) => terminate,
+            Err(error) => {
+                eprintln!("kilnd: cannot listen for SIGTERM: {error}");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                eprintln!("kilnd: cannot listen for interrupt: {error}");
+            }
+        }
+        _ = terminate.recv() => {}
     }
 }
 

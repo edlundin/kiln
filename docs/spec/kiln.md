@@ -434,7 +434,7 @@ The current server implements only the routes marked `current` in that file.
 | Approvals | `POST /v1/tool-calls/{id}/approval` | Allow or reject a requested operation |
 | Artifacts | `POST /v1/artifacts`, `GET /v1/artifacts/{hash}` | Upload composer attachments and download artifact bytes |
 | Extensions | `GET /v1/agents`, `GET /v1/providers`, `GET /v1/plugins`, `GET /v1/mcp/servers` | Inspect available execution boundaries |
-| Lifecycle | `POST /v1/shutdown` | Local daemon shutdown |
+| Lifecycle | `SIGINT`, `SIGTERM` | Graceful local daemon shutdown; an HTTP command remains deferred until local authentication exists |
 
 Commands that create or start resources require an `Idempotency-Key` header.
 The server returns the same resource for a repeated key in the same scope.

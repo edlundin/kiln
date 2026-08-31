@@ -278,8 +278,10 @@ pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subpro
 pub enum RunState {
     Queued,
     Running,
+    Cancelling,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl RunState {
@@ -287,8 +289,10 @@ impl RunState {
         match value {
             "queued" => Ok(Self::Queued),
             "running" => Ok(Self::Running),
+            "cancelling" => Ok(Self::Cancelling),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(InvalidRunState),
         }
     }
@@ -297,15 +301,22 @@ impl RunState {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Cancelling => "cancelling",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Queued, Self::Running) | (Self::Running, Self::Completed | Self::Failed)
+            (Self::Queued, Self::Running | Self::Cancelled)
+                | (
+                    Self::Running,
+                    Self::Completed | Self::Failed | Self::Cancelling
+                )
+                | (Self::Cancelling, Self::Cancelled)
         )
     }
 }
@@ -319,6 +330,7 @@ pub enum ToolCallState {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl ToolCallState {
@@ -328,6 +340,7 @@ impl ToolCallState {
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(InvalidToolCallState),
         }
     }
@@ -338,13 +351,18 @@ impl ToolCallState {
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Requested, Self::Running) | (Self::Running, Self::Completed | Self::Failed)
+            (Self::Requested, Self::Running | Self::Cancelled)
+                | (
+                    Self::Running,
+                    Self::Completed | Self::Failed | Self::Cancelled
+                )
         )
     }
 }
@@ -464,6 +482,7 @@ impl ToolCall {
             ToolCallState::Completed | ToolCallState::Failed => {
                 stdout.is_some() && stderr.is_some() && terminal_exit_matches(state, exit_code)
             }
+            ToolCallState::Cancelled => stdout.is_some() && stderr.is_some(),
         };
         if !valid_result {
             return Err(InvalidPersistedToolCall);
@@ -526,7 +545,14 @@ impl ToolCall {
     }
 
     pub fn transition(&self, state: ToolCallState) -> Result<Self, RunError> {
-        if (self.state, state) != (ToolCallState::Requested, ToolCallState::Running) {
+        if !matches!(
+            (self.state, state),
+            (ToolCallState::Requested, ToolCallState::Running)
+                | (
+                    ToolCallState::Requested | ToolCallState::Running,
+                    ToolCallState::Cancelled
+                )
+        ) {
             return Err(RunError::InvalidTransition);
         }
         Ok(Self::from_parts(
@@ -605,7 +631,7 @@ fn terminal_exit_matches(state: ToolCallState, exit_code: Option<i32>) -> bool {
     match state {
         ToolCallState::Completed => exit_code == Some(0),
         ToolCallState::Failed => exit_code != Some(0),
-        ToolCallState::Requested | ToolCallState::Running => false,
+        ToolCallState::Requested | ToolCallState::Running | ToolCallState::Cancelled => false,
     }
 }
 
@@ -677,8 +703,17 @@ impl SubprocessOutput {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubprocessExecution {
+    Finished(SubprocessOutput),
+    Cancelled(SubprocessOutput),
+    CancellationFailed,
+}
+
 pub trait SubprocessExecutor: Send + Sync {
-    fn execute(&self) -> impl Future<Output = SubprocessOutput> + Send;
+    fn execute<C>(&self, cancellation: C) -> impl Future<Output = SubprocessExecution> + Send
+    where
+        C: Future<Output = ()> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,6 +731,9 @@ pub enum SessionEventPayload {
     RunStateChanged {
         run_id: RunId,
         state: RunState,
+    },
+    RunCancellationRequested {
+        run_id: RunId,
     },
     ToolCallRequested {
         tool_call: ToolCall,
@@ -757,6 +795,16 @@ impl SessionEvent {
             payload: SessionEventPayload::RunStateChanged {
                 run_id: run.run_id.clone(),
                 state: run.state,
+            },
+        }
+    }
+
+    pub fn run_cancellation_requested(event_id: EventId, run: &Run) -> Self {
+        Self {
+            event_id,
+            session_id: run.session_id.clone(),
+            payload: SessionEventPayload::RunCancellationRequested {
+                run_id: run.run_id.clone(),
             },
         }
     }
@@ -955,6 +1003,7 @@ pub enum RunError {
     ActiveRootRunExists,
     IdempotencyKeyRequired,
     InvalidTransition,
+    CancellationFailed,
     RunStoreUnavailable,
 }
 
@@ -1078,6 +1127,17 @@ pub trait RunStore: SessionStore {
         tool_call: &ToolCall,
         events: &[SessionEvent],
     ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
+    fn request_cancellation(
+        &self,
+        run: &Run,
+        events: &[SessionEvent],
+    ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
+    fn finish_cancellation(
+        &self,
+        run: &Run,
+        tool_call: &ToolCall,
+        events: &[SessionEvent],
+    ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
 }
 
 pub struct RunApplication<S, I> {
@@ -1127,6 +1187,38 @@ where
         let event = SessionEvent::run_created(self.ids.event_id(), &run);
         self.store
             .start_root_run(&run, &event, &idempotency_key)
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn request_cancellation(
+        &self,
+        run_id: RunId,
+    ) -> Result<RunMutation<RunSnapshot>, RunError> {
+        let snapshot = self.get_run(run_id).await?;
+        let (run, events) = match snapshot.run.state() {
+            RunState::Queued => {
+                let run = snapshot.run.transition(RunState::Cancelled)?;
+                let events = vec![
+                    SessionEvent::run_cancellation_requested(self.ids.event_id(), &snapshot.run),
+                    SessionEvent::run_state_changed(self.ids.event_id(), &run),
+                ];
+                (run, events)
+            }
+            RunState::Running => {
+                let run = snapshot.run.transition(RunState::Cancelling)?;
+                let events = vec![
+                    SessionEvent::run_cancellation_requested(self.ids.event_id(), &snapshot.run),
+                    SessionEvent::run_state_changed(self.ids.event_id(), &run),
+                ];
+                (run, events)
+            }
+            RunState::Cancelling | RunState::Completed | RunState::Failed | RunState::Cancelled => {
+                (snapshot.run.clone(), Vec::new())
+            }
+        };
+        self.store
+            .request_cancellation(&run, &events)
             .await
             .map_err(map_run_store_error)
     }
@@ -1246,6 +1338,73 @@ where
         ));
         self.store
             .finish_execution(&terminal_run, &terminal_tool_call, &events)
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn finish_cancellation(
+        &self,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        output: SubprocessOutput,
+    ) -> Result<RunMutation<RunSnapshot>, RunError> {
+        let snapshot = self.get_run(run_id.clone()).await?;
+        if snapshot.run.state() != RunState::Cancelling {
+            return Err(RunError::InvalidTransition);
+        }
+        let tool_call = snapshot
+            .tool_call(&tool_call_id)
+            .ok_or(RunError::RunNotFound)?;
+        if tool_call.run_id != run_id
+            || !matches!(
+                tool_call.state(),
+                ToolCallState::Requested | ToolCallState::Running
+            )
+        {
+            return Err(RunError::InvalidTransition);
+        }
+        let cancelled_tool_call = ToolCall::from_parts(
+            tool_call.tool_call_id.clone(),
+            tool_call.run_id.clone(),
+            tool_call.capability.clone(),
+            ToolCallState::Cancelled,
+            Some(output.stdout.clone()),
+            Some(output.stderr.clone()),
+            output.exit_code,
+        );
+        let cancelled_run = snapshot.run.transition(RunState::Cancelled)?;
+        let mut events = Vec::new();
+        if !output.stdout.is_empty() {
+            events.push(SessionEvent::tool_call_output(
+                self.ids.event_id(),
+                snapshot.run.session_id.clone(),
+                run_id.clone(),
+                tool_call_id.clone(),
+                ToolOutputStream::Stdout,
+                output.stdout,
+            ));
+        }
+        if !output.stderr.is_empty() {
+            events.push(SessionEvent::tool_call_output(
+                self.ids.event_id(),
+                snapshot.run.session_id.clone(),
+                run_id,
+                tool_call_id,
+                ToolOutputStream::Stderr,
+                output.stderr,
+            ));
+        }
+        events.push(SessionEvent::tool_call_state_changed(
+            self.ids.event_id(),
+            snapshot.run.session_id.clone(),
+            cancelled_tool_call.clone(),
+        ));
+        events.push(SessionEvent::run_state_changed(
+            self.ids.event_id(),
+            &cancelled_run,
+        ));
+        self.store
+            .finish_cancellation(&cancelled_run, &cancelled_tool_call, &events)
             .await
             .map_err(map_run_store_error)
     }
@@ -2292,6 +2451,7 @@ mod tests {
 #[cfg(test)]
 mod run_tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn session_id() -> SessionId {
         SessionId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
@@ -2313,6 +2473,17 @@ mod run_tests {
 
     #[test]
     fn transitions_allow_only_the_declared_paths() {
+        for (value, state) in [
+            ("queued", RunState::Queued),
+            ("running", RunState::Running),
+            ("cancelling", RunState::Cancelling),
+            ("completed", RunState::Completed),
+            ("failed", RunState::Failed),
+            ("cancelled", RunState::Cancelled),
+        ] {
+            assert_eq!(RunState::parse(value).unwrap(), state);
+            assert_eq!(state.as_str(), value);
+        }
         let run = Run::new(
             RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             session_id(),
@@ -2325,6 +2496,26 @@ mod run_tests {
             run.transition(RunState::Completed),
             Err(RunError::InvalidTransition)
         );
+        assert_eq!(
+            run.transition(RunState::Cancelled).unwrap().state(),
+            RunState::Cancelled
+        );
+        let cancelling = run
+            .transition(RunState::Running)
+            .unwrap()
+            .transition(RunState::Cancelling)
+            .unwrap();
+        assert_eq!(
+            cancelling.transition(RunState::Cancelled).unwrap().state(),
+            RunState::Cancelled
+        );
+        assert_eq!(
+            cancelling.transition(RunState::Completed),
+            Err(RunError::InvalidTransition)
+        );
+        for terminal in [RunState::Completed, RunState::Failed, RunState::Cancelled] {
+            assert!(!terminal.can_transition_to(RunState::Cancelled));
+        }
         let tool = ToolCall::new(
             ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             run.run_id().clone(),
@@ -2344,6 +2535,35 @@ mod run_tests {
             tool.transition(ToolCallState::Completed),
             Err(RunError::InvalidTransition)
         );
+        assert_eq!(
+            tool.transition(ToolCallState::Cancelled).unwrap().state(),
+            ToolCallState::Cancelled
+        );
+        assert_eq!(
+            tool.transition(ToolCallState::Running)
+                .unwrap()
+                .transition(ToolCallState::Cancelled)
+                .unwrap()
+                .state(),
+            ToolCallState::Cancelled
+        );
+        for (value, state) in [
+            ("requested", ToolCallState::Requested),
+            ("running", ToolCallState::Running),
+            ("completed", ToolCallState::Completed),
+            ("failed", ToolCallState::Failed),
+            ("cancelled", ToolCallState::Cancelled),
+        ] {
+            assert_eq!(ToolCallState::parse(value).unwrap(), state);
+            assert_eq!(state.as_str(), value);
+        }
+        for terminal in [
+            ToolCallState::Completed,
+            ToolCallState::Failed,
+            ToolCallState::Cancelled,
+        ] {
+            assert!(!terminal.can_transition_to(ToolCallState::Cancelled));
+        }
     }
 
     #[test]
@@ -2390,5 +2610,314 @@ mod run_tests {
             ToolCallResult::new(ToolCallState::Running, String::new(), String::new(), None,),
             Err(RunError::InvalidTransition)
         );
+        let cancelled = ToolCall::from_persisted(
+            ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+            ToolCallState::Cancelled,
+            Some(String::new()),
+            Some(String::new()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cancelled.state(), ToolCallState::Cancelled);
+        assert_eq!(cancelled.exit_code(), None);
+    }
+
+    struct RunTestIds;
+
+    impl RunIdGenerator for RunTestIds {
+        fn run_id(&self) -> RunId {
+            RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
+        }
+
+        fn tool_call_id(&self) -> ToolCallId {
+            ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
+        }
+
+        fn event_id(&self) -> EventId {
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
+        }
+    }
+
+    struct RunTestStore {
+        snapshot: Mutex<RunSnapshot>,
+        events: std::sync::Arc<Mutex<Vec<SessionEvent>>>,
+        request_count: std::sync::Arc<Mutex<usize>>,
+        finish_count: std::sync::Arc<Mutex<usize>>,
+    }
+
+    impl RunTestStore {
+        fn mutation(
+            &self,
+            snapshot: RunSnapshot,
+            events: &[SessionEvent],
+        ) -> RunMutation<RunSnapshot> {
+            *self.snapshot.lock().unwrap() = snapshot.clone();
+            self.events.lock().unwrap().extend_from_slice(events);
+            let stored_events = events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    StoredSessionEvent::from_event(event, EventCursor::from_value(index as u64 + 1))
+                        .unwrap()
+                })
+                .collect();
+            RunMutation::new(snapshot, stored_events)
+        }
+    }
+
+    impl SessionStore for RunTestStore {
+        async fn create_session(
+            &self,
+            _session: &Session,
+            _event: &SessionEvent,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn get_session(&self, _id: &SessionId) -> Result<Option<Session>, StoreError> {
+            Ok(None)
+        }
+
+        async fn append_message(
+            &self,
+            _message: &Message,
+            _event: &SessionEvent,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn list_session_events(
+            &self,
+            _session_id: &SessionId,
+            _after: EventCursor,
+        ) -> Result<SessionEventPage, StoreError> {
+            Ok(SessionEventPage::new(Vec::new(), EventCursor::zero()))
+        }
+
+        async fn list_events_after(
+            &self,
+            _after: EventCursor,
+        ) -> Result<SessionEventPage, StoreError> {
+            Ok(SessionEventPage::new(Vec::new(), EventCursor::zero()))
+        }
+
+        async fn current_event_cursor(&self) -> Result<Option<EventCursor>, StoreError> {
+            Ok(None)
+        }
+    }
+
+    impl RunStore for RunTestStore {
+        async fn start_root_run(
+            &self,
+            _run: &Run,
+            _event: &SessionEvent,
+            _idempotency_key: &str,
+        ) -> Result<StartRunMutation, RunStoreError> {
+            Err(RunStoreError::Unavailable)
+        }
+
+        async fn get_run(&self, id: &RunId) -> Result<Option<RunSnapshot>, RunStoreError> {
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            Ok((snapshot.run().run_id() == id).then_some(snapshot))
+        }
+
+        async fn get_tool_call(
+            &self,
+            id: &ToolCallId,
+        ) -> Result<Option<(Run, ToolCall)>, RunStoreError> {
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            Ok(snapshot
+                .tool_call(id)
+                .cloned()
+                .map(|tool_call| (snapshot.run().clone(), tool_call)))
+        }
+
+        async fn begin_execution(
+            &self,
+            _run: &Run,
+            _tool_call: &ToolCall,
+            _events: &[SessionEvent],
+        ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+            Err(RunStoreError::Unavailable)
+        }
+
+        async fn begin_tool_call(
+            &self,
+            _tool_call_id: &ToolCallId,
+            _events: &[SessionEvent],
+        ) -> Result<RunMutation<ToolCall>, RunStoreError> {
+            Err(RunStoreError::Unavailable)
+        }
+
+        async fn finish_execution(
+            &self,
+            _run: &Run,
+            _tool_call: &ToolCall,
+            _events: &[SessionEvent],
+        ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+            Err(RunStoreError::Unavailable)
+        }
+
+        async fn request_cancellation(
+            &self,
+            run: &Run,
+            events: &[SessionEvent],
+        ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+            *self.request_count.lock().unwrap() += 1;
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            Ok(self.mutation(
+                RunSnapshot::new(run.clone(), snapshot.tool_calls().to_vec()),
+                events,
+            ))
+        }
+
+        async fn finish_cancellation(
+            &self,
+            run: &Run,
+            tool_call: &ToolCall,
+            events: &[SessionEvent],
+        ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+            *self.finish_count.lock().unwrap() += 1;
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            let mut tool_calls = snapshot.tool_calls().to_vec();
+            let current = tool_calls
+                .iter_mut()
+                .find(|current| current.tool_call_id() == tool_call.tool_call_id())
+                .unwrap();
+            *current = tool_call.clone();
+            Ok(self.mutation(RunSnapshot::new(run.clone(), tool_calls), events))
+        }
+    }
+
+    fn run_test_store(state: RunState, tool_state: ToolCallState) -> RunTestStore {
+        let run = Run::from_persisted(
+            RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            session_id(),
+            state,
+        );
+        let tool_call = ToolCall::new(
+            ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            run.run_id().clone(),
+            DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+        );
+        let tool_call = if tool_state == ToolCallState::Running {
+            tool_call.transition(ToolCallState::Running).unwrap()
+        } else {
+            tool_call
+        };
+        RunTestStore {
+            snapshot: Mutex::new(RunSnapshot::new(run, vec![tool_call])),
+            events: std::sync::Arc::new(Mutex::new(Vec::new())),
+            request_count: std::sync::Arc::new(Mutex::new(0)),
+            finish_count: std::sync::Arc::new(Mutex::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_and_running_cancellation_have_durable_event_order() {
+        for (state, expected_state) in [
+            (RunState::Queued, RunState::Cancelled),
+            (RunState::Running, RunState::Cancelling),
+        ] {
+            let store = run_test_store(state, ToolCallState::Requested);
+            let events = store.events.clone();
+            let app = RunApplication::new(store, RunTestIds);
+            let mutation = app
+                .request_cancellation(RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap())
+                .await
+                .unwrap();
+            assert_eq!(mutation.value.run().state(), expected_state);
+            assert_eq!(mutation.events.len(), 2);
+            assert!(matches!(
+                mutation.events[0].payload(),
+                SessionEventPayload::RunCancellationRequested { .. }
+            ));
+            assert!(matches!(
+                mutation.events[1].payload(),
+                SessionEventPayload::RunStateChanged { state, .. } if *state == expected_state
+            ));
+            assert_eq!(events.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_and_terminal_cancellation_are_no_op_mutations() {
+        for state in [
+            RunState::Cancelling,
+            RunState::Completed,
+            RunState::Failed,
+            RunState::Cancelled,
+        ] {
+            let store = run_test_store(state, ToolCallState::Requested);
+            let events = store.events.clone();
+            let requests = store.request_count.clone();
+            let app = RunApplication::new(store, RunTestIds);
+            let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+            let first = app.request_cancellation(run_id.clone()).await.unwrap();
+            let second = app.request_cancellation(run_id).await.unwrap();
+            assert_eq!(first.value.run().state(), state);
+            assert_eq!(second.value.run().state(), state);
+            assert!(first.events.is_empty());
+            assert!(second.events.is_empty());
+            assert_eq!(*requests.lock().unwrap(), 2);
+            assert!(events.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_finalization_captures_output_before_terminal_events() {
+        let store = run_test_store(RunState::Cancelling, ToolCallState::Running);
+        let events = store.events.clone();
+        let finishes = store.finish_count.clone();
+        let app = RunApplication::new(store, RunTestIds);
+        let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let tool_call_id = ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let mutation = app
+            .finish_cancellation(
+                run_id,
+                tool_call_id.clone(),
+                SubprocessOutput::success("out", "err", 0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mutation.value.run().state(), RunState::Cancelled);
+        let tool_call = mutation.value.tool_call(&tool_call_id).unwrap();
+        assert_eq!(tool_call.state(), ToolCallState::Cancelled);
+        assert_eq!(tool_call.stdout(), Some("out"));
+        assert_eq!(tool_call.stderr(), Some("err"));
+        assert_eq!(tool_call.exit_code(), Some(0));
+        assert_eq!(mutation.events.len(), 4);
+        assert!(matches!(
+            mutation.events[0].payload(),
+            SessionEventPayload::ToolCallOutput {
+                stream: ToolOutputStream::Stdout,
+                content,
+                ..
+            } if content == "out"
+        ));
+        assert!(matches!(
+            mutation.events[1].payload(),
+            SessionEventPayload::ToolCallOutput {
+                stream: ToolOutputStream::Stderr,
+                content,
+                ..
+            } if content == "err"
+        ));
+        assert!(matches!(
+            mutation.events[2].payload(),
+            SessionEventPayload::ToolCallStateChanged { tool_call }
+                if tool_call.state() == ToolCallState::Cancelled
+        ));
+        assert!(matches!(
+            mutation.events[3].payload(),
+            SessionEventPayload::RunStateChanged {
+                state: RunState::Cancelled,
+                ..
+            }
+        ));
+        assert_eq!(*finishes.lock().unwrap(), 1);
+        assert_eq!(events.lock().unwrap().len(), 4);
     }
 }

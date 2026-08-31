@@ -586,6 +586,92 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
             .unwrap(),
         4
     );
+
+    sqlx::raw_sql(include_str!("../migrations/0004_start_run_idempotency.sql"))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO runs (run_id, session_id, state) VALUES (?, ?, 'completed')")
+        .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO tool_calls (
+            tool_call_id, run_id, capability, state, stdout, stderr, exit_code
+         ) VALUES (?, ?, 'kiln.deterministic.subprocess', 'completed', '', '', 0)",
+    )
+    .bind("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO start_run_idempotencies (session_id, idempotency_key, run_id)
+         VALUES (?, 'migration-key', ?)",
+    )
+    .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO session_events (
+            event_id, session_id, event_type, run_id, run_state
+         ) VALUES (?, ?, 'run.created', ?, 'completed')",
+    )
+    .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FB0")
+    .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0005_run_cancellation.sql"))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'session_events'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        5
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT run_id FROM start_run_idempotencies WHERE idempotency_key = 'migration-key'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        "run_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    );
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query(
+        "INSERT INTO session_events (event_id, session_id, event_type) VALUES (?, ?, 'session.created')",
+    )
+    .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FAZ")
+    .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT cursor FROM session_events WHERE event_id = ?")
+            .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FAZ")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        6
+    );
 }
 
 #[tokio::test]
@@ -961,6 +1047,159 @@ async fn run_transitions_persist_historical_events_and_results() {
         .await
         .unwrap();
     assert_eq!(retrieved.run().state(), RunState::Completed);
+}
+
+#[tokio::test]
+async fn queued_cancellation_is_atomic_and_replayed_in_order() {
+    let (_data, store, session) = seeded_session().await;
+    let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
+    let created = app
+        .start_root_run(session.id().clone(), "queued-cancel".to_owned())
+        .await
+        .unwrap();
+    let run_id = created.value.run().run_id().clone();
+
+    let cancelled = app.request_cancellation(run_id.clone()).await.unwrap();
+    assert_eq!(cancelled.value.run().state(), RunState::Cancelled);
+    assert_eq!(cancelled.events.len(), 2);
+    assert!(matches!(
+        cancelled.events[0].payload(),
+        SessionEventPayload::RunCancellationRequested { .. }
+    ));
+    assert!(matches!(
+        cancelled.events[1].payload(),
+        SessionEventPayload::RunStateChanged {
+            state: RunState::Cancelled,
+            ..
+        }
+    ));
+    assert_eq!(
+        cancelled
+            .events
+            .iter()
+            .map(|event| event.cursor().value())
+            .collect::<Vec<_>>(),
+        [3, 4]
+    );
+
+    let repeated = app.request_cancellation(run_id).await.unwrap();
+    assert_eq!(repeated.value, cancelled.value);
+    assert!(repeated.events.is_empty());
+    let history = store
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    assert_eq!(history.events().len(), 4);
+    assert!(matches!(
+        history.events()[2].payload(),
+        SessionEventPayload::RunCancellationRequested { .. }
+    ));
+    assert!(matches!(
+        history.events()[3].payload(),
+        SessionEventPayload::RunStateChanged {
+            state: RunState::Cancelled,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn running_cancellation_finishes_with_output_and_event_order() {
+    let (_data, store, session) = seeded_session().await;
+    let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
+    let created = app
+        .start_root_run(session.id().clone(), "running-cancel".to_owned())
+        .await
+        .unwrap();
+    let run_id = created.value.run().run_id().clone();
+    let running = app.begin_execution(run_id.clone()).await.unwrap();
+    let tool_call_id = running.value.tool_calls()[0].tool_call_id().clone();
+    let cancelling = app.request_cancellation(run_id.clone()).await.unwrap();
+    assert_eq!(cancelling.value.run().state(), RunState::Cancelling);
+    assert!(cancelling.value.tool_call(&tool_call_id).is_some());
+
+    let cancelled = app
+        .finish_cancellation(
+            run_id,
+            tool_call_id,
+            SubprocessOutput::success("out", "err", 137),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cancelled.value.run().state(), RunState::Cancelled);
+    assert_eq!(
+        cancelled.value.tool_calls()[0].state(),
+        ToolCallState::Cancelled
+    );
+    assert_eq!(cancelled.events.len(), 4);
+    assert!(matches!(
+        cancelled.events[0].payload(),
+        SessionEventPayload::ToolCallOutput { .. }
+    ));
+    assert!(matches!(
+        cancelled.events[1].payload(),
+        SessionEventPayload::ToolCallOutput { .. }
+    ));
+    assert!(matches!(
+        cancelled.events[2].payload(),
+        SessionEventPayload::ToolCallStateChanged {
+            tool_call,
+        } if tool_call.state() == ToolCallState::Cancelled
+    ));
+    assert!(matches!(
+        cancelled.events[3].payload(),
+        SessionEventPayload::RunStateChanged {
+            state: RunState::Cancelled,
+            ..
+        }
+    ));
+
+    let history = store
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    assert!(matches!(
+        history.events()[4].payload(),
+        SessionEventPayload::RunCancellationRequested { .. }
+    ));
+    assert!(matches!(
+        history.events()[9].payload(),
+        SessionEventPayload::RunStateChanged {
+            state: RunState::Cancelled,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn cancelling_run_keeps_active_root_unique_until_terminal() {
+    let (_data, store, session) = seeded_session().await;
+    let app = RunApplication::new(store, super::UlidIdGenerator);
+    let created = app
+        .start_root_run(session.id().clone(), "active-cancel".to_owned())
+        .await
+        .unwrap();
+    let run_id = created.value.run().run_id().clone();
+    app.begin_execution(run_id.clone()).await.unwrap();
+    app.request_cancellation(run_id.clone()).await.unwrap();
+
+    assert_eq!(
+        app.start_root_run(session.id().clone(), "blocked-by-cancel".to_owned())
+            .await,
+        Err(kiln_core::RunError::ActiveRootRunExists)
+    );
+
+    let tool_call_id = app.get_run(run_id.clone()).await.unwrap().tool_calls()[0]
+        .tool_call_id()
+        .clone();
+    app.finish_cancellation(run_id, tool_call_id, SubprocessOutput::success("", "", 137))
+        .await
+        .unwrap();
+    assert!(
+        app.start_root_run(session.id().clone(), "after-cancel".to_owned())
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]

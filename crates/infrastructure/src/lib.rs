@@ -2,8 +2,10 @@
 
 use std::{
     env,
+    future::Future,
     io::ErrorKind,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
 };
 
@@ -13,13 +15,19 @@ use kiln_core::{
     RootDiscoveryError, Run, RunId, RunIdGenerator, RunMutation, RunSnapshot, RunState, RunStore,
     RunStoreError, Session, SessionEvent, SessionEventPage, SessionEventPayload, SessionId,
     SessionIdGenerator, SessionStore, StartRunDisposition, StartRunMutation, StoreError,
-    StoredSessionEvent, SubprocessExecutor, SubprocessOutput, ToolCall, ToolCallId, ToolCallState,
-    ToolOutputStream, Workspace, WorkspaceId, WorkspaceIdGenerator, WorkspaceRoot,
-    WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
+    StoredSessionEvent, SubprocessExecution, SubprocessExecutor, SubprocessOutput, ToolCall,
+    ToolCallId, ToolCallState, ToolOutputStream, Workspace, WorkspaceId, WorkspaceIdGenerator,
+    WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use tokio::{process::Command, sync::Mutex};
 use ulid::Ulid;
+
+#[cfg(unix)]
+use rustix::{
+    io::Errno,
+    process::{Pid, Signal, kill_process_group, test_kill_process_group},
+};
 
 #[derive(Debug)]
 pub enum InfrastructureError {
@@ -37,11 +45,14 @@ pub struct SqliteStore {
 pub const DETERMINISTIC_SUBPROCESS_ARGUMENT: &str = "--kiln-deterministic-subprocess";
 pub const DETERMINISTIC_SUCCESS_ARGUMENT: &str = "success";
 pub const DETERMINISTIC_FAILURE_ARGUMENT: &str = "failure";
+pub const DETERMINISTIC_BLOCKING_TREE_ARGUMENT: &str = "blocking-tree";
+pub const KILN_DETERMINISTIC_PID_FILE: &str = "KILN_DETERMINISTIC_PID_FILE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeterministicOutcome {
     Success,
     Failure,
+    BlockingTree,
 }
 
 impl DeterministicOutcome {
@@ -49,6 +60,7 @@ impl DeterministicOutcome {
         match self {
             Self::Success => DETERMINISTIC_SUCCESS_ARGUMENT,
             Self::Failure => DETERMINISTIC_FAILURE_ARGUMENT,
+            Self::BlockingTree => DETERMINISTIC_BLOCKING_TREE_ARGUMENT,
         }
     }
 }
@@ -65,29 +77,158 @@ impl DeterministicSubprocessExecutor {
 }
 
 impl SubprocessExecutor for DeterministicSubprocessExecutor {
-    async fn execute(&self) -> SubprocessOutput {
+    async fn execute<C>(&self, cancellation: C) -> SubprocessExecution
+    where
+        C: Future<Output = ()> + Send,
+    {
         let executable = match env::current_exe() {
             Ok(path) => path,
             Err(_) => {
-                return SubprocessOutput::spawn_failure("deterministic subprocess unavailable");
+                return SubprocessExecution::Finished(SubprocessOutput::spawn_failure(
+                    "deterministic subprocess unavailable",
+                ));
             }
         };
-        let output = Command::new(executable)
+
+        let pid_file = env::var_os(KILN_DETERMINISTIC_PID_FILE);
+        let mut command = Command::new(executable);
+        command
             .arg(DETERMINISTIC_SUBPROCESS_ARGUMENT)
             .arg(self.outcome.argument())
             .env_clear()
-            .kill_on_drop(true)
-            .output()
-            .await;
-        match output {
-            Ok(output) => SubprocessOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                exit_code: output.status.code(),
-                spawn_error: None,
-            },
-            Err(_) => SubprocessOutput::spawn_failure("deterministic subprocess failed to start"),
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(pid_file) = pid_file {
+            command.env(KILN_DETERMINISTIC_PID_FILE, pid_file);
         }
+        #[cfg(unix)]
+        command.process_group(0);
+
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                return SubprocessExecution::Finished(SubprocessOutput::spawn_failure(
+                    "deterministic subprocess failed to start",
+                ));
+            }
+        };
+        let pid = child.id();
+        let mut process_group = pid.and_then(ProcessGroupGuard::new);
+        let output = child.wait_with_output();
+        tokio::pin!(output);
+        tokio::pin!(cancellation);
+        tokio::select! {
+            result = &mut output => match result {
+                Ok(output) => {
+                    if let Some(group) = process_group.as_mut()
+                        && group.stop_remaining_members().await.is_err()
+                    {
+                        return SubprocessExecution::CancellationFailed;
+                    }
+                    SubprocessExecution::Finished(subprocess_output(output))
+                }
+                Err(_) => SubprocessExecution::CancellationFailed,
+            },
+            _ = &mut cancellation => {
+                let Some(group) = process_group.as_mut() else {
+                    return SubprocessExecution::CancellationFailed;
+                };
+                if group.kill().is_err() {
+                    return SubprocessExecution::CancellationFailed;
+                }
+                let output = match output.await {
+                    Ok(output) => output,
+                    Err(_) => return SubprocessExecution::CancellationFailed,
+                };
+                if group.wait_until_gone().await.is_err() {
+                    return SubprocessExecution::CancellationFailed;
+                }
+                group.disarm();
+                SubprocessExecution::Cancelled(subprocess_output(output))
+            }
+        }
+    }
+}
+
+fn subprocess_output(output: std::process::Output) -> SubprocessOutput {
+    SubprocessOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code(),
+        spawn_error: None,
+    }
+}
+
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pid: Option<Pid>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(pid: u32) -> Option<Self> {
+        let pid = i32::try_from(pid).ok().and_then(Pid::from_raw)?;
+        Some(Self { pid: Some(pid) })
+    }
+
+    fn kill(&self) -> Result<(), ()> {
+        let pid = self.pid.ok_or(())?;
+        match kill_process_group(pid, Signal::KILL) {
+            Ok(()) | Err(Errno::SRCH) => Ok(()),
+            Err(_) => Err(()),
+        }
+    }
+
+    async fn wait_until_gone(&self) -> Result<(), ()> {
+        let pid = self.pid.ok_or(())?;
+        loop {
+            match test_kill_process_group(pid) {
+                Err(Errno::SRCH) => return Ok(()),
+                Ok(()) => tokio::task::yield_now().await,
+                Err(_) => return Err(()),
+            }
+        }
+    }
+
+    async fn stop_remaining_members(&mut self) -> Result<(), ()> {
+        let Some(pid) = self.pid else {
+            return Ok(());
+        };
+        match test_kill_process_group(pid) {
+            Err(Errno::SRCH) => {
+                self.disarm();
+                Ok(())
+            }
+            Ok(()) => {
+                self.kill()?;
+                self.wait_until_gone().await?;
+                self.disarm();
+                Ok(())
+            }
+            Err(_) => Err(()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        let _ = self.kill();
+    }
+}
+
+#[cfg(not(unix))]
+struct ProcessGroupGuard;
+
+#[cfg(not(unix))]
+impl ProcessGroupGuard {
+    fn new(_pid: u32) -> Option<Self> {
+        None
     }
 }
 
@@ -552,6 +693,30 @@ fn parse_event_rows(
                 StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
                     .map_err(|_| StoreError::Unavailable)?
             }
+            "run.cancellation_requested" => {
+                if message_id.is_some()
+                    || tool_call_id.is_some()
+                    || run_state.is_some()
+                    || tool_call_state.is_some()
+                    || capability.is_some()
+                    || stdout.is_some()
+                    || stderr.is_some()
+                    || exit_code.is_some()
+                    || output_stream.is_some()
+                    || output_content.is_some()
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::RunCancellationRequested { run_id },
+                )
+                .map_err(|_| StoreError::Unavailable)?
+            }
             "tool_call.requested" | "tool_call.state_changed" => {
                 let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
                     .map_err(|_| StoreError::Unavailable)?;
@@ -693,7 +858,7 @@ impl RunStore for SqliteStore {
         if let Err(error) = result {
             if is_unique_constraint(&error) {
                 let active: Option<String> = sqlx::query_scalar(
-                    "SELECT run_id FROM runs WHERE session_id = ? AND state IN ('queued', 'running') LIMIT 1",
+                    "SELECT run_id FROM runs WHERE session_id = ? AND state IN ('queued', 'running', 'cancelling') LIMIT 1",
                 )
                 .bind(run.session_id().as_str())
                 .fetch_optional(&mut *transaction)
@@ -956,6 +1121,160 @@ impl RunStore for SqliteStore {
             .map_err(|_| RunStoreError::Unavailable)?;
         Ok(RunMutation::new(snapshot, stored_events))
     }
+
+    async fn request_cancellation(
+        &self,
+        run: &Run,
+        events: &[SessionEvent],
+    ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        let current = load_run(&mut transaction, run.run_id())
+            .await?
+            .ok_or(RunStoreError::Unavailable)?;
+        if current.session_id() != run.session_id() {
+            return Err(RunStoreError::InvalidTransition);
+        }
+
+        let transition = match (current.state(), run.state()) {
+            (RunState::Queued, RunState::Cancelled) => Some(RunState::Queued),
+            (RunState::Running, RunState::Cancelling) => Some(RunState::Running),
+            (RunState::Cancelling, RunState::Cancelling)
+            | (RunState::Completed, RunState::Completed)
+            | (RunState::Failed, RunState::Failed)
+            | (RunState::Cancelled, RunState::Cancelled) => None,
+            _ => return Err(RunStoreError::InvalidTransition),
+        };
+
+        let Some(expected_old_state) = transition else {
+            if !events.is_empty() {
+                return Err(RunStoreError::InvalidTransition);
+            }
+            let snapshot = load_snapshot(&mut transaction, run.run_id())
+                .await?
+                .ok_or(RunStoreError::Unavailable)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+            return Ok(RunMutation::new(snapshot, Vec::new()));
+        };
+
+        if events.len() != 2
+            || events[0]
+                != SessionEvent::run_cancellation_requested(events[0].event_id().clone(), &current)
+            || events[1] != SessionEvent::run_state_changed(events[1].event_id().clone(), run)
+        {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        let updated = sqlx::query(
+            "UPDATE runs SET state = ? WHERE run_id = ? AND session_id = ? AND state = ?",
+        )
+        .bind(run.state().as_str())
+        .bind(run.run_id().as_str())
+        .bind(run.session_id().as_str())
+        .bind(expected_old_state.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        let stored_events = insert_events(&mut transaction, events).await?;
+        let snapshot = load_snapshot(&mut transaction, run.run_id())
+            .await?
+            .ok_or(RunStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(RunMutation::new(snapshot, stored_events))
+    }
+
+    async fn finish_cancellation(
+        &self,
+        run: &Run,
+        tool_call: &ToolCall,
+        events: &[SessionEvent],
+    ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        let current_run = load_run(&mut transaction, run.run_id())
+            .await?
+            .ok_or(RunStoreError::Unavailable)?;
+        let current_tool = sqlx::query(
+            "SELECT tool_call_id, run_id, capability, state, stdout, stderr, exit_code
+             FROM tool_calls WHERE tool_call_id = ?",
+        )
+        .bind(tool_call.tool_call_id().as_str())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?
+        .ok_or(RunStoreError::Unavailable)
+        .and_then(|row| parse_tool_call(&row))?;
+        if current_run.state() != RunState::Cancelling
+            || run.state() != RunState::Cancelled
+            || current_run.session_id() != run.session_id()
+            || !matches!(
+                current_tool.state(),
+                ToolCallState::Requested | ToolCallState::Running
+            )
+            || current_tool.run_id() != current_run.run_id()
+            || tool_call.run_id() != run.run_id()
+            || current_tool.tool_call_id() != tool_call.tool_call_id()
+            || current_tool.capability() != tool_call.capability()
+            || tool_call.state() != ToolCallState::Cancelled
+            || tool_call.stdout().is_none()
+            || tool_call.stderr().is_none()
+            || !finish_events_match(events, run, tool_call)
+        {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        let stdout = tool_call.stdout().ok_or(RunStoreError::Unavailable)?;
+        let stderr = tool_call.stderr().ok_or(RunStoreError::Unavailable)?;
+        let updated_tool = sqlx::query(
+            "UPDATE tool_calls
+             SET state = 'cancelled', stdout = ?, stderr = ?, exit_code = ?
+             WHERE tool_call_id = ? AND run_id = ? AND state IN ('requested', 'running')",
+        )
+        .bind(stdout)
+        .bind(stderr)
+        .bind(tool_call.exit_code())
+        .bind(tool_call.tool_call_id().as_str())
+        .bind(run.run_id().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if updated_tool.rows_affected() != 1 {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        let updated_run = sqlx::query(
+            "UPDATE runs SET state = 'cancelled' WHERE run_id = ? AND session_id = ? AND state = 'cancelling'",
+        )
+        .bind(run.run_id().as_str())
+        .bind(run.session_id().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if updated_run.rows_affected() != 1 {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        let stored_events = insert_events(&mut transaction, events).await?;
+        let snapshot = load_snapshot(&mut transaction, run.run_id())
+            .await?
+            .ok_or(RunStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(RunMutation::new(snapshot, stored_events))
+    }
 }
 
 fn finish_events_match(events: &[SessionEvent], run: &Run, tool_call: &ToolCall) -> bool {
@@ -1095,6 +1414,20 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             run_id: Some(run_id.as_str()),
             tool_call_id: None,
             run_state: Some(state.as_str()),
+            tool_call_state: None,
+            capability: None,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            output_stream: None,
+            output_content: None,
+        }),
+        SessionEventPayload::RunCancellationRequested { run_id } => Ok(RunEventColumns {
+            event_type: "run.cancellation_requested",
+            message_id: None,
+            run_id: Some(run_id.as_str()),
+            tool_call_id: None,
+            run_state: None,
             tool_call_state: None,
             capability: None,
             stdout: None,

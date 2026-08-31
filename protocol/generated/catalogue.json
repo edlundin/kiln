@@ -33,7 +33,9 @@
     "run_not_found",
     "active_root_run_exists",
     "invalid_run_state",
-    "run_store_unavailable"
+    "run_store_unavailable",
+    "run_cancellation_failed",
+    "daemon_shutting_down"
   ],
   "http": [
     {
@@ -80,9 +82,14 @@
       "method": "GET",
       "operation": "get_run",
       "path": "/v1/runs/{run_id}"
+    },
+    {
+      "method": "POST",
+      "operation": "cancel_run",
+      "path": "/v1/runs/{run_id}/cancel"
     }
   ],
-  "protocol_version": "0.5.0",
+  "protocol_version": "0.6.0",
   "websocket": [
     {
       "method": "GET",

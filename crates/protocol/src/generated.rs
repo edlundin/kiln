@@ -13,12 +13,12 @@ use crate::{
     CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateWorkspaceRequest,
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
     GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, MessageRole, NEGOTIATE_OPERATION_ID,
-    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
-    RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventResponse,
-    SessionEventsResponse, SessionResponse, StoreIdentity, ToolCallResponse, ToolCallState,
-    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, MessageRole,
+    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, StoreIdentity, ToolCallResponse,
+    ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
     WORKSPACES_PATH, WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, error_code,
 };
 
@@ -470,6 +470,11 @@ paths:
           in: query
           required: true
           schema: {{type: string}}
+        - name: after
+          in: query
+          required: false
+          schema: {{type: string}}
+          description: Exclusive durable Event cursor for reconnect replay.
       responses:
         '101':
           description: WebSocket protocol switch.
@@ -626,6 +631,11 @@ paths:
           in: path
           required: true
           schema: {{type: string}}
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+          description: Opaque non-empty key for idempotent start-run delivery.
       responses:
         '202':
           description: Accepted queued root Run.
@@ -762,7 +772,7 @@ fn normalize_openapi_references(value: &mut Value) {
 
 fn reference() -> String {
     format!(
-        "# EDL-211 protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_RUNS_PATH}` accepts one queued root Run for the Session. The deterministic adapter selects the fixed subprocess; clients cannot provide an executable, arguments, shell, environment, or working directory. `GET {RUN_PATH}` returns the durable Run and ToolCall result.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it does not schedule work between Sessions. The response current cursor and Event rows come from one storage snapshot.\n\nThe client can connect to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}`. After the acknowledgement, the server publishes newly committed Run and ToolCall Events in cursor order. Reconnect replay is outside this release.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
+        "# EDL-212 protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header. The key is scoped to the start-run operation and Session. A repeated key returns the original Run snapshot, including after terminal completion, and does not dispatch another subprocess. A different key creates a new root Run when no root Run is active.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client can connect to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves the existing live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
     )
 }
 

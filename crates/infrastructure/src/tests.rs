@@ -3,9 +3,9 @@ use std::{path::Path, process::Command};
 use kiln_core::{
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EventCursor, EventId, Message, MessageId, MessageRole,
     Run, RunApplication, RunId, RunState, RunStore, Session, SessionEvent, SessionEventPayload,
-    SessionId, SessionStore, SubprocessOutput, ToolCall, ToolCallId, ToolCallResult, ToolCallState,
-    Workspace, WorkspaceId, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId,
-    WorkspaceRootState, WorkspaceStore,
+    SessionId, SessionStore, StartRunDisposition, SubprocessOutput, ToolCall, ToolCallId,
+    ToolCallResult, ToolCallState, Workspace, WorkspaceId, WorkspaceRoot, WorkspaceRootDiscovery,
+    WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
@@ -592,7 +592,10 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
 async fn run_creation_is_atomic_and_has_a_global_cursor_event() {
     let (_data, store, value) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
-    let mutation = app.create_root_run(value.id().clone()).await.unwrap();
+    let mutation = app
+        .start_root_run(value.id().clone(), "atomic-run".to_owned())
+        .await
+        .unwrap();
     assert_eq!(mutation.events.len(), 1);
     assert_eq!(mutation.events[0].cursor().value(), 2);
     assert_eq!(mutation.value.run().state(), RunState::Queued);
@@ -606,12 +609,173 @@ async fn run_creation_is_atomic_and_has_a_global_cursor_event() {
 }
 
 #[tokio::test]
+async fn global_event_suffix_is_exclusive_and_ordered_across_sessions() {
+    let (_data, store, workspace_id) = seeded_store().await;
+    let first = session("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV", workspace_id.as_str());
+    let second = session("ses_01ARZ3NDEKTSV4RRFFQ69G5FAW", workspace_id.as_str());
+    store
+        .create_session(
+            &first,
+            &SessionEvent::session_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+                first.id().clone(),
+                workspace_id.clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .create_session(
+            &second,
+            &SessionEvent::session_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
+                second.id().clone(),
+                workspace_id,
+            ),
+        )
+        .await
+        .unwrap();
+    let first_page = store.list_events_after(EventCursor::zero()).await.unwrap();
+    assert_eq!(
+        first_page
+            .events()
+            .iter()
+            .map(|event| event.cursor().value())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(first_page.current_cursor(), EventCursor::from_value(2));
+    let suffix = store
+        .list_events_after(EventCursor::from_value(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        suffix
+            .events()
+            .iter()
+            .map(|event| event.cursor().value())
+            .collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(suffix.current_cursor(), EventCursor::from_value(2));
+}
+
+#[tokio::test]
+async fn idempotent_start_returns_original_run_before_and_after_terminal_completion() {
+    let (data, store, value) = seeded_session().await;
+    let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
+    let first = app
+        .start_root_run(value.id().clone(), "same-key".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(first.disposition, StartRunDisposition::Created);
+    let duplicate = app
+        .start_root_run(value.id().clone(), "same-key".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(duplicate.disposition, StartRunDisposition::Duplicate);
+    assert_eq!(duplicate.value, first.value);
+    assert!(duplicate.events.is_empty());
+    assert_eq!(
+        store
+            .list_session_events(value.id(), EventCursor::zero())
+            .await
+            .unwrap()
+            .events()
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::RunCreated { .. }))
+            .count(),
+        1
+    );
+
+    let run_id = first.value.run().run_id().clone();
+    let running = app.begin_execution(run_id.clone()).await.unwrap();
+    let tool_call_id = running.value.tool_calls()[0].tool_call_id().clone();
+    app.begin_tool_call(tool_call_id.clone()).await.unwrap();
+    app.finish_execution(
+        run_id,
+        tool_call_id,
+        SubprocessOutput::success("out", "err", 0),
+    )
+    .await
+    .unwrap();
+
+    let reopened = super::SqliteStore::open(data.path()).await.unwrap();
+    let reopened_app = RunApplication::new(reopened, super::UlidIdGenerator);
+    let after_terminal = reopened_app
+        .start_root_run(value.id().clone(), "same-key".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(after_terminal.disposition, StartRunDisposition::Duplicate);
+    assert_eq!(
+        after_terminal.value.run().run_id(),
+        first.value.run().run_id()
+    );
+    assert_eq!(after_terminal.value.run().state(), RunState::Queued);
+    assert!(after_terminal.value.tool_calls().is_empty());
+}
+
+#[tokio::test]
+async fn failed_start_transaction_does_not_reserve_the_idempotency_key() {
+    let (_data, store, session) = seeded_session().await;
+    let rejected = Run::new(
+        RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+        session.id().clone(),
+    );
+    let duplicate_event_id = SessionEvent::run_created(
+        EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+        &rejected,
+    );
+
+    assert_eq!(
+        store
+            .start_root_run(&rejected, &duplicate_event_id, "retryable-key")
+            .await,
+        Err(kiln_core::RunStoreError::Unavailable)
+    );
+    assert_eq!(store.get_run(rejected.run_id()).await.unwrap(), None);
+
+    let accepted = Run::new(
+        RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+        session.id().clone(),
+    );
+    let event = SessionEvent::run_created(
+        EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+        &accepted,
+    );
+    let mutation = store
+        .start_root_run(&accepted, &event, "retryable-key")
+        .await
+        .unwrap();
+
+    assert_eq!(mutation.disposition, StartRunDisposition::Created);
+    assert_eq!(mutation.value.run().run_id(), accepted.run_id());
+}
+
+#[tokio::test]
+async fn different_idempotency_key_keeps_active_root_conflict() {
+    let (_data, store, value) = seeded_session().await;
+    let app = RunApplication::new(store, super::UlidIdGenerator);
+    app.start_root_run(value.id().clone(), "first-key".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(
+        app.start_root_run(value.id().clone(), "second-key".to_owned())
+            .await,
+        Err(kiln_core::RunError::ActiveRootRunExists)
+    );
+}
+
+#[tokio::test]
 async fn only_one_active_root_run_is_allowed_per_session() {
     let (_data, store, value) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
-    app.create_root_run(value.id().clone()).await.unwrap();
+    app.start_root_run(value.id().clone(), "first-run".to_owned())
+        .await
+        .unwrap();
     assert_eq!(
-        app.create_root_run(value.id().clone()).await,
+        app.start_root_run(value.id().clone(), "second-run".to_owned())
+            .await,
         Err(kiln_core::RunError::ActiveRootRunExists)
     );
 }
@@ -626,13 +790,18 @@ async fn run_store_rejects_state_machine_bypass_inputs() {
         &forged,
     );
     assert_eq!(
-        store.create_root_run(&forged, &forged_event).await,
+        store
+            .start_root_run(&forged, &forged_event, "forged-run")
+            .await,
         Err(kiln_core::RunStoreError::InvalidTransition)
     );
     assert_eq!(store.get_run(&forged_id).await.unwrap(), None);
 
     let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
-    let created = app.create_root_run(session.id().clone()).await.unwrap();
+    let created = app
+        .start_root_run(session.id().clone(), "valid-run".to_owned())
+        .await
+        .unwrap();
     let run_id = created.value.run().run_id().clone();
     let running_run = created.value.run().transition(RunState::Running).unwrap();
     let proposed_tool = ToolCall::new(
@@ -730,7 +899,10 @@ async fn run_store_rejects_state_machine_bypass_inputs() {
 async fn run_transitions_persist_historical_events_and_results() {
     let (data, store, value) = seeded_session().await;
     let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
-    let created = app.create_root_run(value.id().clone()).await.unwrap();
+    let created = app
+        .start_root_run(value.id().clone(), "historical-run".to_owned())
+        .await
+        .unwrap();
     let run_id = created.value.run().run_id().clone();
     let running = app.begin_execution(run_id.clone()).await.unwrap();
     let tool_call_id = running.value.tool_calls()[0].tool_call_id().clone();
@@ -795,7 +967,10 @@ async fn run_transitions_persist_historical_events_and_results() {
 async fn failed_output_fails_both_tool_call_and_run() {
     let (_data, store, value) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
-    let created = app.create_root_run(value.id().clone()).await.unwrap();
+    let created = app
+        .start_root_run(value.id().clone(), "failed-run".to_owned())
+        .await
+        .unwrap();
     let run_id = created.value.run().run_id().clone();
     let running = app.begin_execution(run_id.clone()).await.unwrap();
     let tool_call_id = running.value.tool_calls()[0].tool_call_id().clone();

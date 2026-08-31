@@ -22,12 +22,12 @@ use kiln_core::{
     WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
-    AppendMessageRequest, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, MessageResponse,
-    MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, SessionEventDataResponse, SessionEventResponse,
-    SessionEventsResponse, SessionResponse, StoreIdentity, ToolCallResponse, ToolCallState,
-    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    AppendMessageRequest, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
+    MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
+    PROTOCOL_VERSION, ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
+    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, StoreIdentity, ToolCallResponse,
+    ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
     WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse, error_code,
 };
 use semver::Version;
@@ -39,14 +39,15 @@ pub trait RunOperations: Send + Sync {
     fn start_run(
         &self,
         session_id: SessionId,
-    ) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
+        idempotency_key: String,
+    ) -> impl Future<Output = Result<kiln_core::StartRunMutation, RunError>> + Send;
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
 }
 
 #[derive(Clone, Default)]
 pub struct EventBroadcaster {
-    subscribers: Arc<std::sync::Mutex<Vec<tokio::sync::mpsc::UnboundedSender<StoredSessionEvent>>>>,
+    wake_subscribers: Arc<std::sync::Mutex<Vec<tokio::sync::mpsc::UnboundedSender<()>>>>,
 }
 
 impl EventBroadcaster {
@@ -54,23 +55,26 @@ impl EventBroadcaster {
         Self::default()
     }
 
-    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<StoredSessionEvent> {
+    pub fn subscribe_wake(&self) -> tokio::sync::mpsc::UnboundedReceiver<()> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        self.subscribers
+        self.wake_subscribers
             .lock()
-            .expect("event broadcaster lock is not poisoned")
+            .expect("event broadcaster wake lock is not poisoned")
             .push(sender);
         receiver
     }
 
-    pub fn publish(&self, events: impl IntoIterator<Item = StoredSessionEvent>) {
+    pub fn wake(&self) {
         let mut subscribers = self
-            .subscribers
+            .wake_subscribers
             .lock()
-            .expect("event broadcaster lock is not poisoned");
-        subscribers.retain(|subscriber| !subscriber.is_closed());
-        for event in events {
-            subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
+            .expect("event broadcaster wake lock is not poisoned");
+        subscribers.retain(|subscriber| subscriber.send(()).is_ok());
+    }
+
+    pub fn publish(&self, events: impl IntoIterator<Item = StoredSessionEvent>) {
+        if events.into_iter().next().is_some() {
+            self.wake();
         }
     }
 }
@@ -230,6 +234,7 @@ where
         .create_session(workspace_id)
         .await
         .map_err(PublicError::from)?;
+    state.event_broadcaster.wake();
     Ok((StatusCode::CREATED, Json(session_response(&session))))
 }
 
@@ -270,12 +275,14 @@ where
         })
         .await
         .map_err(PublicError::from)?;
+    state.event_broadcaster.wake();
     Ok((StatusCode::CREATED, Json(message_response(&message))))
 }
 
 async fn start_run<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<impl IntoResponse, PublicError>
 where
     W: WorkspaceOperations + 'static,
@@ -283,12 +290,20 @@ where
     R: RunOperations + 'static,
 {
     let session_id = SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?;
+    let idempotency_key = headers
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .ok_or(PublicError::MissingIdempotencyKey)?
+        .to_str()
+        .map_err(|_| PublicError::InvalidIdempotencyKey)?;
+    if idempotency_key.is_empty() {
+        return Err(PublicError::InvalidIdempotencyKey);
+    }
     let run = state
         .run_operations
-        .start_run(session_id)
+        .start_run(session_id, idempotency_key.to_owned())
         .await
         .map_err(PublicError::from)?;
-    Ok((StatusCode::ACCEPTED, Json(run_response(&run))))
+    Ok((StatusCode::ACCEPTED, Json(run_response(&run.value))))
 }
 
 async fn get_run<W, S, R>(
@@ -508,6 +523,7 @@ where
 struct EventQuery {
     version: Option<String>,
     capability: Option<String>,
+    after: Option<String>,
 }
 
 async fn events<W, S, R>(
@@ -529,29 +545,65 @@ where
         return Err(PublicError::MissingCapability);
     }
     let websocket = websocket.map_err(|_| PublicError::WebSocketUpgradeRequired)?;
-    let event_receiver = state.event_broadcaster.subscribe();
-    let current_event_cursor = state
-        .session_operations
-        .current_event_cursor()
-        .await
-        .map_err(PublicError::from)?;
+    let after = query
+        .after
+        .as_deref()
+        .map(EventCursor::parse)
+        .transpose()
+        .map_err(|_| PublicError::InvalidEventCursor)?;
+    let wake_receiver = state.event_broadcaster.subscribe_wake();
+    let (acknowledged_cursor, initial_page) = match after {
+        Some(after) => {
+            let page = state
+                .session_operations
+                .list_events_after(after)
+                .await
+                .map_err(PublicError::from)?;
+            if after > page.current_cursor() {
+                return Err(PublicError::InvalidEventCursor);
+            }
+            (page.current_cursor(), Some(page))
+        }
+        None => (
+            state
+                .session_operations
+                .current_event_cursor()
+                .await
+                .map_err(PublicError::from)?
+                .unwrap_or_else(EventCursor::zero),
+            None,
+        ),
+    };
 
     Ok(websocket
-        .on_upgrade(move |socket| event_socket(socket, current_event_cursor, event_receiver))
+        .on_upgrade(move |socket| {
+            event_socket(
+                socket,
+                acknowledged_cursor,
+                initial_page,
+                state.session_operations,
+                wake_receiver,
+            )
+        })
         .into_response())
 }
 
-async fn event_socket(
+async fn event_socket<S>(
     mut socket: ws::WebSocket,
-    current_event_cursor: Option<EventCursor>,
-    mut event_receiver: tokio::sync::mpsc::UnboundedReceiver<StoredSessionEvent>,
-) {
+    acknowledged_cursor: EventCursor,
+    initial_page: Option<SessionEventPage>,
+    operations: Arc<S>,
+    mut wake_receiver: tokio::sync::mpsc::UnboundedReceiver<()>,
+) where
+    S: SessionOperations + 'static,
+{
     if send_frame(
         &mut socket,
         WebSocketFrame::Ack {
             version: PROTOCOL_VERSION.to_owned(),
             capability: WEBSOCKET_CAPABILITY.to_owned(),
-            current_event_cursor: current_event_cursor.map(|cursor| cursor.to_string()),
+            current_event_cursor: (acknowledged_cursor != EventCursor::zero())
+                .then(|| acknowledged_cursor.to_string()),
         },
     )
     .await
@@ -560,16 +612,38 @@ async fn event_socket(
         return;
     }
 
+    let mut last_cursor = acknowledged_cursor;
+    if let Some(page) = initial_page {
+        for event in page.events() {
+            if send_frame(
+                &mut socket,
+                WebSocketFrame::Event {
+                    event: session_event_response(event),
+                },
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
+        }
+        last_cursor = page.current_cursor();
+    }
+
     loop {
         tokio::select! {
-            event = event_receiver.recv() => {
-                let Some(event) = event else { return };
-                if !event_is_after_ack(&event, current_event_cursor) {
-                    continue;
+            wake = wake_receiver.recv() => {
+                let Some(()) = wake else { return };
+                let page = match operations.list_events_after(last_cursor).await {
+                    Ok(page) => page,
+                    Err(_) => return,
+                };
+                for event in page.events() {
+                    if send_frame(&mut socket, WebSocketFrame::Event { event: session_event_response(event) }).await.is_err() {
+                        return;
+                    }
                 }
-                if send_frame(&mut socket, WebSocketFrame::Event { event: session_event_response(&event) }).await.is_err() {
-                    return;
-                }
+                last_cursor = page.current_cursor();
             }
             message = socket.recv() => {
                 match message {
@@ -656,6 +730,10 @@ enum PublicError {
     InvalidRequest,
     #[error("event cursor is invalid")]
     InvalidEventCursor,
+    #[error("Idempotency-Key header is required")]
+    MissingIdempotencyKey,
+    #[error("Idempotency-Key header is invalid")]
+    InvalidIdempotencyKey,
     #[error("protocol version is not supported")]
     UnsupportedVersion,
     #[error("protocol version is invalid")]
@@ -713,6 +791,16 @@ impl PublicError {
                 StatusCode::BAD_REQUEST,
                 error_code::INVALID_EVENT_CURSOR,
                 "Invalid Event cursor",
+            ),
+            Self::MissingIdempotencyKey => (
+                StatusCode::BAD_REQUEST,
+                error_code::IDEMPOTENCY_KEY_REQUIRED,
+                "Missing Idempotency-Key",
+            ),
+            Self::InvalidIdempotencyKey => (
+                StatusCode::BAD_REQUEST,
+                error_code::INVALID_IDEMPOTENCY_KEY,
+                "Invalid Idempotency-Key",
             ),
             Self::InvalidVersion => (
                 StatusCode::BAD_REQUEST,
@@ -851,6 +939,11 @@ impl PublicError {
                     error_code::ACTIVE_ROOT_RUN_EXISTS,
                     "Active root run exists",
                 ),
+                RunError::IdempotencyKeyRequired => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::IDEMPOTENCY_KEY_REQUIRED,
+                    "Missing Idempotency-Key",
+                ),
                 RunError::InvalidTransition => (
                     StatusCode::CONFLICT,
                     error_code::INVALID_RUN_STATE,
@@ -884,13 +977,6 @@ impl IntoResponse for PublicError {
         );
         response
     }
-}
-
-fn event_is_after_ack(
-    event: &StoredSessionEvent,
-    acknowledged_cursor: Option<EventCursor>,
-) -> bool {
-    acknowledged_cursor.is_none_or(|cursor| event.cursor() > cursor)
 }
 
 #[cfg(test)]
@@ -1069,56 +1155,24 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn broadcaster_preserves_event_order() {
+    #[test]
+    fn broadcaster_wakes_only_when_events_were_committed() {
         let broadcaster = EventBroadcaster::new();
-        let mut receiver = broadcaster.subscribe();
-        let first = stored_event(
+        let mut receiver = broadcaster.subscribe_wake();
+
+        broadcaster.publish(Vec::new());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        broadcaster.publish(vec![stored_event(
             1,
             SessionEventPayload::RunCreated {
                 run_id: run_id(),
                 state: CoreRunState::Queued,
             },
-        );
-        let second = stored_event(
-            2,
-            SessionEventPayload::RunStateChanged {
-                run_id: run_id(),
-                state: CoreRunState::Running,
-            },
-        );
-
-        broadcaster.publish(vec![first, second]);
-
-        assert_eq!(receiver.recv().await.unwrap().cursor().value(), 1);
-        assert_eq!(receiver.recv().await.unwrap().cursor().value(), 2);
-    }
-
-    #[test]
-    fn acknowledged_cursor_is_an_exclusive_boundary() {
-        let at_ack = stored_event(
-            4,
-            SessionEventPayload::RunCreated {
-                run_id: run_id(),
-                state: CoreRunState::Queued,
-            },
-        );
-        let after_ack = stored_event(
-            5,
-            SessionEventPayload::RunStateChanged {
-                run_id: run_id(),
-                state: CoreRunState::Running,
-            },
-        );
-
-        assert!(!event_is_after_ack(
-            &at_ack,
-            Some(EventCursor::from_value(4))
-        ));
-        assert!(event_is_after_ack(
-            &after_ack,
-            Some(EventCursor::from_value(4))
-        ));
-        assert!(event_is_after_ack(&at_ack, None));
+        )]);
+        assert_eq!(receiver.try_recv(), Ok(()));
     }
 }

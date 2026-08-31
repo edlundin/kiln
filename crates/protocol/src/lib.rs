@@ -10,9 +10,10 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.4.0";
+pub const PROTOCOL_VERSION: &str = "0.5.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
+pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 pub const NEGOTIATE_PATH: &str = "/v1/protocol/negotiate";
 pub const EVENTS_WEBSOCKET_PATH: &str = "/v1/events";
 pub const WORKSPACES_PATH: &str = "/v1/workspaces";
@@ -59,6 +60,8 @@ pub mod error_code {
     pub const SESSION_NOT_FOUND: &str = "session_not_found";
     pub const MESSAGE_CONTENT_REQUIRED: &str = "message_content_required";
     pub const INVALID_EVENT_CURSOR: &str = "invalid_event_cursor";
+    pub const IDEMPOTENCY_KEY_REQUIRED: &str = "idempotency_key_required";
+    pub const INVALID_IDEMPOTENCY_KEY: &str = "invalid_idempotency_key";
     pub const SESSION_STORE_UNAVAILABLE: &str = "session_store_unavailable";
     pub const RUN_NOT_FOUND: &str = "run_not_found";
     pub const ACTIVE_ROOT_RUN_EXISTS: &str = "active_root_run_exists";
@@ -90,6 +93,8 @@ pub mod error_code {
         SESSION_NOT_FOUND,
         MESSAGE_CONTENT_REQUIRED,
         INVALID_EVENT_CURSOR,
+        IDEMPOTENCY_KEY_REQUIRED,
+        INVALID_IDEMPOTENCY_KEY,
         SESSION_STORE_UNAVAILABLE,
         RUN_NOT_FOUND,
         ACTIVE_ROOT_RUN_EXISTS,

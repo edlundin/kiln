@@ -12,10 +12,10 @@ use kiln_core::{
     DiscoveredWorkspaceRoot, EventCursor, EventId, Message, MessageId, MessageRole,
     RootDiscoveryError, Run, RunId, RunIdGenerator, RunMutation, RunSnapshot, RunState, RunStore,
     RunStoreError, Session, SessionEvent, SessionEventPage, SessionEventPayload, SessionId,
-    SessionIdGenerator, SessionStore, StoreError, StoredSessionEvent, SubprocessExecutor,
-    SubprocessOutput, ToolCall, ToolCallId, ToolCallState, ToolOutputStream, Workspace,
-    WorkspaceId, WorkspaceIdGenerator, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId,
-    WorkspaceRootState, WorkspaceStore,
+    SessionIdGenerator, SessionStore, StartRunDisposition, StartRunMutation, StoreError,
+    StoredSessionEvent, SubprocessExecutor, SubprocessOutput, ToolCall, ToolCallId, ToolCallState,
+    ToolOutputStream, Workspace, WorkspaceId, WorkspaceIdGenerator, WorkspaceRoot,
+    WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use tokio::{process::Command, sync::Mutex};
@@ -329,253 +329,11 @@ impl SessionStore for SqliteStore {
         session_id: &SessionId,
         after: EventCursor,
     ) -> Result<SessionEventPage, StoreError> {
-        let after = i64::try_from(after.value()).unwrap_or(i64::MAX);
-        let mut connection = self.connection.lock().await;
-        let mut transaction = connection
-            .begin()
-            .await
-            .map_err(|_| StoreError::Unavailable)?;
-        let rows = sqlx::query(
-            "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
-                    e.run_id, e.tool_call_id, e.run_state, e.tool_call_state,
-                    e.capability, e.stdout, e.stderr, e.exit_code,
-                    e.output_stream, e.output_content,
-                    m.message_id AS loaded_message_id, m.session_id AS message_session_id,
-                    m.role, m.content, s.workspace_id
-             FROM session_events e
-             JOIN sessions s ON s.session_id = e.session_id
-             LEFT JOIN messages m ON m.message_id = e.message_id
-             WHERE e.session_id = ? AND e.cursor > ?
-             ORDER BY e.cursor ASC",
-        )
-        .bind(session_id.as_str())
-        .bind(after)
-        .fetch_all(&mut *transaction)
-        .await
-        .map_err(|_| StoreError::Unavailable)?;
+        self.list_events(after, Some(session_id)).await
+    }
 
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let event_id = EventId::parse(
-                row.try_get::<String, _>("event_id")
-                    .map_err(|_| StoreError::Unavailable)?,
-            )
-            .map_err(|_| StoreError::Unavailable)?;
-            let stored_session_id = SessionId::parse(
-                row.try_get::<String, _>("session_id")
-                    .map_err(|_| StoreError::Unavailable)?,
-            )
-            .map_err(|_| StoreError::Unavailable)?;
-            let cursor = committed_cursor(
-                row.try_get::<i64, _>("cursor")
-                    .map_err(|_| StoreError::Unavailable)?,
-            )?;
-            let event_type: String = row
-                .try_get("event_type")
-                .map_err(|_| StoreError::Unavailable)?;
-            let message_id: Option<String> = row
-                .try_get("message_id")
-                .map_err(|_| StoreError::Unavailable)?;
-            let run_id: Option<String> =
-                row.try_get("run_id").map_err(|_| StoreError::Unavailable)?;
-            let tool_call_id: Option<String> = row
-                .try_get("tool_call_id")
-                .map_err(|_| StoreError::Unavailable)?;
-            let run_state: Option<String> = row
-                .try_get("run_state")
-                .map_err(|_| StoreError::Unavailable)?;
-            let tool_call_state: Option<String> = row
-                .try_get("tool_call_state")
-                .map_err(|_| StoreError::Unavailable)?;
-            let capability: Option<String> = row
-                .try_get("capability")
-                .map_err(|_| StoreError::Unavailable)?;
-            let stdout: Option<String> =
-                row.try_get("stdout").map_err(|_| StoreError::Unavailable)?;
-            let stderr: Option<String> =
-                row.try_get("stderr").map_err(|_| StoreError::Unavailable)?;
-            let exit_code: Option<i64> = row
-                .try_get("exit_code")
-                .map_err(|_| StoreError::Unavailable)?;
-            let output_stream: Option<String> = row
-                .try_get("output_stream")
-                .map_err(|_| StoreError::Unavailable)?;
-            let output_content: Option<String> = row
-                .try_get("output_content")
-                .map_err(|_| StoreError::Unavailable)?;
-            let workspace_id = WorkspaceId::parse(
-                row.try_get::<String, _>("workspace_id")
-                    .map_err(|_| StoreError::Unavailable)?,
-            )
-            .map_err(|_| StoreError::Unavailable)?;
-
-            let event = match event_type.as_str() {
-                "session.created" => {
-                    if message_id.is_some() {
-                        return Err(StoreError::Unavailable);
-                    }
-                    StoredSessionEvent::session_created(
-                        event_id,
-                        stored_session_id,
-                        cursor,
-                        workspace_id,
-                    )
-                    .map_err(|_| StoreError::Unavailable)?
-                }
-                "message.appended" => {
-                    let message_id = MessageId::parse(message_id.ok_or(StoreError::Unavailable)?)
-                        .map_err(|_| StoreError::Unavailable)?;
-                    let loaded_message_id = MessageId::parse(
-                        row.try_get::<String, _>("loaded_message_id")
-                            .map_err(|_| StoreError::Unavailable)?,
-                    )
-                    .map_err(|_| StoreError::Unavailable)?;
-                    if loaded_message_id != message_id {
-                        return Err(StoreError::Unavailable);
-                    }
-                    let message_session_id = SessionId::parse(
-                        row.try_get::<String, _>("message_session_id")
-                            .map_err(|_| StoreError::Unavailable)?,
-                    )
-                    .map_err(|_| StoreError::Unavailable)?;
-                    if message_session_id != stored_session_id {
-                        return Err(StoreError::Unavailable);
-                    }
-                    let role = MessageRole::parse(
-                        row.try_get::<String, _>("role")
-                            .map_err(|_| StoreError::Unavailable)?
-                            .as_str(),
-                    )
-                    .map_err(|_| StoreError::Unavailable)?;
-                    let message = Message::new(
-                        message_id,
-                        message_session_id,
-                        role,
-                        row.try_get::<String, _>("content")
-                            .map_err(|_| StoreError::Unavailable)?,
-                    )
-                    .map_err(|_| StoreError::Unavailable)?;
-                    StoredSessionEvent::message_appended(
-                        event_id,
-                        stored_session_id,
-                        cursor,
-                        message,
-                    )
-                    .map_err(|_| StoreError::Unavailable)?
-                }
-                "run.created" | "run.state_changed" => {
-                    if message_id.is_some()
-                        || tool_call_id.is_some()
-                        || run_state.is_none()
-                        || tool_call_state.is_some()
-                        || capability.is_some()
-                        || stdout.is_some()
-                        || stderr.is_some()
-                        || exit_code.is_some()
-                        || output_stream.is_some()
-                        || output_content.is_some()
-                    {
-                        return Err(StoreError::Unavailable);
-                    }
-                    let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
-                        .map_err(|_| StoreError::Unavailable)?;
-                    let state = RunState::parse(&run_state.ok_or(StoreError::Unavailable)?)
-                        .map_err(|_| StoreError::Unavailable)?;
-                    if (event_type == "run.created" && state != RunState::Queued)
-                        || (event_type == "run.state_changed" && state == RunState::Queued)
-                    {
-                        return Err(StoreError::Unavailable);
-                    }
-                    let payload = if event_type == "run.created" {
-                        SessionEventPayload::RunCreated { run_id, state }
-                    } else {
-                        SessionEventPayload::RunStateChanged { run_id, state }
-                    };
-                    StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
-                        .map_err(|_| StoreError::Unavailable)?
-                }
-                "tool_call.requested" | "tool_call.state_changed" => {
-                    let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
-                        .map_err(|_| StoreError::Unavailable)?;
-                    let tool_call_id =
-                        ToolCallId::parse(tool_call_id.ok_or(StoreError::Unavailable)?)
-                            .map_err(|_| StoreError::Unavailable)?;
-                    let state =
-                        ToolCallState::parse(&tool_call_state.ok_or(StoreError::Unavailable)?)
-                            .map_err(|_| StoreError::Unavailable)?;
-                    let capability = capability.ok_or(StoreError::Unavailable)?;
-                    if message_id.is_some()
-                        || run_state.is_some()
-                        || output_stream.is_some()
-                        || output_content.is_some()
-                        || (event_type == "tool_call.requested"
-                            && (state != ToolCallState::Requested
-                                || stdout.is_some()
-                                || stderr.is_some()
-                                || exit_code.is_some()))
-                    {
-                        return Err(StoreError::Unavailable);
-                    }
-                    let exit_code = exit_code
-                        .map(|value| i32::try_from(value).map_err(|_| StoreError::Unavailable))
-                        .transpose()?;
-                    let tool_call = ToolCall::from_persisted(
-                        tool_call_id,
-                        run_id,
-                        capability,
-                        state,
-                        stdout,
-                        stderr,
-                        exit_code,
-                    )
-                    .map_err(|_| StoreError::Unavailable)?;
-                    let payload = if event_type == "tool_call.requested" {
-                        SessionEventPayload::ToolCallRequested { tool_call }
-                    } else {
-                        SessionEventPayload::ToolCallStateChanged { tool_call }
-                    };
-                    StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
-                        .map_err(|_| StoreError::Unavailable)?
-                }
-                "tool_call.output" => {
-                    if message_id.is_some()
-                        || run_state.is_some()
-                        || tool_call_state.is_some()
-                        || capability.is_some()
-                        || stdout.is_some()
-                        || stderr.is_some()
-                        || exit_code.is_some()
-                    {
-                        return Err(StoreError::Unavailable);
-                    }
-                    let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
-                        .map_err(|_| StoreError::Unavailable)?;
-                    let tool_call_id =
-                        ToolCallId::parse(tool_call_id.ok_or(StoreError::Unavailable)?)
-                            .map_err(|_| StoreError::Unavailable)?;
-                    let stream =
-                        ToolOutputStream::parse(&output_stream.ok_or(StoreError::Unavailable)?)
-                            .map_err(|_| StoreError::Unavailable)?;
-                    let payload = SessionEventPayload::ToolCallOutput {
-                        run_id,
-                        tool_call_id,
-                        stream,
-                        content: output_content.ok_or(StoreError::Unavailable)?,
-                    };
-                    StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
-                        .map_err(|_| StoreError::Unavailable)?
-                }
-                _ => return Err(StoreError::Unavailable),
-            };
-            events.push(event);
-        }
-
-        let current_cursor = current_cursor(&mut transaction).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| StoreError::Unavailable)?;
-        Ok(SessionEventPage::new(events, current_cursor))
+    async fn list_events_after(&self, after: EventCursor) -> Result<SessionEventPage, StoreError> {
+        self.list_events(after, None).await
     }
 
     async fn current_event_cursor(&self) -> Result<Option<EventCursor>, StoreError> {
@@ -597,12 +355,289 @@ impl SessionStore for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    async fn list_events(
+        &self,
+        after: EventCursor,
+        session_id: Option<&SessionId>,
+    ) -> Result<SessionEventPage, StoreError> {
+        let after = i64::try_from(after.value()).unwrap_or(i64::MAX);
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| StoreError::Unavailable)?;
+        let rows = match session_id {
+            Some(session_id) => {
+                sqlx::query(
+                    "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
+                        e.run_id, e.tool_call_id, e.run_state, e.tool_call_state,
+                        e.capability, e.stdout, e.stderr, e.exit_code,
+                        e.output_stream, e.output_content,
+                        m.message_id AS loaded_message_id, m.session_id AS message_session_id,
+                        m.role, m.content, s.workspace_id
+                 FROM session_events e
+                 JOIN sessions s ON s.session_id = e.session_id
+                 LEFT JOIN messages m ON m.message_id = e.message_id
+                 WHERE e.session_id = ? AND e.cursor > ?
+                 ORDER BY e.cursor ASC",
+                )
+                .bind(session_id.as_str())
+                .bind(after)
+                .fetch_all(&mut *transaction)
+                .await
+            }
+            None => {
+                sqlx::query(
+                    "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
+                        e.run_id, e.tool_call_id, e.run_state, e.tool_call_state,
+                        e.capability, e.stdout, e.stderr, e.exit_code,
+                        e.output_stream, e.output_content,
+                        m.message_id AS loaded_message_id, m.session_id AS message_session_id,
+                        m.role, m.content, s.workspace_id
+                 FROM session_events e
+                 JOIN sessions s ON s.session_id = e.session_id
+                 LEFT JOIN messages m ON m.message_id = e.message_id
+                 WHERE e.cursor > ?
+                 ORDER BY e.cursor ASC",
+                )
+                .bind(after)
+                .fetch_all(&mut *transaction)
+                .await
+            }
+        }
+        .map_err(|_| StoreError::Unavailable)?;
+        let events = parse_event_rows(rows)?;
+        let current_cursor = current_cursor(&mut transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StoreError::Unavailable)?;
+        Ok(SessionEventPage::new(events, current_cursor))
+    }
+}
+
+fn parse_event_rows(
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+) -> Result<Vec<StoredSessionEvent>, StoreError> {
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let event_id = EventId::parse(
+            row.try_get::<String, _>("event_id")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?;
+        let stored_session_id = SessionId::parse(
+            row.try_get::<String, _>("session_id")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?;
+        let cursor = committed_cursor(
+            row.try_get::<i64, _>("cursor")
+                .map_err(|_| StoreError::Unavailable)?,
+        )?;
+        let event_type: String = row
+            .try_get("event_type")
+            .map_err(|_| StoreError::Unavailable)?;
+        let message_id: Option<String> = row
+            .try_get("message_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let run_id: Option<String> = row.try_get("run_id").map_err(|_| StoreError::Unavailable)?;
+        let tool_call_id: Option<String> = row
+            .try_get("tool_call_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let run_state: Option<String> = row
+            .try_get("run_state")
+            .map_err(|_| StoreError::Unavailable)?;
+        let tool_call_state: Option<String> = row
+            .try_get("tool_call_state")
+            .map_err(|_| StoreError::Unavailable)?;
+        let capability: Option<String> = row
+            .try_get("capability")
+            .map_err(|_| StoreError::Unavailable)?;
+        let stdout: Option<String> = row.try_get("stdout").map_err(|_| StoreError::Unavailable)?;
+        let stderr: Option<String> = row.try_get("stderr").map_err(|_| StoreError::Unavailable)?;
+        let exit_code: Option<i64> = row
+            .try_get("exit_code")
+            .map_err(|_| StoreError::Unavailable)?;
+        let output_stream: Option<String> = row
+            .try_get("output_stream")
+            .map_err(|_| StoreError::Unavailable)?;
+        let output_content: Option<String> = row
+            .try_get("output_content")
+            .map_err(|_| StoreError::Unavailable)?;
+        let workspace_id = WorkspaceId::parse(
+            row.try_get::<String, _>("workspace_id")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?;
+
+        let event = match event_type.as_str() {
+            "session.created" => {
+                if message_id.is_some() {
+                    return Err(StoreError::Unavailable);
+                }
+                StoredSessionEvent::session_created(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    workspace_id,
+                )
+                .map_err(|_| StoreError::Unavailable)?
+            }
+            "message.appended" => {
+                let message_id = MessageId::parse(message_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let loaded_message_id = MessageId::parse(
+                    row.try_get::<String, _>("loaded_message_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                if loaded_message_id != message_id {
+                    return Err(StoreError::Unavailable);
+                }
+                let message_session_id = SessionId::parse(
+                    row.try_get::<String, _>("message_session_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                if message_session_id != stored_session_id {
+                    return Err(StoreError::Unavailable);
+                }
+                let role = MessageRole::parse(
+                    row.try_get::<String, _>("role")
+                        .map_err(|_| StoreError::Unavailable)?
+                        .as_str(),
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                let message = Message::new(
+                    message_id,
+                    message_session_id,
+                    role,
+                    row.try_get::<String, _>("content")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                StoredSessionEvent::message_appended(event_id, stored_session_id, cursor, message)
+                    .map_err(|_| StoreError::Unavailable)?
+            }
+            "run.created" | "run.state_changed" => {
+                if message_id.is_some()
+                    || tool_call_id.is_some()
+                    || run_state.is_none()
+                    || tool_call_state.is_some()
+                    || capability.is_some()
+                    || stdout.is_some()
+                    || stderr.is_some()
+                    || exit_code.is_some()
+                    || output_stream.is_some()
+                    || output_content.is_some()
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let state = RunState::parse(&run_state.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                if (event_type == "run.created" && state != RunState::Queued)
+                    || (event_type == "run.state_changed" && state == RunState::Queued)
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let payload = if event_type == "run.created" {
+                    SessionEventPayload::RunCreated { run_id, state }
+                } else {
+                    SessionEventPayload::RunStateChanged { run_id, state }
+                };
+                StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
+                    .map_err(|_| StoreError::Unavailable)?
+            }
+            "tool_call.requested" | "tool_call.state_changed" => {
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let tool_call_id = ToolCallId::parse(tool_call_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let state = ToolCallState::parse(&tool_call_state.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let capability = capability.ok_or(StoreError::Unavailable)?;
+                if message_id.is_some()
+                    || run_state.is_some()
+                    || output_stream.is_some()
+                    || output_content.is_some()
+                    || (event_type == "tool_call.requested"
+                        && (state != ToolCallState::Requested
+                            || stdout.is_some()
+                            || stderr.is_some()
+                            || exit_code.is_some()))
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let exit_code = exit_code
+                    .map(|value| i32::try_from(value).map_err(|_| StoreError::Unavailable))
+                    .transpose()?;
+                let tool_call = ToolCall::from_persisted(
+                    tool_call_id,
+                    run_id,
+                    capability,
+                    state,
+                    stdout,
+                    stderr,
+                    exit_code,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                let payload = if event_type == "tool_call.requested" {
+                    SessionEventPayload::ToolCallRequested { tool_call }
+                } else {
+                    SessionEventPayload::ToolCallStateChanged { tool_call }
+                };
+                StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
+                    .map_err(|_| StoreError::Unavailable)?
+            }
+            "tool_call.output" => {
+                if message_id.is_some()
+                    || run_state.is_some()
+                    || tool_call_state.is_some()
+                    || capability.is_some()
+                    || stdout.is_some()
+                    || stderr.is_some()
+                    || exit_code.is_some()
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let tool_call_id = ToolCallId::parse(tool_call_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let stream =
+                    ToolOutputStream::parse(&output_stream.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?;
+                let payload = SessionEventPayload::ToolCallOutput {
+                    run_id,
+                    tool_call_id,
+                    stream,
+                    content: output_content.ok_or(StoreError::Unavailable)?,
+                };
+                StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
+                    .map_err(|_| StoreError::Unavailable)?
+            }
+            _ => return Err(StoreError::Unavailable),
+        };
+        events.push(event);
+    }
+
+    Ok(events)
+}
+
 impl RunStore for SqliteStore {
-    async fn create_root_run(
+    async fn start_root_run(
         &self,
         run: &Run,
         event: &SessionEvent,
-    ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+        idempotency_key: &str,
+    ) -> Result<StartRunMutation, RunStoreError> {
+        if idempotency_key.is_empty() {
+            return Err(RunStoreError::IdempotencyKeyRequired);
+        }
         if run.state() != RunState::Queued
             || event != &SessionEvent::run_created(event.event_id().clone(), run)
         {
@@ -613,6 +648,42 @@ impl RunStore for SqliteStore {
             .begin()
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
+        let existing_run_id: Option<String> = sqlx::query_scalar(
+            "SELECT run_id FROM start_run_idempotencies WHERE session_id = ? AND idempotency_key = ?",
+        )
+        .bind(run.session_id().as_str())
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if let Some(existing_run_id) = existing_run_id {
+            let existing_run_id =
+                RunId::parse(existing_run_id).map_err(|_| RunStoreError::Unavailable)?;
+            let existing_run = load_run(&mut transaction, &existing_run_id)
+                .await?
+                .ok_or(RunStoreError::Unavailable)?;
+            if existing_run.session_id() != run.session_id() {
+                return Err(RunStoreError::Unavailable);
+            }
+            let snapshot = RunSnapshot::new(
+                Run::from_persisted(
+                    existing_run_id,
+                    existing_run.session_id().clone(),
+                    RunState::Queued,
+                ),
+                Vec::new(),
+            );
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+            return Ok(StartRunMutation::new(
+                snapshot,
+                Vec::new(),
+                StartRunDisposition::Duplicate,
+            ));
+        }
+
         let result = sqlx::query("INSERT INTO runs (run_id, session_id, state) VALUES (?, ?, ?)")
             .bind(run.run_id().as_str())
             .bind(run.session_id().as_str())
@@ -635,13 +706,23 @@ impl RunStore for SqliteStore {
             return Err(RunStoreError::Unavailable);
         }
         let stored_event = insert_run_event(&mut transaction, event).await?;
+        sqlx::query(
+            "INSERT INTO start_run_idempotencies (session_id, idempotency_key, run_id) VALUES (?, ?, ?)",
+        )
+        .bind(run.session_id().as_str())
+        .bind(idempotency_key)
+        .bind(run.run_id().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
         transaction
             .commit()
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
-        Ok(RunMutation::new(
+        Ok(StartRunMutation::new(
             RunSnapshot::new(run.clone(), Vec::new()),
             vec![stored_event],
+            StartRunDisposition::Created,
         ))
     }
 

@@ -953,6 +953,7 @@ pub enum RunError {
     SessionNotFound,
     RunNotFound,
     ActiveRootRunExists,
+    IdempotencyKeyRequired,
     InvalidTransition,
     RunStoreUnavailable,
 }
@@ -960,8 +961,36 @@ pub enum RunError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStoreError {
     ActiveRootRunExists,
+    IdempotencyKeyRequired,
     InvalidTransition,
     Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartRunDisposition {
+    Created,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartRunMutation {
+    pub value: RunSnapshot,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: StartRunDisposition,
+}
+
+impl StartRunMutation {
+    pub fn new(
+        value: RunSnapshot,
+        events: Vec<StoredSessionEvent>,
+        disposition: StartRunDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -996,6 +1025,10 @@ pub trait SessionStore: Send + Sync {
         session_id: &SessionId,
         after: EventCursor,
     ) -> impl Future<Output = Result<SessionEventPage, StoreError>> + Send;
+    fn list_events_after(
+        &self,
+        after: EventCursor,
+    ) -> impl Future<Output = Result<SessionEventPage, StoreError>> + Send;
     fn current_event_cursor(
         &self,
     ) -> impl Future<Output = Result<Option<EventCursor>, StoreError>> + Send;
@@ -1014,11 +1047,12 @@ pub trait RunIdGenerator: Send + Sync {
 }
 
 pub trait RunStore: SessionStore {
-    fn create_root_run(
+    fn start_root_run(
         &self,
         run: &Run,
         event: &SessionEvent,
-    ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<StartRunMutation, RunStoreError>> + Send;
     fn get_run(
         &self,
         id: &RunId,
@@ -1062,10 +1096,25 @@ where
     S: RunStore,
     I: RunIdGenerator,
 {
-    pub async fn create_root_run(
+    pub async fn start_root_run(
         &self,
         session_id: SessionId,
-    ) -> Result<RunMutation<RunSnapshot>, RunError> {
+        idempotency_key: String,
+    ) -> Result<StartRunMutation, RunError> {
+        if idempotency_key.is_empty() {
+            return Err(RunError::IdempotencyKeyRequired);
+        }
+        let run_id = self.ids.run_id();
+        self.start_root_run_with_id(session_id, idempotency_key, run_id)
+            .await
+    }
+
+    async fn start_root_run_with_id(
+        &self,
+        session_id: SessionId,
+        idempotency_key: String,
+        run_id: RunId,
+    ) -> Result<StartRunMutation, RunError> {
         let session = self
             .store
             .get_session(&session_id)
@@ -1074,10 +1123,10 @@ where
         if session.is_none() {
             return Err(RunError::SessionNotFound);
         }
-        let run = Run::new(self.ids.run_id(), session_id);
+        let run = Run::new(run_id, session_id);
         let event = SessionEvent::run_created(self.ids.event_id(), &run);
         self.store
-            .create_root_run(&run, &event)
+            .start_root_run(&run, &event, &idempotency_key)
             .await
             .map_err(map_run_store_error)
     }
@@ -1218,6 +1267,7 @@ where
 fn map_run_store_error(error: RunStoreError) -> RunError {
     match error {
         RunStoreError::ActiveRootRunExists => RunError::ActiveRootRunExists,
+        RunStoreError::IdempotencyKeyRequired => RunError::IdempotencyKeyRequired,
         RunStoreError::InvalidTransition => RunError::InvalidTransition,
         RunStoreError::Unavailable => RunError::RunStoreUnavailable,
     }
@@ -1239,6 +1289,10 @@ pub trait SessionOperations: Send + Sync {
     fn list_session_events(
         &self,
         session_id: SessionId,
+        after: EventCursor,
+    ) -> impl Future<Output = Result<SessionEventPage, SessionError>> + Send;
+    fn list_events_after(
+        &self,
         after: EventCursor,
     ) -> impl Future<Output = Result<SessionEventPage, SessionError>> + Send;
     fn current_event_cursor(
@@ -1323,6 +1377,16 @@ where
             .map_err(|_| SessionError::SessionStoreUnavailable)
     }
 
+    pub async fn list_events_after(
+        &self,
+        after: EventCursor,
+    ) -> Result<SessionEventPage, SessionError> {
+        self.session_store
+            .list_events_after(after)
+            .await
+            .map_err(|_| SessionError::SessionStoreUnavailable)
+    }
+
     pub async fn current_event_cursor(&self) -> Result<Option<EventCursor>, SessionError> {
         self.session_store
             .current_event_cursor()
@@ -1355,6 +1419,13 @@ where
         after: EventCursor,
     ) -> Result<SessionEventPage, SessionError> {
         SessionApplication::list_session_events(self, session_id, after).await
+    }
+
+    async fn list_events_after(
+        &self,
+        after: EventCursor,
+    ) -> Result<SessionEventPage, SessionError> {
+        SessionApplication::list_events_after(self, after).await
     }
 
     async fn current_event_cursor(&self) -> Result<Option<EventCursor>, SessionError> {
@@ -2093,6 +2164,13 @@ mod tests {
         async fn list_session_events(
             &self,
             _session_id: &SessionId,
+            _after: EventCursor,
+        ) -> Result<SessionEventPage, StoreError> {
+            Ok(SessionEventPage::new(Vec::new(), EventCursor::zero()))
+        }
+
+        async fn list_events_after(
+            &self,
             _after: EventCursor,
         ) -> Result<SessionEventPage, StoreError> {
             Ok(SessionEventPage::new(Vec::new(), EventCursor::zero()))

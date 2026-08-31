@@ -7,12 +7,13 @@ use std::{
 use futures_util::{SinkExt, StreamExt};
 use kiln_protocol::{
     AppendMessageRequest, ClientIdentity, CreateWorkspaceRequest,
-    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, MessageResponse, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_PATH, RunResponse,
-    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    ToolCallState, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
-    WebSocketFrame, WorkspaceResponse, WorkspaceRootRequest, error_code,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
+    MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, SessionEventDataResponse, SessionEventResponse,
+    SessionEventsResponse, SessionResponse, ToolCallState, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    WorkspaceRootRequest, error_code,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -139,9 +140,20 @@ type EventSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn open_event_socket(address: &str) -> EventSocket {
-    let endpoint = format!(
+    open_event_socket_after(address, None).await.0
+}
+
+async fn open_event_socket_after(
+    address: &str,
+    after: Option<&str>,
+) -> (EventSocket, Option<String>) {
+    let mut endpoint = format!(
         "ws://{address}{EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}"
     );
+    if let Some(after) = after {
+        endpoint.push_str("&after=");
+        endpoint.push_str(after);
+    }
     let (mut socket, _) = connect_async(endpoint)
         .await
         .expect("event WebSocket connects");
@@ -157,8 +169,36 @@ async fn open_event_socket(address: &str) -> EventSocket {
             .as_ref(),
     )
     .expect("event WebSocket acknowledgement JSON");
-    assert!(matches!(frame, WebSocketFrame::Ack { .. }));
-    socket
+    let WebSocketFrame::Ack {
+        version,
+        capability,
+        current_event_cursor,
+    } = frame
+    else {
+        panic!("expected event WebSocket acknowledgement");
+    };
+    assert_eq!(version, PROTOCOL_VERSION);
+    assert_eq!(capability, WEBSOCKET_CAPABILITY);
+    (socket, current_event_cursor)
+}
+
+async fn receive_event(socket: &mut EventSocket) -> SessionEventResponse {
+    let frame = socket
+        .next()
+        .await
+        .expect("event WebSocket Event")
+        .expect("event WebSocket Event frame");
+    let frame: WebSocketFrame = serde_json::from_str(
+        frame
+            .into_text()
+            .expect("event WebSocket Event is text")
+            .as_ref(),
+    )
+    .expect("event WebSocket Event JSON");
+    let WebSocketFrame::Event { event } = frame else {
+        panic!("expected event WebSocket Event frame");
+    };
+    event
 }
 
 async fn receive_run_events(
@@ -168,17 +208,7 @@ async fn receive_run_events(
 ) -> Vec<SessionEventResponse> {
     let mut events = Vec::new();
     loop {
-        let frame = socket
-            .next()
-            .await
-            .expect("live Run Event")
-            .expect("live Run Event frame");
-        let frame: WebSocketFrame =
-            serde_json::from_str(frame.into_text().expect("live Run Event is text").as_ref())
-                .expect("live Run Event JSON");
-        let WebSocketFrame::Event { event } = frame else {
-            panic!("expected live Event frame");
-        };
+        let event = receive_event(socket).await;
         let terminal = matches!(
             &event.event,
             SessionEventDataResponse::RunStateChanged {
@@ -892,8 +922,29 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     let mut socket = open_event_socket(&daemon.address).await;
 
     let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, start_path))
+            .send()
+            .await
+            .expect("missing idempotency key response"),
+        StatusCode::BAD_REQUEST,
+        error_code::IDEMPOTENCY_KEY_REQUIRED,
+    )
+    .await;
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, start_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "")
+            .send()
+            .await
+            .expect("empty idempotency key response"),
+        StatusCode::BAD_REQUEST,
+        error_code::INVALID_IDEMPOTENCY_KEY,
+    )
+    .await;
+
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "run-success")
         .send()
         .await
         .expect("start Run response");
@@ -904,6 +955,31 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     assert_eq!(queued.session_id, session.session_id);
     assert_eq!(queued.state, RunState::Queued);
     assert!(queued.tool_calls.is_empty());
+
+    let duplicate_response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "run-success")
+        .send()
+        .await
+        .expect("duplicate start Run response");
+    assert_eq!(duplicate_response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        duplicate_response
+            .json::<RunResponse>()
+            .await
+            .expect("duplicate start Run JSON"),
+        queued
+    );
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, start_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "different-run")
+            .send()
+            .await
+            .expect("different start Run response"),
+        StatusCode::CONFLICT,
+        error_code::ACTIVE_ROOT_RUN_EXISTS,
+    )
+    .await;
 
     let live_events = receive_run_events(&mut socket, &queued.run_id, RunState::Completed).await;
     assert_eq!(
@@ -956,6 +1032,21 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     );
     assert_eq!(tool_call.exit_code, Some(0));
 
+    let duplicate_response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "run-success")
+        .send()
+        .await
+        .expect("post-terminal duplicate start Run response");
+    assert_eq!(duplicate_response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        duplicate_response
+            .json::<RunResponse>()
+            .await
+            .expect("post-terminal duplicate start Run JSON"),
+        queued
+    );
+
     let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
     let response = http
         .get(format!("http://{}{}", daemon.address, events_path))
@@ -984,6 +1075,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
         SESSION_RUNS_PATH.replace("{session_id}", "ses_01ARZ3NDEKTSV4RRFFQ69G5FAW");
     assert_problem(
         http.post(format!("http://{}{}", daemon.address, missing_session_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "missing-session")
             .send()
             .await
             .expect("missing Run Session response"),
@@ -1039,6 +1131,88 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
 }
 
 #[tokio::test]
+async fn reconnect_replays_exact_durable_suffix_across_restart() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary reconnect test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("reconnect repository parent");
+    let data_directory = sandbox.path().join("data");
+    let http = reqwest::Client::new();
+    let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut live_socket = open_event_socket(&daemon.address).await;
+
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "reconnect-run")
+        .send()
+        .await
+        .expect("reconnect Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response.json().await.expect("reconnect Run JSON");
+
+    let first_event = receive_event(&mut live_socket).await;
+    assert!(matches!(
+        &first_event.event,
+        SessionEventDataResponse::RunCreated { run_id, .. } if run_id == &queued.run_id
+    ));
+    let after = first_event.cursor;
+    drop(live_socket);
+
+    let (mut replay_socket, acknowledged_cursor) =
+        open_event_socket_after(&daemon.address, Some(&after)).await;
+    assert!(
+        acknowledged_cursor
+            .as_deref()
+            .expect("reconnect acknowledgement cursor")
+            .parse::<u64>()
+            .expect("numeric reconnect acknowledgement cursor")
+            >= after.parse::<u64>().expect("numeric replay cursor")
+    );
+    let replayed =
+        receive_run_events(&mut replay_socket, &queued.run_id, RunState::Completed).await;
+    let replayed_cursors = replayed
+        .iter()
+        .map(|event| event.cursor.parse::<u64>().expect("numeric replay cursor"))
+        .collect::<Vec<_>>();
+    let after_value = after.parse::<u64>().expect("numeric replay boundary");
+    assert!(replayed_cursors.iter().all(|cursor| *cursor > after_value));
+    assert!(replayed_cursors.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .get(format!(
+            "http://{}{}?after={after}",
+            daemon.address, events_path
+        ))
+        .send()
+        .await
+        .expect("durable replay suffix response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let durable_suffix: SessionEventsResponse =
+        response.json().await.expect("durable replay suffix JSON");
+    assert_eq!(replayed.as_slice(), durable_suffix.events.as_slice());
+
+    drop(replay_socket);
+    drop(daemon);
+
+    let restarted = Daemon::start(binary, &data_directory);
+    let (mut restarted_socket, restarted_cursor) =
+        open_event_socket_after(&restarted.address, Some(&after)).await;
+    assert_eq!(
+        restarted_cursor.as_deref(),
+        Some(durable_suffix.current_event_cursor.as_str())
+    );
+    let replayed_after_restart =
+        receive_run_events(&mut restarted_socket, &queued.run_id, RunState::Completed).await;
+    assert_eq!(
+        replayed_after_restart.as_slice(),
+        durable_suffix.events.as_slice()
+    );
+}
+
+#[tokio::test]
 async fn real_daemon_persists_a_failed_subprocess_result() {
     let binary = env!("CARGO_BIN_EXE_kilnd");
     let sandbox = tempfile::tempdir().expect("temporary failed Run test directory");
@@ -1053,6 +1227,7 @@ async fn real_daemon_persists_a_failed_subprocess_result() {
     let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "run-failure")
         .send()
         .await
         .expect("start failed Run response");
@@ -1111,8 +1286,10 @@ async fn concurrent_runs_publish_in_global_cursor_order() {
     let second_path = SESSION_RUNS_PATH.replace("{session_id}", &second_session.session_id);
     let (first_response, second_response) = tokio::join!(
         http.post(format!("http://{}{}", daemon.address, first_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "first-run")
             .send(),
         http.post(format!("http://{}{}", daemon.address, second_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "second-run")
             .send(),
     );
     let first_response = first_response.expect("first concurrent Run response");
@@ -1164,4 +1341,57 @@ async fn concurrent_runs_publish_in_global_cursor_order() {
         .map(|event| event.cursor.parse::<u64>().expect("numeric Event cursor"))
         .collect::<Vec<_>>();
     assert!(cursors.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[tokio::test]
+async fn concurrent_same_key_starts_one_run_and_one_tool_lifecycle() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary idempotency test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("idempotency repository parent");
+    let data_directory = sandbox.path().join("data");
+    let http = reqwest::Client::new();
+    let daemon = Daemon::start(binary, &data_directory);
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon.address).await;
+    let path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+
+    let (first_response, second_response) = tokio::join!(
+        http.post(format!("http://{}{}", daemon.address, path))
+            .header(IDEMPOTENCY_KEY_HEADER, "concurrent-same-key")
+            .send(),
+        http.post(format!("http://{}{}", daemon.address, path))
+            .header(IDEMPOTENCY_KEY_HEADER, "concurrent-same-key")
+            .send(),
+    );
+    let first_response = first_response.expect("first concurrent idempotent response");
+    let second_response = second_response.expect("second concurrent idempotent response");
+    assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+    assert_eq!(second_response.status(), StatusCode::ACCEPTED);
+    let first: RunResponse = first_response
+        .json()
+        .await
+        .expect("first concurrent idempotent JSON");
+    let second: RunResponse = second_response
+        .json()
+        .await
+        .expect("second concurrent idempotent JSON");
+    assert_eq!(first, second);
+
+    let events = receive_run_events(&mut socket, &first.run_id, RunState::Completed).await;
+    assert_eq!(events.len(), 8);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event_kind(event) == "run.created")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event_kind(event) == "tool_call.requested")
+            .count(),
+        1
+    );
 }

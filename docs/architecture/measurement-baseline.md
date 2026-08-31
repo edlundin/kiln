@@ -14,7 +14,6 @@ The measurements use the local macOS development machine. They are a baseline, n
 | Idle daemon RSS | 12,752 KB | Started daemon with SQLite and file artifacts, then sampled `ps` after capabilities became available |
 | Running daemon RSS | 13,696 KB | Same daemon while a deterministic 30-second sleep tool run was active |
 | Cancellation | Passed | HTTP cancel command returned, then graceful shutdown completed |
-| Reconnect and replay | Passed | `cargo test -p kiln-server --test api` replay test |
 | Graceful shutdown exit | 0 | HTTP shutdown state change followed by SIGINT |
 
 The RSS values are one-process samples. They do not represent a capacity limit. Repeat them on the target host before setting operational limits.

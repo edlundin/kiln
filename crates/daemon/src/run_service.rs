@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use kiln_core::{
-    RunApplication, RunError, RunId, RunMutation, RunSnapshot, SessionId, SubprocessExecutor,
+    RunApplication, RunError, RunId, RunMutation, RunSnapshot, SessionId, StartRunDisposition,
+    SubprocessExecutor,
 };
 use kiln_infrastructure::{DeterministicSubprocessExecutor, SqliteStore, UlidIdGenerator};
 use kiln_server::{EventBroadcaster, RunOperations};
@@ -28,21 +29,38 @@ impl RunService {
         }
     }
 
-    async fn start(&self, session_id: SessionId) -> Result<RunSnapshot, RunError> {
+    async fn start(
+        &self,
+        session_id: SessionId,
+        idempotency_key: String,
+    ) -> Result<kiln_core::StartRunMutation, RunError> {
         let value = {
             let _sequence = self.commit_sequence.lock().await;
-            let RunMutation { value, events } = self.runs.create_root_run(session_id).await?;
+            let mutation = self
+                .runs
+                .start_root_run(session_id, idempotency_key)
+                .await?;
+            let value = mutation.value.clone();
+            let disposition = mutation.disposition;
+            let events = mutation.events;
             self.events.publish(events);
-            value
+            (value, disposition)
         };
 
-        let run_id = value.run().run_id().clone();
-        let service = self.clone();
-        tokio::spawn(async move {
-            service.execute(run_id).await;
-        });
+        let (value, disposition) = value;
+        if disposition == StartRunDisposition::Created {
+            let run_id = value.run().run_id().clone();
+            let service = self.clone();
+            tokio::spawn(async move {
+                service.execute(run_id).await;
+            });
+        }
 
-        Ok(value)
+        Ok(kiln_core::StartRunMutation::new(
+            value,
+            Vec::new(),
+            disposition,
+        ))
     }
 
     async fn execute(&self, run_id: RunId) {
@@ -107,8 +125,9 @@ impl RunOperations for RunService {
     fn start_run(
         &self,
         session_id: SessionId,
-    ) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send {
-        self.start(session_id)
+        idempotency_key: String,
+    ) -> impl Future<Output = Result<kiln_core::StartRunMutation, RunError>> + Send {
+        self.start(session_id, idempotency_key)
     }
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send {

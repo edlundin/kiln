@@ -1,6 +1,6 @@
-# EDL-211 protocol reference
+# EDL-212 protocol reference
 
-Protocol version: `0.4.0`.
+Protocol version: `0.5.0`.
 
 The client sends `POST /v1/protocol/negotiate` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.
 
@@ -10,10 +10,10 @@ The client creates a durable Workspace with `POST /v1/workspaces`, providing a n
 
 `POST /v1/sessions/{session_id}/messages` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.
 
-`POST /v1/sessions/{session_id}/runs` accepts one queued root Run for the Session. The deterministic adapter selects the fixed subprocess; clients cannot provide an executable, arguments, shell, environment, or working directory. `GET /v1/runs/{run_id}` returns the durable Run and ToolCall result.
+`POST /v1/sessions/{session_id}/runs` requires a non-empty opaque `Idempotency-Key` header. The key is scoped to the start-run operation and Session. A repeated key returns the original Run snapshot, including after terminal completion, and does not dispatch another subprocess. A different key creates a new root Run when no root Run is active.
 
-`GET /v1/sessions/{session_id}/events?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it does not schedule work between Sessions. The response current cursor and Event rows come from one storage snapshot.
+`GET /v1/sessions/{session_id}/events?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.
 
-The client can connect to `GET /v1/events?version=0.4.0&capability=kiln.events.websocket`. After the acknowledgement, the server publishes newly committed Run and ToolCall Events in cursor order. Reconnect replay is outside this release.
+The client can connect to `GET /v1/events?version=0.5.0&capability=kiln.events.websocket&after={cursor}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves the existing live-only delivery from the connection snapshot.
 
 HTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.

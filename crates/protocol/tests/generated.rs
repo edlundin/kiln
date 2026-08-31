@@ -3,12 +3,13 @@ use kiln_protocol::{
     CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateWorkspaceRequest,
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
     GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_PATH, RunResponse,
-    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse, SessionResponse,
-    StoreIdentity, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
-    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, error_code,
+    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse,
+    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse,
+    SessionEventsResponse, SessionResponse, StoreIdentity, ToolCallState, ToolOutputStream,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
+    WorkspaceResponse, error_code,
 };
 use serde_json::json;
 
@@ -401,6 +402,42 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
     ] {
         assert!(schema["$defs"][definition].is_object());
     }
+}
+
+#[test]
+fn start_run_contract_requires_opaque_idempotency_key() {
+    let openapi = kiln_protocol::artifact_files()
+        .remove("openapi.yaml")
+        .expect("OpenAPI artifact");
+    let start_run = openapi
+        .split_once("  /v1/sessions/{session_id}/runs:")
+        .expect("start Run path")
+        .1
+        .split_once("components:")
+        .expect("OpenAPI components")
+        .0;
+    assert!(start_run.contains(&format!("- name: {IDEMPOTENCY_KEY_HEADER}")));
+    assert!(start_run.contains("in: header"));
+    assert!(start_run.contains("required: true"));
+    assert!(start_run.contains("type: string"));
+    assert!(openapi.contains("version: 0.5.0"));
+}
+
+#[test]
+fn event_stream_contract_accepts_an_exclusive_replay_cursor() {
+    let openapi = kiln_protocol::artifact_files()
+        .remove("openapi.yaml")
+        .expect("OpenAPI artifact");
+    let event_stream = openapi
+        .split_once("  /v1/events:")
+        .expect("Event WebSocket path")
+        .1
+        .split_once("  /v1/workspaces:")
+        .expect("next OpenAPI path")
+        .0;
+
+    assert!(event_stream.contains("- name: after"));
+    assert!(event_stream.contains("Exclusive durable Event cursor"));
 }
 
 #[test]

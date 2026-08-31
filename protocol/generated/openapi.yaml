@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Kiln daemon protocol
-  version: 0.4.0
+  version: 0.5.0
   description: Kiln loopback protocol contract.
 paths:
   /v1/protocol/negotiate:
@@ -36,6 +36,11 @@ paths:
           in: query
           required: true
           schema: {type: string}
+        - name: after
+          in: query
+          required: false
+          schema: {type: string}
+          description: Exclusive durable Event cursor for reconnect replay.
       responses:
         '101':
           description: WebSocket protocol switch.
@@ -192,6 +197,11 @@ paths:
           in: path
           required: true
           schema: {type: string}
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 1}
+          description: Opaque non-empty key for idempotent start-run delivery.
       responses:
         '202':
           description: Accepted queued root Run.

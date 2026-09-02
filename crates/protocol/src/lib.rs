@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.6.0";
+pub const PROTOCOL_VERSION: &str = "0.8.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -25,6 +25,7 @@ pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
 pub const RUN_CANCEL_PATH: &str = "/v1/runs/{run_id}/cancel";
+pub const TOOL_CALL_APPROVAL_PATH: &str = "/v1/tool-calls/{tool_call_id}/approval";
 pub const NEGOTIATE_OPERATION_ID: &str = "negotiate_protocol";
 pub const EVENT_STREAM_OPERATION_ID: &str = "event_stream";
 pub const CREATE_WORKSPACE_OPERATION_ID: &str = "create_workspace";
@@ -36,8 +37,13 @@ pub const LIST_SESSION_EVENTS_OPERATION_ID: &str = "list_session_events";
 pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
+pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
 
 pub mod error_code {
+    pub const AUTHENTICATION_REQUIRED: &str = "authentication_required";
+    pub const INVALID_AUTHENTICATION: &str = "invalid_authentication";
+    pub const INVALID_HOST: &str = "invalid_host";
+    pub const INVALID_ORIGIN: &str = "invalid_origin";
     pub const INVALID_JSON: &str = "invalid_json";
     pub const INVALID_REQUEST: &str = "invalid_request";
     pub const INVALID_VERSION: &str = "invalid_version";
@@ -71,8 +77,17 @@ pub mod error_code {
     pub const RUN_STORE_UNAVAILABLE: &str = "run_store_unavailable";
     pub const RUN_CANCELLATION_FAILED: &str = "run_cancellation_failed";
     pub const DAEMON_SHUTTING_DOWN: &str = "daemon_shutting_down";
+    pub const WORKSPACE_ROOT_NOT_FOUND: &str = "workspace_root_not_found";
+    pub const PATH_OUTSIDE_WORKSPACE_ROOT: &str = "path_outside_workspace_root";
+    pub const APPROVAL_NOT_FOUND: &str = "approval_not_found";
+    pub const APPROVAL_ALREADY_DECIDED: &str = "approval_already_decided";
+    pub const IDEMPOTENCY_CONFLICT: &str = "idempotency_conflict";
 
     pub const ALL: &[&str] = &[
+        AUTHENTICATION_REQUIRED,
+        INVALID_AUTHENTICATION,
+        INVALID_HOST,
+        INVALID_ORIGIN,
         INVALID_JSON,
         INVALID_REQUEST,
         INVALID_VERSION,
@@ -106,6 +121,11 @@ pub mod error_code {
         RUN_STORE_UNAVAILABLE,
         RUN_CANCELLATION_FAILED,
         DAEMON_SHUTTING_DOWN,
+        WORKSPACE_ROOT_NOT_FOUND,
+        PATH_OUTSIDE_WORKSPACE_ROOT,
+        APPROVAL_NOT_FOUND,
+        APPROVAL_ALREADY_DECIDED,
+        IDEMPOTENCY_CONFLICT,
     ];
 }
 
@@ -201,6 +221,37 @@ pub struct AppendMessageRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct StartRunRequest {
+    pub approval_policy: ApprovalPolicy,
+    pub workspace_root_id: String,
+    pub relative_directory: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    Ask,
+    ReadOnly,
+    FullAccess,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct ApprovalDecisionRequest {
+    pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionResponse {
     pub session_id: String,
@@ -227,6 +278,7 @@ pub struct MessageResponse {
 pub enum RunState {
     Queued,
     Running,
+    WaitingForApproval,
     Cancelling,
     Completed,
     Failed,
@@ -237,10 +289,13 @@ pub enum RunState {
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallState {
     Requested,
+    AwaitingApproval,
+    Ready,
     Running,
     Completed,
     Failed,
     Cancelled,
+    Denied,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -257,6 +312,10 @@ pub struct ToolCallResponse {
     pub run_id: String,
     pub capability: String,
     pub state: ToolCallState,
+    #[schemars(with = "RequiredNullableScope")]
+    pub requested_scope: Option<WorkspaceScopeResponse>,
+    #[schemars(with = "RequiredNullableScope")]
+    pub effective_scope: Option<WorkspaceScopeResponse>,
     #[schemars(with = "RequiredNullableString")]
     pub stdout: Option<String>,
     #[schemars(with = "RequiredNullableString")]
@@ -271,7 +330,37 @@ pub struct RunResponse {
     pub run_id: String,
     pub session_id: String,
     pub state: RunState,
+    #[schemars(with = "RequiredNullableApprovalPolicy")]
+    pub approval_policy: Option<ApprovalPolicy>,
+    #[schemars(with = "RequiredNullableScope")]
+    pub requested_scope: Option<WorkspaceScopeResponse>,
     pub tool_calls: Vec<ToolCallResponse>,
+    pub approvals: Vec<ApprovalResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceScopeResponse {
+    pub workspace_root_id: String,
+    pub relative_directory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ApprovalResponse {
+    pub approval_id: String,
+    pub run_id: String,
+    pub tool_call_id: String,
+    pub requested_scope: WorkspaceScopeResponse,
+    pub state: ApprovalState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    Pending,
+    Approved,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -282,13 +371,26 @@ pub enum SessionEventDataResponse {
     #[serde(rename = "message.appended")]
     MessageAppended { message: MessageResponse },
     #[serde(rename = "run.created")]
-    RunCreated { run_id: String, state: RunState },
+    RunCreated {
+        run_id: String,
+        state: RunState,
+        #[schemars(with = "RequiredNullableApprovalPolicy")]
+        approval_policy: Option<ApprovalPolicy>,
+        #[schemars(with = "RequiredNullableScope")]
+        requested_scope: Option<WorkspaceScopeResponse>,
+    },
     #[serde(rename = "run.state_changed")]
     RunStateChanged { run_id: String, state: RunState },
     #[serde(rename = "run.cancellation_requested")]
     RunCancellationRequested { run_id: String },
     #[serde(rename = "tool_call.requested")]
     ToolCallRequested { tool_call: ToolCallResponse },
+    #[serde(rename = "approval.requested")]
+    ApprovalRequested { approval: ApprovalResponse },
+    #[serde(rename = "approval.decided")]
+    ApprovalDecided { approval: ApprovalResponse },
+    #[serde(rename = "tool_call.denied")]
+    ToolCallDenied { tool_call: ToolCallResponse },
     #[serde(rename = "tool_call.state_changed")]
     ToolCallStateChanged { tool_call: ToolCallResponse },
     #[serde(rename = "tool_call.output")]
@@ -345,5 +447,39 @@ impl JsonSchema for RequiredNullableI32 {
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         json_schema!({"type": ["integer", "null"], "format": "int32"})
+    }
+}
+
+struct RequiredNullableScope;
+
+impl JsonSchema for RequiredNullableScope {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableScope".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let scope = generator.subschema_for::<WorkspaceScopeResponse>();
+        json_schema!({"anyOf": [scope, {"type": "null"}]})
+    }
+}
+
+struct RequiredNullableApprovalPolicy;
+
+impl JsonSchema for RequiredNullableApprovalPolicy {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableApprovalPolicy".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let approval_policy = generator.subschema_for::<ApprovalPolicy>();
+        json_schema!({"anyOf": [approval_policy, {"type": "null"}]})
     }
 }

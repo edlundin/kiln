@@ -9,22 +9,29 @@ use serde_json::{Value, json};
 use ts_rs::{Config, TS};
 
 use crate::{
-    APPEND_MESSAGE_OPERATION_ID, AppendMessageRequest, CANCEL_RUN_OPERATION_ID,
+    APPEND_MESSAGE_OPERATION_ID, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
+    ApprovalPolicy, ApprovalResponse, ApprovalState, CANCEL_RUN_OPERATION_ID,
     CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
-    CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
-    EVENTS_WEBSOCKET_PATH, GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
-    MessageResponse, MessageRole, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest,
-    NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse,
-    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, StoreIdentity, ToolCallResponse, ToolCallState, ToolOutputStream,
+    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_RUN_OPERATION_ID,
+    GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
+    LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, MessageRole, NEGOTIATE_OPERATION_ID,
+    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
+    RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, StartRunRequest, StoreIdentity,
+    TOOL_CALL_APPROVAL_PATH, ToolCallResponse, ToolCallState, ToolOutputStream,
     WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
-    WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, error_code,
+    WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
+    error_code,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "wire frame DTOs are short-lived and do not justify mandatory heap allocation"
+)]
 pub enum WebSocketFrame {
     Ack {
         version: String,
@@ -73,6 +80,14 @@ pub fn artifact_files() -> BTreeMap<&'static str, String> {
     );
     files.insert("fixtures/session-response.json", fixture_session_response());
     files.insert("fixtures/message-response.json", fixture_message_response());
+    files.insert(
+        "fixtures/start-run-request.json",
+        fixture_start_run_request(),
+    );
+    files.insert(
+        "fixtures/approval-decision-request.json",
+        fixture_approval_decision_request(),
+    );
     files.insert("fixtures/run-response.json", fixture_run_response());
     files.insert(
         "fixtures/session-events-response.json",
@@ -129,9 +144,22 @@ fn schema() -> String {
         ("SessionResponse", schema_for!(SessionResponse)),
         ("MessageRole", schema_for!(MessageRole)),
         ("MessageResponse", schema_for!(MessageResponse)),
+        ("StartRunRequest", schema_for!(StartRunRequest)),
+        ("ApprovalPolicy", schema_for!(ApprovalPolicy)),
+        (
+            "ApprovalDecisionRequest",
+            schema_for!(ApprovalDecisionRequest),
+        ),
+        ("ApprovalDecision", schema_for!(ApprovalDecision)),
         ("RunState", schema_for!(RunState)),
         ("ToolCallState", schema_for!(ToolCallState)),
         ("ToolOutputStream", schema_for!(ToolOutputStream)),
+        (
+            "WorkspaceScopeResponse",
+            schema_for!(WorkspaceScopeResponse),
+        ),
+        ("ApprovalState", schema_for!(ApprovalState)),
+        ("ApprovalResponse", schema_for!(ApprovalResponse)),
         ("ToolCallResponse", schema_for!(ToolCallResponse)),
         ("RunResponse", schema_for!(RunResponse)),
         (
@@ -174,9 +202,16 @@ fn typescript() -> String {
         SessionResponse::decl(&config),
         MessageRole::decl(&config),
         MessageResponse::decl(&config),
+        StartRunRequest::decl(&config),
+        ApprovalPolicy::decl(&config),
+        ApprovalDecisionRequest::decl(&config),
+        ApprovalDecision::decl(&config),
         RunState::decl(&config),
         ToolCallState::decl(&config),
         ToolOutputStream::decl(&config),
+        WorkspaceScopeResponse::decl(&config),
+        ApprovalState::decl(&config),
+        ApprovalResponse::decl(&config),
         ToolCallResponse::decl(&config),
         RunResponse::decl(&config),
         SessionEventDataResponse::decl(&config),
@@ -231,6 +266,10 @@ fn catalogue() -> String {
             "method": "GET",
             "path": RUN_PATH,
             "operation": GET_RUN_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": TOOL_CALL_APPROVAL_PATH,
+            "operation": DECIDE_APPROVAL_OPERATION_ID
         }, {
             "method": "POST",
             "path": RUN_CANCEL_PATH,
@@ -382,12 +421,35 @@ fn fixture_message_response() -> String {
     serialize_fixture(&fixture_message())
 }
 
+fn fixture_scope() -> WorkspaceScopeResponse {
+    WorkspaceScopeResponse {
+        workspace_root_id: "wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        relative_directory: ".".to_owned(),
+    }
+}
+
+fn fixture_start_run_request() -> String {
+    serialize_fixture(&StartRunRequest {
+        approval_policy: ApprovalPolicy::FullAccess,
+        workspace_root_id: fixture_scope().workspace_root_id,
+        relative_directory: fixture_scope().relative_directory,
+    })
+}
+
+fn fixture_approval_decision_request() -> String {
+    serialize_fixture(&ApprovalDecisionRequest {
+        decision: ApprovalDecision::Approved,
+    })
+}
+
 fn fixture_tool_call() -> ToolCallResponse {
     ToolCallResponse {
         tool_call_id: "tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
         run_id: "run_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
         capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
         state: ToolCallState::Completed,
+        requested_scope: Some(fixture_scope()),
+        effective_scope: Some(fixture_scope()),
         stdout: Some("Kiln deterministic subprocess completed.\n".to_owned()),
         stderr: Some(String::new()),
         exit_code: Some(0),
@@ -399,7 +461,10 @@ fn fixture_run() -> RunResponse {
         run_id: "run_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
         session_id: "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
         state: RunState::Completed,
+        approval_policy: Some(ApprovalPolicy::FullAccess),
+        requested_scope: Some(fixture_scope()),
         tool_calls: vec![fixture_tool_call()],
+        approvals: Vec::new(),
     }
 }
 
@@ -442,6 +507,8 @@ info:
   title: Kiln daemon protocol
   version: {PROTOCOL_VERSION}
   description: Kiln loopback protocol contract.
+security:
+  - bearerAuth: []
 paths:
   {NEGOTIATE_PATH}:
     post:
@@ -645,6 +712,12 @@ paths:
           required: true
           schema: {{type: string, minLength: 1}}
           description: Opaque non-empty key for idempotent start-run delivery.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRunRequest'
       responses:
         '202':
           description: Accepted queued root Run.
@@ -661,6 +734,42 @@ paths:
         '503':
           $ref: '#/components/responses/Problem'
         '500':
+          $ref: '#/components/responses/Problem'
+  {TOOL_CALL_APPROVAL_PATH}:
+    post:
+      operationId: {DECIDE_APPROVAL_OPERATION_ID}
+      parameters:
+        - name: tool_call_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+          description: Opaque non-empty key for idempotent approval delivery.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Durable Run snapshot after the approval decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
           $ref: '#/components/responses/Problem'
   {RUN_PATH}:
     get:
@@ -709,6 +818,10 @@ paths:
         '503':
           $ref: '#/components/responses/Problem'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
   responses:
     Problem:
       description: Stable public error.
@@ -746,9 +859,22 @@ components:
         ("SessionResponse", openapi_schema::<SessionResponse>()),
         ("MessageRole", openapi_schema::<MessageRole>()),
         ("MessageResponse", openapi_schema::<MessageResponse>()),
+        ("StartRunRequest", openapi_schema::<StartRunRequest>()),
+        ("ApprovalPolicy", openapi_schema::<ApprovalPolicy>()),
+        (
+            "ApprovalDecisionRequest",
+            openapi_schema::<ApprovalDecisionRequest>(),
+        ),
+        ("ApprovalDecision", openapi_schema::<ApprovalDecision>()),
         ("RunState", openapi_schema::<RunState>()),
         ("ToolCallState", openapi_schema::<ToolCallState>()),
         ("ToolOutputStream", openapi_schema::<ToolOutputStream>()),
+        (
+            "WorkspaceScopeResponse",
+            openapi_schema::<WorkspaceScopeResponse>(),
+        ),
+        ("ApprovalState", openapi_schema::<ApprovalState>()),
+        ("ApprovalResponse", openapi_schema::<ApprovalResponse>()),
         ("ToolCallResponse", openapi_schema::<ToolCallResponse>()),
         ("RunResponse", openapi_schema::<RunResponse>()),
         (
@@ -808,7 +934,7 @@ fn normalize_openapi_references(value: &mut Value) {
 
 fn reference() -> String {
     format!(
-        "# EDL-213 protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header. The key is scoped to the start-run operation and Session. A repeated key returns the original Run snapshot and does not dispatch another subprocess. A different key creates a new root Run when no root Run is active.\n\n`POST {RUN_CANCEL_PATH}` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. A completion committed before the cancellation request remains authoritative.\n\nSIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client can connect to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves the existing live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
+        "# EDL-214 protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nAll loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header and a `StartRunRequest` containing the approval policy, immutable Workspace root ID, and normalized relative directory. The key is scoped to the start-run operation and Session. A repeated key with the same request returns the current durable Run snapshot and never dispatches another subprocess. A mismatched reuse is an idempotency conflict.\n\n`ask` records a pending Approval before execution. `read_only` durably denies the subprocess. `full_access` makes the requested scope effective without a prompt. `POST {TOOL_CALL_APPROVAL_PATH}` approves or rejects one pending ToolCall. Approval decisions are durable, first-decision-wins, and idempotent by their own `{IDEMPOTENCY_KEY_HEADER}`. An approval after daemon restart resumes the same Run.\n\n`POST {RUN_CANCEL_PATH}` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.\n\nSIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client connects to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}` and offers `{WEBSOCKET_CAPABILITY}` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `{WEBSOCKET_CAPABILITY}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
     )
 }
 
@@ -846,9 +972,26 @@ mod tests {
             tool_call["properties"]["exit_code"]["type"],
             json!(["integer", "null"])
         );
-        for field in ["stdout", "stderr", "exit_code"] {
+        for field in [
+            "requested_scope",
+            "effective_scope",
+            "stdout",
+            "stderr",
+            "exit_code",
+        ] {
             assert!(
                 tool_call["required"]
+                    .as_array()
+                    .expect("required fields")
+                    .iter()
+                    .any(|required| required == field)
+            );
+        }
+
+        let run = openapi_schema::<RunResponse>();
+        for field in ["approval_policy", "requested_scope", "approvals"] {
+            assert!(
+                run["required"]
                     .as_array()
                     .expect("required fields")
                     .iter()

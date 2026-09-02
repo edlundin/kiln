@@ -150,6 +150,120 @@ impl ToolCallId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ApprovalId(String);
+
+impl ApprovalId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("apr_{value}"))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
+        parse_id(value.into(), "apr_").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPolicy {
+    Ask,
+    ReadOnly,
+    FullAccess,
+}
+
+impl ApprovalPolicy {
+    pub fn parse(value: &str) -> Result<Self, InvalidApprovalPolicy> {
+        match value {
+            "ask" => Ok(Self::Ask),
+            "read_only" => Ok(Self::ReadOnly),
+            "full_access" => Ok(Self::FullAccess),
+            _ => Err(InvalidApprovalPolicy),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::ReadOnly => "read_only",
+            Self::FullAccess => "full_access",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidApprovalPolicy;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspacePathScopeError {
+    Absolute,
+    ParentTraversal,
+    Prefix,
+    InvalidComponent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkspacePathScope {
+    workspace_root_id: WorkspaceRootId,
+    relative_directory: String,
+}
+
+impl WorkspacePathScope {
+    pub fn new(
+        workspace_root_id: WorkspaceRootId,
+        relative_directory: impl AsRef<Path>,
+    ) -> Result<Self, WorkspacePathScopeError> {
+        let input = relative_directory.as_ref();
+        if input.is_absolute() {
+            return Err(WorkspacePathScopeError::Absolute);
+        }
+        let text = input
+            .to_str()
+            .ok_or(WorkspacePathScopeError::InvalidComponent)?;
+        if text.starts_with("\\\\") || text.as_bytes().get(1).is_some_and(|byte| byte == &b':') {
+            return Err(WorkspacePathScopeError::Prefix);
+        }
+
+        let mut components = Vec::new();
+        for component in input.components() {
+            match component {
+                std::path::Component::Normal(value) => components.push(
+                    value
+                        .to_str()
+                        .ok_or(WorkspacePathScopeError::InvalidComponent)?
+                        .to_owned(),
+                ),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    return Err(WorkspacePathScopeError::ParentTraversal);
+                }
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    return Err(WorkspacePathScopeError::Prefix);
+                }
+            }
+        }
+        let relative_directory = if components.is_empty() {
+            ".".to_owned()
+        } else {
+            components.join("/")
+        };
+        Ok(Self {
+            workspace_root_id,
+            relative_directory,
+        })
+    }
+
+    pub fn workspace_root_id(&self) -> &WorkspaceRootId {
+        &self.workspace_root_id
+    }
+
+    pub fn relative_directory(&self) -> &str {
+        &self.relative_directory
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidEventCursor;
 
@@ -278,6 +392,7 @@ pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subpro
 pub enum RunState {
     Queued,
     Running,
+    WaitingForApproval,
     Cancelling,
     Completed,
     Failed,
@@ -289,6 +404,7 @@ impl RunState {
         match value {
             "queued" => Ok(Self::Queued),
             "running" => Ok(Self::Running),
+            "waiting_for_approval" => Ok(Self::WaitingForApproval),
             "cancelling" => Ok(Self::Cancelling),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
@@ -301,6 +417,7 @@ impl RunState {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::WaitingForApproval => "waiting_for_approval",
             Self::Cancelling => "cancelling",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -314,8 +431,9 @@ impl RunState {
             (Self::Queued, Self::Running | Self::Cancelled)
                 | (
                     Self::Running,
-                    Self::Completed | Self::Failed | Self::Cancelling
+                    Self::WaitingForApproval | Self::Completed | Self::Failed | Self::Cancelling
                 )
+                | (Self::WaitingForApproval, Self::Running | Self::Cancelling)
                 | (Self::Cancelling, Self::Cancelled)
         )
     }
@@ -327,20 +445,26 @@ pub struct InvalidRunState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCallState {
     Requested,
+    AwaitingApproval,
+    Ready,
     Running,
     Completed,
     Failed,
     Cancelled,
+    Denied,
 }
 
 impl ToolCallState {
     pub fn parse(value: &str) -> Result<Self, InvalidToolCallState> {
         match value {
             "requested" => Ok(Self::Requested),
+            "awaiting_approval" => Ok(Self::AwaitingApproval),
+            "ready" => Ok(Self::Ready),
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "denied" => Ok(Self::Denied),
             _ => Err(InvalidToolCallState),
         }
     }
@@ -348,17 +472,24 @@ impl ToolCallState {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Requested => "requested",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Ready => "ready",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Denied => "denied",
         }
     }
 
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Requested, Self::Running | Self::Cancelled)
+            (
+                Self::Requested,
+                Self::AwaitingApproval | Self::Ready | Self::Denied
+            ) | (Self::AwaitingApproval, Self::Ready | Self::Denied)
+                | (Self::Ready, Self::Running | Self::Cancelled)
                 | (
                     Self::Running,
                     Self::Completed | Self::Failed | Self::Cancelled
@@ -400,20 +531,51 @@ pub struct InvalidToolOutputStream;
 pub struct Run {
     run_id: RunId,
     session_id: SessionId,
+    approval_policy: Option<ApprovalPolicy>,
+    requested_scope: Option<WorkspacePathScope>,
     state: RunState,
 }
 
 impl Run {
-    pub fn new(run_id: RunId, session_id: SessionId) -> Self {
-        Self::from_persisted(run_id, session_id, RunState::Queued)
-    }
-
-    pub fn from_persisted(run_id: RunId, session_id: SessionId, state: RunState) -> Self {
+    pub fn new(
+        run_id: RunId,
+        session_id: SessionId,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+    ) -> Self {
         Self {
             run_id,
             session_id,
-            state,
+            approval_policy: Some(approval_policy),
+            requested_scope: Some(requested_scope),
+            state: RunState::Queued,
         }
+    }
+
+    pub fn from_persisted(
+        run_id: RunId,
+        session_id: SessionId,
+        state: RunState,
+        approval_policy: Option<ApprovalPolicy>,
+        requested_scope: Option<WorkspacePathScope>,
+    ) -> Result<Self, InvalidPersistedRun> {
+        let scoped = approval_policy.is_some() && requested_scope.is_some();
+        let legacy_terminal = approval_policy.is_none()
+            && requested_scope.is_none()
+            && matches!(
+                state,
+                RunState::Completed | RunState::Failed | RunState::Cancelled
+            );
+        if !scoped && !legacy_terminal {
+            return Err(InvalidPersistedRun);
+        }
+        Ok(Self {
+            run_id,
+            session_id,
+            approval_policy,
+            requested_scope,
+            state,
+        })
     }
 
     pub fn run_id(&self) -> &RunId {
@@ -426,6 +588,12 @@ impl Run {
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
+    pub fn approval_policy(&self) -> Option<ApprovalPolicy> {
+        self.approval_policy
+    }
+    pub fn requested_scope(&self) -> Option<&WorkspacePathScope> {
+        self.requested_scope.as_ref()
+    }
     pub fn state(&self) -> RunState {
         self.state
     }
@@ -434,12 +602,138 @@ impl Run {
         if !self.state.can_transition_to(state) {
             return Err(RunError::InvalidTransition);
         }
-        Ok(Self::from_persisted(
-            self.run_id.clone(),
-            self.session_id.clone(),
+        Ok(Self {
+            run_id: self.run_id.clone(),
+            session_id: self.session_id.clone(),
+            approval_policy: self.approval_policy,
+            requested_scope: self.requested_scope.clone(),
             state,
-        ))
+        })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidPersistedRun;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalState {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl ApprovalState {
+    pub fn parse(value: &str) -> Result<Self, InvalidApprovalState> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            _ => Err(InvalidApprovalState),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidApprovalState;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Approval {
+    approval_id: ApprovalId,
+    run_id: RunId,
+    tool_call_id: ToolCallId,
+    scope: WorkspacePathScope,
+    state: ApprovalState,
+}
+
+impl Approval {
+    pub fn new(
+        approval_id: ApprovalId,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        scope: WorkspacePathScope,
+    ) -> Self {
+        Self {
+            approval_id,
+            run_id,
+            tool_call_id,
+            scope,
+            state: ApprovalState::Pending,
+        }
+    }
+
+    pub fn from_persisted(
+        approval_id: ApprovalId,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        scope: WorkspacePathScope,
+        state: ApprovalState,
+    ) -> Result<Self, InvalidPersistedApproval> {
+        Ok(Self {
+            approval_id,
+            run_id,
+            tool_call_id,
+            scope,
+            state,
+        })
+    }
+
+    pub fn approval_id(&self) -> &ApprovalId {
+        &self.approval_id
+    }
+    pub fn id(&self) -> &ApprovalId {
+        self.approval_id()
+    }
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+    pub fn tool_call_id(&self) -> &ToolCallId {
+        &self.tool_call_id
+    }
+    pub fn scope(&self) -> &WorkspacePathScope {
+        &self.scope
+    }
+    pub fn state(&self) -> ApprovalState {
+        self.state
+    }
+
+    pub fn decide(&self, state: ApprovalState) -> Result<Self, RunError> {
+        if self.state != ApprovalState::Pending
+            || !matches!(state, ApprovalState::Approved | ApprovalState::Rejected)
+        {
+            return Err(RunError::InvalidTransition);
+        }
+        Ok(Self {
+            approval_id: self.approval_id.clone(),
+            run_id: self.run_id.clone(),
+            tool_call_id: self.tool_call_id.clone(),
+            scope: self.scope.clone(),
+            state,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidPersistedApproval;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedToolCall {
+    pub tool_call_id: ToolCallId,
+    pub run_id: RunId,
+    pub capability: String,
+    pub requested_scope: Option<WorkspacePathScope>,
+    pub effective_scope: Option<WorkspacePathScope>,
+    pub state: ToolCallState,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -447,6 +741,8 @@ pub struct ToolCall {
     tool_call_id: ToolCallId,
     run_id: RunId,
     capability: String,
+    requested_scope: Option<WorkspacePathScope>,
+    effective_scope: Option<WorkspacePathScope>,
     state: ToolCallState,
     stdout: Option<String>,
     stderr: Option<String>,
@@ -454,11 +750,18 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    pub fn new(tool_call_id: ToolCallId, run_id: RunId, capability: String) -> Self {
+    pub fn new(
+        tool_call_id: ToolCallId,
+        run_id: RunId,
+        capability: String,
+        requested_scope: WorkspacePathScope,
+    ) -> Self {
         Self {
             tool_call_id,
             run_id,
             capability,
+            requested_scope: Some(requested_scope),
+            effective_scope: None,
             state: ToolCallState::Requested,
             stdout: None,
             stderr: None,
@@ -466,56 +769,91 @@ impl ToolCall {
         }
     }
 
-    pub fn from_persisted(
-        tool_call_id: ToolCallId,
-        run_id: RunId,
-        capability: String,
-        state: ToolCallState,
-        stdout: Option<String>,
-        stderr: Option<String>,
-        exit_code: Option<i32>,
-    ) -> Result<Self, InvalidPersistedToolCall> {
-        let valid_result = match state {
-            ToolCallState::Requested | ToolCallState::Running => {
-                stdout.is_none() && stderr.is_none() && exit_code.is_none()
-            }
-            ToolCallState::Completed | ToolCallState::Failed => {
-                stdout.is_some() && stderr.is_some() && terminal_exit_matches(state, exit_code)
-            }
-            ToolCallState::Cancelled => stdout.is_some() && stderr.is_some(),
-        };
-        if !valid_result {
-            return Err(InvalidPersistedToolCall);
-        }
-        Ok(Self::from_parts(
-            tool_call_id,
-            run_id,
-            capability,
-            state,
-            stdout,
-            stderr,
-            exit_code,
-        ))
+    pub fn from_persisted(persisted: PersistedToolCall) -> Result<Self, InvalidPersistedToolCall> {
+        Self::from_persisted_inner(persisted, false)
     }
 
-    fn from_parts(
-        tool_call_id: ToolCallId,
-        run_id: RunId,
-        capability: String,
-        state: ToolCallState,
-        stdout: Option<String>,
-        stderr: Option<String>,
-        exit_code: Option<i32>,
-    ) -> Self {
-        Self {
+    pub fn from_persisted_event(
+        persisted: PersistedToolCall,
+    ) -> Result<Self, InvalidPersistedToolCall> {
+        Self::from_persisted_inner(persisted, true)
+    }
+
+    fn from_persisted_inner(
+        persisted: PersistedToolCall,
+        allow_legacy_in_progress: bool,
+    ) -> Result<Self, InvalidPersistedToolCall> {
+        let PersistedToolCall {
             tool_call_id,
             run_id,
             capability,
+            requested_scope,
+            effective_scope,
             state,
             stdout,
             stderr,
             exit_code,
+        } = persisted;
+        let scoped = requested_scope.is_some();
+        let legacy_unscoped = !scoped && effective_scope.is_none();
+        let scope_relation_valid = effective_scope.as_ref().is_none_or(|effective| {
+            requested_scope.as_ref().is_some_and(|requested| {
+                effective.workspace_root_id() == requested.workspace_root_id()
+                    && scope_is_within(requested, effective)
+            })
+        });
+        let valid_result = match state {
+            ToolCallState::Requested | ToolCallState::AwaitingApproval => {
+                (scoped
+                    || (allow_legacy_in_progress
+                        && legacy_unscoped
+                        && state == ToolCallState::Requested))
+                    && effective_scope.is_none()
+                    && stdout.is_none()
+                    && stderr.is_none()
+                    && exit_code.is_none()
+            }
+            ToolCallState::Ready | ToolCallState::Running => {
+                ((scoped && effective_scope.is_some())
+                    || (allow_legacy_in_progress
+                        && legacy_unscoped
+                        && state == ToolCallState::Running))
+                    && stdout.is_none()
+                    && stderr.is_none()
+                    && exit_code.is_none()
+            }
+            ToolCallState::Completed | ToolCallState::Failed => {
+                ((scoped && effective_scope.is_some()) || legacy_unscoped)
+                    && stdout.is_some()
+                    && stderr.is_some()
+                    && terminal_exit_matches(state, exit_code)
+            }
+            ToolCallState::Cancelled => {
+                ((scoped && effective_scope.is_some()) || legacy_unscoped)
+                    && stdout.is_some() == stderr.is_some()
+            }
+            ToolCallState::Denied => {
+                scoped
+                    && effective_scope.is_none()
+                    && stdout.is_none()
+                    && stderr.is_none()
+                    && exit_code.is_none()
+            }
+        };
+        if !valid_result || !scope_relation_valid {
+            return Err(InvalidPersistedToolCall);
         }
+        Ok(Self {
+            tool_call_id,
+            run_id,
+            capability,
+            requested_scope,
+            effective_scope,
+            state,
+            stdout,
+            stderr,
+            exit_code,
+        })
     }
 
     pub fn tool_call_id(&self) -> &ToolCallId {
@@ -531,6 +869,12 @@ impl ToolCall {
     pub fn capability(&self) -> &str {
         &self.capability
     }
+    pub fn requested_scope(&self) -> Option<&WorkspacePathScope> {
+        self.requested_scope.as_ref()
+    }
+    pub fn effective_scope(&self) -> Option<&WorkspacePathScope> {
+        self.effective_scope.as_ref()
+    }
     pub fn state(&self) -> ToolCallState {
         self.state
     }
@@ -545,25 +889,46 @@ impl ToolCall {
     }
 
     pub fn transition(&self, state: ToolCallState) -> Result<Self, RunError> {
-        if !matches!(
-            (self.state, state),
-            (ToolCallState::Requested, ToolCallState::Running)
-                | (
-                    ToolCallState::Requested | ToolCallState::Running,
-                    ToolCallState::Cancelled
-                )
-        ) {
+        if !self.state.can_transition_to(state) {
             return Err(RunError::InvalidTransition);
         }
-        Ok(Self::from_parts(
-            self.tool_call_id.clone(),
-            self.run_id.clone(),
-            self.capability.clone(),
+        let effective_scope = match state {
+            ToolCallState::Ready | ToolCallState::Running => Some(
+                self.effective_scope
+                    .clone()
+                    .ok_or(RunError::InvalidTransition)?,
+            ),
+            ToolCallState::AwaitingApproval | ToolCallState::Denied => None,
+            _ => self.effective_scope.clone(),
+        };
+        Ok(Self {
+            effective_scope,
             state,
-            self.stdout.clone(),
-            self.stderr.clone(),
-            self.exit_code,
-        ))
+            ..self.clone()
+        })
+    }
+
+    pub fn with_effective_scope(
+        &self,
+        effective_scope: WorkspacePathScope,
+    ) -> Result<Self, RunError> {
+        if !matches!(
+            self.state,
+            ToolCallState::Requested | ToolCallState::AwaitingApproval
+        ) || self.requested_scope.as_ref().is_none_or(|requested_scope| {
+            effective_scope.workspace_root_id() != requested_scope.workspace_root_id()
+                || !scope_is_within(requested_scope, &effective_scope)
+        }) {
+            return Err(RunError::InvalidTransition);
+        }
+        Ok(Self {
+            effective_scope: Some(effective_scope),
+            state: ToolCallState::Ready,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            ..self.clone()
+        })
     }
 
     pub fn with_result(&self, result: &ToolCallResult) -> Result<Self, RunError> {
@@ -571,16 +936,23 @@ impl ToolCall {
         if !self.state.can_transition_to(state) {
             return Err(RunError::InvalidTransition);
         }
-        Ok(Self::from_parts(
-            self.tool_call_id.clone(),
-            self.run_id.clone(),
-            self.capability.clone(),
+        Ok(Self {
             state,
-            Some(result.stdout.clone()),
-            Some(result.stderr.clone()),
-            result.exit_code,
-        ))
+            stdout: Some(result.stdout.clone()),
+            stderr: Some(result.stderr.clone()),
+            exit_code: result.exit_code,
+            ..self.clone()
+        })
     }
+}
+
+fn scope_is_within(requested: &WorkspacePathScope, effective: &WorkspacePathScope) -> bool {
+    effective.relative_directory() == requested.relative_directory()
+        || (requested.relative_directory() == "." && effective.relative_directory() != "")
+        || effective
+            .relative_directory()
+            .strip_prefix(requested.relative_directory())
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -631,7 +1003,12 @@ fn terminal_exit_matches(state: ToolCallState, exit_code: Option<i32>) -> bool {
     match state {
         ToolCallState::Completed => exit_code == Some(0),
         ToolCallState::Failed => exit_code != Some(0),
-        ToolCallState::Requested | ToolCallState::Running | ToolCallState::Cancelled => false,
+        ToolCallState::Requested
+        | ToolCallState::AwaitingApproval
+        | ToolCallState::Ready
+        | ToolCallState::Running
+        | ToolCallState::Cancelled
+        | ToolCallState::Denied => false,
     }
 }
 
@@ -639,11 +1016,24 @@ fn terminal_exit_matches(state: ToolCallState, exit_code: Option<i32>) -> bool {
 pub struct RunSnapshot {
     run: Run,
     tool_calls: Vec<ToolCall>,
+    approvals: Vec<Approval>,
 }
 
 impl RunSnapshot {
     pub fn new(run: Run, tool_calls: Vec<ToolCall>) -> Self {
-        Self { run, tool_calls }
+        Self {
+            run,
+            tool_calls,
+            approvals: Vec::new(),
+        }
+    }
+
+    pub fn with_approvals(run: Run, tool_calls: Vec<ToolCall>, approvals: Vec<Approval>) -> Self {
+        Self {
+            run,
+            tool_calls,
+            approvals,
+        }
     }
     pub fn run(&self) -> &Run {
         &self.run
@@ -656,6 +1046,19 @@ impl RunSnapshot {
             .iter()
             .find(|tool_call| tool_call.tool_call_id() == id)
     }
+    pub fn approvals(&self) -> &[Approval] {
+        &self.approvals
+    }
+    pub fn approval(&self, id: &ApprovalId) -> Option<&Approval> {
+        self.approvals
+            .iter()
+            .find(|approval| approval.approval_id() == id)
+    }
+    pub fn approval_for_tool_call(&self, id: &ToolCallId) -> Option<&Approval> {
+        self.approvals
+            .iter()
+            .find(|approval| approval.tool_call_id() == id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -664,6 +1067,42 @@ pub struct SubprocessOutput {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub spawn_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubprocessRequest {
+    workspace_root_path: String,
+    workspace_root_filesystem_identity: FilesystemIdentity,
+    scope: WorkspacePathScope,
+}
+
+impl SubprocessRequest {
+    pub fn new(
+        workspace_root_path: String,
+        workspace_root_filesystem_identity: FilesystemIdentity,
+        scope: WorkspacePathScope,
+    ) -> Result<Self, RunError> {
+        if workspace_root_path.is_empty() {
+            return Err(RunError::PathOutsideWorkspaceRoot);
+        }
+        Ok(Self {
+            workspace_root_path,
+            workspace_root_filesystem_identity,
+            scope,
+        })
+    }
+
+    pub fn workspace_root_path(&self) -> &str {
+        &self.workspace_root_path
+    }
+
+    pub fn workspace_root_filesystem_identity(&self) -> &FilesystemIdentity {
+        &self.workspace_root_filesystem_identity
+    }
+
+    pub fn scope(&self) -> &WorkspacePathScope {
+        &self.scope
+    }
 }
 
 impl SubprocessOutput {
@@ -711,7 +1150,11 @@ pub enum SubprocessExecution {
 }
 
 pub trait SubprocessExecutor: Send + Sync {
-    fn execute<C>(&self, cancellation: C) -> impl Future<Output = SubprocessExecution> + Send
+    fn execute<C>(
+        &self,
+        request: SubprocessRequest,
+        cancellation: C,
+    ) -> impl Future<Output = SubprocessExecution> + Send
     where
         C: Future<Output = ()> + Send;
 }
@@ -727,6 +1170,8 @@ pub enum SessionEventPayload {
     RunCreated {
         run_id: RunId,
         state: RunState,
+        approval_policy: Option<ApprovalPolicy>,
+        requested_scope: Option<WorkspacePathScope>,
     },
     RunStateChanged {
         run_id: RunId,
@@ -736,6 +1181,15 @@ pub enum SessionEventPayload {
         run_id: RunId,
     },
     ToolCallRequested {
+        tool_call: ToolCall,
+    },
+    ApprovalRequested {
+        approval: Approval,
+    },
+    ApprovalDecided {
+        approval: Approval,
+    },
+    ToolCallDenied {
         tool_call: ToolCall,
     },
     ToolCallStateChanged {
@@ -784,6 +1238,8 @@ impl SessionEvent {
             payload: SessionEventPayload::RunCreated {
                 run_id: run.run_id.clone(),
                 state: run.state,
+                approval_policy: run.approval_policy,
+                requested_scope: run.requested_scope.clone(),
             },
         }
     }
@@ -830,6 +1286,34 @@ impl SessionEvent {
             event_id,
             session_id,
             payload: SessionEventPayload::ToolCallStateChanged { tool_call },
+        }
+    }
+
+    pub fn approval_requested(
+        event_id: EventId,
+        session_id: SessionId,
+        approval: Approval,
+    ) -> Self {
+        Self {
+            event_id,
+            session_id,
+            payload: SessionEventPayload::ApprovalRequested { approval },
+        }
+    }
+
+    pub fn approval_decided(event_id: EventId, session_id: SessionId, approval: Approval) -> Self {
+        Self {
+            event_id,
+            session_id,
+            payload: SessionEventPayload::ApprovalDecided { approval },
+        }
+    }
+
+    pub fn tool_call_denied(event_id: EventId, session_id: SessionId, tool_call: ToolCall) -> Self {
+        Self {
+            event_id,
+            session_id,
+            payload: SessionEventPayload::ToolCallDenied { tool_call },
         }
     }
 
@@ -999,11 +1483,16 @@ pub enum SessionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunError {
     SessionNotFound,
+    WorkspaceRootNotFound,
+    PathOutsideWorkspaceRoot,
     RunNotFound,
     ActiveRootRunExists,
     IdempotencyKeyRequired,
     InvalidTransition,
     CancellationFailed,
+    ApprovalNotFound,
+    ApprovalAlreadyDecided,
+    IdempotencyConflict,
     RunStoreUnavailable,
 }
 
@@ -1012,12 +1501,23 @@ pub enum RunStoreError {
     ActiveRootRunExists,
     IdempotencyKeyRequired,
     InvalidTransition,
+    WorkspaceRootNotFound,
+    PathOutsideWorkspaceRoot,
+    ApprovalNotFound,
+    ApprovalAlreadyDecided,
+    IdempotencyConflict,
     Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartRunDisposition {
     Created,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecisionDisposition {
+    Applied,
     Duplicate,
 }
 
@@ -1051,6 +1551,27 @@ pub struct RunMutation<T> {
 impl<T> RunMutation<T> {
     pub fn new(value: T, events: Vec<StoredSessionEvent>) -> Self {
         Self { value, events }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalDecisionMutation {
+    pub value: RunSnapshot,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: ApprovalDecisionDisposition,
+}
+
+impl ApprovalDecisionMutation {
+    pub fn new(
+        value: RunSnapshot,
+        events: Vec<StoredSessionEvent>,
+        disposition: ApprovalDecisionDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
     }
 }
 
@@ -1092,10 +1613,11 @@ pub trait SessionIdGenerator: Send + Sync {
 pub trait RunIdGenerator: Send + Sync {
     fn run_id(&self) -> RunId;
     fn tool_call_id(&self) -> ToolCallId;
+    fn approval_id(&self) -> ApprovalId;
     fn event_id(&self) -> EventId;
 }
 
-pub trait RunStore: SessionStore {
+pub trait RunStore: SessionStore + WorkspaceStore {
     fn start_root_run(
         &self,
         run: &Run,
@@ -1110,12 +1632,30 @@ pub trait RunStore: SessionStore {
         &self,
         id: &ToolCallId,
     ) -> impl Future<Output = Result<Option<(Run, ToolCall)>, RunStoreError>> + Send;
+    fn get_approval(
+        &self,
+        id: &ApprovalId,
+    ) -> impl Future<Output = Result<Option<(Run, Approval)>, RunStoreError>> + Send;
+    fn get_approval_decision(
+        &self,
+        approval_id: &ApprovalId,
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<Option<(ApprovalState, RunSnapshot)>, RunStoreError>> + Send;
     fn begin_execution(
         &self,
         run: &Run,
         tool_call: &ToolCall,
+        approval: Option<&Approval>,
         events: &[SessionEvent],
     ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
+    fn decide_approval(
+        &self,
+        run: &Run,
+        tool_call: &ToolCall,
+        approval: &Approval,
+        idempotency_key: &str,
+        events: &[SessionEvent],
+    ) -> impl Future<Output = Result<ApprovalDecisionMutation, RunStoreError>> + Send;
     fn begin_tool_call(
         &self,
         tool_call_id: &ToolCallId,
@@ -1127,9 +1667,17 @@ pub trait RunStore: SessionStore {
         tool_call: &ToolCall,
         events: &[SessionEvent],
     ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
+    fn finish_denied_execution(
+        &self,
+        run: &Run,
+        tool_call: &ToolCall,
+        events: &[SessionEvent],
+    ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
     fn request_cancellation(
         &self,
         run: &Run,
+        tool_call: Option<&ToolCall>,
+        approval: Option<&Approval>,
         events: &[SessionEvent],
     ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
     fn finish_cancellation(
@@ -1160,19 +1708,29 @@ where
         &self,
         session_id: SessionId,
         idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
     ) -> Result<StartRunMutation, RunError> {
         if idempotency_key.is_empty() {
             return Err(RunError::IdempotencyKeyRequired);
         }
         let run_id = self.ids.run_id();
-        self.start_root_run_with_id(session_id, idempotency_key, run_id)
-            .await
+        self.start_root_run_with_id(
+            session_id,
+            idempotency_key,
+            approval_policy,
+            requested_scope,
+            run_id,
+        )
+        .await
     }
 
     async fn start_root_run_with_id(
         &self,
         session_id: SessionId,
         idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
         run_id: RunId,
     ) -> Result<StartRunMutation, RunError> {
         let session = self
@@ -1180,10 +1738,26 @@ where
             .get_session(&session_id)
             .await
             .map_err(|_| RunError::RunStoreUnavailable)?;
-        if session.is_none() {
+        let session = session.ok_or(RunError::SessionNotFound)?;
+        let workspace = self
+            .store
+            .get_workspace(session.workspace_id())
+            .await
+            .map_err(|_| RunError::RunStoreUnavailable)?
+            .ok_or(RunError::WorkspaceRootNotFound)?;
+        if workspace
+            .root(requested_scope.workspace_root_id())
+            .is_none()
+        {
+            return Err(RunError::WorkspaceRootNotFound);
+        }
+        if requested_scope.relative_directory().is_empty() {
+            return Err(RunError::PathOutsideWorkspaceRoot);
+        }
+        if session.id() != &session_id {
             return Err(RunError::SessionNotFound);
         }
-        let run = Run::new(run_id, session_id);
+        let run = Run::new(run_id, session_id, approval_policy, requested_scope);
         let event = SessionEvent::run_created(self.ids.event_id(), &run);
         self.store
             .start_root_run(&run, &event, &idempotency_key)
@@ -1196,14 +1770,14 @@ where
         run_id: RunId,
     ) -> Result<RunMutation<RunSnapshot>, RunError> {
         let snapshot = self.get_run(run_id).await?;
-        let (run, events) = match snapshot.run.state() {
+        let (run, tool_call, approval, events) = match snapshot.run.state() {
             RunState::Queued => {
                 let run = snapshot.run.transition(RunState::Cancelled)?;
                 let events = vec![
                     SessionEvent::run_cancellation_requested(self.ids.event_id(), &snapshot.run),
                     SessionEvent::run_state_changed(self.ids.event_id(), &run),
                 ];
-                (run, events)
+                (run, None, None, events)
             }
             RunState::Running => {
                 let run = snapshot.run.transition(RunState::Cancelling)?;
@@ -1211,14 +1785,44 @@ where
                     SessionEvent::run_cancellation_requested(self.ids.event_id(), &snapshot.run),
                     SessionEvent::run_state_changed(self.ids.event_id(), &run),
                 ];
-                (run, events)
+                (run, None, None, events)
+            }
+            RunState::WaitingForApproval => {
+                let approval = snapshot
+                    .approvals()
+                    .iter()
+                    .find(|approval| approval.state() == ApprovalState::Pending)
+                    .ok_or(RunError::InvalidTransition)?
+                    .decide(ApprovalState::Rejected)?;
+                let tool_call = snapshot
+                    .tool_call(approval.tool_call_id())
+                    .ok_or(RunError::RunNotFound)?
+                    .transition(ToolCallState::Denied)?;
+                let cancelling = snapshot.run.transition(RunState::Cancelling)?;
+                let run = cancelling.transition(RunState::Cancelled)?;
+                let events = vec![
+                    SessionEvent::run_cancellation_requested(self.ids.event_id(), &snapshot.run),
+                    SessionEvent::run_state_changed(self.ids.event_id(), &cancelling),
+                    SessionEvent::approval_decided(
+                        self.ids.event_id(),
+                        snapshot.run.session_id.clone(),
+                        approval.clone(),
+                    ),
+                    SessionEvent::tool_call_denied(
+                        self.ids.event_id(),
+                        snapshot.run.session_id.clone(),
+                        tool_call.clone(),
+                    ),
+                    SessionEvent::run_state_changed(self.ids.event_id(), &run),
+                ];
+                (run, Some(tool_call), Some(approval), events)
             }
             RunState::Cancelling | RunState::Completed | RunState::Failed | RunState::Cancelled => {
-                (snapshot.run.clone(), Vec::new())
+                (snapshot.run.clone(), None, None, Vec::new())
             }
         };
         self.store
-            .request_cancellation(&run, &events)
+            .request_cancellation(&run, tool_call.as_ref(), approval.as_ref(), &events)
             .await
             .map_err(map_run_store_error)
     }
@@ -1236,25 +1840,95 @@ where
         run_id: RunId,
     ) -> Result<RunMutation<RunSnapshot>, RunError> {
         let snapshot = self.get_run(run_id.clone()).await?;
-        let run = snapshot.run.transition(RunState::Running)?;
         if !snapshot.tool_calls.is_empty() {
             return Err(RunError::InvalidTransition);
         }
-        let tool_call = ToolCall::new(
+        let requested_scope = snapshot
+            .run
+            .requested_scope()
+            .cloned()
+            .ok_or(RunError::InvalidTransition)?;
+        let approval_policy = snapshot
+            .run
+            .approval_policy()
+            .ok_or(RunError::InvalidTransition)?;
+        let requested_tool_call = ToolCall::new(
             self.ids.tool_call_id(),
             run_id,
             DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+            requested_scope.clone(),
         );
-        let events = vec![
-            SessionEvent::run_state_changed(self.ids.event_id(), &run),
-            SessionEvent::tool_call_requested(
-                self.ids.event_id(),
-                run.session_id.clone(),
-                tool_call.clone(),
-            ),
-        ];
+        let (run, tool_call, approval, events) = match approval_policy {
+            ApprovalPolicy::Ask => {
+                let running = snapshot.run.transition(RunState::Running)?;
+                let run = running.transition(RunState::WaitingForApproval)?;
+                let tool_call = requested_tool_call.transition(ToolCallState::AwaitingApproval)?;
+                let approval = Approval::new(
+                    self.ids.approval_id(),
+                    run.run_id().clone(),
+                    tool_call.tool_call_id().clone(),
+                    requested_scope.clone(),
+                );
+                let events = vec![
+                    SessionEvent::run_state_changed(self.ids.event_id(), &running),
+                    SessionEvent::tool_call_requested(
+                        self.ids.event_id(),
+                        run.session_id.clone(),
+                        requested_tool_call.clone(),
+                    ),
+                    SessionEvent::tool_call_state_changed(
+                        self.ids.event_id(),
+                        run.session_id.clone(),
+                        tool_call.clone(),
+                    ),
+                    SessionEvent::approval_requested(
+                        self.ids.event_id(),
+                        run.session_id.clone(),
+                        approval.clone(),
+                    ),
+                    SessionEvent::run_state_changed(self.ids.event_id(), &run),
+                ];
+                (run, tool_call, Some(approval), events)
+            }
+            ApprovalPolicy::FullAccess => {
+                let run = snapshot.run.transition(RunState::Running)?;
+                let tool_call = requested_tool_call.with_effective_scope(requested_scope)?;
+                let events = vec![
+                    SessionEvent::run_state_changed(self.ids.event_id(), &run),
+                    SessionEvent::tool_call_requested(
+                        self.ids.event_id(),
+                        run.session_id.clone(),
+                        requested_tool_call.clone(),
+                    ),
+                    SessionEvent::tool_call_state_changed(
+                        self.ids.event_id(),
+                        run.session_id.clone(),
+                        tool_call.clone(),
+                    ),
+                ];
+                (run, tool_call, None, events)
+            }
+            ApprovalPolicy::ReadOnly => {
+                let run = snapshot.run.transition(RunState::Running)?;
+                let tool_call = requested_tool_call.transition(ToolCallState::Denied)?;
+                let events = vec![
+                    SessionEvent::run_state_changed(self.ids.event_id(), &run),
+                    SessionEvent::tool_call_requested(
+                        self.ids.event_id(),
+                        run.session_id.clone(),
+                        requested_tool_call.clone(),
+                    ),
+                    SessionEvent::tool_call_denied(
+                        self.ids.event_id(),
+                        run.session_id.clone(),
+                        tool_call.clone(),
+                    ),
+                ];
+                (run, tool_call, None, events)
+            }
+        };
         self.store
-            .begin_execution(&run, &tool_call, &events)
+            .begin_execution(&run, &tool_call, approval.as_ref(), &events)
             .await
             .map_err(map_run_store_error)
     }
@@ -1275,6 +1949,111 @@ where
         );
         self.store
             .begin_tool_call(&tool_call_id, std::slice::from_ref(&event))
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn decide_approval(
+        &self,
+        approval_id: ApprovalId,
+        decision: ApprovalState,
+        idempotency_key: String,
+    ) -> Result<ApprovalDecisionMutation, RunError> {
+        if idempotency_key.is_empty() {
+            return Err(RunError::IdempotencyKeyRequired);
+        }
+        if decision == ApprovalState::Pending {
+            return Err(RunError::InvalidTransition);
+        }
+        if let Some((stored_decision, snapshot)) = self
+            .store
+            .get_approval_decision(&approval_id, &idempotency_key)
+            .await
+            .map_err(map_run_store_error)?
+        {
+            if stored_decision != decision {
+                return Err(RunError::IdempotencyConflict);
+            }
+            return Ok(ApprovalDecisionMutation::new(
+                snapshot,
+                Vec::new(),
+                ApprovalDecisionDisposition::Duplicate,
+            ));
+        }
+        let (run, _) = self
+            .store
+            .get_approval(&approval_id)
+            .await
+            .map_err(map_run_store_error)?
+            .ok_or(RunError::ApprovalNotFound)?;
+        let snapshot = self.get_run(run.run_id().clone()).await?;
+        let current_approval = snapshot
+            .approval(&approval_id)
+            .ok_or(RunError::ApprovalNotFound)?;
+        if current_approval.state() != ApprovalState::Pending {
+            return Err(RunError::ApprovalAlreadyDecided);
+        }
+        let current_tool_call = snapshot
+            .tool_call(current_approval.tool_call_id())
+            .ok_or(RunError::RunNotFound)?;
+        let approval = current_approval.decide(decision)?;
+        let (tool_call, run) = match decision {
+            ApprovalState::Approved => (
+                current_tool_call.with_effective_scope(approval.scope().clone())?,
+                snapshot.run.transition(RunState::Running)?,
+            ),
+            ApprovalState::Rejected => (
+                current_tool_call.transition(ToolCallState::Denied)?,
+                snapshot.run.transition(RunState::Running)?,
+            ),
+            ApprovalState::Pending => return Err(RunError::InvalidTransition),
+        };
+        let events = vec![
+            SessionEvent::approval_decided(
+                self.ids.event_id(),
+                run.session_id().clone(),
+                approval.clone(),
+            ),
+            match decision {
+                ApprovalState::Approved => SessionEvent::tool_call_state_changed(
+                    self.ids.event_id(),
+                    run.session_id().clone(),
+                    tool_call.clone(),
+                ),
+                ApprovalState::Rejected => SessionEvent::tool_call_denied(
+                    self.ids.event_id(),
+                    run.session_id().clone(),
+                    tool_call.clone(),
+                ),
+                ApprovalState::Pending => unreachable!(),
+            },
+            SessionEvent::run_state_changed(self.ids.event_id(), &run),
+        ];
+        self.store
+            .decide_approval(&run, &tool_call, &approval, &idempotency_key, &events)
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn finish_denied_execution(
+        &self,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+    ) -> Result<RunMutation<RunSnapshot>, RunError> {
+        let snapshot = self.get_run(run_id.clone()).await?;
+        if snapshot.tool_calls().len() != 1 || snapshot.run().state() != RunState::Running {
+            return Err(RunError::InvalidTransition);
+        }
+        let tool_call = snapshot
+            .tool_call(&tool_call_id)
+            .ok_or(RunError::RunNotFound)?;
+        if tool_call.run_id() != &run_id || tool_call.state() != ToolCallState::Denied {
+            return Err(RunError::InvalidTransition);
+        }
+        let run = snapshot.run().transition(RunState::Failed)?;
+        let events = vec![SessionEvent::run_state_changed(self.ids.event_id(), &run)];
+        self.store
+            .finish_denied_execution(&run, tool_call, &events)
             .await
             .map_err(map_run_store_error)
     }
@@ -1358,20 +2137,18 @@ where
         if tool_call.run_id != run_id
             || !matches!(
                 tool_call.state(),
-                ToolCallState::Requested | ToolCallState::Running
+                ToolCallState::Requested | ToolCallState::Ready | ToolCallState::Running
             )
         {
             return Err(RunError::InvalidTransition);
         }
-        let cancelled_tool_call = ToolCall::from_parts(
-            tool_call.tool_call_id.clone(),
-            tool_call.run_id.clone(),
-            tool_call.capability.clone(),
-            ToolCallState::Cancelled,
-            Some(output.stdout.clone()),
-            Some(output.stderr.clone()),
-            output.exit_code,
-        );
+        let cancelled_tool_call = ToolCall {
+            state: ToolCallState::Cancelled,
+            stdout: Some(output.stdout.clone()),
+            stderr: Some(output.stderr.clone()),
+            exit_code: output.exit_code,
+            ..tool_call.clone()
+        };
         let cancelled_run = snapshot.run.transition(RunState::Cancelled)?;
         let mut events = Vec::new();
         if !output.stdout.is_empty() {
@@ -1428,6 +2205,11 @@ fn map_run_store_error(error: RunStoreError) -> RunError {
         RunStoreError::ActiveRootRunExists => RunError::ActiveRootRunExists,
         RunStoreError::IdempotencyKeyRequired => RunError::IdempotencyKeyRequired,
         RunStoreError::InvalidTransition => RunError::InvalidTransition,
+        RunStoreError::WorkspaceRootNotFound => RunError::WorkspaceRootNotFound,
+        RunStoreError::PathOutsideWorkspaceRoot => RunError::PathOutsideWorkspaceRoot,
+        RunStoreError::ApprovalNotFound => RunError::ApprovalNotFound,
+        RunStoreError::ApprovalAlreadyDecided => RunError::ApprovalAlreadyDecided,
+        RunStoreError::IdempotencyConflict => RunError::IdempotencyConflict,
         RunStoreError::Unavailable => RunError::RunStoreUnavailable,
     }
 }
@@ -1612,9 +2394,24 @@ pub struct WorkspaceRootInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesystemIdentity(String);
+
+impl FilesystemIdentity {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.is_empty() && value.trim() == value).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredWorkspaceRoot {
     pub canonical_path: String,
     pub git_common_directory_path: String,
+    pub filesystem_identity: FilesystemIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1624,6 +2421,7 @@ pub struct WorkspaceRoot {
     display_path: String,
     canonical_path: String,
     git_common_directory_path: String,
+    filesystem_identity: FilesystemIdentity,
     position: usize,
     state: WorkspaceRootState,
 }
@@ -1633,8 +2431,7 @@ impl WorkspaceRoot {
         id: WorkspaceRootId,
         name: String,
         display_path: String,
-        canonical_path: String,
-        git_common_directory_path: String,
+        discovered: DiscoveredWorkspaceRoot,
         position: usize,
         state: WorkspaceRootState,
     ) -> Result<Self, WorkspaceError> {
@@ -1644,15 +2441,16 @@ impl WorkspaceRoot {
         if display_path.is_empty() {
             return Err(WorkspaceError::WorkspaceRootMissing);
         }
-        if canonical_path.is_empty() || git_common_directory_path.is_empty() {
+        if discovered.canonical_path.is_empty() || discovered.git_common_directory_path.is_empty() {
             return Err(WorkspaceError::WorkspaceRootNotGitRepository);
         }
         Ok(Self {
             id,
             name,
             display_path,
-            canonical_path,
-            git_common_directory_path,
+            canonical_path: discovered.canonical_path,
+            git_common_directory_path: discovered.git_common_directory_path,
+            filesystem_identity: discovered.filesystem_identity,
             position,
             state,
         })
@@ -1676,6 +2474,10 @@ impl WorkspaceRoot {
 
     pub fn git_common_directory_path(&self) -> &str {
         &self.git_common_directory_path
+    }
+
+    pub fn filesystem_identity(&self) -> &FilesystemIdentity {
+        &self.filesystem_identity
     }
 
     pub fn position(&self) -> usize {
@@ -1744,6 +2546,10 @@ impl Workspace {
 
     pub fn roots(&self) -> &[WorkspaceRoot] {
         &self.roots
+    }
+
+    pub fn root(&self, id: &WorkspaceRootId) -> Option<&WorkspaceRoot> {
+        self.roots.iter().find(|root| root.id() == id)
     }
 }
 
@@ -1870,8 +2676,7 @@ where
                 self.ids.workspace_root_id(),
                 input.name,
                 input.path,
-                discovered.canonical_path,
-                discovered.git_common_directory_path,
+                discovered,
                 position,
                 WorkspaceRootState::Available,
             )?);
@@ -1981,6 +2786,8 @@ mod tests {
         DiscoveredWorkspaceRoot {
             canonical_path: path.to_owned(),
             git_common_directory_path: format!("{path}/.git"),
+            filesystem_identity: FilesystemIdentity::new(format!("test:{path}"))
+                .expect("test identity"),
         }
     }
 
@@ -2173,8 +2980,7 @@ mod tests {
                 WorkspaceRootId::parse(id).unwrap(),
                 name.to_owned(),
                 path.to_owned(),
-                path.to_owned(),
-                format!("{path}/.git"),
+                discovered(path),
                 position,
                 WorkspaceRootState::Available,
             )
@@ -2277,8 +3083,12 @@ mod tests {
                             WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
                             "main".to_owned(),
                             "/main".to_owned(),
-                            "/main".to_owned(),
-                            "/main/.git".to_owned(),
+                            DiscoveredWorkspaceRoot {
+                                canonical_path: "/main".to_owned(),
+                                git_common_directory_path: "/main/.git".to_owned(),
+                                filesystem_identity: FilesystemIdentity::new("test:/main")
+                                    .expect("test identity"),
+                            },
                             0,
                             WorkspaceRootState::Available,
                         )
@@ -2457,6 +3267,105 @@ mod run_tests {
         SessionId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
     }
 
+    fn scope() -> WorkspacePathScope {
+        WorkspacePathScope::new(
+            WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            ".",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn workspace_path_scopes_are_relative_utf8_paths() {
+        let root = WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert_eq!(
+            WorkspacePathScope::new(root.clone(), "./src/./core")
+                .unwrap()
+                .relative_directory(),
+            "src/core"
+        );
+        assert_eq!(
+            WorkspacePathScope::new(root.clone(), "../outside"),
+            Err(WorkspacePathScopeError::ParentTraversal)
+        );
+        assert_eq!(
+            WorkspacePathScope::new(root.clone(), "/outside"),
+            Err(WorkspacePathScopeError::Absolute)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            assert_eq!(
+                WorkspacePathScope::new(root, std::ffi::OsString::from_vec(vec![0xff])),
+                Err(WorkspacePathScopeError::InvalidComponent)
+            );
+        }
+    }
+
+    #[test]
+    fn only_terminal_legacy_records_can_be_unscoped() {
+        let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert_eq!(
+            Run::from_persisted(run_id.clone(), session_id(), RunState::Queued, None, None,),
+            Err(InvalidPersistedRun)
+        );
+        let legacy_run = Run::from_persisted(
+            run_id.clone(),
+            session_id(),
+            RunState::Completed,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(legacy_run.approval_policy(), None);
+        assert_eq!(legacy_run.requested_scope(), None);
+
+        let tool_call_id = ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        assert_eq!(
+            ToolCall::from_persisted(PersistedToolCall {
+                tool_call_id: tool_call_id.clone(),
+                run_id: run_id.clone(),
+                capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+                requested_scope: None,
+                effective_scope: None,
+                state: ToolCallState::Requested,
+                stdout: None,
+                stderr: None,
+                exit_code: None,
+            }),
+            Err(InvalidPersistedToolCall)
+        );
+        assert!(
+            ToolCall::from_persisted_event(PersistedToolCall {
+                tool_call_id: tool_call_id.clone(),
+                run_id: run_id.clone(),
+                capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+                requested_scope: None,
+                effective_scope: None,
+                state: ToolCallState::Requested,
+                stdout: None,
+                stderr: None,
+                exit_code: None,
+            })
+            .is_ok()
+        );
+        let legacy_tool = ToolCall::from_persisted(PersistedToolCall {
+            tool_call_id,
+            run_id,
+            capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+            requested_scope: None,
+            effective_scope: None,
+            state: ToolCallState::Completed,
+            stdout: Some(String::new()),
+            stderr: Some(String::new()),
+            exit_code: Some(0),
+        })
+        .unwrap();
+        assert_eq!(legacy_tool.requested_scope(), None);
+        assert_eq!(legacy_tool.effective_scope(), None);
+    }
+
     #[test]
     fn run_and_tool_call_ids_are_canonical() {
         assert_eq!(
@@ -2476,6 +3385,7 @@ mod run_tests {
         for (value, state) in [
             ("queued", RunState::Queued),
             ("running", RunState::Running),
+            ("waiting_for_approval", RunState::WaitingForApproval),
             ("cancelling", RunState::Cancelling),
             ("completed", RunState::Completed),
             ("failed", RunState::Failed),
@@ -2487,6 +3397,8 @@ mod run_tests {
         let run = Run::new(
             RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             session_id(),
+            ApprovalPolicy::Ask,
+            scope(),
         );
         assert_eq!(
             run.transition(RunState::Running).unwrap().state(),
@@ -2520,13 +3432,16 @@ mod run_tests {
             ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             run.run_id().clone(),
             DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+            scope(),
         );
         assert_eq!(
-            tool.transition(ToolCallState::Running).unwrap().state(),
-            ToolCallState::Running
+            tool.transition(ToolCallState::AwaitingApproval)
+                .unwrap()
+                .state(),
+            ToolCallState::AwaitingApproval
         );
         assert_eq!(
-            tool.transition(ToolCallState::Running)
+            tool.transition(ToolCallState::AwaitingApproval)
                 .unwrap()
                 .transition(ToolCallState::Completed),
             Err(RunError::InvalidTransition)
@@ -2536,23 +3451,18 @@ mod run_tests {
             Err(RunError::InvalidTransition)
         );
         assert_eq!(
-            tool.transition(ToolCallState::Cancelled).unwrap().state(),
-            ToolCallState::Cancelled
-        );
-        assert_eq!(
-            tool.transition(ToolCallState::Running)
-                .unwrap()
-                .transition(ToolCallState::Cancelled)
-                .unwrap()
-                .state(),
-            ToolCallState::Cancelled
+            tool.transition(ToolCallState::Denied).unwrap().state(),
+            ToolCallState::Denied
         );
         for (value, state) in [
             ("requested", ToolCallState::Requested),
+            ("awaiting_approval", ToolCallState::AwaitingApproval),
+            ("ready", ToolCallState::Ready),
             ("running", ToolCallState::Running),
             ("completed", ToolCallState::Completed),
             ("failed", ToolCallState::Failed),
             ("cancelled", ToolCallState::Cancelled),
+            ("denied", ToolCallState::Denied),
         ] {
             assert_eq!(ToolCallState::parse(value).unwrap(), state);
             assert_eq!(state.as_str(), value);
@@ -2561,6 +3471,7 @@ mod run_tests {
             ToolCallState::Completed,
             ToolCallState::Failed,
             ToolCallState::Cancelled,
+            ToolCallState::Denied,
         ] {
             assert!(!terminal.can_transition_to(ToolCallState::Cancelled));
         }
@@ -2571,54 +3482,62 @@ mod run_tests {
         let tool_call_id = ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
         let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
         assert_eq!(
-            ToolCall::from_persisted(
-                tool_call_id.clone(),
-                run_id.clone(),
-                DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
-                ToolCallState::Requested,
-                Some(String::new()),
-                None,
-                None,
-            ),
+            ToolCall::from_persisted(PersistedToolCall {
+                tool_call_id: tool_call_id.clone(),
+                run_id: run_id.clone(),
+                capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+                requested_scope: Some(scope()),
+                effective_scope: None,
+                state: ToolCallState::Requested,
+                stdout: Some(String::new()),
+                stderr: None,
+                exit_code: None,
+            }),
             Err(InvalidPersistedToolCall)
         );
         assert_eq!(
-            ToolCall::from_persisted(
-                tool_call_id.clone(),
-                run_id.clone(),
-                DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
-                ToolCallState::Completed,
-                Some(String::new()),
-                Some(String::new()),
-                Some(7),
-            ),
+            ToolCall::from_persisted(PersistedToolCall {
+                tool_call_id: tool_call_id.clone(),
+                run_id: run_id.clone(),
+                capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+                requested_scope: Some(scope()),
+                effective_scope: Some(scope()),
+                state: ToolCallState::Completed,
+                stdout: Some(String::new()),
+                stderr: Some(String::new()),
+                exit_code: Some(7),
+            }),
             Err(InvalidPersistedToolCall)
         );
         assert_eq!(
-            ToolCall::from_persisted(
+            ToolCall::from_persisted(PersistedToolCall {
                 tool_call_id,
                 run_id,
-                DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
-                ToolCallState::Failed,
-                Some(String::new()),
-                Some(String::new()),
-                Some(0),
-            ),
+                capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+                requested_scope: Some(scope()),
+                effective_scope: Some(scope()),
+                state: ToolCallState::Failed,
+                stdout: Some(String::new()),
+                stderr: Some(String::new()),
+                exit_code: Some(0),
+            }),
             Err(InvalidPersistedToolCall)
         );
         assert_eq!(
             ToolCallResult::new(ToolCallState::Running, String::new(), String::new(), None,),
             Err(RunError::InvalidTransition)
         );
-        let cancelled = ToolCall::from_persisted(
-            ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
-            RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
-            DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
-            ToolCallState::Cancelled,
-            Some(String::new()),
-            Some(String::new()),
-            None,
-        )
+        let cancelled = ToolCall::from_persisted(PersistedToolCall {
+            tool_call_id: ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            run_id: RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            capability: DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+            requested_scope: Some(scope()),
+            effective_scope: Some(scope()),
+            state: ToolCallState::Cancelled,
+            stdout: Some(String::new()),
+            stderr: Some(String::new()),
+            exit_code: None,
+        })
         .unwrap();
         assert_eq!(cancelled.state(), ToolCallState::Cancelled);
         assert_eq!(cancelled.exit_code(), None);
@@ -2638,6 +3557,10 @@ mod run_tests {
         fn event_id(&self) -> EventId {
             EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
         }
+
+        fn approval_id(&self) -> ApprovalId {
+            ApprovalId::parse("apr_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
+        }
     }
 
     struct RunTestStore {
@@ -2645,6 +3568,7 @@ mod run_tests {
         events: std::sync::Arc<Mutex<Vec<SessionEvent>>>,
         request_count: std::sync::Arc<Mutex<usize>>,
         finish_count: std::sync::Arc<Mutex<usize>>,
+        decision_key: Mutex<Option<String>>,
     }
 
     impl RunTestStore {
@@ -2677,7 +3601,10 @@ mod run_tests {
         }
 
         async fn get_session(&self, _id: &SessionId) -> Result<Option<Session>, StoreError> {
-            Ok(None)
+            Ok(Some(Session::new(
+                session_id(),
+                WorkspaceId::parse("wsp_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            )))
         }
 
         async fn append_message(
@@ -2708,6 +3635,38 @@ mod run_tests {
         }
     }
 
+    impl WorkspaceStore for RunTestStore {
+        async fn create_workspace(&self, _workspace: &Workspace) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        async fn get_workspace(&self, _id: &WorkspaceId) -> Result<Option<Workspace>, StoreError> {
+            Ok(Some(
+                Workspace::new(
+                    WorkspaceId::parse("wsp_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+                    "Workspace".to_owned(),
+                    vec![
+                        WorkspaceRoot::new(
+                            WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+                            "main".to_owned(),
+                            "/main".to_owned(),
+                            DiscoveredWorkspaceRoot {
+                                canonical_path: "/main".to_owned(),
+                                git_common_directory_path: "/main/.git".to_owned(),
+                                filesystem_identity: FilesystemIdentity::new("test:/main")
+                                    .expect("test identity"),
+                            },
+                            0,
+                            WorkspaceRootState::Available,
+                        )
+                        .unwrap(),
+                    ],
+                )
+                .unwrap(),
+            ))
+        }
+    }
+
     impl RunStore for RunTestStore {
         async fn start_root_run(
             &self,
@@ -2734,21 +3693,142 @@ mod run_tests {
                 .map(|tool_call| (snapshot.run().clone(), tool_call)))
         }
 
+        async fn get_approval(
+            &self,
+            id: &ApprovalId,
+        ) -> Result<Option<(Run, Approval)>, RunStoreError> {
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            Ok(snapshot
+                .approval(id)
+                .cloned()
+                .map(|approval| (snapshot.run().clone(), approval)))
+        }
+
+        async fn get_approval_decision(
+            &self,
+            id: &ApprovalId,
+            idempotency_key: &str,
+        ) -> Result<Option<(ApprovalState, RunSnapshot)>, RunStoreError> {
+            if self.decision_key.lock().unwrap().as_deref() != Some(idempotency_key) {
+                return Ok(None);
+            }
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            Ok(snapshot
+                .approval(id)
+                .map(|approval| (approval.state(), snapshot.clone())))
+        }
+
         async fn begin_execution(
             &self,
-            _run: &Run,
-            _tool_call: &ToolCall,
-            _events: &[SessionEvent],
+            run: &Run,
+            tool_call: &ToolCall,
+            approval: Option<&Approval>,
+            events: &[SessionEvent],
         ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
-            Err(RunStoreError::Unavailable)
+            let approvals = approval.cloned().into_iter().collect();
+            Ok(self.mutation(
+                RunSnapshot::with_approvals(run.clone(), vec![tool_call.clone()], approvals),
+                events,
+            ))
         }
 
         async fn begin_tool_call(
             &self,
-            _tool_call_id: &ToolCallId,
-            _events: &[SessionEvent],
+            tool_call_id: &ToolCallId,
+            events: &[SessionEvent],
         ) -> Result<RunMutation<ToolCall>, RunStoreError> {
-            Err(RunStoreError::Unavailable)
+            let event_tool_call = events
+                .first()
+                .and_then(|event| match event.payload() {
+                    SessionEventPayload::ToolCallStateChanged { tool_call } => Some(tool_call),
+                    _ => None,
+                })
+                .ok_or(RunStoreError::InvalidTransition)?;
+            if event_tool_call.tool_call_id() != tool_call_id {
+                return Err(RunStoreError::InvalidTransition);
+            }
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            let current = snapshot
+                .tool_call(tool_call_id)
+                .ok_or(RunStoreError::Unavailable)?;
+            if current.state() != ToolCallState::Ready
+                || event_tool_call.state() != ToolCallState::Running
+            {
+                return Err(RunStoreError::InvalidTransition);
+            }
+            let mut tool_calls = snapshot.tool_calls().to_vec();
+            let updated = tool_calls
+                .iter_mut()
+                .find(|tool_call| tool_call.tool_call_id() == tool_call_id)
+                .unwrap();
+            *updated = event_tool_call.clone();
+            let value = event_tool_call.clone();
+            *self.snapshot.lock().unwrap() = RunSnapshot::with_approvals(
+                snapshot.run().clone(),
+                tool_calls,
+                snapshot.approvals().to_vec(),
+            );
+            self.events.lock().unwrap().extend_from_slice(events);
+            let stored_events = events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    StoredSessionEvent::from_event(event, EventCursor::from_value(index as u64 + 1))
+                        .unwrap()
+                })
+                .collect();
+            Ok(RunMutation::new(value, stored_events))
+        }
+
+        async fn decide_approval(
+            &self,
+            run: &Run,
+            tool_call: &ToolCall,
+            approval: &Approval,
+            idempotency_key: &str,
+            events: &[SessionEvent],
+        ) -> Result<ApprovalDecisionMutation, RunStoreError> {
+            let mut key = self.decision_key.lock().unwrap();
+            if let Some(existing) = key.as_deref() {
+                if existing == idempotency_key {
+                    return Ok(ApprovalDecisionMutation::new(
+                        self.snapshot.lock().unwrap().clone(),
+                        Vec::new(),
+                        ApprovalDecisionDisposition::Duplicate,
+                    ));
+                }
+                return Err(RunStoreError::IdempotencyConflict);
+            }
+            *key = Some(idempotency_key.to_owned());
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            let mut tool_calls = snapshot.tool_calls().to_vec();
+            let current_tool_call = tool_calls
+                .iter_mut()
+                .find(|current| current.tool_call_id() == tool_call.tool_call_id())
+                .ok_or(RunStoreError::Unavailable)?;
+            *current_tool_call = tool_call.clone();
+            let mut approvals = snapshot.approvals().to_vec();
+            let current_approval = approvals
+                .iter_mut()
+                .find(|current| current.approval_id() == approval.approval_id())
+                .ok_or(RunStoreError::Unavailable)?;
+            *current_approval = approval.clone();
+            let value = RunSnapshot::with_approvals(run.clone(), tool_calls, approvals);
+            self.events.lock().unwrap().extend_from_slice(events);
+            *self.snapshot.lock().unwrap() = value.clone();
+            let stored_events = events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    StoredSessionEvent::from_event(event, EventCursor::from_value(index as u64 + 1))
+                        .unwrap()
+                })
+                .collect();
+            Ok(ApprovalDecisionMutation::new(
+                value,
+                stored_events,
+                ApprovalDecisionDisposition::Applied,
+            ))
         }
 
         async fn finish_execution(
@@ -2760,15 +3840,50 @@ mod run_tests {
             Err(RunStoreError::Unavailable)
         }
 
+        async fn finish_denied_execution(
+            &self,
+            run: &Run,
+            _tool_call: &ToolCall,
+            events: &[SessionEvent],
+        ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            Ok(self.mutation(
+                RunSnapshot::with_approvals(
+                    run.clone(),
+                    snapshot.tool_calls().to_vec(),
+                    snapshot.approvals().to_vec(),
+                ),
+                events,
+            ))
+        }
+
         async fn request_cancellation(
             &self,
             run: &Run,
+            tool_call: Option<&ToolCall>,
+            approval: Option<&Approval>,
             events: &[SessionEvent],
         ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
             *self.request_count.lock().unwrap() += 1;
             let snapshot = self.snapshot.lock().unwrap().clone();
+            let mut tool_calls = snapshot.tool_calls().to_vec();
+            if let Some(tool_call) = tool_call {
+                let current = tool_calls
+                    .iter_mut()
+                    .find(|current| current.tool_call_id() == tool_call.tool_call_id())
+                    .ok_or(RunStoreError::Unavailable)?;
+                *current = tool_call.clone();
+            }
+            let mut approvals = snapshot.approvals().to_vec();
+            if let Some(approval) = approval {
+                let current = approvals
+                    .iter_mut()
+                    .find(|current| current.approval_id() == approval.approval_id())
+                    .ok_or(RunStoreError::Unavailable)?;
+                *current = approval.clone();
+            }
             Ok(self.mutation(
-                RunSnapshot::new(run.clone(), snapshot.tool_calls().to_vec()),
+                RunSnapshot::with_approvals(run.clone(), tool_calls, approvals),
                 events,
             ))
         }
@@ -2796,23 +3911,148 @@ mod run_tests {
             RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             session_id(),
             state,
-        );
+            Some(ApprovalPolicy::Ask),
+            Some(scope()),
+        )
+        .unwrap();
         let tool_call = ToolCall::new(
             ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             run.run_id().clone(),
             DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+            scope(),
         );
-        let tool_call = if tool_state == ToolCallState::Running {
-            tool_call.transition(ToolCallState::Running).unwrap()
-        } else {
-            tool_call
+        let tool_call = match tool_state {
+            ToolCallState::Ready => tool_call.with_effective_scope(scope()).unwrap(),
+            ToolCallState::Running => tool_call
+                .with_effective_scope(scope())
+                .unwrap()
+                .transition(ToolCallState::Running)
+                .unwrap(),
+            _ => tool_call,
         };
         RunTestStore {
             snapshot: Mutex::new(RunSnapshot::new(run, vec![tool_call])),
             events: std::sync::Arc::new(Mutex::new(Vec::new())),
             request_count: std::sync::Arc::new(Mutex::new(0)),
             finish_count: std::sync::Arc::new(Mutex::new(0)),
+            decision_key: Mutex::new(None),
         }
+    }
+
+    fn empty_run_test_store(policy: ApprovalPolicy) -> RunTestStore {
+        let run = Run::new(
+            RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            session_id(),
+            policy,
+            scope(),
+        );
+        RunTestStore {
+            snapshot: Mutex::new(RunSnapshot::new(run, Vec::new())),
+            events: std::sync::Arc::new(Mutex::new(Vec::new())),
+            request_count: std::sync::Arc::new(Mutex::new(0)),
+            finish_count: std::sync::Arc::new(Mutex::new(0)),
+            decision_key: Mutex::new(None),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_policies_create_one_durable_tool_decision() {
+        for (policy, run_state, tool_state, approval_count) in [
+            (
+                ApprovalPolicy::Ask,
+                RunState::WaitingForApproval,
+                ToolCallState::AwaitingApproval,
+                1,
+            ),
+            (
+                ApprovalPolicy::FullAccess,
+                RunState::Running,
+                ToolCallState::Ready,
+                0,
+            ),
+            (
+                ApprovalPolicy::ReadOnly,
+                RunState::Running,
+                ToolCallState::Denied,
+                0,
+            ),
+        ] {
+            let app = RunApplication::new(empty_run_test_store(policy), RunTestIds);
+            let mutation = app
+                .begin_execution(RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap())
+                .await
+                .unwrap();
+            assert_eq!(mutation.value.run().state(), run_state);
+            assert_eq!(mutation.value.tool_calls()[0].state(), tool_state);
+            assert_eq!(mutation.value.approvals().len(), approval_count);
+            assert!(mutation.events.iter().any(|event| matches!(
+                event.payload(),
+                SessionEventPayload::ToolCallRequested { tool_call }
+                    if tool_call.state() == ToolCallState::Requested
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_decisions_are_idempotent_and_first_decision_wins() {
+        let app = RunApplication::new(empty_run_test_store(ApprovalPolicy::Ask), RunTestIds);
+        let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let pending = app.begin_execution(run_id).await.unwrap().value;
+        let approval_id = pending.approvals()[0].approval_id().clone();
+        let applied = app
+            .decide_approval(
+                approval_id.clone(),
+                ApprovalState::Approved,
+                "approve-once".to_owned(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.disposition, ApprovalDecisionDisposition::Applied);
+        assert_eq!(applied.value.run().state(), RunState::Running);
+        assert_eq!(applied.value.tool_calls()[0].state(), ToolCallState::Ready);
+
+        let duplicate = app
+            .decide_approval(
+                approval_id.clone(),
+                ApprovalState::Approved,
+                "approve-once".to_owned(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            duplicate.disposition,
+            ApprovalDecisionDisposition::Duplicate
+        );
+        assert!(duplicate.events.is_empty());
+        assert_eq!(
+            app.decide_approval(
+                approval_id.clone(),
+                ApprovalState::Rejected,
+                "approve-once".to_owned(),
+            )
+            .await,
+            Err(RunError::IdempotencyConflict)
+        );
+        assert_eq!(
+            app.decide_approval(
+                approval_id,
+                ApprovalState::Rejected,
+                "new-decision".to_owned(),
+            )
+            .await,
+            Err(RunError::ApprovalAlreadyDecided)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_run_rejects_its_approval() {
+        let app = RunApplication::new(empty_run_test_store(ApprovalPolicy::Ask), RunTestIds);
+        let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        app.begin_execution(run_id.clone()).await.unwrap();
+        let cancelled = app.request_cancellation(run_id).await.unwrap().value;
+        assert_eq!(cancelled.run().state(), RunState::Cancelled);
+        assert_eq!(cancelled.tool_calls()[0].state(), ToolCallState::Denied);
+        assert_eq!(cancelled.approvals()[0].state(), ApprovalState::Rejected);
     }
 
     #[tokio::test]

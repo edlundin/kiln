@@ -6,23 +6,31 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use kiln_protocol::{
-    AppendMessageRequest, ClientIdentity, CreateWorkspaceRequest,
-    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
-    MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SessionEventDataResponse,
-    SessionEventResponse, SessionEventsResponse, SessionResponse, ToolCallState,
+    AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy, ApprovalState,
+    ClientIdentity, CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
+    RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
+    SessionResponse, StartRunRequest, TOOL_CALL_APPROVAL_PATH, ToolCallState, ToolOutputStream,
     WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
     WorkspaceResponse, WorkspaceRootRequest, error_code,
 };
-use reqwest::StatusCode;
+use reqwest::{
+    StatusCode,
+    header::{AUTHORIZATION, HOST, HeaderMap, HeaderValue, ORIGIN, WWW_AUTHENTICATE},
+};
 use rustix::process::{Pid, test_kill_process, test_kill_process_group};
 use serde_json::Value;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest, http::header::SEC_WEBSOCKET_PROTOCOL},
+};
 
 struct Daemon {
     child: std::process::Child,
     address: String,
+    token: String,
 }
 
 impl Daemon {
@@ -73,13 +81,36 @@ impl Daemon {
                 .expect("daemon readiness output"),
         )
         .expect("readiness is JSON");
+        let credential_path = readiness["credential_path"]
+            .as_str()
+            .expect("readiness credential path");
+        let token = std::fs::read_to_string(credential_path).expect("daemon credential");
+        assert_eq!(token.len(), 80);
+        assert!(
+            token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
         Self {
             child,
             address: readiness["address"]
                 .as_str()
                 .expect("readiness address")
                 .to_owned(),
+            token,
         }
+    }
+
+    fn client(&self) -> reqwest::Client {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", self.token)).expect("auth header"),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .expect("authenticated HTTP client")
     }
 
     fn signal(&self, signal: &str) {
@@ -160,7 +191,7 @@ async fn create_run_session(
     http: &reqwest::Client,
     address: &str,
     repository_parent: &Path,
-) -> SessionResponse {
+) -> RunSession {
     let repository = git_repository(repository_parent, "run");
     let response = http
         .post(format!("http://{address}{WORKSPACES_PATH}"))
@@ -184,7 +215,32 @@ async fn create_run_session(
         .await
         .expect("Run test Session response");
     assert_eq!(response.status(), StatusCode::CREATED);
-    response.json().await.expect("Run test Session JSON")
+    let session: SessionResponse = response.json().await.expect("Run test Session JSON");
+    RunSession {
+        session_id: session.session_id,
+        workspace_root_id: workspace.roots[0].workspace_root_id.clone(),
+        repository,
+    }
+}
+
+struct RunSession {
+    session_id: String,
+    workspace_root_id: String,
+    repository: PathBuf,
+}
+
+impl RunSession {
+    fn start_request(&self) -> StartRunRequest {
+        self.request_with_policy(ApprovalPolicy::FullAccess)
+    }
+
+    fn request_with_policy(&self, approval_policy: ApprovalPolicy) -> StartRunRequest {
+        StartRunRequest {
+            approval_policy,
+            workspace_root_id: self.workspace_root_id.clone(),
+            relative_directory: ".".to_owned(),
+        }
+    }
 }
 
 fn event_kind(event: &SessionEventResponse) -> &'static str {
@@ -196,6 +252,9 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::RunCancellationRequested { .. } => "run.cancellation_requested",
         SessionEventDataResponse::ToolCallRequested { .. } => "tool_call.requested",
         SessionEventDataResponse::ToolCallStateChanged { .. } => "tool_call.state_changed",
+        SessionEventDataResponse::ApprovalRequested { .. } => "approval.requested",
+        SessionEventDataResponse::ApprovalDecided { .. } => "approval.decided",
+        SessionEventDataResponse::ToolCallDenied { .. } => "tool_call.denied",
         SessionEventDataResponse::ToolCallOutput { .. } => "tool_call.output",
     }
 }
@@ -208,8 +267,13 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
             run_id == expected_run_id
         }
         SessionEventDataResponse::ToolCallRequested { tool_call }
-        | SessionEventDataResponse::ToolCallStateChanged { tool_call } => {
+        | SessionEventDataResponse::ToolCallStateChanged { tool_call }
+        | SessionEventDataResponse::ToolCallDenied { tool_call } => {
             tool_call.run_id == expected_run_id
+        }
+        SessionEventDataResponse::ApprovalRequested { approval }
+        | SessionEventDataResponse::ApprovalDecided { approval } => {
+            approval.run_id == expected_run_id
         }
         SessionEventDataResponse::ToolCallOutput { run_id, .. } => run_id == expected_run_id,
         SessionEventDataResponse::SessionCreated { .. }
@@ -220,24 +284,23 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
 type EventSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn open_event_socket(address: &str) -> EventSocket {
-    open_event_socket_after(address, None).await.0
+async fn open_event_socket(daemon: &Daemon) -> EventSocket {
+    open_event_socket_after(daemon, None).await.0
 }
 
 async fn open_event_socket_after(
-    address: &str,
+    daemon: &Daemon,
     after: Option<&str>,
 ) -> (EventSocket, Option<String>) {
     let mut endpoint = format!(
-        "ws://{address}{EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}"
+        "ws://{}{EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}",
+        daemon.address
     );
     if let Some(after) = after {
         endpoint.push_str("&after=");
         endpoint.push_str(after);
     }
-    let (mut socket, _) = connect_async(endpoint)
-        .await
-        .expect("event WebSocket connects");
+    let mut socket = connect_event_socket(daemon, endpoint).await;
     let frame = socket
         .next()
         .await
@@ -261,6 +324,31 @@ async fn open_event_socket_after(
     assert_eq!(version, PROTOCOL_VERSION);
     assert_eq!(capability, WEBSOCKET_CAPABILITY);
     (socket, current_event_cursor)
+}
+
+async fn connect_event_socket(daemon: &Daemon, endpoint: String) -> EventSocket {
+    let mut request = endpoint
+        .into_client_request()
+        .expect("event WebSocket request");
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_str(&format!(
+            "{WEBSOCKET_CAPABILITY}, kiln.auth.{}",
+            daemon.token
+        ))
+        .expect("event WebSocket protocols"),
+    );
+    let (socket, response) = connect_async(request)
+        .await
+        .expect("event WebSocket connects");
+    assert_eq!(
+        response
+            .headers()
+            .get(SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|value| value.to_str().ok()),
+        Some(WEBSOCKET_CAPABILITY)
+    );
+    socket
 }
 
 async fn receive_event(socket: &mut EventSocket) -> SessionEventResponse {
@@ -336,6 +424,98 @@ async fn assert_problem(
     assert!(!problem.detail.contains("axum"));
 }
 
+#[tokio::test]
+async fn loopback_http_and_websocket_require_the_persistent_credential() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let data_directory = tempfile::tempdir().expect("temporary auth data directory");
+    let daemon = Daemon::start(binary, data_directory.path());
+    let endpoint = format!("http://{}{}", daemon.address, NEGOTIATE_PATH);
+
+    let response = reqwest::Client::new()
+        .get(&endpoint)
+        .send()
+        .await
+        .expect("unauthenticated response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer")
+    );
+    assert_eq!(
+        response
+            .json::<ProblemDetails>()
+            .await
+            .expect("unauthenticated problem")
+            .code,
+        error_code::AUTHENTICATION_REQUIRED
+    );
+
+    assert_problem(
+        reqwest::Client::new()
+            .get(&endpoint)
+            .header(AUTHORIZATION, "Bearer invalid")
+            .send()
+            .await
+            .expect("invalid credential response"),
+        StatusCode::UNAUTHORIZED,
+        error_code::INVALID_AUTHENTICATION,
+    )
+    .await;
+    assert_problem(
+        daemon
+            .client()
+            .get(&endpoint)
+            .header(ORIGIN, "https://example.invalid")
+            .send()
+            .await
+            .expect("invalid Origin response"),
+        StatusCode::BAD_REQUEST,
+        error_code::INVALID_ORIGIN,
+    )
+    .await;
+    assert_problem(
+        daemon
+            .client()
+            .get(&endpoint)
+            .header(HOST, "localhost.invalid")
+            .send()
+            .await
+            .expect("invalid Host response"),
+        StatusCode::BAD_REQUEST,
+        error_code::INVALID_HOST,
+    )
+    .await;
+
+    let websocket_endpoint = format!("ws://{}{}", daemon.address, EVENTS_WEBSOCKET_PATH);
+    let mut request = websocket_endpoint
+        .into_client_request()
+        .expect("invalid WebSocket auth request");
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static("kiln.events.v1, kiln.auth.invalid"),
+    );
+    let error = connect_async(request)
+        .await
+        .expect_err("invalid WebSocket credential is rejected");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("expected WebSocket HTTP authentication error");
+    };
+    assert_eq!(
+        response.status().as_u16(),
+        StatusCode::UNAUTHORIZED.as_u16()
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer")
+    );
+}
+
 #[test]
 fn daemon_rejects_non_loopback_listener() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_kilnd"))
@@ -356,7 +536,7 @@ async fn real_daemon_negotiates_and_rejects_invalid_protocol_input() {
     let data = tempfile::tempdir().expect("temporary data directory");
     let daemon = Daemon::start(binary, data.path());
     let address = &daemon.address;
-    let http = reqwest::Client::new();
+    let http = daemon.client();
     let request = NegotiateRequest {
         min_version: PROTOCOL_VERSION.to_owned(),
         max_version: PROTOCOL_VERSION.to_owned(),
@@ -448,7 +628,7 @@ async fn real_daemon_negotiates_and_rejects_invalid_protocol_input() {
     let endpoint = format!(
         "ws://{address}{EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}"
     );
-    let (mut socket, _) = connect_async(endpoint).await.expect("WebSocket connects");
+    let mut socket = connect_event_socket(&daemon, endpoint).await;
     let ack = socket
         .next()
         .await
@@ -536,9 +716,9 @@ async fn real_daemon_creates_and_recovers_a_multi_repository_workspace() {
     let first = git_repository(&repositories, "first");
     let second = git_repository(&repositories, "second");
     let data_directory = sandbox.path().join("data");
-    let http = reqwest::Client::new();
 
     let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
     let request = CreateWorkspaceRequest {
         name: "Kiln development".to_owned(),
         roots: vec![
@@ -705,8 +885,8 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
     std::fs::create_dir(&repositories).expect("repository parent");
     let repository = git_repository(&repositories, "main");
     let data_directory = sandbox.path().join("data");
-    let http = reqwest::Client::new();
     let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
 
     let response = http
         .post(format!("http://{}{WORKSPACES_PATH}", daemon.address))
@@ -884,9 +1064,7 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
         "ws://{}{EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}",
         daemon.address
     );
-    let (mut socket, _) = connect_async(endpoint)
-        .await
-        .expect("WebSocket connects after Events");
+    let mut socket = connect_event_socket(&daemon, endpoint).await;
     let ack = socket
         .next()
         .await
@@ -997,14 +1175,15 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     let repositories = sandbox.path().join("repositories");
     std::fs::create_dir(&repositories).expect("Run test repository parent");
     let data_directory = sandbox.path().join("data");
-    let http = reqwest::Client::new();
     let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let http = daemon.client();
     let session = create_run_session(&http, &daemon.address, &repositories).await;
-    let mut socket = open_event_socket(&daemon.address).await;
+    let mut socket = open_event_socket(&daemon).await;
 
     let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     assert_problem(
         http.post(format!("http://{}{}", daemon.address, start_path))
+            .json(&session.start_request())
             .send()
             .await
             .expect("missing idempotency key response"),
@@ -1015,6 +1194,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     assert_problem(
         http.post(format!("http://{}{}", daemon.address, start_path))
             .header(IDEMPOTENCY_KEY_HEADER, "")
+            .json(&session.start_request())
             .send()
             .await
             .expect("empty idempotency key response"),
@@ -1026,6 +1206,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "run-success")
+        .json(&session.start_request())
         .send()
         .await
         .expect("start Run response");
@@ -1040,20 +1221,20 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     let duplicate_response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "run-success")
+        .json(&session.start_request())
         .send()
         .await
         .expect("duplicate start Run response");
     assert_eq!(duplicate_response.status(), StatusCode::ACCEPTED);
-    assert_eq!(
-        duplicate_response
-            .json::<RunResponse>()
-            .await
-            .expect("duplicate start Run JSON"),
-        queued
-    );
+    let duplicate = duplicate_response
+        .json::<RunResponse>()
+        .await
+        .expect("duplicate start Run JSON");
+    assert_eq!(duplicate.run_id, queued.run_id);
     assert_problem(
         http.post(format!("http://{}{}", daemon.address, start_path))
             .header(IDEMPOTENCY_KEY_HEADER, "different-run")
+            .json(&session.start_request())
             .send()
             .await
             .expect("different start Run response"),
@@ -1069,6 +1250,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
             "run.created",
             "run.state_changed",
             "tool_call.requested",
+            "tool_call.state_changed",
             "tool_call.state_changed",
             "tool_call.output",
             "tool_call.output",
@@ -1131,6 +1313,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     let duplicate_response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "run-success")
+        .json(&session.start_request())
         .send()
         .await
         .expect("post-terminal duplicate start Run response");
@@ -1140,7 +1323,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
             .json::<RunResponse>()
             .await
             .expect("post-terminal duplicate start Run JSON"),
-        queued
+        completed
     );
 
     let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
@@ -1172,6 +1355,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
     assert_problem(
         http.post(format!("http://{}{}", daemon.address, missing_session_path))
             .header(IDEMPOTENCY_KEY_HEADER, "missing-session")
+            .json(&session.start_request())
             .send()
             .await
             .expect("missing Run Session response"),
@@ -1227,21 +1411,641 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
 }
 
 #[tokio::test]
+async fn ask_approval_survives_restart_resumes_once_and_is_idempotent() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary approval test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("approval repository parent");
+    let data_directory = sandbox.path().join("data");
+    let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "ask-restart")
+        .json(&session.request_with_policy(ApprovalPolicy::Ask))
+        .send()
+        .await
+        .expect("Ask Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response.json().await.expect("Ask Run JSON");
+    let waiting_events =
+        receive_run_events(&mut socket, &queued.run_id, RunState::WaitingForApproval).await;
+    assert_eq!(
+        waiting_events.iter().map(event_kind).collect::<Vec<_>>(),
+        [
+            "run.created",
+            "run.state_changed",
+            "tool_call.requested",
+            "tool_call.state_changed",
+            "approval.requested",
+            "run.state_changed",
+        ]
+    );
+
+    let run_path = RUN_PATH.replace("{run_id}", &queued.run_id);
+    let waiting: RunResponse = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("waiting Run response")
+        .json()
+        .await
+        .expect("waiting Run JSON");
+    assert_eq!(waiting.state, RunState::WaitingForApproval);
+    assert_eq!(waiting.tool_calls.len(), 1);
+    assert_eq!(waiting.tool_calls[0].state, ToolCallState::AwaitingApproval);
+    assert_eq!(waiting.approvals.len(), 1);
+    assert_eq!(waiting.approvals[0].state, ApprovalState::Pending);
+    let tool_call_id = waiting.tool_calls[0].tool_call_id.clone();
+    let after = waiting_events.last().unwrap().cursor.clone();
+    let original_token = daemon.token.clone();
+    drop(socket);
+    drop(daemon);
+
+    let restarted = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    assert_eq!(restarted.token, original_token);
+    let http = restarted.client();
+    let (mut socket, current_cursor) = open_event_socket_after(&restarted, Some(&after)).await;
+    assert_eq!(current_cursor.as_deref(), Some(after.as_str()));
+    let approval_path = TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &tool_call_id);
+    let response = http
+        .post(format!("http://{}{}", restarted.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "approve-once")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        })
+        .send()
+        .await
+        .expect("approval response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let approved: RunResponse = response.json().await.expect("approval JSON");
+    assert_eq!(approved.state, RunState::Running);
+    assert_eq!(approved.approvals[0].state, ApprovalState::Approved);
+    assert_eq!(approved.tool_calls[0].state, ToolCallState::Ready);
+
+    let resumed = receive_run_events(&mut socket, &queued.run_id, RunState::Completed).await;
+    assert_eq!(
+        resumed.iter().map(event_kind).collect::<Vec<_>>(),
+        [
+            "approval.decided",
+            "tool_call.state_changed",
+            "run.state_changed",
+            "tool_call.state_changed",
+            "tool_call.output",
+            "tool_call.output",
+            "tool_call.state_changed",
+            "run.state_changed",
+        ]
+    );
+
+    let duplicate = http
+        .post(format!("http://{}{}", restarted.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "approve-once")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        })
+        .send()
+        .await
+        .expect("duplicate approval response");
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    assert_eq!(
+        duplicate
+            .json::<RunResponse>()
+            .await
+            .expect("duplicate approval JSON")
+            .state,
+        RunState::Completed
+    );
+    assert_problem(
+        http.post(format!("http://{}{}", restarted.address, approval_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "approve-once")
+            .json(&ApprovalDecisionRequest {
+                decision: ApprovalDecision::Rejected,
+            })
+            .send()
+            .await
+            .expect("conflicting approval response"),
+        StatusCode::CONFLICT,
+        error_code::IDEMPOTENCY_CONFLICT,
+    )
+    .await;
+    assert_problem(
+        http.post(format!("http://{}{}", restarted.address, approval_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "approve-again")
+            .json(&ApprovalDecisionRequest {
+                decision: ApprovalDecision::Approved,
+            })
+            .send()
+            .await
+            .expect("second approval response"),
+        StatusCode::CONFLICT,
+        error_code::APPROVAL_ALREADY_DECIDED,
+    )
+    .await;
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let history: SessionEventsResponse = http
+        .get(format!("http://{}{}", restarted.address, events_path))
+        .send()
+        .await
+        .expect("approval history response")
+        .json()
+        .await
+        .expect("approval history JSON");
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| event_kind(event) == "approval.decided")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn concurrent_approval_decisions_have_one_winner() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary concurrent approval directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("concurrent approval repository parent");
+    let data_directory = sandbox.path().join("data");
+    let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "concurrent-ask")
+        .json(&session.request_with_policy(ApprovalPolicy::Ask))
+        .send()
+        .await
+        .expect("concurrent approval Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response.json().await.expect("concurrent approval Run JSON");
+    receive_run_events(&mut socket, &queued.run_id, RunState::WaitingForApproval).await;
+
+    let run_path = RUN_PATH.replace("{run_id}", &queued.run_id);
+    let waiting: RunResponse = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("concurrent waiting Run response")
+        .json()
+        .await
+        .expect("concurrent waiting Run JSON");
+    let approval_path =
+        TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &waiting.tool_calls[0].tool_call_id);
+
+    let approve = http
+        .post(format!("http://{}{}", daemon.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "concurrent-approve")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        });
+    let reject = http
+        .post(format!("http://{}{}", daemon.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "concurrent-reject")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Rejected,
+        });
+    let (approve, reject) = tokio::join!(approve.send(), reject.send());
+    let approve = approve.expect("approve decision response");
+    let reject = reject.expect("reject decision response");
+    let approve_status = approve.status();
+    let approve_body = approve.bytes().await.expect("approve decision body");
+    let reject_status = reject.status();
+    let reject_body = reject.bytes().await.expect("reject decision body");
+
+    let approved_won = approve_status == StatusCode::OK;
+    assert_ne!(approved_won, reject_status == StatusCode::OK);
+    let winner: RunResponse = if approved_won {
+        serde_json::from_slice(&approve_body).expect("winning approval JSON")
+    } else {
+        serde_json::from_slice(&reject_body).expect("winning rejection JSON")
+    };
+    let loser_problem: ProblemDetails = if approved_won {
+        serde_json::from_slice(&reject_body).expect("losing rejection problem JSON")
+    } else {
+        serde_json::from_slice(&approve_body).expect("losing approval problem JSON")
+    };
+    assert_eq!(
+        if approved_won {
+            reject_status
+        } else {
+            approve_status
+        },
+        StatusCode::CONFLICT
+    );
+    assert_eq!(loser_problem.code, error_code::APPROVAL_ALREADY_DECIDED);
+
+    let expected_run_state = if approved_won {
+        RunState::Completed
+    } else {
+        RunState::Failed
+    };
+    let expected_approval_state = if approved_won {
+        ApprovalState::Approved
+    } else {
+        ApprovalState::Rejected
+    };
+    let expected_tool_state = if approved_won {
+        ToolCallState::Completed
+    } else {
+        ToolCallState::Denied
+    };
+    receive_run_events(&mut socket, &queued.run_id, expected_run_state.clone()).await;
+
+    assert_eq!(winner.approvals[0].state, expected_approval_state);
+    let response = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("terminal concurrent approval Run response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let terminal: RunResponse = response
+        .json()
+        .await
+        .expect("terminal concurrent approval Run JSON");
+    assert_eq!(terminal.state, expected_run_state);
+    assert_eq!(terminal.approvals[0].state, expected_approval_state);
+    assert_eq!(terminal.tool_calls[0].state, expected_tool_state);
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let history: SessionEventsResponse = http
+        .get(format!("http://{}{}", daemon.address, events_path))
+        .send()
+        .await
+        .expect("concurrent approval history response")
+        .json()
+        .await
+        .expect("concurrent approval history JSON");
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| {
+                event_kind(event) == "approval.decided"
+                    && event_belongs_to_run(event, &queued.run_id)
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn rejection_and_read_only_deny_without_starting_a_process() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary denied Run test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("denied Run repository parent");
+    let data_directory = sandbox.path().join("data");
+    let pid_file = repositories.join("run/subprocess-pids.json");
+    let daemon = Daemon::start_with_pid_file(binary, &data_directory, "blocking-tree", &pid_file);
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "reject-run")
+        .json(&session.request_with_policy(ApprovalPolicy::Ask))
+        .send()
+        .await
+        .expect("rejected Ask Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response.json().await.expect("rejected Ask Run JSON");
+    receive_run_events(&mut socket, &queued.run_id, RunState::WaitingForApproval).await;
+    assert!(!pid_file.exists());
+
+    let run_path = RUN_PATH.replace("{run_id}", &queued.run_id);
+    let waiting: RunResponse = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("rejected waiting Run response")
+        .json()
+        .await
+        .expect("rejected waiting Run JSON");
+    let approval_path =
+        TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &waiting.tool_calls[0].tool_call_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "reject-once")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Rejected,
+        })
+        .send()
+        .await
+        .expect("rejection response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let rejected: RunResponse = response.json().await.expect("rejection JSON");
+    assert_eq!(rejected.approvals[0].state, ApprovalState::Rejected);
+    assert_eq!(rejected.tool_calls[0].state, ToolCallState::Denied);
+    let rejected_events = receive_run_events(&mut socket, &queued.run_id, RunState::Failed).await;
+    assert_eq!(
+        rejected_events.iter().map(event_kind).collect::<Vec<_>>(),
+        [
+            "approval.decided",
+            "tool_call.denied",
+            "run.state_changed",
+            "run.state_changed",
+        ]
+    );
+    assert!(!pid_file.exists());
+
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "read-only-run")
+        .json(&session.request_with_policy(ApprovalPolicy::ReadOnly))
+        .send()
+        .await
+        .expect("read-only Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let read_only: RunResponse = response.json().await.expect("read-only Run JSON");
+    let read_only_events =
+        receive_run_events(&mut socket, &read_only.run_id, RunState::Failed).await;
+    assert_eq!(
+        read_only_events.iter().map(event_kind).collect::<Vec<_>>(),
+        [
+            "run.created",
+            "run.state_changed",
+            "tool_call.requested",
+            "tool_call.denied",
+            "run.state_changed",
+        ]
+    );
+    assert!(!pid_file.exists());
+}
+
+#[tokio::test]
+async fn cancelling_a_waiting_run_rejects_approval_without_starting_a_process() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary waiting cancellation directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("waiting cancellation repository parent");
+    let data_directory = sandbox.path().join("data");
+    let pid_file = repositories.join("run/subprocess-pids.json");
+    let daemon = Daemon::start_with_pid_file(binary, &data_directory, "blocking-tree", &pid_file);
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "cancel-waiting")
+        .json(&session.request_with_policy(ApprovalPolicy::Ask))
+        .send()
+        .await
+        .expect("waiting cancellation Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response
+        .json()
+        .await
+        .expect("waiting cancellation Run JSON");
+    receive_run_events(&mut socket, &queued.run_id, RunState::WaitingForApproval).await;
+
+    let cancel_path = RUN_CANCEL_PATH.replace("{run_id}", &queued.run_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, cancel_path))
+        .send()
+        .await
+        .expect("waiting cancellation response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let cancelled: RunResponse = response.json().await.expect("waiting cancellation JSON");
+    assert_eq!(cancelled.state, RunState::Cancelled);
+    assert_eq!(cancelled.approvals[0].state, ApprovalState::Rejected);
+    assert_eq!(cancelled.tool_calls[0].state, ToolCallState::Denied);
+    let events = receive_run_events(&mut socket, &queued.run_id, RunState::Cancelled).await;
+    assert_eq!(
+        events.iter().map(event_kind).collect::<Vec<_>>(),
+        [
+            "run.cancellation_requested",
+            "run.state_changed",
+            "approval.decided",
+            "tool_call.denied",
+            "run.state_changed",
+        ]
+    );
+    assert!(!pid_file.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_out_of_root_symlink_is_rejected_before_a_run_is_created() {
+    use std::os::unix::fs::symlink;
+
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary path-scope test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("path-scope repository parent");
+    let data_directory = sandbox.path().join("data");
+    let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let outside = sandbox.path().join("outside");
+    std::fs::create_dir(&outside).expect("outside directory");
+    symlink(&outside, session.repository.join("escape")).expect("escape symlink");
+
+    let mut request = session.start_request();
+    request.relative_directory = "escape".to_owned();
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, start_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "escape-run")
+            .json(&request)
+            .send()
+            .await
+            .expect("escape Run response"),
+        StatusCode::BAD_REQUEST,
+        error_code::PATH_OUTSIDE_WORKSPACE_ROOT,
+    )
+    .await;
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let history: SessionEventsResponse = http
+        .get(format!("http://{}{}", daemon.address, events_path))
+        .send()
+        .await
+        .expect("escape history response")
+        .json()
+        .await
+        .expect("escape history JSON");
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| event_kind(event) == "run.created")
+            .count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replacing_registered_root_with_outside_symlink_fails_approved_run() {
+    use std::os::unix::fs::symlink;
+
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary replaced-root test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("replaced-root repository parent");
+    let data_directory = sandbox.path().join("data");
+    let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "replaced-root")
+        .json(&session.request_with_policy(ApprovalPolicy::Ask))
+        .send()
+        .await
+        .expect("replaced-root Ask Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response.json().await.expect("replaced-root Ask Run JSON");
+    receive_run_events(&mut socket, &queued.run_id, RunState::WaitingForApproval).await;
+
+    let run_path = RUN_PATH.replace("{run_id}", &queued.run_id);
+    let waiting: RunResponse = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("replaced-root waiting Run response")
+        .json()
+        .await
+        .expect("replaced-root waiting Run JSON");
+    let approval_path =
+        TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &waiting.tool_calls[0].tool_call_id);
+
+    let original_repository = session.repository.with_file_name("run-original");
+    std::fs::rename(&session.repository, &original_repository)
+        .expect("replace registered repository root");
+    let outside = sandbox.path().join("outside");
+    std::fs::create_dir(&outside).expect("outside directory");
+    symlink(&outside, &session.repository).expect("outside repository-root symlink");
+
+    let response = http
+        .post(format!("http://{}{}", daemon.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "approve-replaced-root")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        })
+        .send()
+        .await
+        .expect("replaced-root approval response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let approved: RunResponse = response.json().await.expect("replaced-root approval JSON");
+    assert_eq!(approved.state, RunState::Running);
+    assert_eq!(approved.approvals[0].state, ApprovalState::Approved);
+
+    let events = receive_run_events(&mut socket, &queued.run_id, RunState::Failed).await;
+    assert_eq!(
+        events.iter().map(event_kind).collect::<Vec<_>>(),
+        [
+            "approval.decided",
+            "tool_call.state_changed",
+            "run.state_changed",
+            "tool_call.state_changed",
+            "tool_call.output",
+            "tool_call.state_changed",
+            "run.state_changed",
+        ]
+    );
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            SessionEventDataResponse::ToolCallOutput {
+                stream: ToolOutputStream::Stderr,
+                content,
+                ..
+            }
+                if content == "path is outside workspace root"
+        )
+    }));
+
+    let response = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("replaced-root terminal Run response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let failed: RunResponse = response
+        .json()
+        .await
+        .expect("replaced-root terminal Run JSON");
+    assert_eq!(failed.state, RunState::Failed);
+    assert_eq!(failed.tool_calls.len(), 1);
+    let tool_call = &failed.tool_calls[0];
+    assert_eq!(tool_call.state, ToolCallState::Failed);
+    assert_eq!(tool_call.stdout.as_deref(), Some(""));
+    assert_eq!(
+        tool_call.stderr.as_deref(),
+        Some("path is outside workspace root")
+    );
+    assert_eq!(tool_call.exit_code, None);
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let history: SessionEventsResponse = http
+        .get(format!("http://{}{}", daemon.address, events_path))
+        .send()
+        .await
+        .expect("replaced-root history response")
+        .json()
+        .await
+        .expect("replaced-root history JSON");
+    assert!(history.events.iter().any(|event| {
+        event_belongs_to_run(event, &queued.run_id)
+            && matches!(
+                &event.event,
+                SessionEventDataResponse::ToolCallOutput {
+                    stream: ToolOutputStream::Stderr,
+                    content,
+                    ..
+                }
+                    if content == "path is outside workspace root"
+            )
+    }));
+    assert!(matches!(
+        &history
+            .events
+            .iter()
+            .rev()
+            .find(|event| event_belongs_to_run(event, &queued.run_id))
+            .expect("durable terminal Run Event")
+            .event,
+        SessionEventDataResponse::RunStateChanged {
+            state: RunState::Failed,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn cancellation_is_shared_kills_the_process_group_and_survives_restart() {
     let binary = env!("CARGO_BIN_EXE_kilnd");
     let sandbox = tempfile::tempdir().expect("temporary cancellation test directory");
     let repositories = sandbox.path().join("repositories");
     std::fs::create_dir(&repositories).expect("cancellation repository parent");
     let data_directory = sandbox.path().join("data");
-    let pid_file = sandbox.path().join("subprocess-pids.json");
-    let http = reqwest::Client::new();
+    let pid_file = repositories.join("run/subprocess-pids.json");
     let daemon = Daemon::start_with_pid_file(binary, &data_directory, "blocking-tree", &pid_file);
+    let http = daemon.client();
     let session = create_run_session(&http, &daemon.address, &repositories).await;
 
     let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "cancel-tree")
+        .json(&session.start_request())
         .send()
         .await
         .expect("blocking Run response");
@@ -1261,14 +2065,21 @@ async fn cancellation_is_shared_kills_the_process_group_and_survives_restart() {
     );
     let first = first.expect("first cancellation response");
     let second = second.expect("second cancellation response");
-    assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(second.status(), StatusCode::OK);
-    let cancelled: RunResponse = first.json().await.expect("first cancellation JSON");
+    let first_status = first.status();
+    let first_body = first.bytes().await.expect("first cancellation body");
+    let second_status = second.status();
+    let second_body = second.bytes().await.expect("second cancellation body");
     assert_eq!(
-        second
-            .json::<RunResponse>()
-            .await
-            .expect("second cancellation JSON"),
+        (first_status, second_status),
+        (StatusCode::OK, StatusCode::OK),
+        "first: {}; second: {}",
+        String::from_utf8_lossy(&first_body),
+        String::from_utf8_lossy(&second_body),
+    );
+    let cancelled: RunResponse =
+        serde_json::from_slice(&first_body).expect("first cancellation JSON");
+    assert_eq!(
+        serde_json::from_slice::<RunResponse>(&second_body).expect("second cancellation JSON"),
         cancelled
     );
     assert_eq!(cancelled.state, RunState::Cancelled);
@@ -1347,15 +2158,16 @@ async fn sigterm_gracefully_cancels_active_work_before_exit() {
     let repositories = sandbox.path().join("repositories");
     std::fs::create_dir(&repositories).expect("shutdown repository parent");
     let data_directory = sandbox.path().join("data");
-    let pid_file = sandbox.path().join("shutdown-pids.json");
-    let http = reqwest::Client::new();
+    let pid_file = repositories.join("run/shutdown-pids.json");
     let mut daemon =
         Daemon::start_with_pid_file(binary, &data_directory, "blocking-tree", &pid_file);
+    let http = daemon.client();
     let session = create_run_session(&http, &daemon.address, &repositories).await;
     let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "shutdown-tree")
+        .json(&session.start_request())
         .send()
         .await
         .expect("shutdown Run response");
@@ -1400,15 +2212,16 @@ async fn reconnect_replays_exact_durable_suffix_across_restart() {
     let repositories = sandbox.path().join("repositories");
     std::fs::create_dir(&repositories).expect("reconnect repository parent");
     let data_directory = sandbox.path().join("data");
-    let http = reqwest::Client::new();
     let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let http = daemon.client();
     let session = create_run_session(&http, &daemon.address, &repositories).await;
-    let mut live_socket = open_event_socket(&daemon.address).await;
+    let mut live_socket = open_event_socket(&daemon).await;
 
     let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "reconnect-run")
+        .json(&session.start_request())
         .send()
         .await
         .expect("reconnect Run response");
@@ -1424,7 +2237,7 @@ async fn reconnect_replays_exact_durable_suffix_across_restart() {
     drop(live_socket);
 
     let (mut replay_socket, acknowledged_cursor) =
-        open_event_socket_after(&daemon.address, Some(&after)).await;
+        open_event_socket_after(&daemon, Some(&after)).await;
     assert!(
         acknowledged_cursor
             .as_deref()
@@ -1462,7 +2275,7 @@ async fn reconnect_replays_exact_durable_suffix_across_restart() {
 
     let restarted = Daemon::start(binary, &data_directory);
     let (mut restarted_socket, restarted_cursor) =
-        open_event_socket_after(&restarted.address, Some(&after)).await;
+        open_event_socket_after(&restarted, Some(&after)).await;
     assert_eq!(
         restarted_cursor.as_deref(),
         Some(durable_suffix.current_event_cursor.as_str())
@@ -1482,15 +2295,16 @@ async fn real_daemon_persists_a_failed_subprocess_result() {
     let repositories = sandbox.path().join("repositories");
     std::fs::create_dir(&repositories).expect("failed Run test repository parent");
     let data_directory = sandbox.path().join("data");
-    let http = reqwest::Client::new();
     let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("failure"));
+    let http = daemon.client();
     let session = create_run_session(&http, &daemon.address, &repositories).await;
-    let mut socket = open_event_socket(&daemon.address).await;
+    let mut socket = open_event_socket(&daemon).await;
 
     let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "run-failure")
+        .json(&session.start_request())
         .send()
         .await
         .expect("start failed Run response");
@@ -1498,7 +2312,7 @@ async fn real_daemon_persists_a_failed_subprocess_result() {
     let queued: RunResponse = response.json().await.expect("queued failed Run JSON");
 
     let events = receive_run_events(&mut socket, &queued.run_id, RunState::Failed).await;
-    assert_eq!(events.len(), 8);
+    assert_eq!(events.len(), 9);
     assert!(matches!(
         &events.last().expect("terminal failed Run Event").event,
         SessionEventDataResponse::RunStateChanged {
@@ -1539,20 +2353,22 @@ async fn concurrent_runs_publish_in_global_cursor_order() {
     std::fs::create_dir(&first_repositories).expect("first repository parent");
     std::fs::create_dir(&second_repositories).expect("second repository parent");
     let data_directory = sandbox.path().join("data");
-    let http = reqwest::Client::new();
     let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
     let first_session = create_run_session(&http, &daemon.address, &first_repositories).await;
     let second_session = create_run_session(&http, &daemon.address, &second_repositories).await;
-    let mut socket = open_event_socket(&daemon.address).await;
+    let mut socket = open_event_socket(&daemon).await;
 
     let first_path = SESSION_RUNS_PATH.replace("{session_id}", &first_session.session_id);
     let second_path = SESSION_RUNS_PATH.replace("{session_id}", &second_session.session_id);
     let (first_response, second_response) = tokio::join!(
         http.post(format!("http://{}{}", daemon.address, first_path))
             .header(IDEMPOTENCY_KEY_HEADER, "first-run")
+            .json(&first_session.start_request())
             .send(),
         http.post(format!("http://{}{}", daemon.address, second_path))
             .header(IDEMPOTENCY_KEY_HEADER, "second-run")
+            .json(&second_session.start_request())
             .send(),
     );
     let first_response = first_response.expect("first concurrent Run response");
@@ -1598,7 +2414,7 @@ async fn concurrent_runs_publish_in_global_cursor_order() {
         events.push(event);
     }
 
-    assert_eq!(events.len(), 16);
+    assert_eq!(events.len(), 18);
     let cursors = events
         .iter()
         .map(|event| event.cursor.parse::<u64>().expect("numeric Event cursor"))
@@ -1613,18 +2429,20 @@ async fn concurrent_same_key_starts_one_run_and_one_tool_lifecycle() {
     let repositories = sandbox.path().join("repositories");
     std::fs::create_dir(&repositories).expect("idempotency repository parent");
     let data_directory = sandbox.path().join("data");
-    let http = reqwest::Client::new();
     let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
     let session = create_run_session(&http, &daemon.address, &repositories).await;
-    let mut socket = open_event_socket(&daemon.address).await;
+    let mut socket = open_event_socket(&daemon).await;
     let path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
 
     let (first_response, second_response) = tokio::join!(
         http.post(format!("http://{}{}", daemon.address, path))
             .header(IDEMPOTENCY_KEY_HEADER, "concurrent-same-key")
+            .json(&session.start_request())
             .send(),
         http.post(format!("http://{}{}", daemon.address, path))
             .header(IDEMPOTENCY_KEY_HEADER, "concurrent-same-key")
+            .json(&session.start_request())
             .send(),
     );
     let first_response = first_response.expect("first concurrent idempotent response");
@@ -1639,10 +2457,10 @@ async fn concurrent_same_key_starts_one_run_and_one_tool_lifecycle() {
         .json()
         .await
         .expect("second concurrent idempotent JSON");
-    assert_eq!(first, second);
+    assert_eq!(first.run_id, second.run_id);
 
     let events = receive_run_events(&mut socket, &first.run_id, RunState::Completed).await;
-    assert_eq!(events.len(), 8);
+    assert_eq!(events.len(), 9);
     assert_eq!(
         events
             .iter()

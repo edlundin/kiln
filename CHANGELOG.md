@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-02 — `feat`
+
+- Added persistent loopback HTTP and WebSocket authentication with exact Host and Origin validation.
+- Added protocol 0.8.0, workspace-root-scoped deterministic tool execution, and Ask/read_only/full_access approval policies.
+- Added durable approval decisions with restart and cancellation behavior.
+- Persisted filesystem identity rejects replaced workspace roots.
+- Made invalid approved scope a durable failed ToolCall and Run.
+- Made concurrent approval decisions first-writer-wins.
+- Made Unix cancellation avoid post-reap process-group-ID probes and retry interrupted kill calls.
+
+[Commit](pending)
+
 ## 2026-08-31 — `feat`
 
 - Added durable, naturally idempotent `POST /v1/runs/{run_id}/cancel`.

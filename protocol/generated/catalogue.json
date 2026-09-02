@@ -3,6 +3,10 @@
     "kiln.events.websocket"
   ],
   "error_codes": [
+    "authentication_required",
+    "invalid_authentication",
+    "invalid_host",
+    "invalid_origin",
     "invalid_json",
     "invalid_request",
     "invalid_version",
@@ -35,7 +39,12 @@
     "invalid_run_state",
     "run_store_unavailable",
     "run_cancellation_failed",
-    "daemon_shutting_down"
+    "daemon_shutting_down",
+    "workspace_root_not_found",
+    "path_outside_workspace_root",
+    "approval_not_found",
+    "approval_already_decided",
+    "idempotency_conflict"
   ],
   "http": [
     {
@@ -85,11 +94,16 @@
     },
     {
       "method": "POST",
+      "operation": "decide_approval",
+      "path": "/v1/tool-calls/{tool_call_id}/approval"
+    },
+    {
+      "method": "POST",
       "operation": "cancel_run",
       "path": "/v1/runs/{run_id}/cancel"
     }
   ],
-  "protocol_version": "0.6.0",
+  "protocol_version": "0.8.0",
   "websocket": [
     {
       "method": "GET",

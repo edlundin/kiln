@@ -10,10 +10,11 @@ use kiln_core::{RunApplication, SessionApplication, StoreMetadata, WorkspaceAppl
 use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
     DETERMINISTIC_SUBPROCESS_ARGUMENT, DETERMINISTIC_SUCCESS_ARGUMENT, DeterministicOutcome,
-    DeterministicSubprocessExecutor, GitWorkspaceRootDiscovery, SqliteStore, UlidIdGenerator,
+    DeterministicSubprocessExecutor, GitWorkspaceRootDiscovery, LocalAuthCredential, SqliteStore,
+    UlidIdGenerator,
 };
 use kiln_protocol::PROTOCOL_VERSION;
-use kiln_server::{AppState, EventBroadcaster, serve_with_shutdown};
+use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
 
 use crate::run_service::RunService;
 
@@ -57,6 +58,14 @@ async fn main() -> ExitCode {
         }
     };
 
+    let credential = match LocalAuthCredential::open_default() {
+        Ok(credential) => credential,
+        Err(_) => {
+            eprintln!("kilnd: cannot open local authentication credential");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let store = match SqliteStore::open_default().await {
         Ok(store) => store,
         Err(_) => {
@@ -69,15 +78,17 @@ async fn main() -> ExitCode {
     let sessions = SessionApplication::new(store.clone(), store.clone(), UlidIdGenerator);
     let events = EventBroadcaster::default();
     let runs = RunService::new(
-        RunApplication::new(store, UlidIdGenerator),
+        RunApplication::new(store.clone(), UlidIdGenerator),
         DeterministicSubprocessExecutor::new(subprocess_outcome),
         events.clone(),
+        store,
     );
 
     let readiness = serde_json::json!({
         "event": "ready",
         "address": bound_address.to_string(),
         "protocol_version": PROTOCOL_VERSION,
+        "credential_path": credential.path().display().to_string(),
     });
     let readiness_result = {
         let mut stdout = std::io::stdout().lock();
@@ -95,6 +106,7 @@ async fn main() -> ExitCode {
         sessions,
         runs.clone(),
         events,
+        AuthToken::from_bytes(credential.token()),
     );
     let lifecycle = state.lifecycle();
     let signal_lifecycle = lifecycle.clone();

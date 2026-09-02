@@ -10,7 +10,11 @@ use axum::{
         rejection::QueryRejection,
         ws::{self, rejection::WebSocketUpgradeRejection},
     },
-    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    http::{
+        HeaderValue, StatusCode,
+        header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN, SEC_WEBSOCKET_PROTOCOL},
+    },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -22,14 +26,17 @@ use kiln_core::{
     WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
-    AppendMessageRequest, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
-    MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
-    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState,
-    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
+    ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
+    ApprovalState as ProtocolApprovalState, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH,
+    IDEMPOTENCY_KEY_HEADER, MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest,
+    NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse,
+    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
     SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StoreIdentity, ToolCallResponse, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY,
-    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
-    WorkspaceRootResponse, error_code,
+    StartRunRequest, StoreIdentity, TOOL_CALL_APPROVAL_PATH, ToolCallResponse, ToolCallState,
+    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse,
+    WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -41,6 +48,8 @@ pub trait RunOperations: Send + Sync {
         &self,
         session_id: SessionId,
         idempotency_key: String,
+        approval_policy: kiln_core::ApprovalPolicy,
+        requested_scope: kiln_core::WorkspacePathScope,
     ) -> impl Future<Output = Result<kiln_core::StartRunMutation, RunError>> + Send;
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
@@ -49,6 +58,28 @@ pub trait RunOperations: Send + Sync {
         &self,
         run_id: RunId,
     ) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
+
+    fn decide_approval(
+        &self,
+        tool_call_id: kiln_core::ToolCallId,
+        decision: kiln_core::ApprovalState,
+        idempotency_key: String,
+    ) -> impl Future<Output = Result<kiln_core::ApprovalDecisionMutation, RunError>> + Send;
+}
+
+const WEBSOCKET_AUTH_PREFIX: &str = "kiln.auth.";
+
+#[derive(Clone)]
+pub struct AuthToken([u8; 80]);
+
+impl AuthToken {
+    pub fn from_bytes(bytes: [u8; 80]) -> Self {
+        Self(bytes)
+    }
+
+    fn matches(&self, candidate: &[u8]) -> bool {
+        constant_time_equal(&self.0, candidate)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +253,9 @@ impl EventBroadcaster {
 pub struct AppState<W, S, R> {
     store: StoreMetadata,
     event_websocket_endpoint: String,
+    bound_authority: String,
+    http_origin: String,
+    auth_token: AuthToken,
     workspace_operations: Arc<W>,
     session_operations: Arc<S>,
     run_operations: Arc<R>,
@@ -234,6 +268,9 @@ impl<W, S, R> Clone for AppState<W, S, R> {
         Self {
             store: self.store.clone(),
             event_websocket_endpoint: self.event_websocket_endpoint.clone(),
+            bound_authority: self.bound_authority.clone(),
+            http_origin: self.http_origin.clone(),
+            auth_token: self.auth_token.clone(),
             workspace_operations: Arc::clone(&self.workspace_operations),
             session_operations: Arc::clone(&self.session_operations),
             run_operations: Arc::clone(&self.run_operations),
@@ -251,10 +288,15 @@ impl<W, S, R> AppState<W, S, R> {
         session_operations: S,
         run_operations: R,
         event_broadcaster: EventBroadcaster,
+        auth_token: AuthToken,
     ) -> Self {
+        let bound_authority = bound_addr.to_string();
         Self {
             store,
             event_websocket_endpoint: format!("ws://{bound_addr}{EVENTS_WEBSOCKET_PATH}"),
+            http_origin: format!("http://{bound_authority}"),
+            bound_authority,
+            auth_token,
             workspace_operations: Arc::new(workspace_operations),
             session_operations: Arc::new(session_operations),
             run_operations: Arc::new(run_operations),
@@ -285,10 +327,97 @@ where
         .route(SESSION_RUNS_PATH, post(start_run))
         .route(RUN_PATH, get(get_run))
         .route(RUN_CANCEL_PATH, post(cancel_run))
+        .route(TOOL_CALL_APPROVAL_PATH, post(decide_approval))
         .route(EVENTS_WEBSOCKET_PATH, get(events))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
+}
+
+async fn authenticate<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    request: Request,
+    next: Next,
+) -> Response
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    if let Err(error) = validate_authority(&request, &state.bound_authority, &state.http_origin) {
+        return error.into_response();
+    }
+    if let Err(error) = authenticate_request(&request, &state.auth_token) {
+        return error.into_response();
+    }
+    next.run(request).await
+}
+
+fn validate_authority(
+    request: &Request,
+    bound_authority: &str,
+    http_origin: &str,
+) -> Result<(), PublicError> {
+    if request
+        .headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        != Some(bound_authority)
+    {
+        return Err(PublicError::InvalidHost);
+    }
+    let origins = request.headers().get_all(ORIGIN);
+    if origins.iter().count() > 1
+        || origins
+            .iter()
+            .next()
+            .is_some_and(|origin| origin.to_str().ok() != Some(http_origin))
+    {
+        return Err(PublicError::InvalidOrigin);
+    }
+    Ok(())
+}
+
+fn authenticate_request(request: &Request, token: &AuthToken) -> Result<(), PublicError> {
+    let has_authentication_input = request.headers().get(AUTHORIZATION).is_some()
+        || request.headers().get(SEC_WEBSOCKET_PROTOCOL).is_some();
+    let authorization_valid = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|candidate| token.matches(candidate.as_bytes()));
+    if authorization_valid {
+        return Ok(());
+    }
+    let offered = request.headers().get_all(SEC_WEBSOCKET_PROTOCOL);
+    let mut websocket = false;
+    let mut auth = false;
+    for protocol in offered.iter().filter_map(|value| value.to_str().ok()) {
+        for protocol in protocol.split(',').map(str::trim) {
+            websocket |= protocol == WEBSOCKET_CAPABILITY;
+            if let Some(candidate) = protocol.strip_prefix(WEBSOCKET_AUTH_PREFIX) {
+                auth |= token.matches(candidate.as_bytes());
+            }
+        }
+    }
+    if websocket && auth {
+        Ok(())
+    } else if has_authentication_input {
+        Err(PublicError::InvalidAuthentication)
+    } else {
+        Err(PublicError::AuthenticationRequired)
+    }
+}
+
+fn constant_time_equal(expected: &[u8], actual: &[u8]) -> bool {
+    let mut difference = expected.len() ^ actual.len();
+    for index in 0..expected.len().max(actual.len()) {
+        difference |= usize::from(expected.get(index).copied().unwrap_or_default())
+            ^ usize::from(actual.get(index).copied().unwrap_or_default());
+    }
+    difference == 0
 }
 
 pub async fn serve<W, S, R>(
@@ -449,6 +578,7 @@ async fn start_run<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(session_id): Path<String>,
     headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<StartRunRequest>,
 ) -> Result<impl IntoResponse, PublicError>
 where
     W: WorkspaceOperations + 'static,
@@ -465,12 +595,60 @@ where
     if idempotency_key.is_empty() {
         return Err(PublicError::InvalidIdempotencyKey);
     }
+    let approval_policy = match request.approval_policy {
+        ProtocolApprovalPolicy::Ask => kiln_core::ApprovalPolicy::Ask,
+        ProtocolApprovalPolicy::ReadOnly => kiln_core::ApprovalPolicy::ReadOnly,
+        ProtocolApprovalPolicy::FullAccess => kiln_core::ApprovalPolicy::FullAccess,
+    };
+    let root = kiln_core::WorkspaceRootId::parse(request.workspace_root_id)
+        .map_err(|_| PublicError::InvalidRequest)?;
+    let requested_scope = kiln_core::WorkspacePathScope::new(root, request.relative_directory)
+        .map_err(|_| PublicError::Run(RunError::PathOutsideWorkspaceRoot))?;
     let run = state
         .run_operations
-        .start_run(session_id, idempotency_key.to_owned())
+        .start_run(
+            session_id,
+            idempotency_key.to_owned(),
+            approval_policy,
+            requested_scope,
+        )
         .await
         .map_err(PublicError::from)?;
     Ok((StatusCode::ACCEPTED, Json(run_response(&run.value))))
+}
+
+async fn decide_approval<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(tool_call_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<ApprovalDecisionRequest>,
+) -> Result<Json<RunResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let tool_call_id =
+        kiln_core::ToolCallId::parse(tool_call_id).map_err(|_| PublicError::InvalidRequest)?;
+    let idempotency_key = headers
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .ok_or(PublicError::MissingIdempotencyKey)?
+        .to_str()
+        .map_err(|_| PublicError::InvalidIdempotencyKey)?;
+    if idempotency_key.is_empty() {
+        return Err(PublicError::InvalidIdempotencyKey);
+    }
+    let decision = match request.decision {
+        ApprovalDecision::Approved => kiln_core::ApprovalState::Approved,
+        ApprovalDecision::Rejected => kiln_core::ApprovalState::Rejected,
+    };
+    let approval = state
+        .run_operations
+        .decide_approval(tool_call_id, decision, idempotency_key.to_owned())
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(run_response(&approval.value)))
 }
 
 async fn get_run<W, S, R>(
@@ -564,11 +742,39 @@ fn run_response(snapshot: &RunSnapshot) -> RunResponse {
         run_id: snapshot.run().run_id().as_str().to_owned(),
         session_id: snapshot.run().session_id().as_str().to_owned(),
         state: run_state_response(snapshot.run().state()),
+        approval_policy: snapshot.run().approval_policy().map(|policy| match policy {
+            kiln_core::ApprovalPolicy::Ask => ProtocolApprovalPolicy::Ask,
+            kiln_core::ApprovalPolicy::ReadOnly => ProtocolApprovalPolicy::ReadOnly,
+            kiln_core::ApprovalPolicy::FullAccess => ProtocolApprovalPolicy::FullAccess,
+        }),
+        requested_scope: snapshot.run().requested_scope().map(scope_response),
         tool_calls: snapshot
             .tool_calls()
             .iter()
             .map(tool_call_response)
             .collect(),
+        approvals: snapshot.approvals().iter().map(approval_response).collect(),
+    }
+}
+
+fn scope_response(scope: &kiln_core::WorkspacePathScope) -> WorkspaceScopeResponse {
+    WorkspaceScopeResponse {
+        workspace_root_id: scope.workspace_root_id().as_str().to_owned(),
+        relative_directory: scope.relative_directory().to_owned(),
+    }
+}
+
+fn approval_response(approval: &kiln_core::Approval) -> ApprovalResponse {
+    ApprovalResponse {
+        approval_id: approval.approval_id().as_str().to_owned(),
+        run_id: approval.run_id().as_str().to_owned(),
+        tool_call_id: approval.tool_call_id().as_str().to_owned(),
+        requested_scope: scope_response(approval.scope()),
+        state: match approval.state() {
+            kiln_core::ApprovalState::Pending => ProtocolApprovalState::Pending,
+            kiln_core::ApprovalState::Approved => ProtocolApprovalState::Approved,
+            kiln_core::ApprovalState::Rejected => ProtocolApprovalState::Rejected,
+        },
     }
 }
 
@@ -578,6 +784,8 @@ fn tool_call_response(tool_call: &ToolCall) -> ToolCallResponse {
         run_id: tool_call.run_id().as_str().to_owned(),
         capability: tool_call.capability().to_owned(),
         state: tool_call_state_response(tool_call.state()),
+        requested_scope: tool_call.requested_scope().map(scope_response),
+        effective_scope: tool_call.effective_scope().map(scope_response),
         stdout: tool_call.stdout().map(str::to_owned),
         stderr: tool_call.stderr().map(str::to_owned),
         exit_code: tool_call.exit_code(),
@@ -588,6 +796,7 @@ fn run_state_response(state: CoreRunState) -> RunState {
     match state {
         CoreRunState::Queued => RunState::Queued,
         CoreRunState::Running => RunState::Running,
+        CoreRunState::WaitingForApproval => RunState::WaitingForApproval,
         CoreRunState::Cancelling => RunState::Cancelling,
         CoreRunState::Completed => RunState::Completed,
         CoreRunState::Failed => RunState::Failed,
@@ -598,10 +807,13 @@ fn run_state_response(state: CoreRunState) -> RunState {
 fn tool_call_state_response(state: CoreToolCallState) -> ToolCallState {
     match state {
         CoreToolCallState::Requested => ToolCallState::Requested,
+        CoreToolCallState::AwaitingApproval => ToolCallState::AwaitingApproval,
+        CoreToolCallState::Ready => ToolCallState::Ready,
         CoreToolCallState::Running => ToolCallState::Running,
         CoreToolCallState::Completed => ToolCallState::Completed,
         CoreToolCallState::Failed => ToolCallState::Failed,
         CoreToolCallState::Cancelled => ToolCallState::Cancelled,
+        CoreToolCallState::Denied => ToolCallState::Denied,
     }
 }
 
@@ -624,9 +836,20 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
                 message: message_response(message),
             }
         }
-        SessionEventPayload::RunCreated { run_id, state } => SessionEventDataResponse::RunCreated {
+        SessionEventPayload::RunCreated {
+            run_id,
+            state,
+            approval_policy,
+            requested_scope,
+        } => SessionEventDataResponse::RunCreated {
             run_id: run_id.as_str().to_owned(),
             state: run_state_response(*state),
+            approval_policy: approval_policy.map(|policy| match policy {
+                kiln_core::ApprovalPolicy::Ask => ProtocolApprovalPolicy::Ask,
+                kiln_core::ApprovalPolicy::ReadOnly => ProtocolApprovalPolicy::ReadOnly,
+                kiln_core::ApprovalPolicy::FullAccess => ProtocolApprovalPolicy::FullAccess,
+            }),
+            requested_scope: requested_scope.as_ref().map(scope_response),
         },
         SessionEventPayload::RunStateChanged { run_id, state } => {
             SessionEventDataResponse::RunStateChanged {
@@ -641,6 +864,21 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
         }
         SessionEventPayload::ToolCallRequested { tool_call } => {
             SessionEventDataResponse::ToolCallRequested {
+                tool_call: tool_call_response(tool_call),
+            }
+        }
+        SessionEventPayload::ApprovalRequested { approval } => {
+            SessionEventDataResponse::ApprovalRequested {
+                approval: approval_response(approval),
+            }
+        }
+        SessionEventPayload::ApprovalDecided { approval } => {
+            SessionEventDataResponse::ApprovalDecided {
+                approval: approval_response(approval),
+            }
+        }
+        SessionEventPayload::ToolCallDenied { tool_call } => {
+            SessionEventDataResponse::ToolCallDenied {
                 tool_call: tool_call_response(tool_call),
             }
         }
@@ -739,7 +977,9 @@ where
     if query.capability.as_deref() != Some(WEBSOCKET_CAPABILITY) {
         return Err(PublicError::MissingCapability);
     }
-    let websocket = websocket.map_err(|_| PublicError::WebSocketUpgradeRequired)?;
+    let websocket = websocket
+        .map_err(|_| PublicError::WebSocketUpgradeRequired)?
+        .protocols([WEBSOCKET_CAPABILITY]);
     let after = query
         .after
         .as_deref()
@@ -919,6 +1159,14 @@ where
 
 #[derive(Debug, Error)]
 enum PublicError {
+    #[error("authentication is required")]
+    AuthenticationRequired,
+    #[error("authentication is invalid")]
+    InvalidAuthentication,
+    #[error("request Host is invalid")]
+    InvalidHost,
+    #[error("request Origin is invalid")]
+    InvalidOrigin,
     #[error("request body is not valid JSON")]
     InvalidJson,
     #[error("request fields are invalid")]
@@ -974,6 +1222,26 @@ impl From<RunError> for PublicError {
 impl PublicError {
     fn problem(&self) -> ProblemDetails {
         let (status, code, title) = match self {
+            Self::AuthenticationRequired => (
+                StatusCode::UNAUTHORIZED,
+                error_code::AUTHENTICATION_REQUIRED,
+                "Authentication required",
+            ),
+            Self::InvalidAuthentication => (
+                StatusCode::UNAUTHORIZED,
+                error_code::INVALID_AUTHENTICATION,
+                "Invalid authentication",
+            ),
+            Self::InvalidHost => (
+                StatusCode::BAD_REQUEST,
+                error_code::INVALID_HOST,
+                "Invalid Host",
+            ),
+            Self::InvalidOrigin => (
+                StatusCode::BAD_REQUEST,
+                error_code::INVALID_ORIGIN,
+                "Invalid Origin",
+            ),
             Self::InvalidJson => (
                 StatusCode::BAD_REQUEST,
                 error_code::INVALID_JSON,
@@ -1131,6 +1399,16 @@ impl PublicError {
                     error_code::SESSION_NOT_FOUND,
                     "Session not found",
                 ),
+                RunError::WorkspaceRootNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::WORKSPACE_ROOT_NOT_FOUND,
+                    "Workspace root not found",
+                ),
+                RunError::PathOutsideWorkspaceRoot => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::PATH_OUTSIDE_WORKSPACE_ROOT,
+                    "Path outside workspace root",
+                ),
                 RunError::RunNotFound => (
                     StatusCode::NOT_FOUND,
                     error_code::RUN_NOT_FOUND,
@@ -1155,6 +1433,21 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::RUN_CANCELLATION_FAILED,
                     "Run cancellation failed",
+                ),
+                RunError::ApprovalNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::APPROVAL_NOT_FOUND,
+                    "Approval not found",
+                ),
+                RunError::ApprovalAlreadyDecided => (
+                    StatusCode::CONFLICT,
+                    error_code::APPROVAL_ALREADY_DECIDED,
+                    "Approval already decided",
+                ),
+                RunError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Idempotency conflict",
                 ),
                 RunError::RunStoreUnavailable => (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1182,6 +1475,12 @@ impl IntoResponse for PublicError {
             CONTENT_TYPE,
             HeaderValue::from_static("application/problem+json"),
         );
+        if matches!(status, StatusCode::UNAUTHORIZED) {
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer"),
+            );
+        }
         response
     }
 }
@@ -1190,7 +1489,8 @@ impl IntoResponse for PublicError {
 mod tests {
     use super::*;
     use kiln_core::{
-        EventId, MessageRole as CoreMessageRole, Run, SessionEventPayload, ToolCallId, WorkspaceId,
+        ApprovalPolicy, EventId, MessageRole as CoreMessageRole, PersistedToolCall, Run,
+        SessionEventPayload, ToolCallId, WorkspaceId, WorkspacePathScope, WorkspaceRootId,
     };
 
     const SESSION_ID: &str = "ses_01ARZ3NDEKTSV4RRFFQ69G5FAY";
@@ -1212,6 +1512,14 @@ mod tests {
         ToolCallId::parse(TOOL_CALL_ID).unwrap()
     }
 
+    fn path_scope() -> WorkspacePathScope {
+        WorkspacePathScope::new(
+            WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+            ".",
+        )
+        .unwrap()
+    }
+
     fn stored_event(cursor: u64, payload: SessionEventPayload) -> StoredSessionEvent {
         StoredSessionEvent::from_parts(
             EventId::parse(EVENT_ID).unwrap(),
@@ -1224,16 +1532,25 @@ mod tests {
 
     #[test]
     fn run_snapshot_maps_to_protocol_response() {
-        let run = Run::from_persisted(run_id(), session_id(), CoreRunState::Running);
-        let tool_call = ToolCall::from_persisted(
-            tool_call_id(),
+        let run = Run::from_persisted(
             run_id(),
-            "kiln.deterministic.subprocess".to_owned(),
-            CoreToolCallState::Completed,
-            Some("stdout".to_owned()),
-            Some("stderr".to_owned()),
-            Some(0),
+            session_id(),
+            CoreRunState::Running,
+            Some(ApprovalPolicy::FullAccess),
+            Some(path_scope()),
         )
+        .unwrap();
+        let tool_call = ToolCall::from_persisted(PersistedToolCall {
+            tool_call_id: tool_call_id(),
+            run_id: run_id(),
+            capability: "kiln.deterministic.subprocess".to_owned(),
+            requested_scope: Some(path_scope()),
+            effective_scope: Some(path_scope()),
+            state: CoreToolCallState::Completed,
+            stdout: Some("stdout".to_owned()),
+            stderr: Some("stderr".to_owned()),
+            exit_code: Some(0),
+        })
         .unwrap();
         let response = run_response(&RunSnapshot::new(run, vec![tool_call]));
 
@@ -1254,6 +1571,7 @@ mod tests {
             tool_call_id(),
             run_id(),
             "kiln.deterministic.subprocess".to_owned(),
+            path_scope(),
         );
         let message = Message::new(
             kiln_core::MessageId::parse(MESSAGE_ID).unwrap(),
@@ -1270,6 +1588,8 @@ mod tests {
             SessionEventPayload::RunCreated {
                 run_id: run_id(),
                 state: CoreRunState::Queued,
+                approval_policy: Some(ApprovalPolicy::FullAccess),
+                requested_scope: Some(path_scope()),
             },
             SessionEventPayload::RunStateChanged {
                 run_id: run_id(),
@@ -1388,6 +1708,8 @@ mod tests {
             SessionEventPayload::RunCreated {
                 run_id: run_id(),
                 state: CoreRunState::Queued,
+                approval_policy: Some(ApprovalPolicy::FullAccess),
+                requested_scope: Some(path_scope()),
             },
         )]);
         assert_eq!(receiver.try_recv(), Ok(()));

@@ -106,7 +106,13 @@ fn response_types_accept_unknown_fields() {
         "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "state": "queued",
+        "approval_policy": "ask",
+        "requested_scope": {
+            "workspace_root_id": "wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "relative_directory": "."
+        },
         "tool_calls": [],
+        "approvals": [],
         "future": true
     });
     serde_json::from_value::<RunResponse>(value)
@@ -464,6 +470,8 @@ fn run_fixtures_match_json_schema_typescript_and_openapi() {
         SessionEventDataResponse::RunCreated {
             run_id: run.run_id.clone(),
             state: RunState::Queued,
+            approval_policy: None,
+            requested_scope: None,
         },
         SessionEventDataResponse::RunStateChanged {
             run_id: run.run_id.clone(),

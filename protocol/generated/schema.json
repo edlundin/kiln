@@ -14,6 +14,112 @@
       "title": "AppendMessageRequest",
       "type": "object"
     },
+    "ApprovalDecision": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "approved",
+        "rejected"
+      ],
+      "title": "ApprovalDecision",
+      "type": "string"
+    },
+    "ApprovalDecisionRequest": {
+      "$defs": {
+        "ApprovalDecision": {
+          "enum": [
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "title": "ApprovalDecisionRequest",
+      "type": "object"
+    },
+    "ApprovalPolicy": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "ask",
+        "read_only",
+        "full_access"
+      ],
+      "title": "ApprovalPolicy",
+      "type": "string"
+    },
+    "ApprovalResponse": {
+      "$defs": {
+        "ApprovalState": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "approval_id": {
+          "type": "string"
+        },
+        "requested_scope": {
+          "$ref": "#/$defs/WorkspaceScopeResponse"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ApprovalState"
+        },
+        "tool_call_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_id",
+        "run_id",
+        "tool_call_id",
+        "requested_scope",
+        "state"
+      ],
+      "title": "ApprovalResponse",
+      "type": "object"
+    },
+    "ApprovalState": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "pending",
+        "approved",
+        "rejected"
+      ],
+      "title": "ApprovalState",
+      "type": "string"
+    },
     "ClientIdentity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -252,10 +358,54 @@
     },
     "RunResponse": {
       "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "requested_scope": {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval_id",
+            "run_id",
+            "tool_call_id",
+            "requested_scope",
+            "state"
+          ],
+          "type": "object"
+        },
+        "ApprovalState": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
         "RunState": {
           "enum": [
             "queued",
             "running",
+            "waiting_for_approval",
             "cancelling",
             "completed",
             "failed",
@@ -268,11 +418,31 @@
             "capability": {
               "type": "string"
             },
+            "effective_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "exit_code": {
               "format": "int32",
               "type": [
                 "integer",
                 "null"
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "run_id": {
@@ -302,6 +472,8 @@
             "run_id",
             "capability",
             "state",
+            "requested_scope",
+            "effective_scope",
             "stdout",
             "stderr",
             "exit_code"
@@ -311,16 +483,60 @@
         "ToolCallState": {
           "enum": [
             "requested",
+            "awaiting_approval",
+            "ready",
             "running",
             "completed",
             "failed",
-            "cancelled"
+            "cancelled",
+            "denied"
           ],
           "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "approval_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/ApprovalResponse"
+          },
+          "type": "array"
+        },
+        "requested_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "run_id": {
           "type": "string"
         },
@@ -341,7 +557,10 @@
         "run_id",
         "session_id",
         "state",
-        "tool_calls"
+        "approval_policy",
+        "requested_scope",
+        "tool_calls",
+        "approvals"
       ],
       "title": "RunResponse",
       "type": "object"
@@ -351,6 +570,7 @@
       "enum": [
         "queued",
         "running",
+        "waiting_for_approval",
         "cancelling",
         "completed",
         "failed",
@@ -361,6 +581,49 @@
     },
     "SessionEventDataResponse": {
       "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "requested_scope": {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval_id",
+            "run_id",
+            "tool_call_id",
+            "requested_scope",
+            "state"
+          ],
+          "type": "object"
+        },
+        "ApprovalState": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
         "MessageResponse": {
           "properties": {
             "content": {
@@ -394,6 +657,7 @@
           "enum": [
             "queued",
             "running",
+            "waiting_for_approval",
             "cancelling",
             "completed",
             "failed",
@@ -406,11 +670,31 @@
             "capability": {
               "type": "string"
             },
+            "effective_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "exit_code": {
               "format": "int32",
               "type": [
                 "integer",
                 "null"
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "run_id": {
@@ -440,6 +724,8 @@
             "run_id",
             "capability",
             "state",
+            "requested_scope",
+            "effective_scope",
             "stdout",
             "stderr",
             "exit_code"
@@ -449,10 +735,13 @@
         "ToolCallState": {
           "enum": [
             "requested",
+            "awaiting_approval",
+            "ready",
             "running",
             "completed",
             "failed",
-            "cancelled"
+            "cancelled",
+            "denied"
           ],
           "type": "string"
         },
@@ -462,6 +751,21 @@
             "stderr"
           ],
           "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -500,6 +804,26 @@
         },
         {
           "properties": {
+            "approval_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "run_id": {
               "type": "string"
             },
@@ -514,7 +838,9 @@
           "required": [
             "type",
             "run_id",
-            "state"
+            "state",
+            "approval_policy",
+            "requested_scope"
           ],
           "type": "object"
         },
@@ -561,6 +887,54 @@
             },
             "type": {
               "const": "tool_call.requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tool_call"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/ApprovalResponse"
+            },
+            "type": {
+              "const": "approval.requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "approval"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/ApprovalResponse"
+            },
+            "type": {
+              "const": "approval.decided",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "approval"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "tool_call": {
+              "$ref": "#/$defs/ToolCallResponse"
+            },
+            "type": {
+              "const": "tool_call.denied",
               "type": "string"
             }
           },
@@ -619,6 +993,49 @@
     },
     "SessionEventResponse": {
       "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "requested_scope": {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval_id",
+            "run_id",
+            "tool_call_id",
+            "requested_scope",
+            "state"
+          ],
+          "type": "object"
+        },
+        "ApprovalState": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
         "MessageResponse": {
           "properties": {
             "content": {
@@ -652,6 +1069,7 @@
           "enum": [
             "queued",
             "running",
+            "waiting_for_approval",
             "cancelling",
             "completed",
             "failed",
@@ -695,6 +1113,26 @@
             },
             {
               "properties": {
+                "approval_policy": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ApprovalPolicy"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requested_scope": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/WorkspaceScopeResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "run_id": {
                   "type": "string"
                 },
@@ -709,7 +1147,9 @@
               "required": [
                 "type",
                 "run_id",
-                "state"
+                "state",
+                "approval_policy",
+                "requested_scope"
               ],
               "type": "object"
             },
@@ -756,6 +1196,54 @@
                 },
                 "type": {
                   "const": "tool_call.requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "tool_call"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "approval": {
+                  "$ref": "#/$defs/ApprovalResponse"
+                },
+                "type": {
+                  "const": "approval.requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "approval"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "approval": {
+                  "$ref": "#/$defs/ApprovalResponse"
+                },
+                "type": {
+                  "const": "approval.decided",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "approval"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "tool_call": {
+                  "$ref": "#/$defs/ToolCallResponse"
+                },
+                "type": {
+                  "const": "tool_call.denied",
                   "type": "string"
                 }
               },
@@ -816,11 +1304,31 @@
             "capability": {
               "type": "string"
             },
+            "effective_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "exit_code": {
               "format": "int32",
               "type": [
                 "integer",
                 "null"
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "run_id": {
@@ -850,6 +1358,8 @@
             "run_id",
             "capability",
             "state",
+            "requested_scope",
+            "effective_scope",
             "stdout",
             "stderr",
             "exit_code"
@@ -859,10 +1369,13 @@
         "ToolCallState": {
           "enum": [
             "requested",
+            "awaiting_approval",
+            "ready",
             "running",
             "completed",
             "failed",
-            "cancelled"
+            "cancelled",
+            "denied"
           ],
           "type": "string"
         },
@@ -872,6 +1385,21 @@
             "stderr"
           ],
           "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -900,6 +1428,49 @@
     },
     "SessionEventsResponse": {
       "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "requested_scope": {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval_id",
+            "run_id",
+            "tool_call_id",
+            "requested_scope",
+            "state"
+          ],
+          "type": "object"
+        },
+        "ApprovalState": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
         "MessageResponse": {
           "properties": {
             "content": {
@@ -933,6 +1504,7 @@
           "enum": [
             "queued",
             "running",
+            "waiting_for_approval",
             "cancelling",
             "completed",
             "failed",
@@ -976,6 +1548,26 @@
             },
             {
               "properties": {
+                "approval_policy": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ApprovalPolicy"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requested_scope": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/WorkspaceScopeResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "run_id": {
                   "type": "string"
                 },
@@ -990,7 +1582,9 @@
               "required": [
                 "type",
                 "run_id",
-                "state"
+                "state",
+                "approval_policy",
+                "requested_scope"
               ],
               "type": "object"
             },
@@ -1037,6 +1631,54 @@
                 },
                 "type": {
                   "const": "tool_call.requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "tool_call"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "approval": {
+                  "$ref": "#/$defs/ApprovalResponse"
+                },
+                "type": {
+                  "const": "approval.requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "approval"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "approval": {
+                  "$ref": "#/$defs/ApprovalResponse"
+                },
+                "type": {
+                  "const": "approval.decided",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "approval"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "tool_call": {
+                  "$ref": "#/$defs/ToolCallResponse"
+                },
+                "type": {
+                  "const": "tool_call.denied",
                   "type": "string"
                 }
               },
@@ -1120,11 +1762,31 @@
             "capability": {
               "type": "string"
             },
+            "effective_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "exit_code": {
               "format": "int32",
               "type": [
                 "integer",
                 "null"
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "run_id": {
@@ -1154,6 +1816,8 @@
             "run_id",
             "capability",
             "state",
+            "requested_scope",
+            "effective_scope",
             "stdout",
             "stderr",
             "exit_code"
@@ -1163,10 +1827,13 @@
         "ToolCallState": {
           "enum": [
             "requested",
+            "awaiting_approval",
+            "ready",
             "running",
             "completed",
             "failed",
-            "cancelled"
+            "cancelled",
+            "denied"
           ],
           "type": "string"
         },
@@ -1176,6 +1843,21 @@
             "stderr"
           ],
           "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1214,6 +1896,38 @@
       "title": "SessionResponse",
       "type": "object"
     },
+    "StartRunRequest": {
+      "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "approval_policy": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        },
+        "relative_directory": {
+          "type": "string"
+        },
+        "workspace_root_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_policy",
+        "workspace_root_id",
+        "relative_directory"
+      ],
+      "title": "StartRunRequest",
+      "type": "object"
+    },
     "StoreIdentity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1236,12 +1950,30 @@
         "ToolCallState": {
           "enum": [
             "requested",
+            "awaiting_approval",
+            "ready",
             "running",
             "completed",
             "failed",
-            "cancelled"
+            "cancelled",
+            "denied"
           ],
           "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1249,11 +1981,31 @@
         "capability": {
           "type": "string"
         },
+        "effective_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "exit_code": {
           "format": "int32",
           "type": [
             "integer",
             "null"
+          ]
+        },
+        "requested_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "run_id": {
@@ -1283,6 +2035,8 @@
         "run_id",
         "capability",
         "state",
+        "requested_scope",
+        "effective_scope",
         "stdout",
         "stderr",
         "exit_code"
@@ -1294,10 +2048,13 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [
         "requested",
+        "awaiting_approval",
+        "ready",
         "running",
         "completed",
         "failed",
-        "cancelled"
+        "cancelled",
+        "denied"
       ],
       "title": "ToolCallState",
       "type": "string"
@@ -1313,6 +2070,49 @@
     },
     "WebSocketFrame": {
       "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "requested_scope": {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval_id",
+            "run_id",
+            "tool_call_id",
+            "requested_scope",
+            "state"
+          ],
+          "type": "object"
+        },
+        "ApprovalState": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
         "MessageResponse": {
           "properties": {
             "content": {
@@ -1346,6 +2146,7 @@
           "enum": [
             "queued",
             "running",
+            "waiting_for_approval",
             "cancelling",
             "completed",
             "failed",
@@ -1389,6 +2190,26 @@
             },
             {
               "properties": {
+                "approval_policy": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ApprovalPolicy"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requested_scope": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/WorkspaceScopeResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "run_id": {
                   "type": "string"
                 },
@@ -1403,7 +2224,9 @@
               "required": [
                 "type",
                 "run_id",
-                "state"
+                "state",
+                "approval_policy",
+                "requested_scope"
               ],
               "type": "object"
             },
@@ -1450,6 +2273,54 @@
                 },
                 "type": {
                   "const": "tool_call.requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "tool_call"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "approval": {
+                  "$ref": "#/$defs/ApprovalResponse"
+                },
+                "type": {
+                  "const": "approval.requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "approval"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "approval": {
+                  "$ref": "#/$defs/ApprovalResponse"
+                },
+                "type": {
+                  "const": "approval.decided",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "approval"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "tool_call": {
+                  "$ref": "#/$defs/ToolCallResponse"
+                },
+                "type": {
+                  "const": "tool_call.denied",
                   "type": "string"
                 }
               },
@@ -1533,11 +2404,31 @@
             "capability": {
               "type": "string"
             },
+            "effective_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "exit_code": {
               "format": "int32",
               "type": [
                 "integer",
                 "null"
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "run_id": {
@@ -1567,6 +2458,8 @@
             "run_id",
             "capability",
             "state",
+            "requested_scope",
+            "effective_scope",
             "stdout",
             "stderr",
             "exit_code"
@@ -1576,10 +2469,13 @@
         "ToolCallState": {
           "enum": [
             "requested",
+            "awaiting_approval",
+            "ready",
             "running",
             "completed",
             "failed",
-            "cancelled"
+            "cancelled",
+            "denied"
           ],
           "type": "string"
         },
@@ -1589,6 +2485,21 @@
             "stderr"
           ],
           "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1778,9 +2689,26 @@
       ],
       "title": "WorkspaceRootResponse",
       "type": "object"
+    },
+    "WorkspaceScopeResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "relative_directory": {
+          "type": "string"
+        },
+        "workspace_root_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_root_id",
+        "relative_directory"
+      ],
+      "title": "WorkspaceScopeResponse",
+      "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.6.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.8.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

@@ -1,14 +1,114 @@
 use std::{path::Path, process::Command};
 
 use kiln_core::{
-    DETERMINISTIC_SUBPROCESS_CAPABILITY, EventCursor, EventId, Message, MessageId, MessageRole,
-    Run, RunApplication, RunId, RunState, RunStore, Session, SessionEvent, SessionEventPayload,
-    SessionId, SessionStore, StartRunDisposition, SubprocessOutput, ToolCall, ToolCallId,
-    ToolCallResult, ToolCallState, Workspace, WorkspaceId, WorkspaceRoot, WorkspaceRootDiscovery,
+    ApprovalPolicy, DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor,
+    EventId, FilesystemIdentity, Message, MessageId, MessageRole, Run, RunApplication, RunId,
+    RunState, RunStore, Session, SessionEvent, SessionEventPayload, SessionId, SessionStore,
+    StartRunDisposition, SubprocessOutput, ToolCall, ToolCallId, ToolCallResult, ToolCallState,
+    Workspace, WorkspaceId, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
     WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
+
+#[test]
+fn local_auth_credential_is_private_persistent_and_rejects_unsafe_files() {
+    let data = tempfile::tempdir().unwrap();
+    let first = super::LocalAuthCredential::open(data.path()).unwrap();
+    let second = super::LocalAuthCredential::open(data.path()).unwrap();
+    assert_eq!(first.token(), second.token());
+    assert_eq!(first.path(), second.path());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        assert_eq!(
+            std::fs::metadata(first.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let auth_directory = first.path().parent().unwrap();
+        assert_eq!(
+            std::fs::metadata(auth_directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        std::fs::set_permissions(first.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(super::LocalAuthCredential::open(data.path()).is_err());
+
+        let symlink_data = tempfile::tempdir().unwrap();
+        let credential = super::LocalAuthCredential::open(symlink_data.path()).unwrap();
+        let credential_path = credential.path().to_owned();
+        let external = symlink_data.path().join("external-token");
+        std::fs::write(&external, [b'a'; 80]).unwrap();
+        std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_file(&credential_path).unwrap();
+        symlink(&external, &credential_path).unwrap();
+        assert!(super::LocalAuthCredential::open(symlink_data.path()).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn subprocess_scope_accepts_in_root_symlinks_and_rejects_escape_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_root = std::fs::canonicalize(workspace.path()).unwrap();
+    let inside = workspace.path().join("inside");
+    std::fs::create_dir(&inside).unwrap();
+    symlink(&inside, workspace.path().join("inside-link")).unwrap();
+    let inside_request = kiln_core::SubprocessRequest::new(
+        workspace_root.to_str().unwrap().to_owned(),
+        super::workspace_root_filesystem_identity(&workspace_root).unwrap(),
+        WorkspacePathScope::new(test_scope().workspace_root_id().clone(), "inside-link").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(super::validate_subprocess_request(&inside_request), Ok(()));
+
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), workspace.path().join("outside-link")).unwrap();
+    let outside_request = kiln_core::SubprocessRequest::new(
+        workspace_root.to_str().unwrap().to_owned(),
+        super::workspace_root_filesystem_identity(&workspace_root).unwrap(),
+        WorkspacePathScope::new(test_scope().workspace_root_id().clone(), "outside-link").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        super::validate_subprocess_request(&outside_request),
+        Err(kiln_core::RunError::PathOutsideWorkspaceRoot)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn subprocess_scope_rejects_a_replaced_workspace_root() {
+    let parent = tempfile::tempdir().unwrap();
+    let workspace = parent.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let request = kiln_core::SubprocessRequest::new(
+        workspace.to_str().unwrap().to_owned(),
+        super::workspace_root_filesystem_identity(&workspace).unwrap(),
+        WorkspacePathScope::new(test_scope().workspace_root_id().clone(), ".").unwrap(),
+    )
+    .unwrap();
+
+    std::fs::rename(&workspace, parent.path().join("original-workspace")).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+
+    assert_eq!(
+        super::validate_subprocess_request(&request),
+        Err(kiln_core::RunError::PathOutsideWorkspaceRoot)
+    );
+}
 
 fn git_repository() -> (TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().unwrap();
@@ -59,8 +159,12 @@ fn root(id: &str, name: &str, position: usize, path: &str, common: &str) -> Work
         WorkspaceRootId::parse(id).unwrap(),
         name.to_owned(),
         path.to_owned(),
-        path.to_owned(),
-        common.to_owned(),
+        DiscoveredWorkspaceRoot {
+            canonical_path: path.to_owned(),
+            git_common_directory_path: common.to_owned(),
+            filesystem_identity: FilesystemIdentity::new(format!("test:{path}"))
+                .expect("test identity"),
+        },
         position,
         WorkspaceRootState::Available,
     )
@@ -235,6 +339,14 @@ fn message(id: &str, session_id: &str, content: &str) -> Message {
         SessionId::parse(session_id).unwrap(),
         MessageRole::User,
         content.to_owned(),
+    )
+    .unwrap()
+}
+
+fn test_scope() -> WorkspacePathScope {
+    WorkspacePathScope::new(
+        WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+        ".",
     )
     .unwrap()
 }
@@ -631,6 +743,10 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
         .execute(&mut connection)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0006_approval_scopes.sql"))
+        .execute(&mut connection)
+        .await
+        .unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT seq FROM sqlite_sequence WHERE name = 'session_events'",
@@ -675,11 +791,62 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
 }
 
 #[tokio::test]
+async fn approval_scope_migration_rejects_an_active_legacy_run() {
+    let data = tempfile::tempdir().unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(data.path().join("migration.sqlite3"))
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let mut connection = SqliteConnection::connect_with(&options).await.unwrap();
+    for migration in [
+        include_str!("../migrations/0001_workspaces.sql"),
+        include_str!("../migrations/0002_sessions.sql"),
+        include_str!("../migrations/0003_runs.sql"),
+        include_str!("../migrations/0004_start_run_idempotency.sql"),
+        include_str!("../migrations/0005_run_cancellation.sql"),
+    ] {
+        sqlx::raw_sql(migration)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO workspaces (workspace_id, name) VALUES (?, 'Migration test')")
+        .bind("wsp_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions (session_id, workspace_id) VALUES (?, ?)")
+        .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .bind("wsp_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO runs (run_id, session_id, state) VALUES (?, ?, 'running')")
+        .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+    assert!(
+        sqlx::raw_sql(include_str!("../migrations/0006_approval_scopes.sql"))
+            .execute(&mut connection)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn run_creation_is_atomic_and_has_a_global_cursor_event() {
     let (_data, store, value) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
     let mutation = app
-        .start_root_run(value.id().clone(), "atomic-run".to_owned())
+        .start_root_run(
+            value.id().clone(),
+            "atomic-run".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     assert_eq!(mutation.events.len(), 1);
@@ -751,12 +918,22 @@ async fn idempotent_start_returns_original_run_before_and_after_terminal_complet
     let (data, store, value) = seeded_session().await;
     let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
     let first = app
-        .start_root_run(value.id().clone(), "same-key".to_owned())
+        .start_root_run(
+            value.id().clone(),
+            "same-key".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     assert_eq!(first.disposition, StartRunDisposition::Created);
     let duplicate = app
-        .start_root_run(value.id().clone(), "same-key".to_owned())
+        .start_root_run(
+            value.id().clone(),
+            "same-key".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     assert_eq!(duplicate.disposition, StartRunDisposition::Duplicate);
@@ -789,7 +966,12 @@ async fn idempotent_start_returns_original_run_before_and_after_terminal_complet
     let reopened = super::SqliteStore::open(data.path()).await.unwrap();
     let reopened_app = RunApplication::new(reopened, super::UlidIdGenerator);
     let after_terminal = reopened_app
-        .start_root_run(value.id().clone(), "same-key".to_owned())
+        .start_root_run(
+            value.id().clone(),
+            "same-key".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     assert_eq!(after_terminal.disposition, StartRunDisposition::Duplicate);
@@ -797,8 +979,8 @@ async fn idempotent_start_returns_original_run_before_and_after_terminal_complet
         after_terminal.value.run().run_id(),
         first.value.run().run_id()
     );
-    assert_eq!(after_terminal.value.run().state(), RunState::Queued);
-    assert!(after_terminal.value.tool_calls().is_empty());
+    assert_eq!(after_terminal.value.run().state(), RunState::Completed);
+    assert_eq!(after_terminal.value.tool_calls().len(), 1);
 }
 
 #[tokio::test]
@@ -807,6 +989,8 @@ async fn failed_start_transaction_does_not_reserve_the_idempotency_key() {
     let rejected = Run::new(
         RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
         session.id().clone(),
+        ApprovalPolicy::FullAccess,
+        test_scope(),
     );
     let duplicate_event_id = SessionEvent::run_created(
         EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
@@ -824,6 +1008,8 @@ async fn failed_start_transaction_does_not_reserve_the_idempotency_key() {
     let accepted = Run::new(
         RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
         session.id().clone(),
+        ApprovalPolicy::FullAccess,
+        test_scope(),
     );
     let event = SessionEvent::run_created(
         EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
@@ -842,12 +1028,22 @@ async fn failed_start_transaction_does_not_reserve_the_idempotency_key() {
 async fn different_idempotency_key_keeps_active_root_conflict() {
     let (_data, store, value) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
-    app.start_root_run(value.id().clone(), "first-key".to_owned())
-        .await
-        .unwrap();
+    app.start_root_run(
+        value.id().clone(),
+        "first-key".to_owned(),
+        ApprovalPolicy::FullAccess,
+        test_scope(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        app.start_root_run(value.id().clone(), "second-key".to_owned())
-            .await,
+        app.start_root_run(
+            value.id().clone(),
+            "second-key".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
         Err(kiln_core::RunError::ActiveRootRunExists)
     );
 }
@@ -856,12 +1052,22 @@ async fn different_idempotency_key_keeps_active_root_conflict() {
 async fn only_one_active_root_run_is_allowed_per_session() {
     let (_data, store, value) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
-    app.start_root_run(value.id().clone(), "first-run".to_owned())
-        .await
-        .unwrap();
+    app.start_root_run(
+        value.id().clone(),
+        "first-run".to_owned(),
+        ApprovalPolicy::FullAccess,
+        test_scope(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        app.start_root_run(value.id().clone(), "second-run".to_owned())
-            .await,
+        app.start_root_run(
+            value.id().clone(),
+            "second-run".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
         Err(kiln_core::RunError::ActiveRootRunExists)
     );
 }
@@ -870,7 +1076,14 @@ async fn only_one_active_root_run_is_allowed_per_session() {
 async fn run_store_rejects_state_machine_bypass_inputs() {
     let (_data, store, session) = seeded_session().await;
     let forged_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap();
-    let forged = Run::from_persisted(forged_id.clone(), session.id().clone(), RunState::Completed);
+    let forged = Run::from_persisted(
+        forged_id.clone(),
+        session.id().clone(),
+        RunState::Completed,
+        None,
+        None,
+    )
+    .unwrap();
     let forged_event = SessionEvent::run_created(
         EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
         &forged,
@@ -885,7 +1098,12 @@ async fn run_store_rejects_state_machine_bypass_inputs() {
 
     let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
     let created = app
-        .start_root_run(session.id().clone(), "valid-run".to_owned())
+        .start_root_run(
+            session.id().clone(),
+            "valid-run".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     let run_id = created.value.run().run_id().clone();
@@ -894,6 +1112,7 @@ async fn run_store_rejects_state_machine_bypass_inputs() {
         ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
         run_id.clone(),
         DETERMINISTIC_SUBPROCESS_CAPABILITY.to_owned(),
+        test_scope(),
     );
     let reversed_events = [
         SessionEvent::tool_call_requested(
@@ -908,7 +1127,7 @@ async fn run_store_rejects_state_machine_bypass_inputs() {
     ];
     assert_eq!(
         store
-            .begin_execution(&running_run, &proposed_tool, &reversed_events)
+            .begin_execution(&running_run, &proposed_tool, None, &reversed_events)
             .await,
         Err(kiln_core::RunStoreError::InvalidTransition)
     );
@@ -986,13 +1205,18 @@ async fn run_transitions_persist_historical_events_and_results() {
     let (data, store, value) = seeded_session().await;
     let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
     let created = app
-        .start_root_run(value.id().clone(), "historical-run".to_owned())
+        .start_root_run(
+            value.id().clone(),
+            "historical-run".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     let run_id = created.value.run().run_id().clone();
     let running = app.begin_execution(run_id.clone()).await.unwrap();
     let tool_call_id = running.value.tool_calls()[0].tool_call_id().clone();
-    assert_eq!(running.events.len(), 2);
+    assert_eq!(running.events.len(), 3);
     let tool_running = app.begin_tool_call(tool_call_id.clone()).await.unwrap();
     assert_eq!(tool_running.value.state(), ToolCallState::Running);
     let finished = app
@@ -1016,7 +1240,7 @@ async fn run_transitions_persist_historical_events_and_results() {
         .list_session_events(value.id(), EventCursor::zero())
         .await
         .unwrap();
-    assert_eq!(history.events().len(), 9);
+    assert_eq!(history.events().len(), 10);
     assert!(matches!(
         history.events()[1].payload(),
         SessionEventPayload::RunCreated {
@@ -1032,7 +1256,7 @@ async fn run_transitions_persist_historical_events_and_results() {
         }
     ));
     assert!(matches!(
-        history.events()[8].payload(),
+        history.events()[9].payload(),
         SessionEventPayload::RunStateChanged {
             state: RunState::Completed,
             ..
@@ -1054,7 +1278,12 @@ async fn queued_cancellation_is_atomic_and_replayed_in_order() {
     let (_data, store, session) = seeded_session().await;
     let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
     let created = app
-        .start_root_run(session.id().clone(), "queued-cancel".to_owned())
+        .start_root_run(
+            session.id().clone(),
+            "queued-cancel".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     let run_id = created.value.run().run_id().clone();
@@ -1108,7 +1337,12 @@ async fn running_cancellation_finishes_with_output_and_event_order() {
     let (_data, store, session) = seeded_session().await;
     let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
     let created = app
-        .start_root_run(session.id().clone(), "running-cancel".to_owned())
+        .start_root_run(
+            session.id().clone(),
+            "running-cancel".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     let run_id = created.value.run().run_id().clone();
@@ -1159,11 +1393,11 @@ async fn running_cancellation_finishes_with_output_and_event_order() {
         .await
         .unwrap();
     assert!(matches!(
-        history.events()[4].payload(),
+        history.events()[5].payload(),
         SessionEventPayload::RunCancellationRequested { .. }
     ));
     assert!(matches!(
-        history.events()[9].payload(),
+        history.events()[10].payload(),
         SessionEventPayload::RunStateChanged {
             state: RunState::Cancelled,
             ..
@@ -1176,7 +1410,12 @@ async fn cancelling_run_keeps_active_root_unique_until_terminal() {
     let (_data, store, session) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
     let created = app
-        .start_root_run(session.id().clone(), "active-cancel".to_owned())
+        .start_root_run(
+            session.id().clone(),
+            "active-cancel".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     let run_id = created.value.run().run_id().clone();
@@ -1184,8 +1423,13 @@ async fn cancelling_run_keeps_active_root_unique_until_terminal() {
     app.request_cancellation(run_id.clone()).await.unwrap();
 
     assert_eq!(
-        app.start_root_run(session.id().clone(), "blocked-by-cancel".to_owned())
-            .await,
+        app.start_root_run(
+            session.id().clone(),
+            "blocked-by-cancel".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
         Err(kiln_core::RunError::ActiveRootRunExists)
     );
 
@@ -1196,9 +1440,14 @@ async fn cancelling_run_keeps_active_root_unique_until_terminal() {
         .await
         .unwrap();
     assert!(
-        app.start_root_run(session.id().clone(), "after-cancel".to_owned())
-            .await
-            .is_ok()
+        app.start_root_run(
+            session.id().clone(),
+            "after-cancel".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .is_ok()
     );
 }
 
@@ -1207,7 +1456,12 @@ async fn failed_output_fails_both_tool_call_and_run() {
     let (_data, store, value) = seeded_session().await;
     let app = RunApplication::new(store, super::UlidIdGenerator);
     let created = app
-        .start_root_run(value.id().clone(), "failed-run".to_owned())
+        .start_root_run(
+            value.id().clone(),
+            "failed-run".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
         .await
         .unwrap();
     let run_id = created.value.run().run_id().clone();

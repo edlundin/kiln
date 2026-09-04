@@ -1007,6 +1007,38 @@
         },
         {
           "properties": {
+            "task": {
+              "$ref": "#/$defs/TaskResponse"
+            },
+            "type": {
+              "const": "task.updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "task": {
+              "$ref": "#/$defs/TaskResponse"
+            },
+            "type": {
+              "const": "task.state_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "approval_policy": {
               "anyOf": [
                 {
@@ -1368,6 +1400,38 @@
                 },
                 "type": {
                   "const": "task.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.state_changed",
                   "type": "string"
                 }
               },
@@ -1944,6 +2008,38 @@
                 },
                 "type": {
                   "const": "task.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.state_changed",
                   "type": "string"
                 }
               },
@@ -2696,6 +2792,55 @@
       "title": "ToolOutputStream",
       "type": "string"
     },
+    "TransitionTaskRequest": {
+      "$defs": {
+        "TaskState": {
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "blocked",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/TaskState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "title": "TransitionTaskRequest",
+      "type": "object"
+    },
+    "UpdateTaskRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "dependency_task_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "objective": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "objective"
+      ],
+      "title": "UpdateTaskRequest",
+      "type": "object"
+    },
     "WebSocketFrame": {
       "$defs": {
         "ApprovalPolicy": {
@@ -2842,6 +2987,38 @@
                 },
                 "type": {
                   "const": "task.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.state_changed",
                   "type": "string"
                 }
               },
@@ -3477,7 +3654,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.9.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.10.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

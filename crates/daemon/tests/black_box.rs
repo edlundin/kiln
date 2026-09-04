@@ -14,9 +14,10 @@ use kiln_protocol::{
     ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
     SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
     SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StartRunRequest, TASK_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallState,
-    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
-    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootRequest, error_code,
+    StartRunRequest, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
+    TaskState, ToolCallState, ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
+    WorkspaceResponse, WorkspaceRootRequest, error_code,
 };
 use reqwest::{
     StatusCode,
@@ -278,6 +279,8 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::SessionCreated { .. } => "session.created",
         SessionEventDataResponse::MessageAppended { .. } => "message.appended",
         SessionEventDataResponse::TaskCreated { .. } => "task.created",
+        SessionEventDataResponse::TaskUpdated { .. } => "task.updated",
+        SessionEventDataResponse::TaskStateChanged { .. } => "task.state_changed",
         SessionEventDataResponse::RunCreated { .. } => "run.created",
         SessionEventDataResponse::RunStateChanged { .. } => "run.state_changed",
         SessionEventDataResponse::RunCancellationRequested { .. } => "run.cancellation_requested",
@@ -311,7 +314,9 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         | SessionEventDataResponse::ArtifactRegistered { run_id, .. } => run_id == expected_run_id,
         SessionEventDataResponse::SessionCreated { .. }
         | SessionEventDataResponse::MessageAppended { .. }
-        | SessionEventDataResponse::TaskCreated { .. } => false,
+        | SessionEventDataResponse::TaskCreated { .. }
+        | SessionEventDataResponse::TaskUpdated { .. }
+        | SessionEventDataResponse::TaskStateChanged { .. } => false,
     }
 }
 
@@ -1329,6 +1334,197 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
         SessionEventDataResponse::TaskCreated { task } if task == child
     ));
 
+    let child_path = TASK_PATH.replace("{task_id}", &child.task_id);
+    let child_transition_path = TASK_TRANSITION_PATH.replace("{task_id}", &child.task_id);
+    let update_request = UpdateTaskRequest {
+        objective: "updated child".to_owned(),
+        dependency_task_ids: vec![parent.task_id.clone()],
+    };
+    assert_problem(
+        http.patch(format!("http://{}{}", daemon.address, child_path))
+            .json(&update_request)
+            .send()
+            .await
+            .expect("missing Task update idempotency response"),
+        StatusCode::BAD_REQUEST,
+        error_code::IDEMPOTENCY_KEY_REQUIRED,
+    )
+    .await;
+    let updated: TaskResponse = http
+        .patch(format!("http://{}{}", daemon.address, child_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-update")
+        .json(&update_request)
+        .send()
+        .await
+        .expect("Task update response")
+        .json()
+        .await
+        .expect("Task update JSON");
+    assert_eq!(updated.objective, "updated child");
+    assert_eq!(updated.state, TaskState::Pending);
+    assert!(matches!(
+        receive_event(&mut socket).await.event,
+        SessionEventDataResponse::TaskUpdated { task } if task == updated
+    ));
+    let duplicate: TaskResponse = http
+        .patch(format!("http://{}{}", daemon.address, child_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-update")
+        .json(&update_request)
+        .send()
+        .await
+        .expect("duplicate Task update response")
+        .json()
+        .await
+        .expect("duplicate Task update JSON");
+    assert_eq!(duplicate, updated);
+    assert_problem(
+        http.patch(format!("http://{}{}", daemon.address, child_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "task-update")
+            .json(&UpdateTaskRequest {
+                objective: "conflict".to_owned(),
+                dependency_task_ids: vec![parent.task_id.clone()],
+            })
+            .send()
+            .await
+            .expect("Task update conflict response"),
+        StatusCode::CONFLICT,
+        error_code::IDEMPOTENCY_CONFLICT,
+    )
+    .await;
+    assert_problem(
+        http.post(format!(
+            "http://{}{}",
+            daemon.address, child_transition_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-not-ready")
+        .json(&TransitionTaskRequest {
+            state: TaskState::Ready,
+        })
+        .send()
+        .await
+        .expect("guarded Task transition response"),
+        StatusCode::CONFLICT,
+        error_code::INVALID_TASK_TRANSITION,
+    )
+    .await;
+
+    let parent_transition_path = TASK_TRANSITION_PATH.replace("{task_id}", &parent.task_id);
+    let cancelled_parent: TaskResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address, parent_transition_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-parent-cancel")
+        .json(&TransitionTaskRequest {
+            state: TaskState::Cancelled,
+        })
+        .send()
+        .await
+        .expect("parent Task cancellation response")
+        .json()
+        .await
+        .expect("parent Task cancellation JSON");
+    assert!(matches!(
+        receive_event(&mut socket).await.event,
+        SessionEventDataResponse::TaskStateChanged { task } if task == cancelled_parent
+    ));
+    let blocked_child: TaskResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address, child_transition_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-child-block")
+        .json(&TransitionTaskRequest {
+            state: TaskState::Blocked,
+        })
+        .send()
+        .await
+        .expect("child Task blocked response")
+        .json()
+        .await
+        .expect("child Task blocked JSON");
+    assert_eq!(blocked_child.state, TaskState::Blocked);
+    assert!(matches!(
+        receive_event(&mut socket).await.event,
+        SessionEventDataResponse::TaskStateChanged { task } if task == blocked_child
+    ));
+
+    let unblocked_child: TaskResponse = http
+        .patch(format!("http://{}{}", daemon.address, child_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-child-unblock")
+        .json(&UpdateTaskRequest {
+            objective: "updated child".to_owned(),
+            dependency_task_ids: Vec::new(),
+        })
+        .send()
+        .await
+        .expect("child Task unblock response")
+        .json()
+        .await
+        .expect("child Task unblock JSON");
+    assert_eq!(unblocked_child.state, TaskState::Pending);
+    assert!(matches!(
+        receive_event(&mut socket).await.event,
+        SessionEventDataResponse::TaskUpdated { task } if task.state == TaskState::Blocked
+    ));
+    assert!(matches!(
+        receive_event(&mut socket).await.event,
+        SessionEventDataResponse::TaskStateChanged { task } if task == unblocked_child
+    ));
+
+    let ready_request = TransitionTaskRequest {
+        state: TaskState::Ready,
+    };
+    let ready_child: TaskResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address, child_transition_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-child-ready")
+        .json(&ready_request)
+        .send()
+        .await
+        .expect("child Task ready response")
+        .json()
+        .await
+        .expect("child Task ready JSON");
+    assert_eq!(ready_child.state, TaskState::Ready);
+    assert!(ready_child.dependency_task_ids.is_empty());
+    assert!(matches!(
+        receive_event(&mut socket).await.event,
+        SessionEventDataResponse::TaskStateChanged { task } if task == ready_child
+    ));
+    let duplicate: TaskResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address, child_transition_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-child-ready")
+        .json(&ready_request)
+        .send()
+        .await
+        .expect("duplicate Task transition response")
+        .json()
+        .await
+        .expect("duplicate Task transition JSON");
+    assert_eq!(duplicate, ready_child);
+    assert_problem(
+        http.post(format!(
+            "http://{}{}",
+            daemon.address, child_transition_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-child-ready")
+        .json(&TransitionTaskRequest {
+            state: TaskState::Cancelled,
+        })
+        .send()
+        .await
+        .expect("Task transition conflict response"),
+        StatusCode::CONFLICT,
+        error_code::IDEMPOTENCY_CONFLICT,
+    )
+    .await;
+
     let fetched: TaskResponse = http
         .get(format!(
             "http://{}{}",
@@ -1341,7 +1537,7 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
         .json()
         .await
         .expect("Task read JSON");
-    assert_eq!(fetched, child);
+    assert_eq!(fetched, ready_child);
     let history: SessionEventsResponse = http
         .get(format!(
             "http://{}{}",
@@ -1361,6 +1557,22 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
             .filter(|event| event_kind(event) == "task.created")
             .count(),
         2
+    );
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| event_kind(event) == "task.updated")
+            .count(),
+        2
+    );
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| event_kind(event) == "task.state_changed")
+            .count(),
+        4
     );
 
     drop(socket);
@@ -1385,7 +1597,7 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
         .json()
         .await
         .expect("recovered Task JSON");
-    assert_eq!(recovered, child);
+    assert_eq!(recovered, ready_child);
 }
 
 #[tokio::test]

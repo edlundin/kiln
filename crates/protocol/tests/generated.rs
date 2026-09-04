@@ -9,9 +9,10 @@ use kiln_protocol::{
     PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState,
     SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
     SESSION_TASKS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse,
-    SessionResponse, StoreIdentity, TASK_PATH, TaskResponse, TaskState, ToolCallState,
-    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
-    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, error_code,
+    SessionResponse, StoreIdentity, TASK_PATH, TASK_TRANSITION_PATH, TRANSITION_TASK_OPERATION_ID,
+    TaskResponse, TaskState, ToolCallState, ToolOutputStream, TransitionTaskRequest,
+    UPDATE_TASK_OPERATION_ID, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, error_code,
 };
 use serde_json::json;
 
@@ -58,6 +59,12 @@ fn command_types_reject_unknown_fields() {
 
     let value = json!({"objective": "task", "unknown": true});
     assert!(serde_json::from_value::<CreateTaskRequest>(value).is_err());
+
+    let value = json!({"objective": "task", "dependency_task_ids": [], "unknown": true});
+    assert!(serde_json::from_value::<UpdateTaskRequest>(value).is_err());
+
+    let value = json!({"state": "ready", "unknown": true});
+    assert!(serde_json::from_value::<TransitionTaskRequest>(value).is_err());
 
     let value = json!({
         "name": "Kiln",
@@ -281,10 +288,17 @@ fn catalogue_and_error_fixture_use_protocol_metadata() {
     assert_eq!(catalogue["http"][7]["operation"], CREATE_TASK_OPERATION_ID);
     assert_eq!(catalogue["http"][8]["path"], TASK_PATH);
     assert_eq!(catalogue["http"][8]["operation"], GET_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][9]["path"], SESSION_RUNS_PATH);
-    assert_eq!(catalogue["http"][9]["operation"], START_RUN_OPERATION_ID);
-    assert_eq!(catalogue["http"][10]["path"], RUN_PATH);
-    assert_eq!(catalogue["http"][10]["operation"], GET_RUN_OPERATION_ID);
+    assert_eq!(catalogue["http"][9]["path"], TASK_PATH);
+    assert_eq!(catalogue["http"][9]["operation"], UPDATE_TASK_OPERATION_ID);
+    assert_eq!(catalogue["http"][10]["path"], TASK_TRANSITION_PATH);
+    assert_eq!(
+        catalogue["http"][10]["operation"],
+        TRANSITION_TASK_OPERATION_ID
+    );
+    assert_eq!(catalogue["http"][11]["path"], SESSION_RUNS_PATH);
+    assert_eq!(catalogue["http"][11]["operation"], START_RUN_OPERATION_ID);
+    assert_eq!(catalogue["http"][12]["path"], RUN_PATH);
+    assert_eq!(catalogue["http"][12]["operation"], GET_RUN_OPERATION_ID);
     let artifact = catalogue["http"]
         .as_array()
         .expect("HTTP operations")
@@ -395,6 +409,20 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
     )
     .expect("create Task fixture follows the request DTO");
     assert!(!task_request.objective.is_empty());
+    let update_task_request = serde_json::from_str::<UpdateTaskRequest>(
+        artifacts
+            .get("fixtures/update-task-request.json")
+            .expect("update Task fixture"),
+    )
+    .expect("update Task fixture follows the request DTO");
+    assert!(!update_task_request.objective.is_empty());
+    let transition_task_request = serde_json::from_str::<TransitionTaskRequest>(
+        artifacts
+            .get("fixtures/transition-task-request.json")
+            .expect("transition Task fixture"),
+    )
+    .expect("transition Task fixture follows the request DTO");
+    assert_eq!(transition_task_request.state, TaskState::Ready);
     let task = serde_json::from_str::<TaskResponse>(
         artifacts
             .get("fixtures/task-response.json")
@@ -437,6 +465,8 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
         (SESSION_MESSAGES_PATH, APPEND_MESSAGE_OPERATION_ID),
         (SESSION_TASKS_PATH, CREATE_TASK_OPERATION_ID),
         (TASK_PATH, GET_TASK_OPERATION_ID),
+        (TASK_PATH, UPDATE_TASK_OPERATION_ID),
+        (TASK_TRANSITION_PATH, TRANSITION_TASK_OPERATION_ID),
         (SESSION_EVENTS_PATH, LIST_SESSION_EVENTS_OPERATION_ID),
     ] {
         assert!(openapi.contains(&format!("  {path}:")));
@@ -449,6 +479,8 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
     for definition in [
         "AppendMessageRequest",
         "CreateTaskRequest",
+        "UpdateTaskRequest",
+        "TransitionTaskRequest",
         "ArtifactResponse",
         "SessionResponse",
         "MessageResponse",
@@ -486,6 +518,24 @@ fn start_run_contract_requires_opaque_idempotency_key() {
         .0;
     assert!(create_task.contains(&format!("- name: {IDEMPOTENCY_KEY_HEADER}")));
     assert!(create_task.contains("required: true"));
+    let update_task = openapi
+        .split_once(&format!("  {TASK_PATH}:"))
+        .expect("Task path")
+        .1
+        .split_once(&format!("  {TASK_TRANSITION_PATH}:"))
+        .expect("Task transition path")
+        .0;
+    assert!(update_task.contains(&format!("- name: {IDEMPOTENCY_KEY_HEADER}")));
+    assert!(update_task.contains(&format!("operationId: {UPDATE_TASK_OPERATION_ID}")));
+    let transition_task = openapi
+        .split_once(&format!("  {TASK_TRANSITION_PATH}:"))
+        .expect("Task transition path")
+        .1
+        .split_once(&format!("  {SESSION_EVENTS_PATH}:"))
+        .expect("Session Events path")
+        .0;
+    assert!(transition_task.contains(&format!("- name: {IDEMPOTENCY_KEY_HEADER}")));
+    assert!(transition_task.contains(&format!("operationId: {TRANSITION_TASK_OPERATION_ID}")));
     assert!(openapi.contains(&format!("version: {PROTOCOL_VERSION}")));
 }
 

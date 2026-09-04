@@ -22,6 +22,10 @@ export type AppendMessageRequest = { content: string, };
 
 export type CreateTaskRequest = { objective: string, parent_task_id: string | null, dependency_task_ids: Array<string>, };
 
+export type UpdateTaskRequest = { objective: string, dependency_task_ids: Array<string>, };
+
+export type TransitionTaskRequest = { state: TaskState, };
+
 export type SessionResponse = { session_id: string, workspace_id: string, };
 
 export type MessageRole = "user";
@@ -58,7 +62,7 @@ export type ToolCallResponse = { tool_call_id: string, run_id: string, capabilit
 
 export type RunResponse = { run_id: string, session_id: string, state: RunState, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, tool_calls: Array<ToolCallResponse>, approvals: Array<ApprovalResponse>, };
 
-export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "task.created", task: TaskResponse, } | { "type": "run.created", run_id: string, state: RunState, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "run.cancellation_requested", run_id: string, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "approval.requested", approval: ApprovalResponse, } | { "type": "approval.decided", approval: ApprovalResponse, } | { "type": "tool_call.denied", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, } | { "type": "artifact.registered", run_id: string, tool_call_id: string, stream: ToolOutputStream, artifact: ArtifactResponse, };
+export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "task.created", task: TaskResponse, } | { "type": "task.updated", task: TaskResponse, } | { "type": "task.state_changed", task: TaskResponse, } | { "type": "run.created", run_id: string, state: RunState, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "run.cancellation_requested", run_id: string, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "approval.requested", approval: ApprovalResponse, } | { "type": "approval.decided", approval: ApprovalResponse, } | { "type": "tool_call.denied", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, } | { "type": "artifact.registered", run_id: string, tool_call_id: string, stream: ToolOutputStream, artifact: ArtifactResponse, };
 
 export type SessionEventResponse = { event_id: string, cursor: string, session_id: string, event: SessionEventDataResponse, };
 

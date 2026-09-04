@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.9.0";
+pub const PROTOCOL_VERSION: &str = "0.10.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -26,6 +26,7 @@ pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
 pub const TASK_PATH: &str = "/v1/tasks/{task_id}";
+pub const TASK_TRANSITION_PATH: &str = "/v1/tasks/{task_id}/transition";
 pub const RUN_CANCEL_PATH: &str = "/v1/runs/{run_id}/cancel";
 pub const TOOL_CALL_APPROVAL_PATH: &str = "/v1/tool-calls/{tool_call_id}/approval";
 pub const ARTIFACT_PATH: &str = "/v1/artifacts/{content_hash}";
@@ -38,6 +39,8 @@ pub const GET_SESSION_OPERATION_ID: &str = "get_session";
 pub const APPEND_MESSAGE_OPERATION_ID: &str = "append_message";
 pub const CREATE_TASK_OPERATION_ID: &str = "create_task";
 pub const GET_TASK_OPERATION_ID: &str = "get_task";
+pub const UPDATE_TASK_OPERATION_ID: &str = "update_task";
+pub const TRANSITION_TASK_OPERATION_ID: &str = "transition_task";
 pub const LIST_SESSION_EVENTS_OPERATION_ID: &str = "list_session_events";
 pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
@@ -80,6 +83,7 @@ pub mod error_code {
     pub const TASK_LINK_OUTSIDE_SESSION: &str = "task_link_outside_session";
     pub const DUPLICATE_TASK_DEPENDENCY: &str = "duplicate_task_dependency";
     pub const TASK_CYCLE: &str = "task_cycle";
+    pub const INVALID_TASK_TRANSITION: &str = "invalid_task_transition";
     pub const TASK_STORE_UNAVAILABLE: &str = "task_store_unavailable";
     pub const INVALID_EVENT_CURSOR: &str = "invalid_event_cursor";
     pub const IDEMPOTENCY_KEY_REQUIRED: &str = "idempotency_key_required";
@@ -135,6 +139,7 @@ pub mod error_code {
         TASK_LINK_OUTSIDE_SESSION,
         DUPLICATE_TASK_DEPENDENCY,
         TASK_CYCLE,
+        INVALID_TASK_TRANSITION,
         TASK_STORE_UNAVAILABLE,
         INVALID_EVENT_CURSOR,
         IDEMPOTENCY_KEY_REQUIRED,
@@ -257,6 +262,22 @@ pub struct CreateTaskRequest {
     pub parent_task_id: Option<String>,
     #[serde(default)]
     pub dependency_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct UpdateTaskRequest {
+    pub objective: String,
+    #[serde(default)]
+    pub dependency_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct TransitionTaskRequest {
+    pub state: TaskState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -449,6 +470,10 @@ pub enum SessionEventDataResponse {
     MessageAppended { message: MessageResponse },
     #[serde(rename = "task.created")]
     TaskCreated { task: TaskResponse },
+    #[serde(rename = "task.updated")]
+    TaskUpdated { task: TaskResponse },
+    #[serde(rename = "task.state_changed")]
+    TaskStateChanged { task: TaskResponse },
     #[serde(rename = "run.created")]
     RunCreated {
         run_id: String,

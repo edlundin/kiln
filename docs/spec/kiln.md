@@ -430,7 +430,7 @@ The current server implements only the routes marked `current` in that file.
 | Threads | `GET/POST /v1/projects/{id}/threads`, `GET /v1/threads/{id}`, `GET/POST /v1/threads/{id}/messages` | Thread drawer, persistent work records, transcript, and user input |
 | Events | `GET /v1/threads/{id}/events?after={cursor}`, WebSocket `/v1/threads/{id}/stream` | Replay and live delivery |
 | Runs | `GET/POST /v1/threads/{id}/runs`, `GET /v1/runs/{id}`, `POST /v1/runs/{id}/input`, `POST /v1/runs/{id}/cancel` | Root and child run lifecycle, supervision, and guidance |
-| Tasks | `GET/POST /v1/threads/{id}/tasks` | Explicit hierarchical work graph and run assignment |
+| Tasks | `GET/POST /v1/threads/{id}/tasks`, `PATCH /v1/tasks/{id}`, `POST /v1/tasks/{id}/transition` | Explicit hierarchical work graph and guarded lifecycle |
 | Approvals | `POST /v1/tool-calls/{id}/approval` | Allow or reject a requested operation |
 | Artifacts | `POST /v1/artifacts`, `GET /v1/artifacts/{hash}` | Upload composer attachments and download artifact bytes |
 | Extensions | `GET /v1/agents`, `GET /v1/providers`, `GET /v1/plugins`, `GET /v1/mcp/servers` | Inspect available execution boundaries |

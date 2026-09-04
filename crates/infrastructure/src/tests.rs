@@ -5,9 +5,10 @@ use kiln_core::{
     DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
     MessageRole, Run, RunApplication, RunId, RunState, RunStore, Session, SessionEvent,
     SessionEventPayload, SessionId, SessionStore, StartRunDisposition, SubprocessOutput, Task,
-    TaskId, TaskStore, TaskStoreError, ToolCall, ToolCallId, ToolCallResult, ToolCallState,
-    Workspace, WorkspaceId, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
-    WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
+    TaskId, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
+    ToolCallResult, ToolCallState, TransitionTask, UpdateTask, Workspace, WorkspaceId,
+    WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState,
+    WorkspaceStore,
 };
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
@@ -398,7 +399,7 @@ async fn session_migration_survives_reopen() {
 }
 
 #[tokio::test]
-async fn tasks_are_idempotent_validate_session_links_and_survive_reopen() {
+async fn tasks_are_idempotent_validate_lifecycle_and_survive_reopen() {
     let (data, store, workspace_id) = seeded_store().await;
     let first_session = session("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV", workspace_id.as_str());
     let second_session = session("ses_01ARZ3NDEKTSV4RRFFQ69G5FAW", workspace_id.as_str());
@@ -527,13 +528,209 @@ async fn tasks_are_idempotent_validate_session_links_and_survive_reopen() {
         )
         .await
         .unwrap();
+
+    assert_eq!(
+        store
+            .update_task(
+                &UpdateTask {
+                    task_id: parent.task_id().clone(),
+                    objective: parent.objective().to_owned(),
+                    dependency_task_ids: vec![child.task_id().clone()],
+                    idempotency_key: "cycle-key".to_owned(),
+                },
+                [
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB2").unwrap(),
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB3").unwrap(),
+                ],
+            )
+            .await,
+        Err(TaskStoreError::Cycle)
+    );
+
+    let update = UpdateTask {
+        task_id: child.task_id().clone(),
+        objective: "updated child".to_owned(),
+        dependency_task_ids: vec![parent.task_id().clone()],
+        idempotency_key: "update-key".to_owned(),
+    };
+    assert_eq!(
+        store
+            .update_task(
+                &update,
+                [
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB3").unwrap(),
+                ],
+            )
+            .await,
+        Err(TaskStoreError::Unavailable)
+    );
+    assert_eq!(
+        store
+            .get_task(child.task_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .objective(),
+        "child"
+    );
+    let updated = store
+        .update_task(
+            &update,
+            [
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB4").unwrap(),
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB5").unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.disposition, TaskMutationDisposition::Applied);
+    assert_eq!(updated.value.objective(), "updated child");
+    assert_eq!(updated.events.len(), 1);
+    let duplicate = store
+        .update_task(
+            &update,
+            [
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB6").unwrap(),
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB7").unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.disposition, TaskMutationDisposition::Duplicate);
+    assert!(duplicate.events.is_empty());
+    assert_eq!(
+        store
+            .update_task(
+                &UpdateTask {
+                    objective: "conflict".to_owned(),
+                    ..update.clone()
+                },
+                [
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB8").unwrap(),
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB9").unwrap(),
+                ],
+            )
+            .await,
+        Err(TaskStoreError::IdempotencyConflict)
+    );
+
+    assert_eq!(
+        store
+            .transition_task(
+                &TransitionTask {
+                    task_id: child.task_id().clone(),
+                    state: TaskState::Ready,
+                    idempotency_key: "not-ready-key".to_owned(),
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBA").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::InvalidTransition)
+    );
+    store
+        .transition_task(
+            &TransitionTask {
+                task_id: parent.task_id().clone(),
+                state: TaskState::Cancelled,
+                idempotency_key: "cancel-parent-key".to_owned(),
+            },
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBB").unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .transition_task(
+            &TransitionTask {
+                task_id: child.task_id().clone(),
+                state: TaskState::Blocked,
+                idempotency_key: "block-child-key".to_owned(),
+            },
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBC").unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let unblocked = store
+        .update_task(
+            &UpdateTask {
+                task_id: child.task_id().clone(),
+                objective: "updated child".to_owned(),
+                dependency_task_ids: Vec::new(),
+                idempotency_key: "unblock-child-key".to_owned(),
+            },
+            [
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBD").unwrap(),
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBE").unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(unblocked.value.state(), TaskState::Pending);
+    assert_eq!(unblocked.events.len(), 2);
+    assert!(matches!(
+        unblocked.events[0].payload(),
+        SessionEventPayload::TaskUpdated { .. }
+    ));
+    assert!(matches!(
+        unblocked.events[1].payload(),
+        SessionEventPayload::TaskStateChanged { .. }
+    ));
+
+    let transition = TransitionTask {
+        task_id: child.task_id().clone(),
+        state: TaskState::Ready,
+        idempotency_key: "ready-child-key".to_owned(),
+    };
+    let ready = store
+        .transition_task(
+            &transition,
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBF").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ready.value.state(), TaskState::Ready);
+    let duplicate = store
+        .transition_task(
+            &transition,
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBG").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.disposition, TaskMutationDisposition::Duplicate);
+    assert!(duplicate.events.is_empty());
+    assert_eq!(
+        store
+            .transition_task(
+                &TransitionTask {
+                    state: TaskState::Cancelled,
+                    ..transition.clone()
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBH").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::IdempotencyConflict)
+    );
+    assert_eq!(
+        store
+            .transition_task(
+                &TransitionTask {
+                    task_id: child.task_id().clone(),
+                    state: TaskState::Completed,
+                    idempotency_key: "invalid-terminal-key".to_owned(),
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBJ").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::InvalidTransition)
+    );
     drop(store);
 
     let reopened = super::SqliteStore::open(data.path()).await.unwrap();
-    assert_eq!(
-        reopened.get_task(child.task_id()).await.unwrap(),
-        Some(child)
-    );
+    let recovered = reopened.get_task(child.task_id()).await.unwrap().unwrap();
+    assert_eq!(recovered.objective(), "updated child");
+    assert_eq!(recovered.state(), TaskState::Ready);
+    assert!(recovered.dependency_task_ids().is_empty());
     let events = reopened
         .list_session_events(first_session.id(), EventCursor::zero())
         .await
@@ -545,6 +742,25 @@ async fn tasks_are_idempotent_validate_session_links_and_survive_reopen() {
             .filter(|event| matches!(event.payload(), SessionEventPayload::TaskCreated { .. }))
             .count(),
         2
+    );
+    assert_eq!(
+        events
+            .events()
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::TaskUpdated { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .events()
+            .iter()
+            .filter(|event| matches!(
+                event.payload(),
+                SessionEventPayload::TaskStateChanged { .. }
+            ))
+            .count(),
+        4
     );
 }
 

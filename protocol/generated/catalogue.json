@@ -37,6 +37,7 @@
     "task_link_outside_session",
     "duplicate_task_dependency",
     "task_cycle",
+    "invalid_task_transition",
     "task_store_unavailable",
     "invalid_event_cursor",
     "idempotency_key_required",
@@ -104,6 +105,16 @@
       "path": "/v1/tasks/{task_id}"
     },
     {
+      "method": "PATCH",
+      "operation": "update_task",
+      "path": "/v1/tasks/{task_id}"
+    },
+    {
+      "method": "POST",
+      "operation": "transition_task",
+      "path": "/v1/tasks/{task_id}/transition"
+    },
+    {
       "method": "POST",
       "operation": "start_run",
       "path": "/v1/sessions/{session_id}/runs"
@@ -129,7 +140,7 @@
       "path": "/v1/artifacts/{content_hash}"
     }
   ],
-  "protocol_version": "0.9.0",
+  "protocol_version": "0.10.0",
   "websocket": [
     {
       "method": "GET",

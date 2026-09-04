@@ -2,6 +2,14 @@
 
 ## 2026-09-04 — `feat`
 
+- Added idempotent Task objective and dependency updates.
+- Added guarded Task lifecycle transitions with dependency and cycle validation.
+- Added durable lifecycle events, restart recovery, and protocol version `0.10.0`.
+
+[Commit](pending)
+
+## 2026-09-04 — `feat`
+
 - Added durable Task create/get HTTP operations with idempotent creation.
 - Added same-Session parent and dependency validation, plus streamed and replayable `task.created` events.
 - Added SQLite restart recovery and the generated protocol contract for Tasks.

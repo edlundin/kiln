@@ -21,11 +21,12 @@ use crate::{
     ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
     SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
     START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, StartRunRequest, StoreIdentity, TASK_PATH, TOOL_CALL_APPROVAL_PATH,
-    TaskResponse, TaskState, ToolCallResponse, ToolCallState, ToolOutputStream,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
-    WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
-    error_code,
+    SessionResponse, StartRunRequest, StoreIdentity, TASK_PATH, TASK_TRANSITION_PATH,
+    TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState,
+    ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
+    UPDATE_TASK_OPERATION_ID, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WorkspaceResponse, WorkspaceRootRequest,
+    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -83,6 +84,14 @@ pub fn artifact_files() -> BTreeMap<&'static str, String> {
     files.insert(
         "fixtures/create-task-request.json",
         fixture_create_task_request(),
+    );
+    files.insert(
+        "fixtures/update-task-request.json",
+        fixture_update_task_request(),
+    );
+    files.insert(
+        "fixtures/transition-task-request.json",
+        fixture_transition_task_request(),
     );
     files.insert("fixtures/session-response.json", fixture_session_response());
     files.insert("fixtures/message-response.json", fixture_message_response());
@@ -149,6 +158,8 @@ fn schema() -> String {
         ("WorkspaceResponse", schema_for!(WorkspaceResponse)),
         ("AppendMessageRequest", schema_for!(AppendMessageRequest)),
         ("CreateTaskRequest", schema_for!(CreateTaskRequest)),
+        ("UpdateTaskRequest", schema_for!(UpdateTaskRequest)),
+        ("TransitionTaskRequest", schema_for!(TransitionTaskRequest)),
         ("SessionResponse", schema_for!(SessionResponse)),
         ("MessageRole", schema_for!(MessageRole)),
         ("MessageResponse", schema_for!(MessageResponse)),
@@ -211,6 +222,8 @@ fn typescript() -> String {
         WorkspaceResponse::decl(&config),
         AppendMessageRequest::decl(&config),
         CreateTaskRequest::decl(&config),
+        UpdateTaskRequest::decl(&config),
+        TransitionTaskRequest::decl(&config),
         SessionResponse::decl(&config),
         MessageRole::decl(&config),
         MessageResponse::decl(&config),
@@ -281,6 +294,14 @@ fn catalogue() -> String {
             "method": "GET",
             "path": TASK_PATH,
             "operation": GET_TASK_OPERATION_ID
+        }, {
+            "method": "PATCH",
+            "path": TASK_PATH,
+            "operation": UPDATE_TASK_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": TASK_TRANSITION_PATH,
+            "operation": TRANSITION_TASK_OPERATION_ID
         }, {
             "method": "POST",
             "path": SESSION_RUNS_PATH,
@@ -433,6 +454,19 @@ fn fixture_create_task_request() -> String {
         objective: "Inspect durable Task recovery.".to_owned(),
         parent_task_id: None,
         dependency_task_ids: Vec::new(),
+    })
+}
+
+fn fixture_update_task_request() -> String {
+    serialize_fixture(&UpdateTaskRequest {
+        objective: "Inspect durable Task lifecycle recovery.".to_owned(),
+        dependency_task_ids: vec!["tsk_01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned()],
+    })
+}
+
+fn fixture_transition_task_request() -> String {
+    serialize_fixture(&TransitionTaskRequest {
+        state: TaskState::Ready,
     })
 }
 
@@ -784,6 +818,77 @@ paths:
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'
+    patch:
+      operationId: {UPDATE_TASK_OPERATION_ID}
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+          description: Opaque non-empty key for idempotent Task updates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskRequest'
+      responses:
+        '200':
+          description: Updated durable Task snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  {TASK_TRANSITION_PATH}:
+    post:
+      operationId: {TRANSITION_TASK_OPERATION_ID}
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+          description: Opaque non-empty key for idempotent Task transitions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionTaskRequest'
+      responses:
+        '200':
+          description: Transitioned durable Task snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
   {SESSION_EVENTS_PATH}:
     get:
       operationId: {LIST_SESSION_EVENTS_OPERATION_ID}
@@ -992,6 +1097,11 @@ components:
             openapi_schema::<AppendMessageRequest>(),
         ),
         ("CreateTaskRequest", openapi_schema::<CreateTaskRequest>()),
+        ("UpdateTaskRequest", openapi_schema::<UpdateTaskRequest>()),
+        (
+            "TransitionTaskRequest",
+            openapi_schema::<TransitionTaskRequest>(),
+        ),
         ("SessionResponse", openapi_schema::<SessionResponse>()),
         ("MessageRole", openapi_schema::<MessageRole>()),
         ("MessageResponse", openapi_schema::<MessageResponse>()),
@@ -1074,6 +1184,10 @@ fn normalize_openapi_references(value: &mut Value) {
 fn reference() -> String {
     format!(
         "# EDL-215 protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nAll loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_TASKS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header. It creates one durable pending Task and one `task.created` Event atomically. Parent and dependency links must target Tasks in the same Session. A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET {TASK_PATH}` returns the durable Task snapshot.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header and a `StartRunRequest` containing the approval policy, immutable Workspace root ID, and normalized relative directory. The key is scoped to the start-run operation and Session. A repeated key with the same request returns the current durable Run snapshot and never dispatches another subprocess. A mismatched reuse is an idempotency conflict.\n\n`ask` records a pending Approval before execution. `read_only` durably denies the subprocess. `full_access` makes the requested scope effective without a prompt. `POST {TOOL_CALL_APPROVAL_PATH}` approves or rejects one pending ToolCall. Approval decisions are durable, first-decision-wins, and idempotent by their own `{IDEMPOTENCY_KEY_HEADER}`. An approval after daemon restart resumes the same Run.\n\nTool output larger than 4,096 bytes is stored as one immutable artifact instead of inline Event content. The `artifact.registered` Event and terminal ToolCall include the content hash, media type, and decimal byte size. `GET {ARTIFACT_PATH}` returns the verified bytes with safe download headers.\n\n`POST {RUN_CANCEL_PATH}` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.\n\nSIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client connects to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}` and offers `{WEBSOCKET_CAPABILITY}` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `{WEBSOCKET_CAPABILITY}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
+    )
+    .replace(
+        "A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.",
+        "`PATCH /v1/tasks/{task_id}` replaces mutable objective and dependency data and records `task.updated`. `POST /v1/tasks/{task_id}/transition` applies one guarded lifecycle transition and records `task.state_changed`. All Task commands are idempotent. A repeated key with the same normalized request returns the current Task without another Event. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.",
     )
 }
 

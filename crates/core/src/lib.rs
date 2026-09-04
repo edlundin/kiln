@@ -509,6 +509,19 @@ impl TaskState {
             Self::Cancelled => "cancelled",
         }
     }
+
+    fn can_transition_to(self, state: Self) -> bool {
+        matches!(
+            (self, state),
+            (Self::Pending, Self::Ready | Self::Blocked | Self::Cancelled)
+                | (Self::Blocked, Self::Ready | Self::Cancelled)
+                | (Self::Ready, Self::Running | Self::Cancelled)
+                | (
+                    Self::Running,
+                    Self::Completed | Self::Failed | Self::Cancelled
+                )
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -533,18 +546,12 @@ impl Task {
         parent_task_id: Option<TaskId>,
         mut dependency_task_ids: Vec<TaskId>,
     ) -> Result<Self, TaskError> {
-        if objective.trim().is_empty() {
-            return Err(TaskError::ObjectiveRequired);
-        }
-        dependency_task_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        if dependency_task_ids.windows(2).any(|ids| ids[0] == ids[1]) {
-            return Err(TaskError::DuplicateDependency);
-        }
-        if parent_task_id.as_ref() == Some(&task_id)
-            || dependency_task_ids.iter().any(|id| id == &task_id)
-        {
-            return Err(TaskError::Cycle);
-        }
+        validate_task_input(
+            &task_id,
+            &objective,
+            parent_task_id.as_ref(),
+            &mut dependency_task_ids,
+        )?;
         Ok(Self {
             task_id,
             session_id,
@@ -604,6 +611,63 @@ impl Task {
     pub fn assigned_run_id(&self) -> Option<&RunId> {
         self.assigned_run_id.as_ref()
     }
+
+    pub fn update(
+        &self,
+        objective: String,
+        dependency_task_ids: Vec<TaskId>,
+    ) -> Result<Self, TaskError> {
+        if !matches!(self.state, TaskState::Pending | TaskState::Blocked) {
+            return Err(TaskError::InvalidTransition);
+        }
+        let mut task = Self::new(
+            self.task_id.clone(),
+            self.session_id.clone(),
+            objective,
+            self.parent_task_id.clone(),
+            dependency_task_ids,
+        )?;
+        task.state = self.state;
+        task.assigned_run_id = self.assigned_run_id.clone();
+        Ok(task)
+    }
+
+    pub fn unblock(&self) -> Result<Self, TaskError> {
+        if self.state != TaskState::Blocked {
+            return Err(TaskError::InvalidTransition);
+        }
+        let mut task = self.clone();
+        task.state = TaskState::Pending;
+        Ok(task)
+    }
+
+    pub fn transition(&self, state: TaskState) -> Result<Self, TaskError> {
+        if !self.state.can_transition_to(state) {
+            return Err(TaskError::InvalidTransition);
+        }
+        let mut task = self.clone();
+        task.state = state;
+        Ok(task)
+    }
+}
+
+fn validate_task_input(
+    task_id: &TaskId,
+    objective: &str,
+    parent_task_id: Option<&TaskId>,
+    dependency_task_ids: &mut [TaskId],
+) -> Result<(), TaskError> {
+    if objective.trim().is_empty() {
+        return Err(TaskError::ObjectiveRequired);
+    }
+    dependency_task_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    if dependency_task_ids.windows(2).any(|ids| ids[0] == ids[1]) {
+        return Err(TaskError::DuplicateDependency);
+    }
+    if parent_task_id == Some(task_id) || dependency_task_ids.iter().any(|id| id == task_id) {
+        return Err(TaskError::Cycle);
+    }
+    Ok(())
 }
 
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
@@ -1456,6 +1520,12 @@ pub enum SessionEventPayload {
     TaskCreated {
         task: Task,
     },
+    TaskUpdated {
+        task: Task,
+    },
+    TaskStateChanged {
+        task: Task,
+    },
     RunCreated {
         run_id: RunId,
         state: RunState,
@@ -1531,6 +1601,22 @@ impl SessionEvent {
             event_id,
             session_id: task.session_id.clone(),
             payload: SessionEventPayload::TaskCreated { task },
+        }
+    }
+
+    pub fn task_updated(event_id: EventId, task: Task) -> Self {
+        Self {
+            event_id,
+            session_id: task.session_id.clone(),
+            payload: SessionEventPayload::TaskUpdated { task },
+        }
+    }
+
+    pub fn task_state_changed(event_id: EventId, task: Task) -> Self {
+        Self {
+            event_id,
+            session_id: task.session_id.clone(),
+            payload: SessionEventPayload::TaskStateChanged { task },
         }
     }
 
@@ -1803,6 +1889,33 @@ pub struct CreateTask {
     pub idempotency_key: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateTask {
+    pub task_id: TaskId,
+    pub objective: String,
+    pub dependency_task_ids: Vec<TaskId>,
+    pub idempotency_key: String,
+}
+
+impl UpdateTask {
+    fn validate(mut self) -> Result<Self, TaskError> {
+        validate_task_input(
+            &self.task_id,
+            &self.objective,
+            None,
+            &mut self.dependency_task_ids,
+        )?;
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionTask {
+    pub task_id: TaskId,
+    pub state: TaskState,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateTaskDisposition {
     Created,
@@ -1831,6 +1944,33 @@ impl CreateTaskMutation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskMutationDisposition {
+    Applied,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskMutation {
+    pub value: Task,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: TaskMutationDisposition,
+}
+
+impl TaskMutation {
+    pub fn new(
+        value: Task,
+        events: Vec<StoredSessionEvent>,
+        disposition: TaskMutationDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskError {
     SessionNotFound,
     TaskNotFound,
@@ -1840,6 +1980,7 @@ pub enum TaskError {
     TaskLinkOutsideSession,
     DuplicateDependency,
     Cycle,
+    InvalidTransition,
     IdempotencyKeyRequired,
     IdempotencyConflict,
     TaskStoreUnavailable,
@@ -1847,11 +1988,14 @@ pub enum TaskError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStoreError {
+    TaskNotFound,
     ParentTaskNotFound,
     DependencyTaskNotFound,
     TaskLinkOutsideSession,
     IdempotencyKeyRequired,
     IdempotencyConflict,
+    Cycle,
+    InvalidTransition,
     InvalidTask,
     Unavailable,
 }
@@ -2000,6 +2144,16 @@ pub trait TaskStore: Send + Sync {
         &self,
         task_id: &TaskId,
     ) -> impl Future<Output = Result<Option<Task>, StoreError>> + Send;
+    fn update_task(
+        &self,
+        command: &UpdateTask,
+        event_ids: [EventId; 2],
+    ) -> impl Future<Output = Result<TaskMutation, TaskStoreError>> + Send;
+    fn transition_task(
+        &self,
+        command: &TransitionTask,
+        event_id: EventId,
+    ) -> impl Future<Output = Result<TaskMutation, TaskStoreError>> + Send;
 }
 
 pub trait SessionIdGenerator: Send + Sync {
@@ -2697,6 +2851,14 @@ pub trait TaskOperations: Send + Sync {
         command: CreateTask,
     ) -> impl Future<Output = Result<CreateTaskMutation, TaskError>> + Send;
     fn get_task(&self, task_id: TaskId) -> impl Future<Output = Result<Task, TaskError>> + Send;
+    fn update_task(
+        &self,
+        command: UpdateTask,
+    ) -> impl Future<Output = Result<TaskMutation, TaskError>> + Send;
+    fn transition_task(
+        &self,
+        command: TransitionTask,
+    ) -> impl Future<Output = Result<TaskMutation, TaskError>> + Send;
 }
 
 pub struct SessionApplication<W, S, I> {
@@ -2871,6 +3033,32 @@ where
             .map_err(|_| TaskError::TaskStoreUnavailable)?
             .ok_or(TaskError::TaskNotFound)
     }
+
+    pub async fn update_task(&self, command: UpdateTask) -> Result<TaskMutation, TaskError> {
+        if command.idempotency_key.is_empty() {
+            return Err(TaskError::IdempotencyKeyRequired);
+        }
+        self.session_store
+            .update_task(
+                &command.validate()?,
+                [self.ids.event_id(), self.ids.event_id()],
+            )
+            .await
+            .map_err(task_store_error)
+    }
+
+    pub async fn transition_task(
+        &self,
+        command: TransitionTask,
+    ) -> Result<TaskMutation, TaskError> {
+        if command.idempotency_key.is_empty() {
+            return Err(TaskError::IdempotencyKeyRequired);
+        }
+        self.session_store
+            .transition_task(&command, self.ids.event_id())
+            .await
+            .map_err(task_store_error)
+    }
 }
 
 impl<W, S, I> TaskOperations for SessionApplication<W, S, I>
@@ -2886,15 +3074,26 @@ where
     async fn get_task(&self, task_id: TaskId) -> Result<Task, TaskError> {
         SessionApplication::get_task(self, task_id).await
     }
+
+    async fn update_task(&self, command: UpdateTask) -> Result<TaskMutation, TaskError> {
+        SessionApplication::update_task(self, command).await
+    }
+
+    async fn transition_task(&self, command: TransitionTask) -> Result<TaskMutation, TaskError> {
+        SessionApplication::transition_task(self, command).await
+    }
 }
 
 fn task_store_error(error: TaskStoreError) -> TaskError {
     match error {
+        TaskStoreError::TaskNotFound => TaskError::TaskNotFound,
         TaskStoreError::ParentTaskNotFound => TaskError::ParentTaskNotFound,
         TaskStoreError::DependencyTaskNotFound => TaskError::DependencyTaskNotFound,
         TaskStoreError::TaskLinkOutsideSession => TaskError::TaskLinkOutsideSession,
         TaskStoreError::IdempotencyKeyRequired => TaskError::IdempotencyKeyRequired,
         TaskStoreError::IdempotencyConflict => TaskError::IdempotencyConflict,
+        TaskStoreError::Cycle => TaskError::Cycle,
+        TaskStoreError::InvalidTransition => TaskError::InvalidTransition,
         TaskStoreError::InvalidTask | TaskStoreError::Unavailable => {
             TaskError::TaskStoreUnavailable
         }
@@ -3613,7 +3812,7 @@ mod tests {
                 task.session_id().clone(),
                 "objective".to_owned(),
                 None,
-                vec![first.clone(), first],
+                vec![first.clone(), first.clone()],
             ),
             Err(TaskError::DuplicateDependency)
         );
@@ -3629,13 +3828,34 @@ mod tests {
         );
         assert_eq!(
             Task::new(
-                task_id,
+                task_id.clone(),
                 task.session_id().clone(),
                 " \n ".to_owned(),
                 None,
                 Vec::new(),
             ),
             Err(TaskError::ObjectiveRequired)
+        );
+
+        let updated = task
+            .update(
+                "  updated objective  ".to_owned(),
+                vec![second.clone(), first.clone()],
+            )
+            .unwrap();
+        assert_eq!(updated.objective(), "  updated objective  ");
+        assert_eq!(updated.dependency_task_ids(), [first, second]);
+        let blocked = updated.transition(TaskState::Blocked).unwrap();
+        assert_eq!(blocked.unblock().unwrap().state(), TaskState::Pending);
+        let ready = updated.transition(TaskState::Ready).unwrap();
+        assert_eq!(ready.state(), TaskState::Ready);
+        assert_eq!(
+            ready.transition(TaskState::Completed),
+            Err(TaskError::InvalidTransition)
+        );
+        assert_eq!(
+            ready.update("changed too late".to_owned(), Vec::new()),
+            Err(TaskError::InvalidTransition)
         );
     }
 

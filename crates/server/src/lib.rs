@@ -27,7 +27,8 @@ use kiln_core::{
     Session, SessionError, SessionEventPage, SessionEventPayload, SessionId, SessionOperations,
     StoreMetadata, StoredSessionEvent, Task, TaskError, TaskId, TaskOperations,
     TaskState as CoreTaskState, ToolCall, ToolCallState as CoreToolCallState,
-    ToolOutputStream as CoreToolOutputStream, WorkspaceError, WorkspaceId, WorkspaceOperations,
+    ToolOutputStream as CoreToolOutputStream, TransitionTask, UpdateTask, WorkspaceError,
+    WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
@@ -38,8 +39,9 @@ use kiln_protocol::{
     ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
     SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
     SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StartRunRequest, StoreIdentity, TASK_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState,
-    ToolCallResponse, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    StartRunRequest, StoreIdentity, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
+    TaskResponse, TaskState, ToolCallResponse, ToolCallState, ToolOutputStream,
+    TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
     WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
     WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
@@ -359,7 +361,8 @@ where
         .route(SESSION_PATH, get(get_session))
         .route(SESSION_MESSAGES_PATH, post(append_message))
         .route(SESSION_TASKS_PATH, post(create_task))
-        .route(TASK_PATH, get(get_task))
+        .route(TASK_PATH, get(get_task).patch(update_task))
+        .route(TASK_TRANSITION_PATH, post(transition_task))
         .route(SESSION_EVENTS_PATH, get(list_session_events))
         .route(SESSION_RUNS_PATH, post(start_run))
         .route(RUN_PATH, get(get_run))
@@ -669,6 +672,64 @@ where
     Ok(Json(task_response(&task)))
 }
 
+async fn update_task<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(task_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<UpdateTaskRequest>,
+) -> Result<Json<TaskResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let task_id = TaskId::parse(task_id).map_err(|_| PublicError::InvalidRequest)?;
+    let dependency_task_ids = request
+        .dependency_task_ids
+        .into_iter()
+        .map(TaskId::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PublicError::InvalidRequest)?;
+    let mutation = state
+        .session_operations
+        .update_task(UpdateTask {
+            task_id,
+            objective: request.objective,
+            dependency_task_ids,
+            idempotency_key: required_idempotency_key(&headers)?,
+        })
+        .await
+        .map_err(PublicError::from)?;
+    state.event_broadcaster.publish(mutation.events);
+    Ok(Json(task_response(&mutation.value)))
+}
+
+async fn transition_task<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(task_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<TransitionTaskRequest>,
+) -> Result<Json<TaskResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let mutation = state
+        .session_operations
+        .transition_task(TransitionTask {
+            task_id: TaskId::parse(task_id).map_err(|_| PublicError::InvalidRequest)?,
+            state: task_state_request(request.state),
+            idempotency_key: required_idempotency_key(&headers)?,
+        })
+        .await
+        .map_err(PublicError::from)?;
+    state.event_broadcaster.publish(mutation.events);
+    Ok(Json(task_response(&mutation.value)))
+}
+
 fn required_idempotency_key(headers: &axum::http::HeaderMap) -> Result<String, PublicError> {
     let value = headers
         .get(IDEMPOTENCY_KEY_HEADER)
@@ -921,6 +982,18 @@ fn task_state_response(state: CoreTaskState) -> TaskState {
     }
 }
 
+fn task_state_request(state: TaskState) -> CoreTaskState {
+    match state {
+        TaskState::Pending => CoreTaskState::Pending,
+        TaskState::Ready => CoreTaskState::Ready,
+        TaskState::Running => CoreTaskState::Running,
+        TaskState::Blocked => CoreTaskState::Blocked,
+        TaskState::Completed => CoreTaskState::Completed,
+        TaskState::Failed => CoreTaskState::Failed,
+        TaskState::Cancelled => CoreTaskState::Cancelled,
+    }
+}
+
 fn run_response(snapshot: &RunSnapshot) -> RunResponse {
     RunResponse {
         run_id: snapshot.run().run_id().as_str().to_owned(),
@@ -1033,6 +1106,14 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
         SessionEventPayload::TaskCreated { task } => SessionEventDataResponse::TaskCreated {
             task: task_response(task),
         },
+        SessionEventPayload::TaskUpdated { task } => SessionEventDataResponse::TaskUpdated {
+            task: task_response(task),
+        },
+        SessionEventPayload::TaskStateChanged { task } => {
+            SessionEventDataResponse::TaskStateChanged {
+                task: task_response(task),
+            }
+        }
         SessionEventPayload::RunCreated {
             run_id,
             state,
@@ -1664,6 +1745,11 @@ impl PublicError {
                     StatusCode::BAD_REQUEST,
                     error_code::TASK_CYCLE,
                     "Task cycle",
+                ),
+                TaskError::InvalidTransition => (
+                    StatusCode::CONFLICT,
+                    error_code::INVALID_TASK_TRANSITION,
+                    "Invalid Task transition",
                 ),
                 TaskError::IdempotencyKeyRequired => (
                     StatusCode::BAD_REQUEST,

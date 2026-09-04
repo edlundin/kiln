@@ -1,0 +1,6 @@
+{
+  "objective": "Inspect durable Task lifecycle recovery.",
+  "dependency_task_ids": [
+    "tsk_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+  ]
+}

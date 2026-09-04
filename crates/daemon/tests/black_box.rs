@@ -8,16 +8,17 @@ use std::{
 use futures_util::{SinkExt, StreamExt};
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
-    ApprovalState, ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest,
+    ApprovalState, AssignTaskRequest, ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest,
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
     MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
     ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
     SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
     SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StartRunRequest, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
-    TaskState, ToolCallState, ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
-    WorkspaceResponse, WorkspaceRootRequest, error_code,
+    StartRunRequest, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
+    TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallState, ToolOutputStream,
+    TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    WorkspaceRootRequest, error_code,
 };
 use reqwest::{
     StatusCode,
@@ -280,6 +281,7 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::MessageAppended { .. } => "message.appended",
         SessionEventDataResponse::TaskCreated { .. } => "task.created",
         SessionEventDataResponse::TaskUpdated { .. } => "task.updated",
+        SessionEventDataResponse::TaskAssigned { .. } => "task.assigned",
         SessionEventDataResponse::TaskStateChanged { .. } => "task.state_changed",
         SessionEventDataResponse::RunCreated { .. } => "run.created",
         SessionEventDataResponse::RunStateChanged { .. } => "run.state_changed",
@@ -316,6 +318,7 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         | SessionEventDataResponse::MessageAppended { .. }
         | SessionEventDataResponse::TaskCreated { .. }
         | SessionEventDataResponse::TaskUpdated { .. }
+        | SessionEventDataResponse::TaskAssigned { .. }
         | SessionEventDataResponse::TaskStateChanged { .. } => false,
     }
 }
@@ -1525,6 +1528,109 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
     )
     .await;
 
+    let run: RunResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            SESSION_RUNS_PATH.replace("{session_id}", &session.session_id)
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-assignment-run")
+        .json(&session.request_with_policy(ApprovalPolicy::Ask))
+        .send()
+        .await
+        .expect("Task assignment Run response")
+        .json()
+        .await
+        .expect("Task assignment Run JSON");
+    let child_assignment_path = TASK_ASSIGNMENT_PATH.replace("{task_id}", &child.task_id);
+    let assignment_request = AssignTaskRequest {
+        run_id: run.run_id.clone(),
+    };
+    assert_problem(
+        http.post(format!(
+            "http://{}{}",
+            daemon.address, child_assignment_path
+        ))
+        .json(&assignment_request)
+        .send()
+        .await
+        .expect("missing Task assignment idempotency response"),
+        StatusCode::BAD_REQUEST,
+        error_code::IDEMPOTENCY_KEY_REQUIRED,
+    )
+    .await;
+    assert_problem(
+        http.post(format!(
+            "http://{}{}",
+            daemon.address, child_assignment_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "missing-task-run")
+        .json(&AssignTaskRequest {
+            run_id: "run_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        })
+        .send()
+        .await
+        .expect("missing Task Run response"),
+        StatusCode::NOT_FOUND,
+        error_code::RUN_NOT_FOUND,
+    )
+    .await;
+    let assigned_child: TaskResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address, child_assignment_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-assignment")
+        .json(&assignment_request)
+        .send()
+        .await
+        .expect("Task assignment response")
+        .json()
+        .await
+        .expect("Task assignment JSON");
+    assert_eq!(
+        assigned_child.assigned_run_id.as_deref(),
+        Some(run.run_id.as_str())
+    );
+    loop {
+        if matches!(
+            receive_event(&mut socket).await.event,
+            SessionEventDataResponse::TaskAssigned { task } if task == assigned_child
+        ) {
+            break;
+        }
+    }
+    let duplicate: TaskResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address, child_assignment_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-assignment")
+        .json(&assignment_request)
+        .send()
+        .await
+        .expect("duplicate Task assignment response")
+        .json()
+        .await
+        .expect("duplicate Task assignment JSON");
+    assert_eq!(duplicate, assigned_child);
+    assert_problem(
+        http.post(format!(
+            "http://{}{}",
+            daemon.address, child_assignment_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-assignment")
+        .json(&AssignTaskRequest {
+            run_id: "run_01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+        })
+        .send()
+        .await
+        .expect("Task assignment conflict response"),
+        StatusCode::CONFLICT,
+        error_code::IDEMPOTENCY_CONFLICT,
+    )
+    .await;
+
     let fetched: TaskResponse = http
         .get(format!(
             "http://{}{}",
@@ -1537,7 +1643,7 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
         .json()
         .await
         .expect("Task read JSON");
-    assert_eq!(fetched, ready_child);
+    assert_eq!(fetched, assigned_child);
     let history: SessionEventsResponse = http
         .get(format!(
             "http://{}{}",
@@ -1557,6 +1663,14 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
             .filter(|event| event_kind(event) == "task.created")
             .count(),
         2
+    );
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| event_kind(event) == "task.assigned")
+            .count(),
+        1
     );
     assert_eq!(
         history
@@ -1597,7 +1711,7 @@ async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
         .json()
         .await
         .expect("recovered Task JSON");
-    assert_eq!(recovered, ready_child);
+    assert_eq!(recovered, assigned_child);
 }
 
 #[tokio::test]

@@ -9,24 +9,24 @@ use serde_json::{Value, json};
 use ts_rs::{Config, TS};
 
 use crate::{
-    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision,
-    ApprovalDecisionRequest, ApprovalPolicy, ApprovalResponse, ApprovalState, ArtifactResponse,
-    CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID,
-    CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest,
-    DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
-    EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, MessageRole,
-    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
-    START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, StartRunRequest, StoreIdentity, TASK_PATH, TASK_TRANSITION_PATH,
-    TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState,
-    ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
-    UPDATE_TASK_OPERATION_ID, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
-    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WorkspaceResponse, WorkspaceRootRequest,
-    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
+    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ASSIGN_TASK_OPERATION_ID, AppendMessageRequest,
+    ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy, ApprovalResponse, ApprovalState,
+    ArtifactResponse, AssignTaskRequest, CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID,
+    CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateTaskRequest,
+    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
+    GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID,
+    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
+    MessageResponse, MessageRole, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest,
+    NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse,
+    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SESSION_TASKS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventResponse,
+    SessionEventsResponse, SessionResponse, StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH,
+    TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID,
+    TaskResponse, TaskState, ToolCallResponse, ToolCallState, ToolOutputStream,
+    TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UpdateTaskRequest, WEBSOCKET_CAPABILITY,
+    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WorkspaceResponse,
+    WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -92,6 +92,10 @@ pub fn artifact_files() -> BTreeMap<&'static str, String> {
     files.insert(
         "fixtures/transition-task-request.json",
         fixture_transition_task_request(),
+    );
+    files.insert(
+        "fixtures/assign-task-request.json",
+        fixture_assign_task_request(),
     );
     files.insert("fixtures/session-response.json", fixture_session_response());
     files.insert("fixtures/message-response.json", fixture_message_response());
@@ -160,6 +164,7 @@ fn schema() -> String {
         ("CreateTaskRequest", schema_for!(CreateTaskRequest)),
         ("UpdateTaskRequest", schema_for!(UpdateTaskRequest)),
         ("TransitionTaskRequest", schema_for!(TransitionTaskRequest)),
+        ("AssignTaskRequest", schema_for!(AssignTaskRequest)),
         ("SessionResponse", schema_for!(SessionResponse)),
         ("MessageRole", schema_for!(MessageRole)),
         ("MessageResponse", schema_for!(MessageResponse)),
@@ -224,6 +229,7 @@ fn typescript() -> String {
         CreateTaskRequest::decl(&config),
         UpdateTaskRequest::decl(&config),
         TransitionTaskRequest::decl(&config),
+        AssignTaskRequest::decl(&config),
         SessionResponse::decl(&config),
         MessageRole::decl(&config),
         MessageResponse::decl(&config),
@@ -298,6 +304,10 @@ fn catalogue() -> String {
             "method": "PATCH",
             "path": TASK_PATH,
             "operation": UPDATE_TASK_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": TASK_ASSIGNMENT_PATH,
+            "operation": ASSIGN_TASK_OPERATION_ID
         }, {
             "method": "POST",
             "path": TASK_TRANSITION_PATH,
@@ -467,6 +477,12 @@ fn fixture_update_task_request() -> String {
 fn fixture_transition_task_request() -> String {
     serialize_fixture(&TransitionTaskRequest {
         state: TaskState::Ready,
+    })
+}
+
+fn fixture_assign_task_request() -> String {
+    serialize_fixture(&AssignTaskRequest {
+        run_id: "run_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
     })
 }
 
@@ -853,6 +869,42 @@ paths:
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'
+  {TASK_ASSIGNMENT_PATH}:
+    post:
+      operationId: {ASSIGN_TASK_OPERATION_ID}
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+          description: Opaque non-empty key for idempotent Task assignment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignTaskRequest'
+      responses:
+        '200':
+          description: Assigned durable Task snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
   {TASK_TRANSITION_PATH}:
     post:
       operationId: {TRANSITION_TASK_OPERATION_ID}
@@ -1102,6 +1154,7 @@ components:
             "TransitionTaskRequest",
             openapi_schema::<TransitionTaskRequest>(),
         ),
+        ("AssignTaskRequest", openapi_schema::<AssignTaskRequest>()),
         ("SessionResponse", openapi_schema::<SessionResponse>()),
         ("MessageRole", openapi_schema::<MessageRole>()),
         ("MessageResponse", openapi_schema::<MessageResponse>()),
@@ -1187,7 +1240,7 @@ fn reference() -> String {
     )
     .replace(
         "A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.",
-        "`PATCH /v1/tasks/{task_id}` replaces mutable objective and dependency data and records `task.updated`. `POST /v1/tasks/{task_id}/transition` applies one guarded lifecycle transition and records `task.state_changed`. All Task commands are idempotent. A repeated key with the same normalized request returns the current Task without another Event. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.",
+        "`PATCH /v1/tasks/{task_id}` replaces mutable objective and dependency data and records `task.updated`. `POST /v1/tasks/{task_id}/assignment` assigns one active Run in the same Session and records `task.assigned`. `POST /v1/tasks/{task_id}/transition` applies one guarded lifecycle transition and records `task.state_changed`. All Task commands are idempotent. A repeated key with the same normalized request returns the current Task without another Event. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.",
     )
 }
 

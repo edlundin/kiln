@@ -649,6 +649,18 @@ impl Task {
         task.state = state;
         Ok(task)
     }
+
+    pub fn assign(&self, run_id: RunId) -> Result<Self, TaskError> {
+        if !matches!(
+            self.state,
+            TaskState::Pending | TaskState::Ready | TaskState::Blocked
+        ) {
+            return Err(TaskError::InvalidAssignment);
+        }
+        let mut task = self.clone();
+        task.assigned_run_id = Some(run_id);
+        Ok(task)
+    }
 }
 
 fn validate_task_input(
@@ -1526,6 +1538,9 @@ pub enum SessionEventPayload {
     TaskStateChanged {
         task: Task,
     },
+    TaskAssigned {
+        task: Task,
+    },
     RunCreated {
         run_id: RunId,
         state: RunState,
@@ -1617,6 +1632,14 @@ impl SessionEvent {
             event_id,
             session_id: task.session_id.clone(),
             payload: SessionEventPayload::TaskStateChanged { task },
+        }
+    }
+
+    pub fn task_assigned(event_id: EventId, task: Task) -> Self {
+        Self {
+            event_id,
+            session_id: task.session_id.clone(),
+            payload: SessionEventPayload::TaskAssigned { task },
         }
     }
 
@@ -1916,6 +1939,13 @@ pub struct TransitionTask {
     pub idempotency_key: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignTask {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateTaskDisposition {
     Created,
@@ -1977,10 +2007,12 @@ pub enum TaskError {
     ObjectiveRequired,
     ParentTaskNotFound,
     DependencyTaskNotFound,
+    RunNotFound,
     TaskLinkOutsideSession,
     DuplicateDependency,
     Cycle,
     InvalidTransition,
+    InvalidAssignment,
     IdempotencyKeyRequired,
     IdempotencyConflict,
     TaskStoreUnavailable,
@@ -1991,11 +2023,13 @@ pub enum TaskStoreError {
     TaskNotFound,
     ParentTaskNotFound,
     DependencyTaskNotFound,
+    RunNotFound,
     TaskLinkOutsideSession,
     IdempotencyKeyRequired,
     IdempotencyConflict,
     Cycle,
     InvalidTransition,
+    InvalidAssignment,
     InvalidTask,
     Unavailable,
 }
@@ -2152,6 +2186,11 @@ pub trait TaskStore: Send + Sync {
     fn transition_task(
         &self,
         command: &TransitionTask,
+        event_id: EventId,
+    ) -> impl Future<Output = Result<TaskMutation, TaskStoreError>> + Send;
+    fn assign_task(
+        &self,
+        command: &AssignTask,
         event_id: EventId,
     ) -> impl Future<Output = Result<TaskMutation, TaskStoreError>> + Send;
 }
@@ -2859,6 +2898,10 @@ pub trait TaskOperations: Send + Sync {
         &self,
         command: TransitionTask,
     ) -> impl Future<Output = Result<TaskMutation, TaskError>> + Send;
+    fn assign_task(
+        &self,
+        command: AssignTask,
+    ) -> impl Future<Output = Result<TaskMutation, TaskError>> + Send;
 }
 
 pub struct SessionApplication<W, S, I> {
@@ -3059,6 +3102,16 @@ where
             .await
             .map_err(task_store_error)
     }
+
+    pub async fn assign_task(&self, command: AssignTask) -> Result<TaskMutation, TaskError> {
+        if command.idempotency_key.is_empty() {
+            return Err(TaskError::IdempotencyKeyRequired);
+        }
+        self.session_store
+            .assign_task(&command, self.ids.event_id())
+            .await
+            .map_err(task_store_error)
+    }
 }
 
 impl<W, S, I> TaskOperations for SessionApplication<W, S, I>
@@ -3082,6 +3135,10 @@ where
     async fn transition_task(&self, command: TransitionTask) -> Result<TaskMutation, TaskError> {
         SessionApplication::transition_task(self, command).await
     }
+
+    async fn assign_task(&self, command: AssignTask) -> Result<TaskMutation, TaskError> {
+        SessionApplication::assign_task(self, command).await
+    }
 }
 
 fn task_store_error(error: TaskStoreError) -> TaskError {
@@ -3089,11 +3146,13 @@ fn task_store_error(error: TaskStoreError) -> TaskError {
         TaskStoreError::TaskNotFound => TaskError::TaskNotFound,
         TaskStoreError::ParentTaskNotFound => TaskError::ParentTaskNotFound,
         TaskStoreError::DependencyTaskNotFound => TaskError::DependencyTaskNotFound,
+        TaskStoreError::RunNotFound => TaskError::RunNotFound,
         TaskStoreError::TaskLinkOutsideSession => TaskError::TaskLinkOutsideSession,
         TaskStoreError::IdempotencyKeyRequired => TaskError::IdempotencyKeyRequired,
         TaskStoreError::IdempotencyConflict => TaskError::IdempotencyConflict,
         TaskStoreError::Cycle => TaskError::Cycle,
         TaskStoreError::InvalidTransition => TaskError::InvalidTransition,
+        TaskStoreError::InvalidAssignment => TaskError::InvalidAssignment,
         TaskStoreError::InvalidTask | TaskStoreError::Unavailable => {
             TaskError::TaskStoreUnavailable
         }
@@ -3849,6 +3908,13 @@ mod tests {
         assert_eq!(blocked.unblock().unwrap().state(), TaskState::Pending);
         let ready = updated.transition(TaskState::Ready).unwrap();
         assert_eq!(ready.state(), TaskState::Ready);
+        let assigned = ready
+            .assign(RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap())
+            .unwrap();
+        assert_eq!(
+            assigned.assigned_run_id().map(RunId::as_str),
+            Some("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
         assert_eq!(
             ready.transition(TaskState::Completed),
             Err(TaskError::InvalidTransition)
@@ -3856,6 +3922,11 @@ mod tests {
         assert_eq!(
             ready.update("changed too late".to_owned(), Vec::new()),
             Err(TaskError::InvalidTransition)
+        );
+        let running = assigned.transition(TaskState::Running).unwrap();
+        assert_eq!(
+            running.assign(RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap()),
+            Err(TaskError::InvalidAssignment)
         );
     }
 

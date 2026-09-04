@@ -2,6 +2,14 @@
 
 ## 2026-09-04 — `feat`
 
+- Added idempotent Task-to-Run assignment for active Runs in the same Session.
+- Enforced one-to-one Task and Run assignment with durable `task.assigned` recovery.
+- Published the assignment endpoint and protocol version `0.11.0`.
+
+[Commit](pending)
+
+## 2026-09-04 — `feat`
+
 - Added idempotent Task objective and dependency updates.
 - Added guarded Task lifecycle transitions with dependency and cycle validation.
 - Added durable lifecycle events, restart recovery, and protocol version `0.10.0`.

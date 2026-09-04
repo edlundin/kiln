@@ -1,7 +1,7 @@
 use std::{path::Path, process::Command};
 
 use kiln_core::{
-    ApprovalPolicy, CreateTaskDisposition, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    ApprovalPolicy, AssignTask, CreateTaskDisposition, DETERMINISTIC_SUBPROCESS_CAPABILITY,
     DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
     MessageRole, Run, RunApplication, RunId, RunState, RunStore, Session, SessionEvent,
     SessionEventPayload, SessionId, SessionStore, StartRunDisposition, SubprocessOutput, Task,
@@ -724,13 +724,175 @@ async fn tasks_are_idempotent_validate_lifecycle_and_survive_reopen() {
             .await,
         Err(TaskStoreError::InvalidTransition)
     );
+
+    let run = Run::new(
+        RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+        first_session.id().clone(),
+        ApprovalPolicy::FullAccess,
+        test_scope(),
+    );
+    store
+        .start_root_run(
+            &run,
+            &SessionEvent::run_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBK").unwrap(),
+                &run,
+            ),
+            "first-task-run",
+        )
+        .await
+        .unwrap();
+    let outside_run = Run::new(
+        RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
+        second_session.id().clone(),
+        ApprovalPolicy::FullAccess,
+        test_scope(),
+    );
+    store
+        .start_root_run(
+            &outside_run,
+            &SessionEvent::run_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBM").unwrap(),
+                &outside_run,
+            ),
+            "outside-task-run",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .assign_task(
+                &AssignTask {
+                    task_id: child.task_id().clone(),
+                    run_id: RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAX").unwrap(),
+                    idempotency_key: "missing-run-key".to_owned(),
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBN").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::RunNotFound)
+    );
+    assert_eq!(
+        store
+            .assign_task(
+                &AssignTask {
+                    task_id: child.task_id().clone(),
+                    run_id: outside_run.run_id().clone(),
+                    idempotency_key: "outside-run-key".to_owned(),
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBP").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::TaskLinkOutsideSession)
+    );
+    let assignment = AssignTask {
+        task_id: child.task_id().clone(),
+        run_id: run.run_id().clone(),
+        idempotency_key: "assign-run-key".to_owned(),
+    };
+    let assigned = store
+        .assign_task(
+            &assignment,
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBQ").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(assigned.disposition, TaskMutationDisposition::Applied);
+    assert_eq!(assigned.value.assigned_run_id(), Some(run.run_id()));
+    assert!(matches!(
+        assigned.events[0].payload(),
+        SessionEventPayload::TaskAssigned { .. }
+    ));
+    let other = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FB0").unwrap(),
+        first_session.id().clone(),
+        "other".to_owned(),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    store
+        .create_task(
+            &other,
+            &SessionEvent::task_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBW").unwrap(),
+                other.clone(),
+            ),
+            "other-task-key",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .assign_task(
+                &AssignTask {
+                    task_id: other.task_id().clone(),
+                    run_id: run.run_id().clone(),
+                    idempotency_key: "duplicate-run-key".to_owned(),
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBX").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::InvalidAssignment)
+    );
+    let duplicate = store
+        .assign_task(
+            &assignment,
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBR").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.disposition, TaskMutationDisposition::Duplicate);
+    assert!(duplicate.events.is_empty());
+    assert_eq!(
+        store
+            .assign_task(
+                &AssignTask {
+                    run_id: outside_run.run_id().clone(),
+                    ..assignment.clone()
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBS").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::IdempotencyConflict)
+    );
+    assert_eq!(
+        store
+            .transition_task(
+                &TransitionTask {
+                    task_id: child.task_id().clone(),
+                    state: TaskState::Running,
+                    idempotency_key: "run-before-claim-key".to_owned(),
+                },
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBT").unwrap(),
+            )
+            .await,
+        Err(TaskStoreError::InvalidTransition)
+    );
+    RunApplication::new(store.clone(), super::UlidIdGenerator)
+        .begin_execution(run.run_id().clone())
+        .await
+        .unwrap();
+    let running = store
+        .transition_task(
+            &TransitionTask {
+                task_id: child.task_id().clone(),
+                state: TaskState::Running,
+                idempotency_key: "run-after-claim-key".to_owned(),
+            },
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBV").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.value.state(), TaskState::Running);
     drop(store);
 
     let reopened = super::SqliteStore::open(data.path()).await.unwrap();
     let recovered = reopened.get_task(child.task_id()).await.unwrap().unwrap();
     assert_eq!(recovered.objective(), "updated child");
-    assert_eq!(recovered.state(), TaskState::Ready);
+    assert_eq!(recovered.state(), TaskState::Running);
     assert!(recovered.dependency_task_ids().is_empty());
+    assert_eq!(recovered.assigned_run_id(), Some(run.run_id()));
     let events = reopened
         .list_session_events(first_session.id(), EventCursor::zero())
         .await
@@ -741,7 +903,15 @@ async fn tasks_are_idempotent_validate_lifecycle_and_survive_reopen() {
             .iter()
             .filter(|event| matches!(event.payload(), SessionEventPayload::TaskCreated { .. }))
             .count(),
-        2
+        3
+    );
+    assert_eq!(
+        events
+            .events()
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::TaskAssigned { .. }))
+            .count(),
+        1
     );
     assert_eq!(
         events
@@ -760,7 +930,7 @@ async fn tasks_are_idempotent_validate_lifecycle_and_survive_reopen() {
                 SessionEventPayload::TaskStateChanged { .. }
             ))
             .count(),
-        4
+        5
     );
 }
 

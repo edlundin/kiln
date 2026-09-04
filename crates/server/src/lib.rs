@@ -22,27 +22,27 @@ use axum::{
     routing::{get, post},
 };
 use kiln_core::{
-    AppendMessage, Artifact, ContentHash, CreateTask, CreateWorkspace, EventCursor, Message,
-    MessageRole as CoreMessageRole, RunError, RunId, RunSnapshot, RunState as CoreRunState,
-    Session, SessionError, SessionEventPage, SessionEventPayload, SessionId, SessionOperations,
-    StoreMetadata, StoredSessionEvent, Task, TaskError, TaskId, TaskOperations,
-    TaskState as CoreTaskState, ToolCall, ToolCallState as CoreToolCallState,
+    AppendMessage, Artifact, AssignTask, ContentHash, CreateTask, CreateWorkspace, EventCursor,
+    Message, MessageRole as CoreMessageRole, RunError, RunId, RunSnapshot,
+    RunState as CoreRunState, Session, SessionError, SessionEventPage, SessionEventPayload,
+    SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task, TaskError, TaskId,
+    TaskOperations, TaskState as CoreTaskState, ToolCall, ToolCallState as CoreToolCallState,
     ToolOutputStream as CoreToolOutputStream, TransitionTask, UpdateTask, WorkspaceError,
     WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
     ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
-    ApprovalState as ProtocolApprovalState, ArtifactResponse, CreateTaskRequest,
+    ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest, CreateTaskRequest,
     CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse,
     MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
     ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
     SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
     SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StartRunRequest, StoreIdentity, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
-    TaskResponse, TaskState, ToolCallResponse, ToolCallState, ToolOutputStream,
-    TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
-    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
+    TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
+    ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY,
+    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
     WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
@@ -362,6 +362,7 @@ where
         .route(SESSION_MESSAGES_PATH, post(append_message))
         .route(SESSION_TASKS_PATH, post(create_task))
         .route(TASK_PATH, get(get_task).patch(update_task))
+        .route(TASK_ASSIGNMENT_PATH, post(assign_task))
         .route(TASK_TRANSITION_PATH, post(transition_task))
         .route(SESSION_EVENTS_PATH, get(list_session_events))
         .route(SESSION_RUNS_PATH, post(start_run))
@@ -722,6 +723,31 @@ where
         .transition_task(TransitionTask {
             task_id: TaskId::parse(task_id).map_err(|_| PublicError::InvalidRequest)?,
             state: task_state_request(request.state),
+            idempotency_key: required_idempotency_key(&headers)?,
+        })
+        .await
+        .map_err(PublicError::from)?;
+    state.event_broadcaster.publish(mutation.events);
+    Ok(Json(task_response(&mutation.value)))
+}
+
+async fn assign_task<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(task_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<AssignTaskRequest>,
+) -> Result<Json<TaskResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let mutation = state
+        .session_operations
+        .assign_task(AssignTask {
+            task_id: TaskId::parse(task_id).map_err(|_| PublicError::InvalidRequest)?,
+            run_id: RunId::parse(request.run_id).map_err(|_| PublicError::InvalidRequest)?,
             idempotency_key: required_idempotency_key(&headers)?,
         })
         .await
@@ -1107,6 +1133,9 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
             task: task_response(task),
         },
         SessionEventPayload::TaskUpdated { task } => SessionEventDataResponse::TaskUpdated {
+            task: task_response(task),
+        },
+        SessionEventPayload::TaskAssigned { task } => SessionEventDataResponse::TaskAssigned {
             task: task_response(task),
         },
         SessionEventPayload::TaskStateChanged { task } => {
@@ -1731,6 +1760,11 @@ impl PublicError {
                     error_code::DEPENDENCY_TASK_NOT_FOUND,
                     "Dependency Task not found",
                 ),
+                TaskError::RunNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::RUN_NOT_FOUND,
+                    "Run not found",
+                ),
                 TaskError::TaskLinkOutsideSession => (
                     StatusCode::BAD_REQUEST,
                     error_code::TASK_LINK_OUTSIDE_SESSION,
@@ -1750,6 +1784,11 @@ impl PublicError {
                     StatusCode::CONFLICT,
                     error_code::INVALID_TASK_TRANSITION,
                     "Invalid Task transition",
+                ),
+                TaskError::InvalidAssignment => (
+                    StatusCode::CONFLICT,
+                    error_code::INVALID_TASK_ASSIGNMENT,
+                    "Invalid Task assignment",
                 ),
                 TaskError::IdempotencyKeyRequired => (
                     StatusCode::BAD_REQUEST,

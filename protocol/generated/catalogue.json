@@ -38,6 +38,7 @@
     "duplicate_task_dependency",
     "task_cycle",
     "invalid_task_transition",
+    "invalid_task_assignment",
     "task_store_unavailable",
     "invalid_event_cursor",
     "idempotency_key_required",
@@ -111,6 +112,11 @@
     },
     {
       "method": "POST",
+      "operation": "assign_task",
+      "path": "/v1/tasks/{task_id}/assignment"
+    },
+    {
+      "method": "POST",
       "operation": "transition_task",
       "path": "/v1/tasks/{task_id}/transition"
     },
@@ -140,7 +146,7 @@
       "path": "/v1/artifacts/{content_hash}"
     }
   ],
-  "protocol_version": "0.10.0",
+  "protocol_version": "0.11.0",
   "websocket": [
     {
       "method": "GET",

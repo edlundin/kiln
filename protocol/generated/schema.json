@@ -141,6 +141,20 @@
       "title": "ArtifactResponse",
       "type": "object"
     },
+    "AssignTaskRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id"
+      ],
+      "title": "AssignTaskRequest",
+      "type": "object"
+    },
     "ClientIdentity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1027,6 +1041,22 @@
               "$ref": "#/$defs/TaskResponse"
             },
             "type": {
+              "const": "task.assigned",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "task": {
+              "$ref": "#/$defs/TaskResponse"
+            },
+            "type": {
               "const": "task.state_changed",
               "type": "string"
             }
@@ -1416,6 +1446,22 @@
                 },
                 "type": {
                   "const": "task.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.assigned",
                   "type": "string"
                 }
               },
@@ -2024,6 +2070,22 @@
                 },
                 "type": {
                   "const": "task.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.assigned",
                   "type": "string"
                 }
               },
@@ -3018,6 +3080,22 @@
                   "$ref": "#/$defs/TaskResponse"
                 },
                 "type": {
+                  "const": "task.assigned",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
                   "const": "task.state_changed",
                   "type": "string"
                 }
@@ -3654,7 +3732,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.10.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.11.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

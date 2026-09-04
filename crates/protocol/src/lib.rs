@@ -21,9 +21,11 @@ pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const WORKSPACE_SESSIONS_PATH: &str = "/v1/workspaces/{workspace_id}/sessions";
 pub const SESSION_PATH: &str = "/v1/sessions/{session_id}";
 pub const SESSION_MESSAGES_PATH: &str = "/v1/sessions/{session_id}/messages";
+pub const SESSION_TASKS_PATH: &str = "/v1/sessions/{session_id}/tasks";
 pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
+pub const TASK_PATH: &str = "/v1/tasks/{task_id}";
 pub const RUN_CANCEL_PATH: &str = "/v1/runs/{run_id}/cancel";
 pub const TOOL_CALL_APPROVAL_PATH: &str = "/v1/tool-calls/{tool_call_id}/approval";
 pub const ARTIFACT_PATH: &str = "/v1/artifacts/{content_hash}";
@@ -34,6 +36,8 @@ pub const GET_WORKSPACE_OPERATION_ID: &str = "get_workspace";
 pub const CREATE_SESSION_OPERATION_ID: &str = "create_session";
 pub const GET_SESSION_OPERATION_ID: &str = "get_session";
 pub const APPEND_MESSAGE_OPERATION_ID: &str = "append_message";
+pub const CREATE_TASK_OPERATION_ID: &str = "create_task";
+pub const GET_TASK_OPERATION_ID: &str = "get_task";
 pub const LIST_SESSION_EVENTS_OPERATION_ID: &str = "list_session_events";
 pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
@@ -69,6 +73,14 @@ pub mod error_code {
     pub const WORKSPACE_STORE_UNAVAILABLE: &str = "workspace_store_unavailable";
     pub const SESSION_NOT_FOUND: &str = "session_not_found";
     pub const MESSAGE_CONTENT_REQUIRED: &str = "message_content_required";
+    pub const TASK_NOT_FOUND: &str = "task_not_found";
+    pub const TASK_OBJECTIVE_REQUIRED: &str = "task_objective_required";
+    pub const PARENT_TASK_NOT_FOUND: &str = "parent_task_not_found";
+    pub const DEPENDENCY_TASK_NOT_FOUND: &str = "dependency_task_not_found";
+    pub const TASK_LINK_OUTSIDE_SESSION: &str = "task_link_outside_session";
+    pub const DUPLICATE_TASK_DEPENDENCY: &str = "duplicate_task_dependency";
+    pub const TASK_CYCLE: &str = "task_cycle";
+    pub const TASK_STORE_UNAVAILABLE: &str = "task_store_unavailable";
     pub const INVALID_EVENT_CURSOR: &str = "invalid_event_cursor";
     pub const IDEMPOTENCY_KEY_REQUIRED: &str = "idempotency_key_required";
     pub const INVALID_IDEMPOTENCY_KEY: &str = "invalid_idempotency_key";
@@ -116,6 +128,14 @@ pub mod error_code {
         WORKSPACE_STORE_UNAVAILABLE,
         SESSION_NOT_FOUND,
         MESSAGE_CONTENT_REQUIRED,
+        TASK_NOT_FOUND,
+        TASK_OBJECTIVE_REQUIRED,
+        PARENT_TASK_NOT_FOUND,
+        DEPENDENCY_TASK_NOT_FOUND,
+        TASK_LINK_OUTSIDE_SESSION,
+        DUPLICATE_TASK_DEPENDENCY,
+        TASK_CYCLE,
+        TASK_STORE_UNAVAILABLE,
         INVALID_EVENT_CURSOR,
         IDEMPOTENCY_KEY_REQUIRED,
         INVALID_IDEMPOTENCY_KEY,
@@ -231,6 +251,17 @@ pub struct AppendMessageRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
+pub struct CreateTaskRequest {
+    pub objective: String,
+    #[serde(default)]
+    pub parent_task_id: Option<String>,
+    #[serde(default)]
+    pub dependency_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct StartRunRequest {
     pub approval_policy: ApprovalPolicy,
     pub workspace_root_id: String,
@@ -279,6 +310,32 @@ pub struct MessageResponse {
     pub session_id: String,
     pub role: MessageRole,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    Pending,
+    Ready,
+    Running,
+    Blocked,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskResponse {
+    pub task_id: String,
+    pub session_id: String,
+    pub objective: String,
+    pub state: TaskState,
+    #[schemars(with = "RequiredNullableString")]
+    pub parent_task_id: Option<String>,
+    pub dependency_task_ids: Vec<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub assigned_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -390,6 +447,8 @@ pub enum SessionEventDataResponse {
     SessionCreated { workspace_id: String },
     #[serde(rename = "message.appended")]
     MessageAppended { message: MessageResponse },
+    #[serde(rename = "task.created")]
+    TaskCreated { task: TaskResponse },
     #[serde(rename = "run.created")]
     RunCreated {
         run_id: String,

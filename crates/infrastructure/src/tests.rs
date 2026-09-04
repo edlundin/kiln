@@ -1,10 +1,11 @@
 use std::{path::Path, process::Command};
 
 use kiln_core::{
-    ApprovalPolicy, DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor,
-    EventId, FilesystemIdentity, Message, MessageId, MessageRole, Run, RunApplication, RunId,
-    RunState, RunStore, Session, SessionEvent, SessionEventPayload, SessionId, SessionStore,
-    StartRunDisposition, SubprocessOutput, ToolCall, ToolCallId, ToolCallResult, ToolCallState,
+    ApprovalPolicy, CreateTaskDisposition, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
+    MessageRole, Run, RunApplication, RunId, RunState, RunStore, Session, SessionEvent,
+    SessionEventPayload, SessionId, SessionStore, StartRunDisposition, SubprocessOutput, Task,
+    TaskId, TaskStore, TaskStoreError, ToolCall, ToolCallId, ToolCallResult, ToolCallState,
     Workspace, WorkspaceId, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
     WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
@@ -393,6 +394,157 @@ async fn session_migration_survives_reopen() {
             .events()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn tasks_are_idempotent_validate_session_links_and_survive_reopen() {
+    let (data, store, workspace_id) = seeded_store().await;
+    let first_session = session("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV", workspace_id.as_str());
+    let second_session = session("ses_01ARZ3NDEKTSV4RRFFQ69G5FAW", workspace_id.as_str());
+    for (value, event_id) in [
+        (&first_session, "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        (&second_session, "evt_01ARZ3NDEKTSV4RRFFQ69G5FAW"),
+    ] {
+        store
+            .create_session(
+                value,
+                &SessionEvent::session_created(
+                    EventId::parse(event_id).unwrap(),
+                    value.id().clone(),
+                    workspace_id.clone(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let parent = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+        first_session.id().clone(),
+        "parent".to_owned(),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    let created = store
+        .create_task(
+            &parent,
+            &SessionEvent::task_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAX").unwrap(),
+                parent.clone(),
+            ),
+            "parent-key",
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.disposition, CreateTaskDisposition::Created);
+    assert_eq!(created.events.len(), 1);
+
+    let retry = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
+        first_session.id().clone(),
+        "parent".to_owned(),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    let duplicate = store
+        .create_task(
+            &retry,
+            &SessionEvent::task_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+                retry.clone(),
+            ),
+            "parent-key",
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.disposition, CreateTaskDisposition::Duplicate);
+    assert_eq!(duplicate.value, parent);
+    assert!(duplicate.events.is_empty());
+
+    let conflict = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAX").unwrap(),
+        first_session.id().clone(),
+        "different".to_owned(),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .create_task(
+                &conflict,
+                &SessionEvent::task_created(
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+                    conflict.clone(),
+                ),
+                "parent-key",
+            )
+            .await,
+        Err(TaskStoreError::IdempotencyConflict)
+    );
+
+    let outside = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+        second_session.id().clone(),
+        "outside".to_owned(),
+        Some(parent.task_id().clone()),
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .create_task(
+                &outside,
+                &SessionEvent::task_created(
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB0").unwrap(),
+                    outside.clone(),
+                ),
+                "outside-key",
+            )
+            .await,
+        Err(TaskStoreError::TaskLinkOutsideSession)
+    );
+
+    let child = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+        first_session.id().clone(),
+        "child".to_owned(),
+        Some(parent.task_id().clone()),
+        vec![parent.task_id().clone()],
+    )
+    .unwrap();
+    store
+        .create_task(
+            &child,
+            &SessionEvent::task_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FB1").unwrap(),
+                child.clone(),
+            ),
+            "child-key",
+        )
+        .await
+        .unwrap();
+    drop(store);
+
+    let reopened = super::SqliteStore::open(data.path()).await.unwrap();
+    assert_eq!(
+        reopened.get_task(child.task_id()).await.unwrap(),
+        Some(child)
+    );
+    let events = reopened
+        .list_session_events(first_session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .events()
+            .iter()
+            .filter(|event| matches!(event.payload(), SessionEventPayload::TaskCreated { .. }))
+            .count(),
+        2
     );
 }
 

@@ -12,6 +12,8 @@ The client creates a durable Workspace with `POST /v1/workspaces`, providing a n
 
 `POST /v1/sessions/{session_id}/messages` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.
 
+`POST /v1/sessions/{session_id}/tasks` requires a non-empty opaque `Idempotency-Key` header. It creates one durable pending Task and one `task.created` Event atomically. Parent and dependency links must target Tasks in the same Session. A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.
+
 `POST /v1/sessions/{session_id}/runs` requires a non-empty opaque `Idempotency-Key` header and a `StartRunRequest` containing the approval policy, immutable Workspace root ID, and normalized relative directory. The key is scoped to the start-run operation and Session. A repeated key with the same request returns the current durable Run snapshot and never dispatches another subprocess. A mismatched reuse is an idempotency conflict.
 
 `ask` records a pending Approval before execution. `read_only` durably denies the subprocess. `full_access` makes the requested scope effective without a prompt. `POST /v1/tool-calls/{tool_call_id}/approval` approves or rejects one pending ToolCall. Approval decisions are durable, first-decision-wins, and idempotent by their own `Idempotency-Key`. An approval after daemon restart resumes the same Run.

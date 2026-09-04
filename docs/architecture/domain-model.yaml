@@ -60,13 +60,14 @@ entities:
     required:
       - id
       - thread_id
+      - objective
       - state
       - dependency_ids
     relationships:
       parent_task_id: optional_parent_Task
       child_task_ids: many_Task
       run_id: optional_assigned_Run
-    initial_slice: represented_only
+    initial_slice: durable_create_and_get
   Agent:
     required:
       - id

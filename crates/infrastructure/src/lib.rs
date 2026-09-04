@@ -13,15 +13,16 @@ use std::{
 use directories::ProjectDirs;
 use kiln_core::{
     Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, ContentHash,
-    DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor, EventId,
-    FilesystemIdentity, Message, MessageId, MessageRole, PersistedToolCall, RootDiscoveryError,
-    Run, RunId, RunIdGenerator, RunMutation, RunSnapshot, RunState, RunStore, RunStoreError,
-    Session, SessionEvent, SessionEventPage, SessionEventPayload, SessionId, SessionIdGenerator,
-    SessionStore, StartRunDisposition, StartRunMutation, StoreError, StoredSessionEvent,
-    SubprocessExecution, SubprocessExecutor, SubprocessOutput, SubprocessRequest, ToolCall,
-    ToolCallId, ToolCallState, ToolOutputStream, Workspace, WorkspaceId, WorkspaceIdGenerator,
-    WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState,
-    WorkspaceStore,
+    CreateTaskDisposition, CreateTaskMutation, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
+    MessageRole, PersistedToolCall, RootDiscoveryError, Run, RunId, RunIdGenerator, RunMutation,
+    RunSnapshot, RunState, RunStore, RunStoreError, Session, SessionEvent, SessionEventPage,
+    SessionEventPayload, SessionId, SessionIdGenerator, SessionStore, StartRunDisposition,
+    StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor,
+    SubprocessOutput, SubprocessRequest, Task, TaskId, TaskIdGenerator, TaskState, TaskStore,
+    TaskStoreError, ToolCall, ToolCallId, ToolCallState, ToolOutputStream, Workspace, WorkspaceId,
+    WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
+    WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
@@ -975,6 +976,73 @@ impl WorkspaceStore for SqliteStore {
     }
 }
 
+async fn load_task(
+    connection: &mut SqliteConnection,
+    task_id: &TaskId,
+) -> Result<Option<Task>, StoreError> {
+    let row = sqlx::query(
+        "SELECT task_id, session_id, objective, state, parent_task_id, assigned_run_id
+         FROM tasks WHERE task_id = ?",
+    )
+    .bind(task_id.as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| StoreError::Unavailable)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let dependency_rows = sqlx::query(
+        "SELECT dependency_task_id FROM task_dependencies
+         WHERE task_id = ? ORDER BY position ASC",
+    )
+    .bind(task_id.as_str())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| StoreError::Unavailable)?;
+    let dependency_task_ids = dependency_rows
+        .into_iter()
+        .map(|row| {
+            TaskId::parse(
+                row.try_get::<String, _>("dependency_task_id")
+                    .map_err(|_| StoreError::Unavailable)?,
+            )
+            .map_err(|_| StoreError::Unavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Task::from_persisted(
+        TaskId::parse(
+            row.try_get::<String, _>("task_id")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?,
+        SessionId::parse(
+            row.try_get::<String, _>("session_id")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?,
+        row.try_get("objective")
+            .map_err(|_| StoreError::Unavailable)?,
+        TaskState::parse(
+            &row.try_get::<String, _>("state")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?,
+        row.try_get::<Option<String>, _>("parent_task_id")
+            .map_err(|_| StoreError::Unavailable)?
+            .map(TaskId::parse)
+            .transpose()
+            .map_err(|_| StoreError::Unavailable)?,
+        dependency_task_ids,
+        row.try_get::<Option<String>, _>("assigned_run_id")
+            .map_err(|_| StoreError::Unavailable)?
+            .map(RunId::parse)
+            .transpose()
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map(Some)
+    .map_err(|_| StoreError::Unavailable)
+}
+
 impl SessionStore for SqliteStore {
     async fn create_session(
         &self,
@@ -1128,6 +1196,8 @@ impl SqliteStore {
             Some(session_id) => {
                 sqlx::query(
                     "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
+                        e.task_id, e.task_objective, e.task_state, e.parent_task_id,
+                        e.dependency_task_ids, e.assigned_run_id,
                         e.run_id, e.tool_call_id, e.run_state, e.tool_call_state,
                         e.approval_id, e.approval_state, e.approval_policy,
                         e.requested_workspace_root_id, e.requested_relative_directory,
@@ -1159,6 +1229,8 @@ impl SqliteStore {
             None => {
                 sqlx::query(
                     "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
+                        e.task_id, e.task_objective, e.task_state, e.parent_task_id,
+                        e.dependency_task_ids, e.assigned_run_id,
                         e.run_id, e.tool_call_id, e.run_state, e.tool_call_state,
                         e.approval_id, e.approval_state, e.approval_policy,
                         e.requested_workspace_root_id, e.requested_relative_directory,
@@ -1198,6 +1270,190 @@ impl SqliteStore {
     }
 }
 
+impl TaskStore for SqliteStore {
+    async fn create_task(
+        &self,
+        task: &Task,
+        event: &SessionEvent,
+        idempotency_key: &str,
+    ) -> Result<CreateTaskMutation, TaskStoreError> {
+        if idempotency_key.is_empty() {
+            return Err(TaskStoreError::IdempotencyKeyRequired);
+        }
+        let SessionEventPayload::TaskCreated { task: event_task } = event.payload() else {
+            return Err(TaskStoreError::InvalidTask);
+        };
+        if event.session_id() != task.session_id()
+            || event_task != task
+            || task.state() != TaskState::Pending
+            || task.assigned_run_id().is_some()
+        {
+            return Err(TaskStoreError::InvalidTask);
+        }
+        let dependency_task_ids = serde_json::to_string(
+            &task
+                .dependency_task_ids()
+                .iter()
+                .map(TaskId::as_str)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| TaskStoreError::InvalidTask)?;
+
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| TaskStoreError::Unavailable)?;
+        let existing = sqlx::query(
+            "SELECT task_id, objective, parent_task_id, dependency_task_ids
+             FROM create_task_idempotencies
+             WHERE session_id = ? AND idempotency_key = ?",
+        )
+        .bind(task.session_id().as_str())
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| TaskStoreError::Unavailable)?;
+        if let Some(existing) = existing {
+            let existing_task_id = existing
+                .try_get::<String, _>("task_id")
+                .map_err(|_| TaskStoreError::Unavailable)?;
+            let same_request = existing
+                .try_get::<String, _>("objective")
+                .map_err(|_| TaskStoreError::Unavailable)?
+                == task.objective()
+                && existing
+                    .try_get::<Option<String>, _>("parent_task_id")
+                    .map_err(|_| TaskStoreError::Unavailable)?
+                    .as_deref()
+                    == task.parent_task_id().map(TaskId::as_str)
+                && existing
+                    .try_get::<String, _>("dependency_task_ids")
+                    .map_err(|_| TaskStoreError::Unavailable)?
+                    == dependency_task_ids;
+            if !same_request {
+                return Err(TaskStoreError::IdempotencyConflict);
+            }
+            let existing_task_id =
+                TaskId::parse(existing_task_id).map_err(|_| TaskStoreError::Unavailable)?;
+            let existing_task = load_task(&mut transaction, &existing_task_id)
+                .await
+                .map_err(|_| TaskStoreError::Unavailable)?
+                .ok_or(TaskStoreError::Unavailable)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| TaskStoreError::Unavailable)?;
+            return Ok(CreateTaskMutation::new(
+                existing_task,
+                Vec::new(),
+                CreateTaskDisposition::Duplicate,
+            ));
+        }
+
+        if let Some(parent_task_id) = task.parent_task_id() {
+            let parent_session_id =
+                sqlx::query_scalar::<_, String>("SELECT session_id FROM tasks WHERE task_id = ?")
+                    .bind(parent_task_id.as_str())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(|_| TaskStoreError::Unavailable)?
+                    .ok_or(TaskStoreError::ParentTaskNotFound)?;
+            if parent_session_id != task.session_id().as_str() {
+                return Err(TaskStoreError::TaskLinkOutsideSession);
+            }
+        }
+        for dependency_task_id in task.dependency_task_ids() {
+            let dependency_session_id =
+                sqlx::query_scalar::<_, String>("SELECT session_id FROM tasks WHERE task_id = ?")
+                    .bind(dependency_task_id.as_str())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(|_| TaskStoreError::Unavailable)?
+                    .ok_or(TaskStoreError::DependencyTaskNotFound)?;
+            if dependency_session_id != task.session_id().as_str() {
+                return Err(TaskStoreError::TaskLinkOutsideSession);
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO tasks
+                (task_id, session_id, objective, state, parent_task_id, assigned_run_id)
+             VALUES (?, ?, ?, ?, ?, NULL)",
+        )
+        .bind(task.task_id().as_str())
+        .bind(task.session_id().as_str())
+        .bind(task.objective())
+        .bind(task.state().as_str())
+        .bind(task.parent_task_id().map(TaskId::as_str))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TaskStoreError::Unavailable)?;
+        for (position, dependency_task_id) in task.dependency_task_ids().iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO task_dependencies (task_id, dependency_task_id, position)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(task.task_id().as_str())
+            .bind(dependency_task_id.as_str())
+            .bind(i64::try_from(position).map_err(|_| TaskStoreError::Unavailable)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| TaskStoreError::Unavailable)?;
+        }
+        sqlx::query(
+            "INSERT INTO create_task_idempotencies
+                (session_id, idempotency_key, task_id, objective, parent_task_id, dependency_task_ids)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(task.session_id().as_str())
+        .bind(idempotency_key)
+        .bind(task.task_id().as_str())
+        .bind(task.objective())
+        .bind(task.parent_task_id().map(TaskId::as_str))
+        .bind(&dependency_task_ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TaskStoreError::Unavailable)?;
+        let result = sqlx::query(
+            "INSERT INTO session_events (
+                event_id, session_id, event_type, task_id, task_objective, task_state,
+                parent_task_id, dependency_task_ids, assigned_run_id
+             ) VALUES (?, ?, 'task.created', ?, ?, ?, ?, ?, NULL)",
+        )
+        .bind(event.event_id().as_str())
+        .bind(event.session_id().as_str())
+        .bind(task.task_id().as_str())
+        .bind(task.objective())
+        .bind(task.state().as_str())
+        .bind(task.parent_task_id().map(TaskId::as_str))
+        .bind(&dependency_task_ids)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TaskStoreError::Unavailable)?;
+        let stored_event = StoredSessionEvent::from_event(
+            event,
+            committed_cursor(result.last_insert_rowid())
+                .map_err(|_| TaskStoreError::Unavailable)?,
+        )
+        .map_err(|_| TaskStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| TaskStoreError::Unavailable)?;
+        Ok(CreateTaskMutation::new(
+            task.clone(),
+            vec![stored_event],
+            CreateTaskDisposition::Created,
+        ))
+    }
+
+    async fn get_task(&self, task_id: &TaskId) -> Result<Option<Task>, StoreError> {
+        let mut connection = self.connection.lock().await;
+        load_task(&mut connection, task_id).await
+    }
+}
+
 fn parse_event_rows(
     rows: Vec<sqlx::sqlite::SqliteRow>,
 ) -> Result<Vec<StoredSessionEvent>, StoreError> {
@@ -1222,6 +1478,24 @@ fn parse_event_rows(
             .map_err(|_| StoreError::Unavailable)?;
         let message_id: Option<String> = row
             .try_get("message_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let task_id: Option<String> = row
+            .try_get("task_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let task_objective: Option<String> = row
+            .try_get("task_objective")
+            .map_err(|_| StoreError::Unavailable)?;
+        let task_state: Option<String> = row
+            .try_get("task_state")
+            .map_err(|_| StoreError::Unavailable)?;
+        let parent_task_id: Option<String> = row
+            .try_get("parent_task_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let dependency_task_ids: Option<String> = row
+            .try_get("dependency_task_ids")
+            .map_err(|_| StoreError::Unavailable)?;
+        let assigned_run_id: Option<String> = row
+            .try_get("assigned_run_id")
             .map_err(|_| StoreError::Unavailable)?;
         let run_id: Option<String> = row.try_get("run_id").map_err(|_| StoreError::Unavailable)?;
         let tool_call_id: Option<String> = row
@@ -1340,6 +1614,44 @@ fn parse_event_rows(
                 .map_err(|_| StoreError::Unavailable)?;
                 StoredSessionEvent::message_appended(event_id, stored_session_id, cursor, message)
                     .map_err(|_| StoreError::Unavailable)?
+            }
+            "task.created" => {
+                let task_id = TaskId::parse(task_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let parent_task_id = parent_task_id
+                    .map(TaskId::parse)
+                    .transpose()
+                    .map_err(|_| StoreError::Unavailable)?;
+                let dependency_task_ids = serde_json::from_str::<Vec<String>>(
+                    &dependency_task_ids.ok_or(StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?
+                .into_iter()
+                .map(TaskId::parse)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| StoreError::Unavailable)?;
+                let assigned_run_id = assigned_run_id
+                    .map(RunId::parse)
+                    .transpose()
+                    .map_err(|_| StoreError::Unavailable)?;
+                let task = Task::from_persisted(
+                    task_id,
+                    stored_session_id.clone(),
+                    task_objective.ok_or(StoreError::Unavailable)?,
+                    TaskState::parse(&task_state.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?,
+                    parent_task_id,
+                    dependency_task_ids,
+                    assigned_run_id,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::TaskCreated { task },
+                )
+                .map_err(|_| StoreError::Unavailable)?
             }
             "run.created" | "run.state_changed" => {
                 if message_id.is_some()
@@ -3120,7 +3432,8 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
                 .map(WorkspacePathScope::relative_directory),
         }),
         SessionEventPayload::SessionCreated { .. }
-        | SessionEventPayload::MessageAppended { .. } => Err(RunStoreError::Unavailable),
+        | SessionEventPayload::MessageAppended { .. }
+        | SessionEventPayload::TaskCreated { .. } => Err(RunStoreError::Unavailable),
     }
 }
 
@@ -3596,6 +3909,16 @@ impl SessionIdGenerator for UlidIdGenerator {
 
     fn message_id(&self) -> MessageId {
         MessageId::from_ulid(Ulid::generate())
+    }
+
+    fn event_id(&self) -> EventId {
+        EventId::from_ulid(Ulid::generate())
+    }
+}
+
+impl TaskIdGenerator for UlidIdGenerator {
+    fn task_id(&self) -> TaskId {
+        TaskId::from_ulid(Ulid::generate())
     }
 
     fn event_id(&self) -> EventId {

@@ -170,6 +170,63 @@ paths:
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'
+  /v1/sessions/{session_id}/tasks:
+    post:
+      operationId: create_task
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 1}
+          description: Opaque non-empty key for idempotent Task creation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+      responses:
+        '201':
+          description: Durable pending Task.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  /v1/tasks/{task_id}:
+    get:
+      operationId: get_task
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Durable Task snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
   /v1/sessions/{session_id}/events:
     get:
       operationId: list_session_events
@@ -362,9 +419,12 @@ components:
     WorkspaceRootResponse: {"properties":{"canonical_path":{"type":"string"},"display_path":{"type":"string"},"git_common_directory_path":{"type":"string"},"name":{"type":"string"},"position":{"format":"uint","minimum":0,"type":"integer"},"state":{"type":"string"},"workspace_root_id":{"type":"string"}},"required":["workspace_root_id","name","display_path","canonical_path","git_common_directory_path","position","state"],"type":"object"}
     WorkspaceResponse: {"properties":{"name":{"type":"string"},"roots":{"items":{"$ref":"#/components/schemas/WorkspaceRootResponse"},"type":"array"},"workspace_id":{"type":"string"}},"required":["workspace_id","name","roots"],"type":"object"}
     AppendMessageRequest: {"additionalProperties":false,"properties":{"content":{"type":"string"}},"required":["content"],"type":"object"}
+    CreateTaskRequest: {"additionalProperties":false,"properties":{"dependency_task_ids":{"default":[],"items":{"type":"string"},"type":"array"},"objective":{"type":"string"},"parent_task_id":{"default":null,"type":["string","null"]}},"required":["objective"],"type":"object"}
     SessionResponse: {"properties":{"session_id":{"type":"string"},"workspace_id":{"type":"string"}},"required":["session_id","workspace_id"],"type":"object"}
     MessageRole: {"enum":["user"],"type":"string"}
     MessageResponse: {"properties":{"content":{"type":"string"},"message_id":{"type":"string"},"role":{"$ref":"#/components/schemas/MessageRole"},"session_id":{"type":"string"}},"required":["message_id","session_id","role","content"],"type":"object"}
+    TaskState: {"enum":["pending","ready","running","blocked","completed","failed","cancelled"],"type":"string"}
+    TaskResponse: {"properties":{"assigned_run_id":{"type":["string","null"]},"dependency_task_ids":{"items":{"type":"string"},"type":"array"},"objective":{"type":"string"},"parent_task_id":{"type":["string","null"]},"session_id":{"type":"string"},"state":{"$ref":"#/components/schemas/TaskState"},"task_id":{"type":"string"}},"required":["task_id","session_id","objective","state","parent_task_id","dependency_task_ids","assigned_run_id"],"type":"object"}
     StartRunRequest: {"additionalProperties":false,"properties":{"approval_policy":{"$ref":"#/components/schemas/ApprovalPolicy"},"relative_directory":{"type":"string"},"workspace_root_id":{"type":"string"}},"required":["approval_policy","workspace_root_id","relative_directory"],"type":"object"}
     ApprovalPolicy: {"enum":["ask","read_only","full_access"],"type":"string"}
     ApprovalDecisionRequest: {"additionalProperties":false,"properties":{"decision":{"$ref":"#/components/schemas/ApprovalDecision"}},"required":["decision"],"type":"object"}
@@ -378,6 +438,6 @@ components:
     ApprovalResponse: {"properties":{"approval_id":{"type":"string"},"requested_scope":{"$ref":"#/components/schemas/WorkspaceScopeResponse"},"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/ApprovalState"},"tool_call_id":{"type":"string"}},"required":["approval_id","run_id","tool_call_id","requested_scope","state"],"type":"object"}
     ToolCallResponse: {"properties":{"capability":{"type":"string"},"effective_scope":{"anyOf":[{"$ref":"#/components/schemas/WorkspaceScopeResponse"},{"type":"null"}]},"exit_code":{"format":"int32","type":["integer","null"]},"requested_scope":{"anyOf":[{"$ref":"#/components/schemas/WorkspaceScopeResponse"},{"type":"null"}]},"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/ToolCallState"},"stderr":{"type":["string","null"]},"stderr_artifact":{"anyOf":[{"$ref":"#/components/schemas/ArtifactResponse"},{"type":"null"}]},"stdout":{"type":["string","null"]},"stdout_artifact":{"anyOf":[{"$ref":"#/components/schemas/ArtifactResponse"},{"type":"null"}]},"tool_call_id":{"type":"string"}},"required":["tool_call_id","run_id","capability","state","requested_scope","effective_scope","stdout","stderr","stdout_artifact","stderr_artifact","exit_code"],"type":"object"}
     RunResponse: {"properties":{"approval_policy":{"anyOf":[{"$ref":"#/components/schemas/ApprovalPolicy"},{"type":"null"}]},"approvals":{"items":{"$ref":"#/components/schemas/ApprovalResponse"},"type":"array"},"requested_scope":{"anyOf":[{"$ref":"#/components/schemas/WorkspaceScopeResponse"},{"type":"null"}]},"run_id":{"type":"string"},"session_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"tool_calls":{"items":{"$ref":"#/components/schemas/ToolCallResponse"},"type":"array"}},"required":["run_id","session_id","state","approval_policy","requested_scope","tool_calls","approvals"],"type":"object"}
-    SessionEventDataResponse: {"oneOf":[{"properties":{"type":{"const":"session.created","type":"string"},"workspace_id":{"type":"string"}},"required":["type","workspace_id"],"type":"object"},{"properties":{"message":{"$ref":"#/components/schemas/MessageResponse"},"type":{"const":"message.appended","type":"string"}},"required":["type","message"],"type":"object"},{"properties":{"approval_policy":{"anyOf":[{"$ref":"#/components/schemas/ApprovalPolicy"},{"type":"null"}]},"requested_scope":{"anyOf":[{"$ref":"#/components/schemas/WorkspaceScopeResponse"},{"type":"null"}]},"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"type":{"const":"run.created","type":"string"}},"required":["type","run_id","state","approval_policy","requested_scope"],"type":"object"},{"properties":{"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"type":{"const":"run.state_changed","type":"string"}},"required":["type","run_id","state"],"type":"object"},{"properties":{"run_id":{"type":"string"},"type":{"const":"run.cancellation_requested","type":"string"}},"required":["type","run_id"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.requested","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"approval":{"$ref":"#/components/schemas/ApprovalResponse"},"type":{"const":"approval.requested","type":"string"}},"required":["type","approval"],"type":"object"},{"properties":{"approval":{"$ref":"#/components/schemas/ApprovalResponse"},"type":{"const":"approval.decided","type":"string"}},"required":["type","approval"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.denied","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.state_changed","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"content":{"type":"string"},"run_id":{"type":"string"},"stream":{"$ref":"#/components/schemas/ToolOutputStream"},"tool_call_id":{"type":"string"},"type":{"const":"tool_call.output","type":"string"}},"required":["type","run_id","tool_call_id","stream","content"],"type":"object"},{"properties":{"artifact":{"$ref":"#/components/schemas/ArtifactResponse"},"run_id":{"type":"string"},"stream":{"$ref":"#/components/schemas/ToolOutputStream"},"tool_call_id":{"type":"string"},"type":{"const":"artifact.registered","type":"string"}},"required":["type","run_id","tool_call_id","stream","artifact"],"type":"object"}]}
+    SessionEventDataResponse: {"oneOf":[{"properties":{"type":{"const":"session.created","type":"string"},"workspace_id":{"type":"string"}},"required":["type","workspace_id"],"type":"object"},{"properties":{"message":{"$ref":"#/components/schemas/MessageResponse"},"type":{"const":"message.appended","type":"string"}},"required":["type","message"],"type":"object"},{"properties":{"task":{"$ref":"#/components/schemas/TaskResponse"},"type":{"const":"task.created","type":"string"}},"required":["type","task"],"type":"object"},{"properties":{"approval_policy":{"anyOf":[{"$ref":"#/components/schemas/ApprovalPolicy"},{"type":"null"}]},"requested_scope":{"anyOf":[{"$ref":"#/components/schemas/WorkspaceScopeResponse"},{"type":"null"}]},"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"type":{"const":"run.created","type":"string"}},"required":["type","run_id","state","approval_policy","requested_scope"],"type":"object"},{"properties":{"run_id":{"type":"string"},"state":{"$ref":"#/components/schemas/RunState"},"type":{"const":"run.state_changed","type":"string"}},"required":["type","run_id","state"],"type":"object"},{"properties":{"run_id":{"type":"string"},"type":{"const":"run.cancellation_requested","type":"string"}},"required":["type","run_id"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.requested","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"approval":{"$ref":"#/components/schemas/ApprovalResponse"},"type":{"const":"approval.requested","type":"string"}},"required":["type","approval"],"type":"object"},{"properties":{"approval":{"$ref":"#/components/schemas/ApprovalResponse"},"type":{"const":"approval.decided","type":"string"}},"required":["type","approval"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.denied","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"tool_call":{"$ref":"#/components/schemas/ToolCallResponse"},"type":{"const":"tool_call.state_changed","type":"string"}},"required":["type","tool_call"],"type":"object"},{"properties":{"content":{"type":"string"},"run_id":{"type":"string"},"stream":{"$ref":"#/components/schemas/ToolOutputStream"},"tool_call_id":{"type":"string"},"type":{"const":"tool_call.output","type":"string"}},"required":["type","run_id","tool_call_id","stream","content"],"type":"object"},{"properties":{"artifact":{"$ref":"#/components/schemas/ArtifactResponse"},"run_id":{"type":"string"},"stream":{"$ref":"#/components/schemas/ToolOutputStream"},"tool_call_id":{"type":"string"},"type":{"const":"artifact.registered","type":"string"}},"required":["type","run_id","tool_call_id","stream","artifact"],"type":"object"}]}
     SessionEventResponse: {"properties":{"cursor":{"type":"string"},"event":{"$ref":"#/components/schemas/SessionEventDataResponse"},"event_id":{"type":"string"},"session_id":{"type":"string"}},"required":["event_id","cursor","session_id","event"],"type":"object"}
     SessionEventsResponse: {"properties":{"current_event_cursor":{"type":"string"},"events":{"items":{"$ref":"#/components/schemas/SessionEventResponse"},"type":"array"}},"required":["events","current_event_cursor"],"type":"object"}

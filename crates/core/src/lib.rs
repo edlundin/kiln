@@ -86,6 +86,23 @@ impl SessionId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TaskId(String);
+
+impl TaskId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("tsk_{value}"))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
+        parse_id(value.into(), "tsk_").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MessageId(String);
 
 impl MessageId {
@@ -453,6 +470,139 @@ impl Message {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Pending,
+    Ready,
+    Running,
+    Blocked,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl TaskState {
+    pub fn parse(value: &str) -> Result<Self, InvalidTaskState> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "ready" => Ok(Self::Ready),
+            "running" => Ok(Self::Running),
+            "blocked" => Ok(Self::Blocked),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(InvalidTaskState),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidTaskState;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    task_id: TaskId,
+    session_id: SessionId,
+    objective: String,
+    state: TaskState,
+    parent_task_id: Option<TaskId>,
+    dependency_task_ids: Vec<TaskId>,
+    assigned_run_id: Option<RunId>,
+}
+
+impl Task {
+    pub fn new(
+        task_id: TaskId,
+        session_id: SessionId,
+        objective: String,
+        parent_task_id: Option<TaskId>,
+        mut dependency_task_ids: Vec<TaskId>,
+    ) -> Result<Self, TaskError> {
+        if objective.trim().is_empty() {
+            return Err(TaskError::ObjectiveRequired);
+        }
+        dependency_task_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        if dependency_task_ids.windows(2).any(|ids| ids[0] == ids[1]) {
+            return Err(TaskError::DuplicateDependency);
+        }
+        if parent_task_id.as_ref() == Some(&task_id)
+            || dependency_task_ids.iter().any(|id| id == &task_id)
+        {
+            return Err(TaskError::Cycle);
+        }
+        Ok(Self {
+            task_id,
+            session_id,
+            objective,
+            state: TaskState::Pending,
+            parent_task_id,
+            dependency_task_ids,
+            assigned_run_id: None,
+        })
+    }
+
+    pub fn from_persisted(
+        task_id: TaskId,
+        session_id: SessionId,
+        objective: String,
+        state: TaskState,
+        parent_task_id: Option<TaskId>,
+        dependency_task_ids: Vec<TaskId>,
+        assigned_run_id: Option<RunId>,
+    ) -> Result<Self, TaskError> {
+        let mut task = Self::new(
+            task_id,
+            session_id,
+            objective,
+            parent_task_id,
+            dependency_task_ids,
+        )?;
+        task.state = state;
+        task.assigned_run_id = assigned_run_id;
+        Ok(task)
+    }
+
+    pub fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn objective(&self) -> &str {
+        &self.objective
+    }
+
+    pub fn state(&self) -> TaskState {
+        self.state
+    }
+
+    pub fn parent_task_id(&self) -> Option<&TaskId> {
+        self.parent_task_id.as_ref()
+    }
+
+    pub fn dependency_task_ids(&self) -> &[TaskId] {
+        &self.dependency_task_ids
+    }
+
+    pub fn assigned_run_id(&self) -> Option<&RunId> {
+        self.assigned_run_id.as_ref()
     }
 }
 
@@ -1303,6 +1453,9 @@ pub enum SessionEventPayload {
     MessageAppended {
         message: Message,
     },
+    TaskCreated {
+        task: Task,
+    },
     RunCreated {
         run_id: RunId,
         state: RunState,
@@ -1370,6 +1523,14 @@ impl SessionEvent {
             event_id,
             session_id: message.session_id.clone(),
             payload: SessionEventPayload::MessageAppended { message },
+        }
+    }
+
+    pub fn task_created(event_id: EventId, task: Task) -> Self {
+        Self {
+            event_id,
+            session_id: task.session_id.clone(),
+            payload: SessionEventPayload::TaskCreated { task },
         }
     }
 
@@ -1633,6 +1794,68 @@ pub struct AppendMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTask {
+    pub session_id: SessionId,
+    pub objective: String,
+    pub parent_task_id: Option<TaskId>,
+    pub dependency_task_ids: Vec<TaskId>,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateTaskDisposition {
+    Created,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTaskMutation {
+    pub value: Task,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: CreateTaskDisposition,
+}
+
+impl CreateTaskMutation {
+    pub fn new(
+        value: Task,
+        events: Vec<StoredSessionEvent>,
+        disposition: CreateTaskDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskError {
+    SessionNotFound,
+    TaskNotFound,
+    ObjectiveRequired,
+    ParentTaskNotFound,
+    DependencyTaskNotFound,
+    TaskLinkOutsideSession,
+    DuplicateDependency,
+    Cycle,
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
+    TaskStoreUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStoreError {
+    ParentTaskNotFound,
+    DependencyTaskNotFound,
+    TaskLinkOutsideSession,
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
+    InvalidTask,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionError {
     WorkspaceNotFound,
@@ -1766,9 +1989,27 @@ pub trait SessionStore: Send + Sync {
     ) -> impl Future<Output = Result<Option<EventCursor>, StoreError>> + Send;
 }
 
+pub trait TaskStore: Send + Sync {
+    fn create_task(
+        &self,
+        task: &Task,
+        event: &SessionEvent,
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<CreateTaskMutation, TaskStoreError>> + Send;
+    fn get_task(
+        &self,
+        task_id: &TaskId,
+    ) -> impl Future<Output = Result<Option<Task>, StoreError>> + Send;
+}
+
 pub trait SessionIdGenerator: Send + Sync {
     fn session_id(&self) -> SessionId;
     fn message_id(&self) -> MessageId;
+    fn event_id(&self) -> EventId;
+}
+
+pub trait TaskIdGenerator: Send + Sync {
+    fn task_id(&self) -> TaskId;
     fn event_id(&self) -> EventId;
 }
 
@@ -2450,6 +2691,14 @@ pub trait SessionOperations: Send + Sync {
     ) -> impl Future<Output = Result<Option<EventCursor>, SessionError>> + Send;
 }
 
+pub trait TaskOperations: Send + Sync {
+    fn create_task(
+        &self,
+        command: CreateTask,
+    ) -> impl Future<Output = Result<CreateTaskMutation, TaskError>> + Send;
+    fn get_task(&self, task_id: TaskId) -> impl Future<Output = Result<Task, TaskError>> + Send;
+}
+
 pub struct SessionApplication<W, S, I> {
     workspace_store: W,
     session_store: S,
@@ -2580,6 +2829,75 @@ where
 
     async fn current_event_cursor(&self) -> Result<Option<EventCursor>, SessionError> {
         SessionApplication::current_event_cursor(self).await
+    }
+}
+
+impl<W, S, I> SessionApplication<W, S, I>
+where
+    S: SessionStore + TaskStore,
+    I: TaskIdGenerator,
+{
+    pub async fn create_task(&self, command: CreateTask) -> Result<CreateTaskMutation, TaskError> {
+        if command.idempotency_key.is_empty() {
+            return Err(TaskError::IdempotencyKeyRequired);
+        }
+        if self
+            .session_store
+            .get_session(&command.session_id)
+            .await
+            .map_err(|_| TaskError::TaskStoreUnavailable)?
+            .is_none()
+        {
+            return Err(TaskError::SessionNotFound);
+        }
+        let task = Task::new(
+            self.ids.task_id(),
+            command.session_id,
+            command.objective,
+            command.parent_task_id,
+            command.dependency_task_ids,
+        )?;
+        let event = SessionEvent::task_created(self.ids.event_id(), task.clone());
+        self.session_store
+            .create_task(&task, &event, &command.idempotency_key)
+            .await
+            .map_err(task_store_error)
+    }
+
+    pub async fn get_task(&self, task_id: TaskId) -> Result<Task, TaskError> {
+        self.session_store
+            .get_task(&task_id)
+            .await
+            .map_err(|_| TaskError::TaskStoreUnavailable)?
+            .ok_or(TaskError::TaskNotFound)
+    }
+}
+
+impl<W, S, I> TaskOperations for SessionApplication<W, S, I>
+where
+    W: Send + Sync,
+    S: SessionStore + TaskStore,
+    I: TaskIdGenerator,
+{
+    async fn create_task(&self, command: CreateTask) -> Result<CreateTaskMutation, TaskError> {
+        SessionApplication::create_task(self, command).await
+    }
+
+    async fn get_task(&self, task_id: TaskId) -> Result<Task, TaskError> {
+        SessionApplication::get_task(self, task_id).await
+    }
+}
+
+fn task_store_error(error: TaskStoreError) -> TaskError {
+    match error {
+        TaskStoreError::ParentTaskNotFound => TaskError::ParentTaskNotFound,
+        TaskStoreError::DependencyTaskNotFound => TaskError::DependencyTaskNotFound,
+        TaskStoreError::TaskLinkOutsideSession => TaskError::TaskLinkOutsideSession,
+        TaskStoreError::IdempotencyKeyRequired => TaskError::IdempotencyKeyRequired,
+        TaskStoreError::IdempotencyConflict => TaskError::IdempotencyConflict,
+        TaskStoreError::InvalidTask | TaskStoreError::Unavailable => {
+            TaskError::TaskStoreUnavailable
+        }
     }
 }
 
@@ -3237,10 +3555,12 @@ mod tests {
     #[test]
     fn session_ids_and_cursors_require_canonical_values() {
         assert!(SessionId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").is_ok());
+        assert!(TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAV").is_ok());
         assert!(MessageId::parse("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV").is_ok());
         assert!(EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").is_ok());
         assert!(SessionId::parse("ses_01arz3ndektsv4rrffq69g5fav").is_err());
         assert!(MessageId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").is_err());
+        assert!(TaskId::parse("tsk_invalid").is_err());
         assert!(EventId::parse("evt_invalid").is_err());
 
         assert_eq!(EventCursor::parse("0").unwrap(), EventCursor::zero());
@@ -3270,6 +3590,52 @@ mod tests {
                 " \n\t ".to_owned(),
             ),
             Err(SessionError::MessageContentRequired)
+        );
+    }
+
+    #[test]
+    fn tasks_validate_objectives_cycles_and_dependency_sets() {
+        let task_id = TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let first = TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap();
+        let second = TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FAX").unwrap();
+        let task = Task::new(
+            task_id.clone(),
+            SessionId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            "objective".to_owned(),
+            None,
+            vec![second.clone(), first.clone()],
+        )
+        .unwrap();
+        assert_eq!(task.dependency_task_ids(), [first.clone(), second.clone()]);
+        assert_eq!(
+            Task::new(
+                task_id.clone(),
+                task.session_id().clone(),
+                "objective".to_owned(),
+                None,
+                vec![first.clone(), first],
+            ),
+            Err(TaskError::DuplicateDependency)
+        );
+        assert_eq!(
+            Task::new(
+                task_id.clone(),
+                task.session_id().clone(),
+                "objective".to_owned(),
+                Some(task_id.clone()),
+                Vec::new(),
+            ),
+            Err(TaskError::Cycle)
+        );
+        assert_eq!(
+            Task::new(
+                task_id,
+                task.session_id().clone(),
+                " \n ".to_owned(),
+                None,
+                Vec::new(),
+            ),
+            Err(TaskError::ObjectiveRequired)
         );
     }
 

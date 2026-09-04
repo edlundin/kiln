@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-04 — `feat`
+
+- Added durable Task create/get HTTP operations with idempotent creation.
+- Added same-Session parent and dependency validation, plus streamed and replayable `task.created` events.
+- Added SQLite restart recovery and the generated protocol contract for Tasks.
+
+[Commit](pending)
+
 ## 2026-09-04 — `test`
 
 - Added a complete real-daemon vertical-slice acceptance scenario across multi-root Workspace, Session/Message persistence, approval ordering, WebSocket reconnect/replay, cancellation and process-group termination, artifact retrieval, and graceful restart.

@@ -159,6 +159,34 @@
       "title": "ClientIdentity",
       "type": "object"
     },
+    "CreateTaskRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "dependency_task_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "parent_task_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "objective"
+      ],
+      "title": "CreateTaskRequest",
+      "type": "object"
+    },
     "CreateWorkspaceRequest": {
       "$defs": {
         "WorkspaceRootRequest": {
@@ -746,6 +774,62 @@
           ],
           "type": "string"
         },
+        "TaskResponse": {
+          "properties": {
+            "assigned_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dependency_task_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "objective": {
+              "type": "string"
+            },
+            "parent_task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/TaskState"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "session_id",
+            "objective",
+            "state",
+            "parent_task_id",
+            "dependency_task_ids",
+            "assigned_run_id"
+          ],
+          "type": "object"
+        },
+        "TaskState": {
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "blocked",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        },
         "ToolCallResponse": {
           "properties": {
             "capability": {
@@ -902,6 +986,22 @@
           "required": [
             "type",
             "message"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "task": {
+              "$ref": "#/$defs/TaskResponse"
+            },
+            "type": {
+              "const": "task.created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "task"
           ],
           "type": "object"
         },
@@ -1263,6 +1363,22 @@
             },
             {
               "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "approval_policy": {
                   "anyOf": [
                     {
@@ -1476,6 +1592,62 @@
               "type": "object"
             }
           ]
+        },
+        "TaskResponse": {
+          "properties": {
+            "assigned_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dependency_task_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "objective": {
+              "type": "string"
+            },
+            "parent_task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/TaskState"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "session_id",
+            "objective",
+            "state",
+            "parent_task_id",
+            "dependency_task_ids",
+            "assigned_run_id"
+          ],
+          "type": "object"
+        },
+        "TaskState": {
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "blocked",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
         },
         "ToolCallResponse": {
           "properties": {
@@ -1767,6 +1939,22 @@
             },
             {
               "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "approval_policy": {
                   "anyOf": [
                     {
@@ -2004,6 +2192,62 @@
           ],
           "type": "object"
         },
+        "TaskResponse": {
+          "properties": {
+            "assigned_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dependency_task_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "objective": {
+              "type": "string"
+            },
+            "parent_task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/TaskState"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "session_id",
+            "objective",
+            "state",
+            "parent_task_id",
+            "dependency_task_ids",
+            "assigned_run_id"
+          ],
+          "type": "object"
+        },
+        "TaskState": {
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "blocked",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        },
         "ToolCallResponse": {
           "properties": {
             "capability": {
@@ -2213,6 +2457,80 @@
       ],
       "title": "StoreIdentity",
       "type": "object"
+    },
+    "TaskResponse": {
+      "$defs": {
+        "TaskState": {
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "blocked",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "assigned_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dependency_task_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "parent_task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/TaskState"
+        },
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "session_id",
+        "objective",
+        "state",
+        "parent_task_id",
+        "dependency_task_ids",
+        "assigned_run_id"
+      ],
+      "title": "TaskResponse",
+      "type": "object"
+    },
+    "TaskState": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "pending",
+        "ready",
+        "running",
+        "blocked",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "title": "TaskState",
+      "type": "string"
     },
     "ToolCallResponse": {
       "$defs": {
@@ -2519,6 +2837,22 @@
             },
             {
               "properties": {
+                "task": {
+                  "$ref": "#/$defs/TaskResponse"
+                },
+                "type": {
+                  "const": "task.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "task"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "approval_policy": {
                   "anyOf": [
                     {
@@ -2755,6 +3089,62 @@
             "event"
           ],
           "type": "object"
+        },
+        "TaskResponse": {
+          "properties": {
+            "assigned_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dependency_task_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "objective": {
+              "type": "string"
+            },
+            "parent_task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/TaskState"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "session_id",
+            "objective",
+            "state",
+            "parent_task_id",
+            "dependency_task_ids",
+            "assigned_run_id"
+          ],
+          "type": "object"
+        },
+        "TaskState": {
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "blocked",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
         },
         "ToolCallResponse": {
           "properties": {

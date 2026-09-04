@@ -8,14 +8,15 @@ use std::{
 use futures_util::{SinkExt, StreamExt};
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
-    ApprovalState, ClientIdentity, CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
-    RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, StartRunRequest, TOOL_CALL_APPROVAL_PATH, ToolCallState, ToolOutputStream,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
-    WorkspaceResponse, WorkspaceRootRequest, error_code,
+    ApprovalState, ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
+    MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
+    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
+    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
+    StartRunRequest, TASK_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallState,
+    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootRequest, error_code,
 };
 use reqwest::{
     StatusCode,
@@ -276,6 +277,7 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
     match &event.event {
         SessionEventDataResponse::SessionCreated { .. } => "session.created",
         SessionEventDataResponse::MessageAppended { .. } => "message.appended",
+        SessionEventDataResponse::TaskCreated { .. } => "task.created",
         SessionEventDataResponse::RunCreated { .. } => "run.created",
         SessionEventDataResponse::RunStateChanged { .. } => "run.state_changed",
         SessionEventDataResponse::RunCancellationRequested { .. } => "run.cancellation_requested",
@@ -308,7 +310,8 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         SessionEventDataResponse::ToolCallOutput { run_id, .. }
         | SessionEventDataResponse::ArtifactRegistered { run_id, .. } => run_id == expected_run_id,
         SessionEventDataResponse::SessionCreated { .. }
-        | SessionEventDataResponse::MessageAppended { .. } => false,
+        | SessionEventDataResponse::MessageAppended { .. }
+        | SessionEventDataResponse::TaskCreated { .. } => false,
     }
 }
 
@@ -1222,6 +1225,167 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
         error_code::INVALID_REQUEST,
     )
     .await;
+}
+
+#[tokio::test]
+async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary Task test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("Task test repository parent");
+    let data_directory = sandbox.path().join("data");
+    let mut daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+    let tasks_path = SESSION_TASKS_PATH.replace("{session_id}", &session.session_id);
+    let parent_request = CreateTaskRequest {
+        objective: "parent".to_owned(),
+        parent_task_id: None,
+        dependency_task_ids: Vec::new(),
+    };
+
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, tasks_path))
+            .json(&parent_request)
+            .send()
+            .await
+            .expect("missing Task idempotency response"),
+        StatusCode::BAD_REQUEST,
+        error_code::IDEMPOTENCY_KEY_REQUIRED,
+    )
+    .await;
+
+    let response = http
+        .post(format!("http://{}{}", daemon.address, tasks_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-parent")
+        .json(&parent_request)
+        .send()
+        .await
+        .expect("parent Task response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let parent: TaskResponse = response.json().await.expect("parent Task JSON");
+    assert_eq!(parent.state, TaskState::Pending);
+    assert_eq!(parent.parent_task_id, None);
+    assert!(parent.dependency_task_ids.is_empty());
+    assert_eq!(parent.assigned_run_id, None);
+    let live = receive_event(&mut socket).await;
+    assert!(matches!(
+        live.event,
+        SessionEventDataResponse::TaskCreated { task } if task == parent
+    ));
+
+    let duplicate: TaskResponse = http
+        .post(format!("http://{}{}", daemon.address, tasks_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-parent")
+        .json(&parent_request)
+        .send()
+        .await
+        .expect("duplicate parent Task response")
+        .json()
+        .await
+        .expect("duplicate parent Task JSON");
+    assert_eq!(duplicate, parent);
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, tasks_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "task-parent")
+            .json(&CreateTaskRequest {
+                objective: "different".to_owned(),
+                parent_task_id: None,
+                dependency_task_ids: Vec::new(),
+            })
+            .send()
+            .await
+            .expect("Task idempotency conflict response"),
+        StatusCode::CONFLICT,
+        error_code::IDEMPOTENCY_CONFLICT,
+    )
+    .await;
+
+    let child_request = CreateTaskRequest {
+        objective: "child".to_owned(),
+        parent_task_id: Some(parent.task_id.clone()),
+        dependency_task_ids: vec![parent.task_id.clone()],
+    };
+    let response = http
+        .post(format!("http://{}{}", daemon.address, tasks_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "task-child")
+        .json(&child_request)
+        .send()
+        .await
+        .expect("child Task response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let child: TaskResponse = response.json().await.expect("child Task JSON");
+    assert_eq!(
+        child.parent_task_id.as_deref(),
+        Some(parent.task_id.as_str())
+    );
+    assert_eq!(
+        child.dependency_task_ids.as_slice(),
+        std::slice::from_ref(&parent.task_id)
+    );
+    assert!(matches!(
+        receive_event(&mut socket).await.event,
+        SessionEventDataResponse::TaskCreated { task } if task == child
+    ));
+
+    let fetched: TaskResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            TASK_PATH.replace("{task_id}", &child.task_id)
+        ))
+        .send()
+        .await
+        .expect("Task read response")
+        .json()
+        .await
+        .expect("Task read JSON");
+    assert_eq!(fetched, child);
+    let history: SessionEventsResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id)
+        ))
+        .send()
+        .await
+        .expect("Task history response")
+        .json()
+        .await
+        .expect("Task history JSON");
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| event_kind(event) == "task.created")
+            .count(),
+        2
+    );
+
+    drop(socket);
+    daemon.signal("TERM");
+    assert!(
+        daemon
+            .wait_for_exit_within(Duration::from_secs(5))
+            .await
+            .success()
+    );
+    let restarted = Daemon::start(binary, &data_directory);
+    let recovered: TaskResponse = restarted
+        .client()
+        .get(format!(
+            "http://{}{}",
+            restarted.address,
+            TASK_PATH.replace("{task_id}", &child.task_id)
+        ))
+        .send()
+        .await
+        .expect("recovered Task response")
+        .json()
+        .await
+        .expect("recovered Task JSON");
+    assert_eq!(recovered, child);
 }
 
 #[tokio::test]

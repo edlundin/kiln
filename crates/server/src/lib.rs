@@ -22,24 +22,26 @@ use axum::{
     routing::{get, post},
 };
 use kiln_core::{
-    AppendMessage, Artifact, ContentHash, CreateWorkspace, EventCursor, Message,
+    AppendMessage, Artifact, ContentHash, CreateTask, CreateWorkspace, EventCursor, Message,
     MessageRole as CoreMessageRole, RunError, RunId, RunSnapshot, RunState as CoreRunState,
     Session, SessionError, SessionEventPage, SessionEventPayload, SessionId, SessionOperations,
-    StoreMetadata, StoredSessionEvent, ToolCall, ToolCallState as CoreToolCallState,
+    StoreMetadata, StoredSessionEvent, Task, TaskError, TaskId, TaskOperations,
+    TaskState as CoreTaskState, ToolCall, ToolCallState as CoreToolCallState,
     ToolOutputStream as CoreToolOutputStream, WorkspaceError, WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
     ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
-    ApprovalState as ProtocolApprovalState, ArtifactResponse, CreateWorkspaceRequest,
-    EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse, MessageRole, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
-    RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, StartRunRequest, StoreIdentity, TOOL_CALL_APPROVAL_PATH, ToolCallResponse,
-    ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
-    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse,
-    WorkspaceScopeResponse, error_code,
+    ApprovalState as ProtocolApprovalState, ArtifactResponse, CreateTaskRequest,
+    CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse,
+    MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
+    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
+    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
+    StartRunRequest, StoreIdentity, TASK_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState,
+    ToolCallResponse, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -346,7 +348,7 @@ impl<W, S, R> AppState<W, S, R> {
 pub fn router<W, S, R>(state: AppState<W, S, R>) -> Router
 where
     W: WorkspaceOperations + 'static,
-    S: SessionOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
     R: RunOperations + ArtifactOperations + 'static,
 {
     Router::new()
@@ -356,6 +358,8 @@ where
         .route(WORKSPACE_SESSIONS_PATH, post(create_session))
         .route(SESSION_PATH, get(get_session))
         .route(SESSION_MESSAGES_PATH, post(append_message))
+        .route(SESSION_TASKS_PATH, post(create_task))
+        .route(TASK_PATH, get(get_task))
         .route(SESSION_EVENTS_PATH, get(list_session_events))
         .route(SESSION_RUNS_PATH, post(start_run))
         .route(RUN_PATH, get(get_run))
@@ -376,7 +380,7 @@ async fn authenticate<W, S, R>(
 ) -> Response
 where
     W: WorkspaceOperations + 'static,
-    S: SessionOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
     R: RunOperations + ArtifactOperations + 'static,
 {
     if let Err(error) = validate_authority(&request, &state.bound_authority, &state.http_origin) {
@@ -460,7 +464,7 @@ pub async fn serve<W, S, R>(
 ) -> Result<(), std::io::Error>
 where
     W: WorkspaceOperations + 'static,
-    S: SessionOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
     R: RunOperations + ArtifactOperations + 'static,
 {
     axum::serve(listener, router(state)).await
@@ -473,7 +477,7 @@ pub async fn serve_with_shutdown<W, S, R>(
 ) -> Result<(), std::io::Error>
 where
     W: WorkspaceOperations + 'static,
-    S: SessionOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
     R: RunOperations + ArtifactOperations + 'static,
 {
     axum::serve(listener, router(state))
@@ -608,6 +612,75 @@ where
     Ok((StatusCode::CREATED, Json(message_response(&message))))
 }
 
+async fn create_task<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<CreateTaskRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let session_id = SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?;
+    let parent_task_id = request
+        .parent_task_id
+        .map(TaskId::parse)
+        .transpose()
+        .map_err(|_| PublicError::InvalidRequest)?;
+    let dependency_task_ids = request
+        .dependency_task_ids
+        .into_iter()
+        .map(TaskId::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PublicError::InvalidRequest)?;
+    let mutation = state
+        .session_operations
+        .create_task(CreateTask {
+            session_id,
+            objective: request.objective,
+            parent_task_id,
+            dependency_task_ids,
+            idempotency_key: required_idempotency_key(&headers)?,
+        })
+        .await
+        .map_err(PublicError::from)?;
+    state.event_broadcaster.publish(mutation.events);
+    Ok((StatusCode::CREATED, Json(task_response(&mutation.value))))
+}
+
+async fn get_task<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(task_id): Path<String>,
+) -> Result<Json<TaskResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + TaskOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let task_id = TaskId::parse(task_id).map_err(|_| PublicError::InvalidRequest)?;
+    let task = state
+        .session_operations
+        .get_task(task_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(task_response(&task)))
+}
+
+fn required_idempotency_key(headers: &axum::http::HeaderMap) -> Result<String, PublicError> {
+    let value = headers
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .ok_or(PublicError::MissingIdempotencyKey)?
+        .to_str()
+        .map_err(|_| PublicError::InvalidIdempotencyKey)?;
+    if value.is_empty() {
+        return Err(PublicError::InvalidIdempotencyKey);
+    }
+    Ok(value.to_owned())
+}
+
 async fn start_run<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(session_id): Path<String>,
@@ -621,14 +694,7 @@ where
 {
     let _command = state.lifecycle.begin_command()?;
     let session_id = SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?;
-    let idempotency_key = headers
-        .get(IDEMPOTENCY_KEY_HEADER)
-        .ok_or(PublicError::MissingIdempotencyKey)?
-        .to_str()
-        .map_err(|_| PublicError::InvalidIdempotencyKey)?;
-    if idempotency_key.is_empty() {
-        return Err(PublicError::InvalidIdempotencyKey);
-    }
+    let idempotency_key = required_idempotency_key(&headers)?;
     let approval_policy = match request.approval_policy {
         ProtocolApprovalPolicy::Ask => kiln_core::ApprovalPolicy::Ask,
         ProtocolApprovalPolicy::ReadOnly => kiln_core::ApprovalPolicy::ReadOnly,
@@ -642,7 +708,7 @@ where
         .run_operations
         .start_run(
             session_id,
-            idempotency_key.to_owned(),
+            idempotency_key,
             approval_policy,
             requested_scope,
         )
@@ -665,21 +731,14 @@ where
     let _command = state.lifecycle.begin_command()?;
     let tool_call_id =
         kiln_core::ToolCallId::parse(tool_call_id).map_err(|_| PublicError::InvalidRequest)?;
-    let idempotency_key = headers
-        .get(IDEMPOTENCY_KEY_HEADER)
-        .ok_or(PublicError::MissingIdempotencyKey)?
-        .to_str()
-        .map_err(|_| PublicError::InvalidIdempotencyKey)?;
-    if idempotency_key.is_empty() {
-        return Err(PublicError::InvalidIdempotencyKey);
-    }
+    let idempotency_key = required_idempotency_key(&headers)?;
     let decision = match request.decision {
         ApprovalDecision::Approved => kiln_core::ApprovalState::Approved,
         ApprovalDecision::Rejected => kiln_core::ApprovalState::Rejected,
     };
     let approval = state
         .run_operations
-        .decide_approval(tool_call_id, decision, idempotency_key.to_owned())
+        .decide_approval(tool_call_id, decision, idempotency_key)
         .await
         .map_err(PublicError::from)?;
     Ok(Json(run_response(&approval.value)))
@@ -830,6 +889,38 @@ fn message_response(message: &Message) -> MessageResponse {
     }
 }
 
+fn task_response(task: &Task) -> TaskResponse {
+    TaskResponse {
+        task_id: task.task_id().as_str().to_owned(),
+        session_id: task.session_id().as_str().to_owned(),
+        objective: task.objective().to_owned(),
+        state: task_state_response(task.state()),
+        parent_task_id: task
+            .parent_task_id()
+            .map(|task_id| task_id.as_str().to_owned()),
+        dependency_task_ids: task
+            .dependency_task_ids()
+            .iter()
+            .map(|task_id| task_id.as_str().to_owned())
+            .collect(),
+        assigned_run_id: task
+            .assigned_run_id()
+            .map(|run_id| run_id.as_str().to_owned()),
+    }
+}
+
+fn task_state_response(state: CoreTaskState) -> TaskState {
+    match state {
+        CoreTaskState::Pending => TaskState::Pending,
+        CoreTaskState::Ready => TaskState::Ready,
+        CoreTaskState::Running => TaskState::Running,
+        CoreTaskState::Blocked => TaskState::Blocked,
+        CoreTaskState::Completed => TaskState::Completed,
+        CoreTaskState::Failed => TaskState::Failed,
+        CoreTaskState::Cancelled => TaskState::Cancelled,
+    }
+}
+
 fn run_response(snapshot: &RunSnapshot) -> RunResponse {
     RunResponse {
         run_id: snapshot.run().run_id().as_str().to_owned(),
@@ -939,6 +1030,9 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
                 message: message_response(message),
             }
         }
+        SessionEventPayload::TaskCreated { task } => SessionEventDataResponse::TaskCreated {
+            task: task_response(task),
+        },
         SessionEventPayload::RunCreated {
             run_id,
             state,
@@ -1311,6 +1405,8 @@ enum PublicError {
     Workspace(WorkspaceError),
     #[error("session operation failed")]
     Session(SessionError),
+    #[error("task operation failed")]
+    Task(TaskError),
     #[error("run operation failed")]
     Run(RunError),
     #[error("artifact operation failed")]
@@ -1328,6 +1424,12 @@ impl From<WorkspaceError> for PublicError {
 impl From<SessionError> for PublicError {
     fn from(error: SessionError) -> Self {
         Self::Session(error)
+    }
+}
+
+impl From<TaskError> for PublicError {
+    fn from(error: TaskError) -> Self {
+        Self::Task(error)
     }
 }
 
@@ -1520,6 +1622,63 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::SESSION_STORE_UNAVAILABLE,
                     "Session store unavailable",
+                ),
+            },
+            Self::Task(error) => match error {
+                TaskError::SessionNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::SESSION_NOT_FOUND,
+                    "Session not found",
+                ),
+                TaskError::TaskNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::TASK_NOT_FOUND,
+                    "Task not found",
+                ),
+                TaskError::ObjectiveRequired => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::TASK_OBJECTIVE_REQUIRED,
+                    "Invalid Task",
+                ),
+                TaskError::ParentTaskNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::PARENT_TASK_NOT_FOUND,
+                    "Parent Task not found",
+                ),
+                TaskError::DependencyTaskNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::DEPENDENCY_TASK_NOT_FOUND,
+                    "Dependency Task not found",
+                ),
+                TaskError::TaskLinkOutsideSession => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::TASK_LINK_OUTSIDE_SESSION,
+                    "Task link outside Session",
+                ),
+                TaskError::DuplicateDependency => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::DUPLICATE_TASK_DEPENDENCY,
+                    "Duplicate Task dependency",
+                ),
+                TaskError::Cycle => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::TASK_CYCLE,
+                    "Task cycle",
+                ),
+                TaskError::IdempotencyKeyRequired => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::IDEMPOTENCY_KEY_REQUIRED,
+                    "Missing Idempotency-Key",
+                ),
+                TaskError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Idempotency conflict",
+                ),
+                TaskError::TaskStoreUnavailable => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::TASK_STORE_UNAVAILABLE,
+                    "Task store unavailable",
                 ),
             },
             Self::Run(error) => match error {

@@ -1,16 +1,17 @@
 use kiln_protocol::{
     APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, AppendMessageRequest, CANCEL_RUN_OPERATION_ID,
-    CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
-    CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
-    EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
-    RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse,
-    SessionResponse, StoreIdentity, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY,
-    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
-    error_code,
+    CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
+    ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
+    GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID,
+    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
+    MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
+    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SESSION_TASKS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse,
+    SessionResponse, StoreIdentity, TASK_PATH, TaskResponse, TaskState, ToolCallState,
+    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, error_code,
 };
 use serde_json::json;
 
@@ -54,6 +55,9 @@ fn command_types_reject_unknown_fields() {
 
     let value = json!({"content": "message", "unknown": true});
     assert!(serde_json::from_value::<AppendMessageRequest>(value).is_err());
+
+    let value = json!({"objective": "task", "unknown": true});
+    assert!(serde_json::from_value::<CreateTaskRequest>(value).is_err());
 
     let value = json!({
         "name": "Kiln",
@@ -102,6 +106,19 @@ fn response_types_accept_unknown_fields() {
     });
     serde_json::from_value::<SessionResponse>(value)
         .expect("Session responses ignore fields added by a compatible server");
+
+    let value = json!({
+        "task_id": "tsk_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "objective": "task",
+        "state": "pending",
+        "parent_task_id": null,
+        "dependency_task_ids": [],
+        "assigned_run_id": null,
+        "future": true
+    });
+    serde_json::from_value::<TaskResponse>(value)
+        .expect("Task responses ignore fields added by a compatible server");
 
     let value = json!({
         "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -260,10 +277,14 @@ fn catalogue_and_error_fixture_use_protocol_metadata() {
         catalogue["http"][6]["operation"],
         LIST_SESSION_EVENTS_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][7]["path"], SESSION_RUNS_PATH);
-    assert_eq!(catalogue["http"][7]["operation"], START_RUN_OPERATION_ID);
-    assert_eq!(catalogue["http"][8]["path"], RUN_PATH);
-    assert_eq!(catalogue["http"][8]["operation"], GET_RUN_OPERATION_ID);
+    assert_eq!(catalogue["http"][7]["path"], SESSION_TASKS_PATH);
+    assert_eq!(catalogue["http"][7]["operation"], CREATE_TASK_OPERATION_ID);
+    assert_eq!(catalogue["http"][8]["path"], TASK_PATH);
+    assert_eq!(catalogue["http"][8]["operation"], GET_TASK_OPERATION_ID);
+    assert_eq!(catalogue["http"][9]["path"], SESSION_RUNS_PATH);
+    assert_eq!(catalogue["http"][9]["operation"], START_RUN_OPERATION_ID);
+    assert_eq!(catalogue["http"][10]["path"], RUN_PATH);
+    assert_eq!(catalogue["http"][10]["operation"], GET_RUN_OPERATION_ID);
     let artifact = catalogue["http"]
         .as_array()
         .expect("HTTP operations")
@@ -367,6 +388,22 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
     .expect("Message fixture follows the response DTO");
     assert_eq!(message.session_id, session.session_id);
 
+    let task_request = serde_json::from_str::<CreateTaskRequest>(
+        artifacts
+            .get("fixtures/create-task-request.json")
+            .expect("create Task fixture"),
+    )
+    .expect("create Task fixture follows the request DTO");
+    assert!(!task_request.objective.is_empty());
+    let task = serde_json::from_str::<TaskResponse>(
+        artifacts
+            .get("fixtures/task-response.json")
+            .expect("Task fixture"),
+    )
+    .expect("Task fixture follows the response DTO");
+    assert_eq!(task.session_id, session.session_id);
+    assert_eq!(task.state, TaskState::Pending);
+
     let page = serde_json::from_str::<SessionEventsResponse>(
         artifacts
             .get("fixtures/session-events-response.json")
@@ -398,6 +435,8 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
         (WORKSPACE_SESSIONS_PATH, CREATE_SESSION_OPERATION_ID),
         (SESSION_PATH, GET_SESSION_OPERATION_ID),
         (SESSION_MESSAGES_PATH, APPEND_MESSAGE_OPERATION_ID),
+        (SESSION_TASKS_PATH, CREATE_TASK_OPERATION_ID),
+        (TASK_PATH, GET_TASK_OPERATION_ID),
         (SESSION_EVENTS_PATH, LIST_SESSION_EVENTS_OPERATION_ID),
     ] {
         assert!(openapi.contains(&format!("  {path}:")));
@@ -409,9 +448,12 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
             .expect("JSON Schema is valid JSON");
     for definition in [
         "AppendMessageRequest",
+        "CreateTaskRequest",
         "ArtifactResponse",
         "SessionResponse",
         "MessageResponse",
+        "TaskState",
+        "TaskResponse",
         "SessionEventResponse",
         "SessionEventsResponse",
     ] {
@@ -435,6 +477,15 @@ fn start_run_contract_requires_opaque_idempotency_key() {
     assert!(start_run.contains("in: header"));
     assert!(start_run.contains("required: true"));
     assert!(start_run.contains("type: string"));
+    let create_task = openapi
+        .split_once(&format!("  {SESSION_TASKS_PATH}:"))
+        .expect("create Task path")
+        .1
+        .split_once(&format!("  {TASK_PATH}:"))
+        .expect("get Task path")
+        .0;
+    assert!(create_task.contains(&format!("- name: {IDEMPOTENCY_KEY_HEADER}")));
+    assert!(create_task.contains("required: true"));
     assert!(openapi.contains(&format!("version: {PROTOCOL_VERSION}")));
 }
 

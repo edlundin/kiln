@@ -1,0 +1,9 @@
+{
+  "task_id": "tsk_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "objective": "Inspect durable Task recovery.",
+  "state": "pending",
+  "parent_task_id": null,
+  "dependency_task_ids": [],
+  "assigned_run_id": null
+}

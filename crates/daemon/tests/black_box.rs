@@ -2,6 +2,7 @@ use std::{
     io::BufRead,
     path::{Path, PathBuf},
     process::Stdio,
+    time::{Duration, Instant},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -125,6 +126,33 @@ impl Daemon {
 
     fn wait_for_exit(&mut self) -> std::process::ExitStatus {
         self.child.wait().expect("daemon exits")
+    }
+
+    async fn wait_for_exit_within(&mut self, timeout: Duration) -> std::process::ExitStatus {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(status) = self.child.try_wait().expect("daemon exit can be polled") {
+                    return status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("daemon exits within the measured fixture tripwire")
+    }
+
+    fn resident_memory_kb(&self) -> u64 {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p"])
+            .arg(self.child.id().to_string())
+            .output()
+            .expect("daemon RSS sample runs");
+        assert!(output.status.success(), "daemon RSS sample succeeds");
+        String::from_utf8(output.stdout)
+            .expect("daemon RSS sample is UTF-8")
+            .trim()
+            .parse()
+            .expect("daemon RSS sample is numeric")
     }
 }
 
@@ -391,6 +419,31 @@ async fn receive_run_events(
         events.push(event);
         if terminal {
             return events;
+        }
+    }
+}
+
+async fn receive_run_events_with_peak_rss(
+    daemon: &Daemon,
+    socket: &mut EventSocket,
+    run_id: &str,
+    terminal_state: RunState,
+) -> (Vec<SessionEventResponse>, u64) {
+    let mut events = Vec::new();
+    let mut peak_rss_kb = daemon.resident_memory_kb();
+    loop {
+        let event = receive_event(socket).await;
+        peak_rss_kb = peak_rss_kb.max(daemon.resident_memory_kb());
+        let terminal = matches!(
+            &event.event,
+            SessionEventDataResponse::RunStateChanged {
+                run_id: event_run_id,
+                state,
+            } if event_run_id == run_id && state == &terminal_state
+        );
+        events.push(event);
+        if terminal {
+            return (events, peak_rss_kb);
         }
     }
 }
@@ -2668,5 +2721,442 @@ async fn concurrent_same_key_starts_one_run_and_one_tool_lifecycle() {
             .filter(|event| event_kind(event) == "tool_call.requested")
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn complete_first_vertical_slice_is_repeatable_across_reconnect_and_restart() {
+    tokio::time::timeout(Duration::from_secs(5), complete_first_vertical_slice())
+        .await
+        .expect("complete vertical slice finishes within the measured fixture tripwire");
+}
+
+async fn complete_first_vertical_slice() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary vertical-slice directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("vertical-slice repository parent");
+    let primary = git_repository(&repositories, "primary");
+    let companion = git_repository(&repositories, "companion");
+    let data_directory = sandbox.path().join("data");
+    let approval_pid_file = primary.join("approval-pids.json");
+
+    let daemon =
+        Daemon::start_with_pid_file(binary, &data_directory, "large-output", &approval_pid_file);
+    let idle_rss_kb = daemon.resident_memory_kb();
+    let http = daemon.client();
+    let workspace_request = CreateWorkspaceRequest {
+        name: "Vertical slice Workspace".to_owned(),
+        roots: vec![
+            WorkspaceRootRequest {
+                name: "primary".to_owned(),
+                path: canonical_string(&primary),
+            },
+            WorkspaceRootRequest {
+                name: "companion".to_owned(),
+                path: canonical_string(&companion),
+            },
+        ],
+    };
+    let response = http
+        .post(format!("http://{}{WORKSPACES_PATH}", daemon.address))
+        .json(&workspace_request)
+        .send()
+        .await
+        .expect("vertical-slice Workspace response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let workspace: WorkspaceResponse = response
+        .json()
+        .await
+        .expect("vertical-slice Workspace JSON");
+    assert_eq!(workspace.name, workspace_request.name);
+    assert_eq!(workspace.roots.len(), 2);
+    assert_eq!(
+        workspace.roots[0].canonical_path,
+        canonical_string(&primary)
+    );
+    assert_eq!(
+        workspace.roots[1].canonical_path,
+        canonical_string(&companion)
+    );
+
+    let sessions_path = WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", &workspace.workspace_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, sessions_path))
+        .send()
+        .await
+        .expect("vertical-slice Session response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let session: SessionResponse = response.json().await.expect("vertical-slice Session JSON");
+    assert_eq!(session.workspace_id, workspace.workspace_id);
+
+    let messages_path = SESSION_MESSAGES_PATH.replace("{session_id}", &session.session_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, messages_path))
+        .json(&AppendMessageRequest {
+            content: "Run the complete deterministic vertical slice".to_owned(),
+        })
+        .send()
+        .await
+        .expect("vertical-slice Message response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let message: MessageResponse = response.json().await.expect("vertical-slice Message JSON");
+    assert_eq!(message.session_id, session.session_id);
+
+    let mut socket = open_event_socket(&daemon).await;
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let run_request = StartRunRequest {
+        approval_policy: ApprovalPolicy::Ask,
+        workspace_root_id: workspace.roots[0].workspace_root_id.clone(),
+        relative_directory: ".".to_owned(),
+    };
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-artifact")
+        .json(&run_request)
+        .send()
+        .await
+        .expect("vertical-slice approval Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let queued: RunResponse = response
+        .json()
+        .await
+        .expect("vertical-slice approval Run JSON");
+    let waiting_events =
+        receive_run_events(&mut socket, &queued.run_id, RunState::WaitingForApproval).await;
+    assert_eq!(
+        waiting_events.iter().map(event_kind).collect::<Vec<_>>(),
+        [
+            "run.created",
+            "run.state_changed",
+            "tool_call.requested",
+            "tool_call.state_changed",
+            "approval.requested",
+            "run.state_changed",
+        ]
+    );
+    assert!(
+        !approval_pid_file.exists(),
+        "Ask policy must not execute before approval"
+    );
+    let replay_after = waiting_events[0].cursor.clone();
+    let waiting: RunResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            RUN_PATH.replace("{run_id}", &queued.run_id)
+        ))
+        .send()
+        .await
+        .expect("vertical-slice waiting Run response")
+        .json()
+        .await
+        .expect("vertical-slice waiting Run JSON");
+    assert_eq!(waiting.state, RunState::WaitingForApproval);
+    assert_eq!(waiting.approvals[0].state, ApprovalState::Pending);
+    assert_eq!(waiting.tool_calls[0].state, ToolCallState::AwaitingApproval);
+    let tool_call_id = waiting.tool_calls[0].tool_call_id.clone();
+    let original_token = daemon.token.clone();
+    drop(socket);
+    drop(daemon);
+
+    let mut daemon =
+        Daemon::start_with_pid_file(binary, &data_directory, "large-output", &approval_pid_file);
+    assert_eq!(daemon.token, original_token);
+    let http = daemon.client();
+    let workspace_path = WORKSPACE_PATH.replace("{workspace_id}", &workspace.workspace_id);
+    let recovered_workspace: WorkspaceResponse = http
+        .get(format!("http://{}{}", daemon.address, workspace_path))
+        .send()
+        .await
+        .expect("recovered vertical-slice Workspace response")
+        .json()
+        .await
+        .expect("recovered vertical-slice Workspace JSON");
+    assert_eq!(recovered_workspace, workspace);
+    let session_path = SESSION_PATH.replace("{session_id}", &session.session_id);
+    let recovered_session: SessionResponse = http
+        .get(format!("http://{}{}", daemon.address, session_path))
+        .send()
+        .await
+        .expect("recovered vertical-slice Session response")
+        .json()
+        .await
+        .expect("recovered vertical-slice Session JSON");
+    assert_eq!(recovered_session, session);
+    assert!(
+        !approval_pid_file.exists(),
+        "pending approval must remain blocked across restart"
+    );
+
+    let reconnect_started = Instant::now();
+    let (mut socket, acknowledged_cursor) =
+        open_event_socket_after(&daemon, Some(&replay_after)).await;
+    let reconnect_ms = reconnect_started.elapsed().as_secs_f64() * 1_000.0;
+    assert!(
+        acknowledged_cursor
+            .as_deref()
+            .expect("vertical-slice replay acknowledgement cursor")
+            .parse::<u64>()
+            .expect("numeric vertical-slice acknowledgement cursor")
+            > replay_after
+                .parse::<u64>()
+                .expect("numeric vertical-slice replay cursor")
+    );
+    let approval_path = TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &tool_call_id);
+    let response = http
+        .post(format!("http://{}{}", daemon.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-approve")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        })
+        .send()
+        .await
+        .expect("vertical-slice approval response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let approved: RunResponse = response.json().await.expect("vertical-slice approval JSON");
+    assert_eq!(approved.approvals[0].state, ApprovalState::Approved);
+    let (replayed, streaming_peak_rss_kb) =
+        receive_run_events_with_peak_rss(&daemon, &mut socket, &queued.run_id, RunState::Completed)
+            .await;
+    let approval_pid: Value = serde_json::from_str(
+        &std::fs::read_to_string(&approval_pid_file)
+            .expect("approved vertical-slice subprocess PID marker"),
+    )
+    .expect("approved vertical-slice subprocess PID marker JSON");
+    assert!(
+        approval_pid["parent_pid"]
+            .as_u64()
+            .is_some_and(|pid| pid > 0),
+        "approved large-output subprocess must write its PID marker"
+    );
+    let replayed_cursors = replayed
+        .iter()
+        .map(|event| {
+            event
+                .cursor
+                .parse::<u64>()
+                .expect("numeric vertical-slice replay Event cursor")
+        })
+        .collect::<Vec<_>>();
+    let replay_after = replay_after
+        .parse::<u64>()
+        .expect("numeric vertical-slice replay boundary");
+    assert!(replayed_cursors.iter().all(|cursor| *cursor > replay_after));
+    assert!(replayed_cursors.windows(2).all(|pair| pair[0] < pair[1]));
+    let approval_event_index = replayed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                SessionEventDataResponse::ApprovalDecided { approval }
+                    if approval.run_id == queued.run_id
+                        && approval.state == ApprovalState::Approved
+            )
+        })
+        .expect("approved vertical-slice Event");
+    let first_output_event_index = replayed
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                SessionEventDataResponse::ToolCallOutput { run_id, .. }
+                    | SessionEventDataResponse::ArtifactRegistered { run_id, .. }
+                    if run_id == &queued.run_id
+            )
+        })
+        .expect("vertical-slice output or artifact Event");
+    assert!(approval_event_index < first_output_event_index);
+    let artifact = replayed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEventDataResponse::ArtifactRegistered {
+                run_id,
+                stream: ToolOutputStream::Stdout,
+                artifact,
+                ..
+            } if run_id == &queued.run_id => Some(artifact.clone()),
+            _ => None,
+        })
+        .expect("vertical-slice artifact Event");
+    assert_eq!(artifact.size, "180000");
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let durable_suffix: SessionEventsResponse = http
+        .get(format!(
+            "http://{}{}?after={replay_after}",
+            daemon.address, events_path
+        ))
+        .send()
+        .await
+        .expect("vertical-slice durable replay response")
+        .json()
+        .await
+        .expect("vertical-slice durable replay JSON");
+    assert_eq!(replayed, durable_suffix.events);
+
+    let run_path = RUN_PATH.replace("{run_id}", &queued.run_id);
+    let completed: RunResponse = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("vertical-slice completed Run response")
+        .json()
+        .await
+        .expect("vertical-slice completed Run JSON");
+    assert_eq!(completed.state, RunState::Completed);
+    assert_eq!(
+        completed.tool_calls[0].stdout_artifact.as_ref(),
+        Some(&artifact)
+    );
+    let artifact_path = ARTIFACT_PATH.replace("{content_hash}", &artifact.content_hash);
+    let expected_artifact = "kiln large output\n".repeat(10_000);
+    let response = http
+        .get(format!("http://{}{}", daemon.address, artifact_path))
+        .send()
+        .await
+        .expect("vertical-slice artifact response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .bytes()
+            .await
+            .expect("vertical-slice artifact bytes"),
+        expected_artifact.as_bytes()
+    );
+
+    drop(socket);
+    let shutdown_started = Instant::now();
+    daemon.signal("INT");
+    assert!(
+        daemon
+            .wait_for_exit_within(Duration::from_secs(5))
+            .await
+            .success()
+    );
+    let shutdown_ms = shutdown_started.elapsed().as_secs_f64() * 1_000.0;
+
+    let cancellation_pid_file = primary.join("cancellation-pids.json");
+    let mut daemon = Daemon::start_with_pid_file(
+        binary,
+        &data_directory,
+        "blocking-tree",
+        &cancellation_pid_file,
+    );
+    assert_eq!(daemon.token, original_token);
+    let http = daemon.client();
+    let response = http
+        .get(format!("http://{}{}", daemon.address, artifact_path))
+        .send()
+        .await
+        .expect("restarted vertical-slice artifact response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .bytes()
+            .await
+            .expect("restarted vertical-slice artifact bytes"),
+        expected_artifact.as_bytes()
+    );
+
+    let mut socket = open_event_socket(&daemon).await;
+    let cancellation_request = StartRunRequest {
+        approval_policy: ApprovalPolicy::FullAccess,
+        workspace_root_id: workspace.roots[0].workspace_root_id.clone(),
+        relative_directory: ".".to_owned(),
+    };
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-cancel")
+        .json(&cancellation_request)
+        .send()
+        .await
+        .expect("vertical-slice cancellation Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let running: RunResponse = response
+        .json()
+        .await
+        .expect("vertical-slice cancellation Run JSON");
+    let (parent_pid, child_pid) = fixture_pids(&cancellation_pid_file).await;
+    assert!(process_exists(parent_pid));
+    assert!(process_exists(child_pid));
+    assert!(process_group_exists(parent_pid));
+
+    let cancel_path = RUN_CANCEL_PATH.replace("{run_id}", &running.run_id);
+    let cancellation_started = Instant::now();
+    let response = http
+        .post(format!("http://{}{}", daemon.address, cancel_path))
+        .send()
+        .await
+        .expect("vertical-slice cancellation response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let cancelled: RunResponse = response
+        .json()
+        .await
+        .expect("vertical-slice cancellation JSON");
+    assert_eq!(cancelled.state, RunState::Cancelled);
+    assert!(!process_exists(parent_pid));
+    assert!(!process_exists(child_pid));
+    assert!(!process_group_exists(parent_pid));
+    let cancellation_ms = cancellation_started.elapsed().as_secs_f64() * 1_000.0;
+    let cancellation_events =
+        receive_run_events(&mut socket, &running.run_id, RunState::Cancelled).await;
+    assert!(cancellation_events.iter().any(|event| {
+        event_kind(event) == "run.cancellation_requested"
+            && event_belongs_to_run(event, &running.run_id)
+    }));
+
+    drop(socket);
+    daemon.signal("TERM");
+    assert!(
+        daemon
+            .wait_for_exit_within(Duration::from_secs(5))
+            .await
+            .success()
+    );
+
+    let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
+    let recovered_cancelled: RunResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            RUN_PATH.replace("{run_id}", &running.run_id)
+        ))
+        .send()
+        .await
+        .expect("recovered vertical-slice cancellation response")
+        .json()
+        .await
+        .expect("recovered vertical-slice cancellation JSON");
+    assert_eq!(recovered_cancelled, cancelled);
+    let history: SessionEventsResponse = http
+        .get(format!("http://{}{}", daemon.address, events_path))
+        .send()
+        .await
+        .expect("recovered vertical-slice Event history response")
+        .json()
+        .await
+        .expect("recovered vertical-slice Event history JSON");
+    assert!(history.events.iter().any(|event| {
+        matches!(
+            &event.event,
+            SessionEventDataResponse::MessageAppended {
+                message: recovered_message
+            } if recovered_message == &message
+        )
+    }));
+    assert!(history.events.iter().any(|event| {
+        matches!(
+            &event.event,
+            SessionEventDataResponse::ArtifactRegistered {
+                run_id,
+                artifact: recovered_artifact,
+                ..
+            } if run_id == &queued.run_id && recovered_artifact == &artifact
+        )
+    }));
+    eprintln!(
+        "EDL-216 metrics: idle_rss_kb={idle_rss_kb} streaming_peak_rss_kb={streaming_peak_rss_kb} reconnect_ms={reconnect_ms:.3} cancellation_ms={cancellation_ms:.3} shutdown_ms={shutdown_ms:.3}"
     );
 }

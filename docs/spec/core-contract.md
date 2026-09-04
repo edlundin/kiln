@@ -286,14 +286,17 @@ objects, JSON-RPC frames, MCP frames, or PTY handles.
 
 The first implementation proves:
 
-1. create a project with one local root;
-2. create a thread;
-3. append one message;
-4. start one deterministic run;
-5. commit ordered run events;
-6. complete the run;
-7. restart the daemon; and
-8. query the run and replay the same events.
+1. create a Workspace with two local Git roots;
+2. create a Session and append one message;
+3. start one deterministic Run that waits for approval without executing;
+4. stream ordered events, disconnect, restart the daemon, and replay the exact
+   non-empty durable suffix after the first observed Run Event cursor;
+5. approve the ToolCall, complete the Run, and retrieve its large-output
+   artifact;
+6. start and cancel a second Run, including its owned process group;
+7. stop and restart the daemon gracefully; and
+8. recover the Workspace, Session, Runs, message, events, and artifact through
+   the public protocol.
 
 The slice is complete only when it passes through the public protocol and a real
 SQLite adapter. In-memory adapters support unit tests but are not acceptance

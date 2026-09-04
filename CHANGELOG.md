@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-04 — `test`
+
+- Added a complete real-daemon vertical-slice acceptance scenario across multi-root Workspace, Session/Message persistence, approval ordering, WebSocket reconnect/replay, cancellation and process-group termination, artifact retrieval, and graceful restart.
+- Recorded repeatable build, memory, and timing baselines, with Rust learning evidence.
+
+[Commit](pending)
+
 ## 2026-09-04 — `feat`
 
 - Added content-addressed storage for tool output larger than 4,096 bytes.

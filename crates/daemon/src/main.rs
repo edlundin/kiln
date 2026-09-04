@@ -11,8 +11,8 @@ use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
     DETERMINISTIC_LARGE_OUTPUT_ARGUMENT, DETERMINISTIC_SUBPROCESS_ARGUMENT,
     DETERMINISTIC_SUCCESS_ARGUMENT, DeterministicOutcome, DeterministicSubprocessExecutor,
-    FileArtifactStore, GitWorkspaceRootDiscovery, LocalAuthCredential, SqliteStore,
-    UlidIdGenerator,
+    FileArtifactStore, GitWorkspaceRootDiscovery, KILN_DETERMINISTIC_PID_FILE, LocalAuthCredential,
+    SqliteStore, UlidIdGenerator,
 };
 use kiln_protocol::PROTOCOL_VERSION;
 use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
@@ -154,6 +154,13 @@ fn deterministic_subprocess_fixture() -> Option<ExitCode> {
     }
 
     if outcome.as_deref() == Some(DETERMINISTIC_LARGE_OUTPUT_ARGUMENT) {
+        if let Some(pid_file) = env::var_os(KILN_DETERMINISTIC_PID_FILE) {
+            let pids = serde_json::json!({"parent_pid": std::process::id()});
+            if let Err(error) = std::fs::write(&pid_file, pids.to_string()) {
+                eprintln!("kilnd: cannot write deterministic PID file: {error}");
+                return Some(ExitCode::FAILURE);
+            }
+        }
         for _ in 0..10_000 {
             println!("kiln large output");
         }
@@ -226,7 +233,7 @@ fn blocking_tree_fixture() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let Some(pid_file) = env::var_os("KILN_DETERMINISTIC_PID_FILE") else {
+    let Some(pid_file) = env::var_os(KILN_DETERMINISTIC_PID_FILE) else {
         eprintln!("kilnd: KILN_DETERMINISTIC_PID_FILE is required for blocking-tree");
         stop_fixture_child(&mut child);
         return ExitCode::FAILURE;

@@ -21,7 +21,7 @@ sha2 = { version = "0.11.0", default-features = false }
 sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite"] }
 thiserror = "2.0.20"
 tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.53.1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 ts-rs = { version = "12.0.1", default-features = false, features = ["no-serde-warnings", "serde-compat"] }
 ulid = { version = "3.0.0", default-features = false, features = ["std"] }

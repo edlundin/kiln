@@ -120,6 +120,27 @@
       "title": "ApprovalState",
       "type": "string"
     },
+    "ArtifactResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "content_hash": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "size": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content_hash",
+        "media_type",
+        "size"
+      ],
+      "title": "ArtifactResponse",
+      "type": "object"
+    },
     "ClientIdentity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -401,6 +422,25 @@
           ],
           "type": "string"
         },
+        "ArtifactResponse": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_hash",
+            "media_type",
+            "size"
+          ],
+          "type": "object"
+        },
         "RunState": {
           "enum": [
             "queued",
@@ -457,10 +497,30 @@
                 "null"
               ]
             },
+            "stderr_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "stdout": {
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "stdout_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "tool_call_id": {
@@ -476,6 +536,8 @@
             "effective_scope",
             "stdout",
             "stderr",
+            "stdout_artifact",
+            "stderr_artifact",
             "exit_code"
           ],
           "type": "object"
@@ -624,6 +686,25 @@
           ],
           "type": "string"
         },
+        "ArtifactResponse": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_hash",
+            "media_type",
+            "size"
+          ],
+          "type": "object"
+        },
         "MessageResponse": {
           "properties": {
             "content": {
@@ -709,10 +790,30 @@
                 "null"
               ]
             },
+            "stderr_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "stdout": {
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "stdout_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "tool_call_id": {
@@ -728,6 +829,8 @@
             "effective_scope",
             "stdout",
             "stderr",
+            "stdout_artifact",
+            "stderr_artifact",
             "exit_code"
           ],
           "type": "object"
@@ -987,6 +1090,34 @@
             "content"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactResponse"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "stream": {
+              "$ref": "#/$defs/ToolOutputStream"
+            },
+            "tool_call_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "artifact.registered",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "tool_call_id",
+            "stream",
+            "artifact"
+          ],
+          "type": "object"
         }
       ],
       "title": "SessionEventDataResponse"
@@ -1035,6 +1166,25 @@
             "rejected"
           ],
           "type": "string"
+        },
+        "ArtifactResponse": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_hash",
+            "media_type",
+            "size"
+          ],
+          "type": "object"
         },
         "MessageResponse": {
           "properties": {
@@ -1296,6 +1446,34 @@
                 "content"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "artifact": {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "stream": {
+                  "$ref": "#/$defs/ToolOutputStream"
+                },
+                "tool_call_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "artifact.registered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "tool_call_id",
+                "stream",
+                "artifact"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -1343,10 +1521,30 @@
                 "null"
               ]
             },
+            "stderr_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "stdout": {
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "stdout_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "tool_call_id": {
@@ -1362,6 +1560,8 @@
             "effective_scope",
             "stdout",
             "stderr",
+            "stdout_artifact",
+            "stderr_artifact",
             "exit_code"
           ],
           "type": "object"
@@ -1471,6 +1671,25 @@
           ],
           "type": "string"
         },
+        "ArtifactResponse": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_hash",
+            "media_type",
+            "size"
+          ],
+          "type": "object"
+        },
         "MessageResponse": {
           "properties": {
             "content": {
@@ -1731,6 +1950,34 @@
                 "content"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "artifact": {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "stream": {
+                  "$ref": "#/$defs/ToolOutputStream"
+                },
+                "tool_call_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "artifact.registered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "tool_call_id",
+                "stream",
+                "artifact"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -1801,10 +2048,30 @@
                 "null"
               ]
             },
+            "stderr_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "stdout": {
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "stdout_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "tool_call_id": {
@@ -1820,6 +2087,8 @@
             "effective_scope",
             "stdout",
             "stderr",
+            "stdout_artifact",
+            "stderr_artifact",
             "exit_code"
           ],
           "type": "object"
@@ -1947,6 +2216,25 @@
     },
     "ToolCallResponse": {
       "$defs": {
+        "ArtifactResponse": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_hash",
+            "media_type",
+            "size"
+          ],
+          "type": "object"
+        },
         "ToolCallState": {
           "enum": [
             "requested",
@@ -2020,10 +2308,30 @@
             "null"
           ]
         },
+        "stderr_artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "stdout": {
           "type": [
             "string",
             "null"
+          ]
+        },
+        "stdout_artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactResponse"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "tool_call_id": {
@@ -2039,6 +2347,8 @@
         "effective_scope",
         "stdout",
         "stderr",
+        "stdout_artifact",
+        "stderr_artifact",
         "exit_code"
       ],
       "title": "ToolCallResponse",
@@ -2112,6 +2422,25 @@
             "rejected"
           ],
           "type": "string"
+        },
+        "ArtifactResponse": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_hash",
+            "media_type",
+            "size"
+          ],
+          "type": "object"
         },
         "MessageResponse": {
           "properties": {
@@ -2373,6 +2702,34 @@
                 "content"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "artifact": {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "stream": {
+                  "$ref": "#/$defs/ToolOutputStream"
+                },
+                "tool_call_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "artifact.registered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "tool_call_id",
+                "stream",
+                "artifact"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -2443,10 +2800,30 @@
                 "null"
               ]
             },
+            "stderr_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "stdout": {
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "stdout_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "tool_call_id": {
@@ -2462,6 +2839,8 @@
             "effective_scope",
             "stdout",
             "stderr",
+            "stdout_artifact",
+            "stderr_artifact",
             "exit_code"
           ],
           "type": "object"
@@ -2708,7 +3087,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.8.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.9.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

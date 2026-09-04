@@ -40,17 +40,19 @@ export type ToolCallState = "requested" | "awaiting_approval" | "ready" | "runni
 
 export type ToolOutputStream = "stdout" | "stderr";
 
+export type ArtifactResponse = { content_hash: string, media_type: string, size: string, };
+
 export type WorkspaceScopeResponse = { workspace_root_id: string, relative_directory: string, };
 
 export type ApprovalState = "pending" | "approved" | "rejected";
 
 export type ApprovalResponse = { approval_id: string, run_id: string, tool_call_id: string, requested_scope: WorkspaceScopeResponse, state: ApprovalState, };
 
-export type ToolCallResponse = { tool_call_id: string, run_id: string, capability: string, state: ToolCallState, requested_scope: WorkspaceScopeResponse | null, effective_scope: WorkspaceScopeResponse | null, stdout: string | null, stderr: string | null, exit_code: number | null, };
+export type ToolCallResponse = { tool_call_id: string, run_id: string, capability: string, state: ToolCallState, requested_scope: WorkspaceScopeResponse | null, effective_scope: WorkspaceScopeResponse | null, stdout: string | null, stderr: string | null, stdout_artifact: ArtifactResponse | null, stderr_artifact: ArtifactResponse | null, exit_code: number | null, };
 
 export type RunResponse = { run_id: string, session_id: string, state: RunState, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, tool_calls: Array<ToolCallResponse>, approvals: Array<ApprovalResponse>, };
 
-export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "run.created", run_id: string, state: RunState, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "run.cancellation_requested", run_id: string, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "approval.requested", approval: ApprovalResponse, } | { "type": "approval.decided", approval: ApprovalResponse, } | { "type": "tool_call.denied", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, };
+export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "run.created", run_id: string, state: RunState, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "run.cancellation_requested", run_id: string, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "approval.requested", approval: ApprovalResponse, } | { "type": "approval.decided", approval: ApprovalResponse, } | { "type": "tool_call.denied", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, } | { "type": "artifact.registered", run_id: string, tool_call_id: string, stream: ToolOutputStream, artifact: ArtifactResponse, };
 
 export type SessionEventResponse = { event_id: string, cursor: string, session_id: string, event: SessionEventDataResponse, };
 

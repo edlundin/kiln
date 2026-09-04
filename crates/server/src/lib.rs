@@ -11,30 +11,33 @@ use axum::{
         ws::{self, rejection::WebSocketUpgradeRejection},
     },
     http::{
-        HeaderValue, StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN, SEC_WEBSOCKET_PROTOCOL},
+        HeaderName, HeaderValue, StatusCode,
+        header::{
+            AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, ETAG,
+            HOST, ORIGIN, SEC_WEBSOCKET_PROTOCOL,
+        },
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use kiln_core::{
-    AppendMessage, CreateWorkspace, EventCursor, Message, MessageRole as CoreMessageRole, RunError,
-    RunId, RunSnapshot, RunState as CoreRunState, Session, SessionError, SessionEventPage,
-    SessionEventPayload, SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, ToolCall,
-    ToolCallState as CoreToolCallState, ToolOutputStream as CoreToolOutputStream, WorkspaceError,
-    WorkspaceId, WorkspaceOperations,
+    AppendMessage, Artifact, ContentHash, CreateWorkspace, EventCursor, Message,
+    MessageRole as CoreMessageRole, RunError, RunId, RunSnapshot, RunState as CoreRunState,
+    Session, SessionError, SessionEventPage, SessionEventPayload, SessionId, SessionOperations,
+    StoreMetadata, StoredSessionEvent, ToolCall, ToolCallState as CoreToolCallState,
+    ToolOutputStream as CoreToolOutputStream, WorkspaceError, WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
-    AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
+    ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
     ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
-    ApprovalState as ProtocolApprovalState, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH,
-    IDEMPOTENCY_KEY_HEADER, MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest,
-    NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse,
-    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StartRunRequest, StoreIdentity, TOOL_CALL_APPROVAL_PATH, ToolCallResponse, ToolCallState,
-    ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    ApprovalState as ProtocolApprovalState, ArtifactResponse, CreateWorkspaceRequest,
+    EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse, MessageRole, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
+    RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
+    SessionResponse, StartRunRequest, StoreIdentity, TOOL_CALL_APPROVAL_PATH, ToolCallResponse,
+    ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
     WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse,
     WorkspaceScopeResponse, error_code,
 };
@@ -65,6 +68,36 @@ pub trait RunOperations: Send + Sync {
         decision: kiln_core::ApprovalState,
         idempotency_key: String,
     ) -> impl Future<Output = Result<kiln_core::ApprovalDecisionMutation, RunError>> + Send;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ArtifactFetchError {
+    #[error("artifact does not exist")]
+    NotFound,
+    #[error("artifact store is unavailable")]
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub struct ArtifactDownload {
+    artifact: Artifact,
+    bytes: Vec<u8>,
+}
+
+impl ArtifactDownload {
+    pub fn new(artifact: Artifact, bytes: Vec<u8>) -> Result<Self, ArtifactFetchError> {
+        if u64::try_from(bytes.len()).ok() != Some(artifact.size()) {
+            return Err(ArtifactFetchError::Unavailable);
+        }
+        Ok(Self { artifact, bytes })
+    }
+}
+
+pub trait ArtifactOperations: Send + Sync {
+    fn get_artifact(
+        &self,
+        content_hash: ContentHash,
+    ) -> impl Future<Output = Result<ArtifactDownload, ArtifactFetchError>> + Send;
 }
 
 const WEBSOCKET_AUTH_PREFIX: &str = "kiln.auth.";
@@ -314,7 +347,7 @@ pub fn router<W, S, R>(state: AppState<W, S, R>) -> Router
 where
     W: WorkspaceOperations + 'static,
     S: SessionOperations + 'static,
-    R: RunOperations + 'static,
+    R: RunOperations + ArtifactOperations + 'static,
 {
     Router::new()
         .route(NEGOTIATE_PATH, post(negotiate))
@@ -328,6 +361,7 @@ where
         .route(RUN_PATH, get(get_run))
         .route(RUN_CANCEL_PATH, post(cancel_run))
         .route(TOOL_CALL_APPROVAL_PATH, post(decide_approval))
+        .route(ARTIFACT_PATH, get(get_artifact))
         .route(EVENTS_WEBSOCKET_PATH, get(events))
         .method_not_allowed_fallback(method_not_allowed)
         .fallback(not_found)
@@ -343,7 +377,7 @@ async fn authenticate<W, S, R>(
 where
     W: WorkspaceOperations + 'static,
     S: SessionOperations + 'static,
-    R: RunOperations + 'static,
+    R: RunOperations + ArtifactOperations + 'static,
 {
     if let Err(error) = validate_authority(&request, &state.bound_authority, &state.http_origin) {
         return error.into_response();
@@ -427,7 +461,7 @@ pub async fn serve<W, S, R>(
 where
     W: WorkspaceOperations + 'static,
     S: SessionOperations + 'static,
-    R: RunOperations + 'static,
+    R: RunOperations + ArtifactOperations + 'static,
 {
     axum::serve(listener, router(state)).await
 }
@@ -440,7 +474,7 @@ pub async fn serve_with_shutdown<W, S, R>(
 where
     W: WorkspaceOperations + 'static,
     S: SessionOperations + 'static,
-    R: RunOperations + 'static,
+    R: RunOperations + ArtifactOperations + 'static,
 {
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown)
@@ -669,6 +703,65 @@ where
     Ok(Json(run_response(&run)))
 }
 
+async fn get_artifact<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(content_hash): Path<String>,
+) -> Result<Response, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + ArtifactOperations + 'static,
+{
+    let content_hash =
+        ContentHash::parse(content_hash).map_err(|_| PublicError::InvalidContentHash)?;
+    let download = state
+        .run_operations
+        .get_artifact(content_hash)
+        .await
+        .map_err(PublicError::from)?;
+    let mut response = download.bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(download.artifact.media_type())
+            .expect("validated artifact media type is a valid header value"),
+    );
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&download.artifact.size().to_string())
+            .expect("artifact size is a valid header value"),
+    );
+    headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"artifact\""),
+    );
+    headers.insert(
+        ETAG,
+        HeaderValue::from_str(&format!(
+            "\"{}\"",
+            download.artifact.content_hash().as_str()
+        ))
+        .expect("content hash is a valid ETag"),
+    );
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("sandbox; default-src 'none'"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    Ok(response)
+}
+
 async fn cancel_run<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(run_id): Path<String>,
@@ -788,7 +881,17 @@ fn tool_call_response(tool_call: &ToolCall) -> ToolCallResponse {
         effective_scope: tool_call.effective_scope().map(scope_response),
         stdout: tool_call.stdout().map(str::to_owned),
         stderr: tool_call.stderr().map(str::to_owned),
+        stdout_artifact: tool_call.stdout_artifact().map(artifact_response),
+        stderr_artifact: tool_call.stderr_artifact().map(artifact_response),
         exit_code: tool_call.exit_code(),
+    }
+}
+
+fn artifact_response(artifact: &Artifact) -> ArtifactResponse {
+    ArtifactResponse {
+        content_hash: artifact.content_hash().as_str().to_owned(),
+        media_type: artifact.media_type().to_owned(),
+        size: artifact.size().to_string(),
     }
 }
 
@@ -897,6 +1000,17 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
             tool_call_id: tool_call_id.as_str().to_owned(),
             stream: tool_output_stream_response(*stream),
             content: content.clone(),
+        },
+        SessionEventPayload::ArtifactRegistered {
+            run_id,
+            tool_call_id,
+            stream,
+            artifact,
+        } => SessionEventDataResponse::ArtifactRegistered {
+            run_id: run_id.as_str().to_owned(),
+            tool_call_id: tool_call_id.as_str().to_owned(),
+            stream: tool_output_stream_response(*stream),
+            artifact: artifact_response(artifact),
         },
     };
     SessionEventResponse {
@@ -1173,6 +1287,8 @@ enum PublicError {
     InvalidRequest,
     #[error("event cursor is invalid")]
     InvalidEventCursor,
+    #[error("content hash is invalid")]
+    InvalidContentHash,
     #[error("Idempotency-Key header is required")]
     MissingIdempotencyKey,
     #[error("Idempotency-Key header is invalid")]
@@ -1197,6 +1313,8 @@ enum PublicError {
     Session(SessionError),
     #[error("run operation failed")]
     Run(RunError),
+    #[error("artifact operation failed")]
+    Artifact(ArtifactFetchError),
     #[error("daemon is shutting down")]
     DaemonShuttingDown,
 }
@@ -1216,6 +1334,12 @@ impl From<SessionError> for PublicError {
 impl From<RunError> for PublicError {
     fn from(error: RunError) -> Self {
         Self::Run(error)
+    }
+}
+
+impl From<ArtifactFetchError> for PublicError {
+    fn from(error: ArtifactFetchError) -> Self {
+        Self::Artifact(error)
     }
 }
 
@@ -1256,6 +1380,11 @@ impl PublicError {
                 StatusCode::BAD_REQUEST,
                 error_code::INVALID_EVENT_CURSOR,
                 "Invalid Event cursor",
+            ),
+            Self::InvalidContentHash => (
+                StatusCode::BAD_REQUEST,
+                error_code::INVALID_CONTENT_HASH,
+                "Invalid content hash",
             ),
             Self::MissingIdempotencyKey => (
                 StatusCode::BAD_REQUEST,
@@ -1455,6 +1584,18 @@ impl PublicError {
                     "Run store unavailable",
                 ),
             },
+            Self::Artifact(error) => match error {
+                ArtifactFetchError::NotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::ARTIFACT_NOT_FOUND,
+                    "Artifact not found",
+                ),
+                ArtifactFetchError::Unavailable => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::ARTIFACT_STORE_UNAVAILABLE,
+                    "Artifact store unavailable",
+                ),
+            },
         };
         ProblemDetails {
             type_uri: "about:blank".to_owned(),
@@ -1549,6 +1690,8 @@ mod tests {
             state: CoreToolCallState::Completed,
             stdout: Some("stdout".to_owned()),
             stderr: Some("stderr".to_owned()),
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code: Some(0),
         })
         .unwrap();
@@ -1606,6 +1749,17 @@ mod tests {
                 stream: CoreToolOutputStream::Stdout,
                 content: "output".to_owned(),
             },
+            SessionEventPayload::ArtifactRegistered {
+                run_id: run_id(),
+                tool_call_id: tool_call_id(),
+                stream: CoreToolOutputStream::Stdout,
+                artifact: Artifact::new(
+                    ContentHash::parse("a".repeat(64)).unwrap(),
+                    "text/plain; charset=utf-8",
+                    7,
+                )
+                .unwrap(),
+            },
         ];
 
         let events: Vec<_> = payloads
@@ -1647,6 +1801,10 @@ mod tests {
         assert!(matches!(
             events[7].event,
             SessionEventDataResponse::ToolCallOutput { .. }
+        ));
+        assert!(matches!(
+            events[8].event,
+            SessionEventDataResponse::ArtifactRegistered { .. }
         ));
     }
 

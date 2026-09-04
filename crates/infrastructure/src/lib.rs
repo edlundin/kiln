@@ -1,7 +1,8 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
 use std::{
-    env, fs,
+    env,
+    fs::{self, OpenOptions},
     future::Future,
     io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
@@ -11,25 +12,24 @@ use std::{
 
 use directories::ProjectDirs;
 use kiln_core::{
-    Approval, ApprovalId, ApprovalPolicy, ApprovalState, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
-    MessageRole, PersistedToolCall, RootDiscoveryError, Run, RunId, RunIdGenerator, RunMutation,
-    RunSnapshot, RunState, RunStore, RunStoreError, Session, SessionEvent, SessionEventPage,
-    SessionEventPayload, SessionId, SessionIdGenerator, SessionStore, StartRunDisposition,
-    StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor,
-    SubprocessOutput, SubprocessRequest, ToolCall, ToolCallId, ToolCallState, ToolOutputStream,
-    Workspace, WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot,
-    WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
+    Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, ContentHash,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor, EventId,
+    FilesystemIdentity, Message, MessageId, MessageRole, PersistedToolCall, RootDiscoveryError,
+    Run, RunId, RunIdGenerator, RunMutation, RunSnapshot, RunState, RunStore, RunStoreError,
+    Session, SessionEvent, SessionEventPage, SessionEventPayload, SessionId, SessionIdGenerator,
+    SessionStore, StartRunDisposition, StartRunMutation, StoreError, StoredSessionEvent,
+    SubprocessExecution, SubprocessExecutor, SubprocessOutput, SubprocessRequest, ToolCall,
+    ToolCallId, ToolCallState, ToolOutputStream, Workspace, WorkspaceId, WorkspaceIdGenerator,
+    WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState,
+    WorkspaceStore,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use tokio::{process::Command, sync::Mutex};
 use ulid::Ulid;
 
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
-
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 #[cfg(unix)]
 use rustix::{
@@ -260,6 +260,184 @@ fn insecure_auth_storage() -> io::Error {
     )
 }
 
+const ARTIFACT_DIRECTORY: &str = "artifacts";
+
+#[derive(Debug)]
+pub enum ArtifactStoreError {
+    Filesystem(io::Error),
+    Corrupt,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileArtifactStore {
+    root: Arc<PathBuf>,
+}
+
+impl FileArtifactStore {
+    pub fn open_default() -> Result<Self, InfrastructureError> {
+        let data_directory =
+            data_directory().ok_or(InfrastructureError::DataDirectoryUnavailable)?;
+        Self::open(data_directory)
+    }
+
+    pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, InfrastructureError> {
+        let root = data_dir.as_ref().join(ARTIFACT_DIRECTORY);
+        ensure_private_directory(&root).map_err(InfrastructureError::Filesystem)?;
+        Ok(Self {
+            root: Arc::new(root),
+        })
+    }
+
+    pub fn store(&self, bytes: &[u8], media_type: &str) -> Result<Artifact, ArtifactStoreError> {
+        let content_hash = hash_bytes(bytes);
+        let artifact = Artifact::new(
+            content_hash.clone(),
+            media_type,
+            u64::try_from(bytes.len()).map_err(|_| ArtifactStoreError::Corrupt)?,
+        )
+        .map_err(|_| ArtifactStoreError::Corrupt)?;
+        let directory = self.bucket(&content_hash);
+        ensure_private_directory(&directory).map_err(ArtifactStoreError::Filesystem)?;
+        let path = directory.join(content_hash.as_str());
+        if path.exists() {
+            verify_artifact_file(&path, &artifact)?;
+            return Ok(artifact);
+        }
+
+        let temporary = directory.join(format!(
+            ".{}.{}.tmp",
+            content_hash.as_str(),
+            Ulid::generate()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&temporary)
+            .map_err(ArtifactStoreError::Filesystem)?;
+        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(ArtifactStoreError::Filesystem(error));
+        }
+        drop(file);
+        match fs::hard_link(&temporary, &path) {
+            Ok(()) => {
+                fs::remove_file(&temporary).map_err(ArtifactStoreError::Filesystem)?;
+                #[cfg(unix)]
+                fs::File::open(&directory)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(ArtifactStoreError::Filesystem)?;
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                fs::remove_file(&temporary).map_err(ArtifactStoreError::Filesystem)?;
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(ArtifactStoreError::Filesystem(error));
+            }
+        }
+        verify_artifact_file(&path, &artifact)?;
+        Ok(artifact)
+    }
+
+    pub fn read(&self, content_hash: &ContentHash) -> Result<Option<Vec<u8>>, ArtifactStoreError> {
+        let path = self.bucket(content_hash).join(content_hash.as_str());
+        let mut file = match open_artifact_file(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ArtifactStoreError::Filesystem(error)),
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(ArtifactStoreError::Filesystem)?;
+        if hash_bytes(&bytes) != *content_hash {
+            return Err(ArtifactStoreError::Corrupt);
+        }
+        Ok(Some(bytes))
+    }
+
+    fn bucket(&self, content_hash: &ContentHash) -> PathBuf {
+        self.root.join(&content_hash.as_str()[..2])
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> ContentHash {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(b"0123456789abcdef"[(byte >> 4) as usize] as char);
+        encoded.push(b"0123456789abcdef"[(byte & 0x0f) as usize] as char);
+    }
+    ContentHash::parse(encoded).expect("SHA-256 is a lowercase 64-character hexadecimal value")
+}
+
+fn verify_artifact_file(path: &Path, artifact: &Artifact) -> Result<(), ArtifactStoreError> {
+    let mut file = open_artifact_file(path).map_err(ArtifactStoreError::Filesystem)?;
+    let metadata = file.metadata().map_err(ArtifactStoreError::Filesystem)?;
+    if !metadata.file_type().is_file() || metadata.len() != artifact.size() {
+        return Err(ArtifactStoreError::Corrupt);
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1_024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(ArtifactStoreError::Filesystem)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    if digest.as_slice()
+        != artifact_hash_bytes(artifact.content_hash()).ok_or(ArtifactStoreError::Corrupt)?
+    {
+        return Err(ArtifactStoreError::Corrupt);
+    }
+    Ok(())
+}
+
+fn artifact_hash_bytes(content_hash: &ContentHash) -> Option<[u8; 32]> {
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in content_hash
+        .as_str()
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        bytes[index] = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
+    }
+    Some(bytes)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn open_artifact_file(path: &Path) -> io::Result<fs::File> {
+    open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(io::Error::from)
+}
+
+#[cfg(not(unix))]
+fn open_artifact_file(path: &Path) -> io::Result<fs::File> {
+    OpenOptions::new().read(true).open(path)
+}
+
 #[derive(Clone)]
 pub struct SqliteStore {
     connection: Arc<Mutex<SqliteConnection>>,
@@ -269,6 +447,7 @@ pub const DETERMINISTIC_SUBPROCESS_ARGUMENT: &str = "--kiln-deterministic-subpro
 pub const DETERMINISTIC_SUCCESS_ARGUMENT: &str = "success";
 pub const DETERMINISTIC_FAILURE_ARGUMENT: &str = "failure";
 pub const DETERMINISTIC_BLOCKING_TREE_ARGUMENT: &str = "blocking-tree";
+pub const DETERMINISTIC_LARGE_OUTPUT_ARGUMENT: &str = "large-output";
 pub const KILN_DETERMINISTIC_PID_FILE: &str = "KILN_DETERMINISTIC_PID_FILE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +455,7 @@ pub enum DeterministicOutcome {
     Success,
     Failure,
     BlockingTree,
+    LargeOutput,
 }
 
 impl DeterministicOutcome {
@@ -284,6 +464,7 @@ impl DeterministicOutcome {
             Self::Success => DETERMINISTIC_SUCCESS_ARGUMENT,
             Self::Failure => DETERMINISTIC_FAILURE_ARGUMENT,
             Self::BlockingTree => DETERMINISTIC_BLOCKING_TREE_ARGUMENT,
+            Self::LargeOutput => DETERMINISTIC_LARGE_OUTPUT_ARGUMENT,
         }
     }
 }
@@ -506,6 +687,8 @@ fn subprocess_output(output: std::process::Output) -> SubprocessOutput {
     SubprocessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stdout_artifact: None,
+        stderr_artifact: None,
         exit_code: output.status.code(),
         spawn_error: None,
     }
@@ -590,6 +773,69 @@ impl SqliteStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
         })
+    }
+
+    pub async fn get_artifact_metadata(
+        &self,
+        content_hash: &ContentHash,
+    ) -> Result<Option<Artifact>, StoreError> {
+        let mut connection = self.connection.lock().await;
+        let row = sqlx::query(
+            "SELECT content_hash, media_type, size FROM artifacts WHERE content_hash = ?",
+        )
+        .bind(content_hash.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| StoreError::Unavailable)?;
+        row.map(|row| parse_artifact(&row)).transpose()
+    }
+}
+
+fn parse_artifact(row: &sqlx::sqlite::SqliteRow) -> Result<Artifact, StoreError> {
+    let content_hash = ContentHash::parse(
+        row.try_get::<String, _>("content_hash")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let media_type = row
+        .try_get::<String, _>("media_type")
+        .map_err(|_| StoreError::Unavailable)?;
+    let size = row
+        .try_get::<i64, _>("size")
+        .map_err(|_| StoreError::Unavailable)?;
+    Artifact::new(
+        content_hash,
+        media_type,
+        u64::try_from(size).map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)
+}
+
+fn parse_optional_artifact(
+    row: &sqlx::sqlite::SqliteRow,
+    hash_column: &str,
+    media_type_column: &str,
+    size_column: &str,
+) -> Result<Option<Artifact>, StoreError> {
+    let content_hash = row
+        .try_get::<Option<String>, _>(hash_column)
+        .map_err(|_| StoreError::Unavailable)?;
+    let media_type = row
+        .try_get::<Option<String>, _>(media_type_column)
+        .map_err(|_| StoreError::Unavailable)?;
+    let size = row
+        .try_get::<Option<i64>, _>(size_column)
+        .map_err(|_| StoreError::Unavailable)?;
+    match (content_hash, media_type, size) {
+        (None, None, None) => Ok(None),
+        (Some(content_hash), Some(media_type), Some(size)) => Artifact::new(
+            ContentHash::parse(content_hash).map_err(|_| StoreError::Unavailable)?,
+            media_type,
+            u64::try_from(size).map_err(|_| StoreError::Unavailable)?,
+        )
+        .map(Some)
+        .map_err(|_| StoreError::Unavailable),
+        _ => Err(StoreError::Unavailable),
     }
 }
 
@@ -887,12 +1133,21 @@ impl SqliteStore {
                         e.requested_workspace_root_id, e.requested_relative_directory,
                         e.effective_workspace_root_id, e.effective_relative_directory,
                         e.capability, e.stdout, e.stderr, e.exit_code,
-                        e.output_stream, e.output_content,
+                        e.output_stream, e.output_content, e.artifact_hash,
+                        e.stdout_artifact_hash, e.stderr_artifact_hash,
+                        a.media_type AS artifact_media_type, a.size AS artifact_size,
+                        osa.media_type AS stdout_artifact_media_type,
+                        osa.size AS stdout_artifact_size,
+                        esa.media_type AS stderr_artifact_media_type,
+                        esa.size AS stderr_artifact_size,
                         m.message_id AS loaded_message_id, m.session_id AS message_session_id,
                         m.role, m.content, s.workspace_id
                  FROM session_events e
                  JOIN sessions s ON s.session_id = e.session_id
                  LEFT JOIN messages m ON m.message_id = e.message_id
+                 LEFT JOIN artifacts a ON a.content_hash = e.artifact_hash
+                 LEFT JOIN artifacts osa ON osa.content_hash = e.stdout_artifact_hash
+                 LEFT JOIN artifacts esa ON esa.content_hash = e.stderr_artifact_hash
                  WHERE e.session_id = ? AND e.cursor > ?
                  ORDER BY e.cursor ASC",
                 )
@@ -909,12 +1164,21 @@ impl SqliteStore {
                         e.requested_workspace_root_id, e.requested_relative_directory,
                         e.effective_workspace_root_id, e.effective_relative_directory,
                         e.capability, e.stdout, e.stderr, e.exit_code,
-                        e.output_stream, e.output_content,
+                        e.output_stream, e.output_content, e.artifact_hash,
+                        e.stdout_artifact_hash, e.stderr_artifact_hash,
+                        a.media_type AS artifact_media_type, a.size AS artifact_size,
+                        osa.media_type AS stdout_artifact_media_type,
+                        osa.size AS stdout_artifact_size,
+                        esa.media_type AS stderr_artifact_media_type,
+                        esa.size AS stderr_artifact_size,
                         m.message_id AS loaded_message_id, m.session_id AS message_session_id,
                         m.role, m.content, s.workspace_id
                  FROM session_events e
                  JOIN sessions s ON s.session_id = e.session_id
                  LEFT JOIN messages m ON m.message_id = e.message_id
+                 LEFT JOIN artifacts a ON a.content_hash = e.artifact_hash
+                 LEFT JOIN artifacts osa ON osa.content_hash = e.stdout_artifact_hash
+                 LEFT JOIN artifacts esa ON esa.content_hash = e.stderr_artifact_hash
                  WHERE e.cursor > ?
                  ORDER BY e.cursor ASC",
                 )
@@ -1004,6 +1268,24 @@ fn parse_event_rows(
         let output_content: Option<String> = row
             .try_get("output_content")
             .map_err(|_| StoreError::Unavailable)?;
+        let artifact = parse_optional_artifact(
+            &row,
+            "artifact_hash",
+            "artifact_media_type",
+            "artifact_size",
+        )?;
+        let stdout_artifact = parse_optional_artifact(
+            &row,
+            "stdout_artifact_hash",
+            "stdout_artifact_media_type",
+            "stdout_artifact_size",
+        )?;
+        let stderr_artifact = parse_optional_artifact(
+            &row,
+            "stderr_artifact_hash",
+            "stderr_artifact_media_type",
+            "stderr_artifact_size",
+        )?;
         let workspace_id = WorkspaceId::parse(
             row.try_get::<String, _>("workspace_id")
                 .map_err(|_| StoreError::Unavailable)?,
@@ -1160,6 +1442,8 @@ fn parse_event_rows(
                     state,
                     stdout,
                     stderr,
+                    stdout_artifact,
+                    stderr_artifact,
                     exit_code,
                 })
                 .map_err(|_| StoreError::Unavailable)?;
@@ -1223,6 +1507,40 @@ fn parse_event_rows(
                 };
                 StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
                     .map_err(|_| StoreError::Unavailable)?
+            }
+            "artifact.registered" => {
+                if message_id.is_some()
+                    || run_state.is_some()
+                    || tool_call_state.is_some()
+                    || capability.is_some()
+                    || stdout.is_some()
+                    || stderr.is_some()
+                    || exit_code.is_some()
+                    || output_content.is_some()
+                    || stdout_artifact.is_some()
+                    || stderr_artifact.is_some()
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let tool_call_id = ToolCallId::parse(tool_call_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let stream =
+                    ToolOutputStream::parse(&output_stream.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?;
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::ArtifactRegistered {
+                        run_id,
+                        tool_call_id,
+                        stream,
+                        artifact: artifact.ok_or(StoreError::Unavailable)?,
+                    },
+                )
+                .map_err(|_| StoreError::Unavailable)?
             }
             _ => return Err(StoreError::Unavailable),
         };
@@ -1390,8 +1708,17 @@ impl RunStore for SqliteStore {
                     t.tool_call_id, t.run_id AS tool_run_id, t.capability, t.state AS tool_state,
                     t.requested_workspace_root_id, t.requested_relative_directory,
                     t.effective_workspace_root_id, t.effective_relative_directory,
-                    t.stdout, t.stderr, t.exit_code
-             FROM tool_calls t JOIN runs r ON r.run_id = t.run_id
+                    t.stdout, t.stderr, t.exit_code,
+                    osa.content_hash AS stdout_artifact_hash,
+                    osa.media_type AS stdout_artifact_media_type,
+                    osa.size AS stdout_artifact_size,
+                    esa.content_hash AS stderr_artifact_hash,
+                    esa.media_type AS stderr_artifact_media_type,
+                    esa.size AS stderr_artifact_size
+             FROM tool_calls t
+             JOIN runs r ON r.run_id = t.run_id
+             LEFT JOIN artifacts osa ON osa.content_hash = t.stdout_artifact_hash
+             LEFT JOIN artifacts esa ON esa.content_hash = t.stderr_artifact_hash
              WHERE t.tool_call_id = ?",
         )
         .bind(id.as_str())
@@ -1762,7 +2089,10 @@ impl RunStore for SqliteStore {
             "SELECT tool_call_id, run_id, capability, state,
                     requested_workspace_root_id, requested_relative_directory,
                     effective_workspace_root_id, effective_relative_directory,
-                    stdout, stderr, exit_code
+                    stdout, stderr, exit_code,
+                    NULL AS stdout_artifact_hash, NULL AS stdout_artifact_media_type,
+                    NULL AS stdout_artifact_size, NULL AS stderr_artifact_hash,
+                    NULL AS stderr_artifact_media_type, NULL AS stderr_artifact_size
              FROM tool_calls WHERE tool_call_id = ?",
         )
         .bind(tool_call.tool_call_id().as_str())
@@ -1958,7 +2288,10 @@ impl RunStore for SqliteStore {
             "SELECT tool_call_id, run_id, capability, state,
                     requested_workspace_root_id, requested_relative_directory,
                     effective_workspace_root_id, effective_relative_directory,
-                    stdout, stderr, exit_code
+                    stdout, stderr, exit_code,
+                    NULL AS stdout_artifact_hash, NULL AS stdout_artifact_media_type,
+                    NULL AS stdout_artifact_size, NULL AS stderr_artifact_hash,
+                    NULL AS stderr_artifact_media_type, NULL AS stderr_artifact_size
              FROM tool_calls WHERE tool_call_id = ?",
         )
         .bind(tool_call_id.as_str())
@@ -2020,7 +2353,10 @@ impl RunStore for SqliteStore {
             "SELECT tool_call_id, run_id, capability, state,
                     requested_workspace_root_id, requested_relative_directory,
                     effective_workspace_root_id, effective_relative_directory,
-                    stdout, stderr, exit_code
+                    stdout, stderr, exit_code,
+                    NULL AS stdout_artifact_hash, NULL AS stdout_artifact_media_type,
+                    NULL AS stdout_artifact_size, NULL AS stderr_artifact_hash,
+                    NULL AS stderr_artifact_media_type, NULL AS stderr_artifact_size
              FROM tool_calls WHERE tool_call_id = ?",
         )
         .bind(tool_call.tool_call_id().as_str())
@@ -2045,12 +2381,13 @@ impl RunStore for SqliteStore {
         {
             return Err(RunStoreError::InvalidTransition);
         }
-        let stdout = tool_call.stdout().ok_or(RunStoreError::Unavailable)?;
-        let stderr = tool_call.stderr().ok_or(RunStoreError::Unavailable)?;
-        sqlx::query("UPDATE tool_calls SET state = ?, stdout = ?, stderr = ?, exit_code = ? WHERE tool_call_id = ? AND state = 'running'")
+        insert_tool_call_artifacts(&mut transaction, tool_call).await?;
+        sqlx::query("UPDATE tool_calls SET state = ?, stdout = ?, stderr = ?, stdout_artifact_hash = ?, stderr_artifact_hash = ?, exit_code = ? WHERE tool_call_id = ? AND state = 'running'")
             .bind(tool_call.state().as_str())
-            .bind(stdout)
-            .bind(stderr)
+            .bind(tool_call.stdout())
+            .bind(tool_call.stderr())
+            .bind(tool_call.stdout_artifact().map(|artifact| artifact.content_hash().as_str()))
+            .bind(tool_call.stderr_artifact().map(|artifact| artifact.content_hash().as_str()))
             .bind(tool_call.exit_code())
             .bind(tool_call.tool_call_id().as_str())
             .execute(&mut *transaction)
@@ -2249,7 +2586,10 @@ impl RunStore for SqliteStore {
             "SELECT tool_call_id, run_id, capability, state,
                     requested_workspace_root_id, requested_relative_directory,
                     effective_workspace_root_id, effective_relative_directory,
-                    stdout, stderr, exit_code
+                    stdout, stderr, exit_code,
+                    NULL AS stdout_artifact_hash, NULL AS stdout_artifact_media_type,
+                    NULL AS stdout_artifact_size, NULL AS stderr_artifact_hash,
+                    NULL AS stderr_artifact_media_type, NULL AS stderr_artifact_size
              FROM tool_calls WHERE tool_call_id = ?",
         )
         .bind(tool_call.tool_call_id().as_str())
@@ -2272,21 +2612,22 @@ impl RunStore for SqliteStore {
             || current_tool.requested_scope() != tool_call.requested_scope()
             || current_tool.effective_scope() != tool_call.effective_scope()
             || tool_call.state() != ToolCallState::Cancelled
-            || tool_call.stdout().is_none()
-            || tool_call.stderr().is_none()
+            || (tool_call.stdout().is_none() == tool_call.stdout_artifact().is_none())
+            || (tool_call.stderr().is_none() == tool_call.stderr_artifact().is_none())
             || !finish_events_match(events, run, tool_call)
         {
             return Err(RunStoreError::InvalidTransition);
         }
-        let stdout = tool_call.stdout().ok_or(RunStoreError::Unavailable)?;
-        let stderr = tool_call.stderr().ok_or(RunStoreError::Unavailable)?;
+        insert_tool_call_artifacts(&mut transaction, tool_call).await?;
         let updated_tool = sqlx::query(
             "UPDATE tool_calls
-             SET state = 'cancelled', stdout = ?, stderr = ?, exit_code = ?
+             SET state = 'cancelled', stdout = ?, stderr = ?, stdout_artifact_hash = ?, stderr_artifact_hash = ?, exit_code = ?
              WHERE tool_call_id = ? AND run_id = ? AND state IN ('requested', 'ready', 'running')",
         )
-        .bind(stdout)
-        .bind(stderr)
+        .bind(tool_call.stdout())
+        .bind(tool_call.stderr())
+        .bind(tool_call.stdout_artifact().map(|artifact| artifact.content_hash().as_str()))
+        .bind(tool_call.stderr_artifact().map(|artifact| artifact.content_hash().as_str()))
         .bind(tool_call.exit_code())
         .bind(tool_call.tool_call_id().as_str())
         .bind(run.run_id().as_str())
@@ -2320,49 +2661,28 @@ impl RunStore for SqliteStore {
 }
 
 fn finish_events_match(events: &[SessionEvent], run: &Run, tool_call: &ToolCall) -> bool {
-    let Some(stdout) = tool_call.stdout() else {
+    let Some(index) = output_event_index(
+        events,
+        run,
+        tool_call,
+        ToolOutputStream::Stdout,
+        tool_call.stdout(),
+        tool_call.stdout_artifact(),
+        0,
+    ) else {
         return false;
     };
-    let Some(stderr) = tool_call.stderr() else {
+    let Some(mut index) = output_event_index(
+        events,
+        run,
+        tool_call,
+        ToolOutputStream::Stderr,
+        tool_call.stderr(),
+        tool_call.stderr_artifact(),
+        index,
+    ) else {
         return false;
     };
-    let mut index = 0;
-    if !stdout.is_empty() {
-        let Some(event) = events.get(index) else {
-            return false;
-        };
-        if event
-            != &SessionEvent::tool_call_output(
-                event.event_id().clone(),
-                run.session_id().clone(),
-                run.run_id().clone(),
-                tool_call.tool_call_id().clone(),
-                ToolOutputStream::Stdout,
-                stdout.to_owned(),
-            )
-        {
-            return false;
-        }
-        index += 1;
-    }
-    if !stderr.is_empty() {
-        let Some(event) = events.get(index) else {
-            return false;
-        };
-        if event
-            != &SessionEvent::tool_call_output(
-                event.event_id().clone(),
-                run.session_id().clone(),
-                run.run_id().clone(),
-                tool_call.tool_call_id().clone(),
-                ToolOutputStream::Stderr,
-                stderr.to_owned(),
-            )
-        {
-            return false;
-        }
-        index += 1;
-    }
     let Some(tool_event) = events.get(index) else {
         return false;
     };
@@ -2381,6 +2701,38 @@ fn finish_events_match(events: &[SessionEvent], run: &Run, tool_call: &ToolCall)
     };
     run_event == &SessionEvent::run_state_changed(run_event.event_id().clone(), run)
         && index + 1 == events.len()
+}
+
+fn output_event_index(
+    events: &[SessionEvent],
+    run: &Run,
+    tool_call: &ToolCall,
+    stream: ToolOutputStream,
+    inline: Option<&str>,
+    artifact: Option<&Artifact>,
+    index: usize,
+) -> Option<usize> {
+    let expected = match (inline, artifact) {
+        (Some(""), None) => return Some(index),
+        (Some(content), None) => SessionEvent::tool_call_output(
+            events.get(index)?.event_id().clone(),
+            run.session_id().clone(),
+            run.run_id().clone(),
+            tool_call.tool_call_id().clone(),
+            stream,
+            content.to_owned(),
+        ),
+        (None, Some(artifact)) => SessionEvent::artifact_registered(
+            events.get(index)?.event_id().clone(),
+            run.session_id().clone(),
+            run.run_id().clone(),
+            tool_call.tool_call_id().clone(),
+            stream,
+            artifact.clone(),
+        ),
+        _ => return None,
+    };
+    (events.get(index)? == &expected).then_some(index + 1)
 }
 
 fn committed_cursor(value: i64) -> Result<EventCursor, StoreError> {
@@ -2419,6 +2771,52 @@ async fn insert_events(
     Ok(stored)
 }
 
+async fn insert_tool_call_artifacts(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tool_call: &ToolCall,
+) -> Result<(), RunStoreError> {
+    for artifact in [tool_call.stdout_artifact(), tool_call.stderr_artifact()]
+        .into_iter()
+        .flatten()
+    {
+        let size = i64::try_from(artifact.size()).map_err(|_| RunStoreError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO artifacts (content_hash, media_type, size, storage_reference)
+             VALUES (?, ?, ?, ?) ON CONFLICT(content_hash) DO NOTHING",
+        )
+        .bind(artifact.content_hash().as_str())
+        .bind(artifact.media_type())
+        .bind(size)
+        .bind(artifact.content_hash().as_str())
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let row = sqlx::query(
+            "SELECT media_type, size, storage_reference FROM artifacts WHERE content_hash = ?",
+        )
+        .bind(artifact.content_hash().as_str())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if row
+            .try_get::<String, _>("media_type")
+            .map_err(|_| RunStoreError::Unavailable)?
+            != artifact.media_type()
+            || row
+                .try_get::<i64, _>("size")
+                .map_err(|_| RunStoreError::Unavailable)?
+                != size
+            || row
+                .try_get::<String, _>("storage_reference")
+                .map_err(|_| RunStoreError::Unavailable)?
+                != artifact.content_hash().as_str()
+        {
+            return Err(RunStoreError::Unavailable);
+        }
+    }
+    Ok(())
+}
+
 struct RunEventColumns<'a> {
     event_type: &'static str,
     message_id: Option<&'a str>,
@@ -2432,6 +2830,9 @@ struct RunEventColumns<'a> {
     exit_code: Option<i32>,
     output_stream: Option<&'a str>,
     output_content: Option<&'a str>,
+    artifact_hash: Option<&'a str>,
+    stdout_artifact_hash: Option<&'a str>,
+    stderr_artifact_hash: Option<&'a str>,
     approval_id: Option<&'a str>,
     approval_state: Option<&'a str>,
     approval_policy: Option<&'a str>,
@@ -2461,6 +2862,9 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: None,
             output_stream: None,
             output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
             approval_id: None,
             approval_state: None,
             approval_policy: approval_policy.map(ApprovalPolicy::as_str),
@@ -2486,6 +2890,9 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: None,
             output_stream: None,
             output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
             approval_id: None,
             approval_state: None,
             approval_policy: None,
@@ -2507,6 +2914,9 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: None,
             output_stream: None,
             output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
             approval_id: None,
             approval_state: None,
             approval_policy: None,
@@ -2528,6 +2938,9 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: tool_call.exit_code(),
             output_stream: None,
             output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
             approval_id: None,
             approval_state: None,
             approval_policy: None,
@@ -2557,6 +2970,13 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: tool_call.exit_code(),
             output_stream: None,
             output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: tool_call
+                .stdout_artifact()
+                .map(|artifact| artifact.content_hash().as_str()),
+            stderr_artifact_hash: tool_call
+                .stderr_artifact()
+                .map(|artifact| artifact.content_hash().as_str()),
             approval_id: None,
             approval_state: None,
             approval_policy: None,
@@ -2591,6 +3011,38 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: None,
             output_stream: Some(stream.as_str()),
             output_content: Some(content.as_str()),
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
+            approval_id: None,
+            approval_state: None,
+            approval_policy: None,
+            requested_workspace_root_id: None,
+            requested_relative_directory: None,
+            effective_workspace_root_id: None,
+            effective_relative_directory: None,
+        }),
+        SessionEventPayload::ArtifactRegistered {
+            run_id,
+            tool_call_id,
+            stream,
+            artifact,
+        } => Ok(RunEventColumns {
+            event_type: "artifact.registered",
+            message_id: None,
+            run_id: Some(run_id.as_str()),
+            tool_call_id: Some(tool_call_id.as_str()),
+            run_state: None,
+            tool_call_state: None,
+            capability: None,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            output_stream: Some(stream.as_str()),
+            output_content: None,
+            artifact_hash: Some(artifact.content_hash().as_str()),
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
             approval_id: None,
             approval_state: None,
             approval_policy: None,
@@ -2620,6 +3072,9 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: None,
             output_stream: None,
             output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
             approval_id: Some(approval.approval_id().as_str()),
             approval_state: Some(approval.state().as_str()),
             approval_policy: None,
@@ -2641,6 +3096,13 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             exit_code: tool_call.exit_code(),
             output_stream: None,
             output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: tool_call
+                .stdout_artifact()
+                .map(|artifact| artifact.content_hash().as_str()),
+            stderr_artifact_hash: tool_call
+                .stderr_artifact()
+                .map(|artifact| artifact.content_hash().as_str()),
             approval_id: None,
             approval_state: None,
             approval_policy: None,
@@ -2672,8 +3134,9 @@ async fn insert_run_event(
             run_state, tool_call_state, capability, stdout, stderr, exit_code,
             output_stream, output_content, approval_id, approval_state, approval_policy,
             requested_workspace_root_id, requested_relative_directory,
-            effective_workspace_root_id, effective_relative_directory
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            effective_workspace_root_id, effective_relative_directory,
+            artifact_hash, stdout_artifact_hash, stderr_artifact_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     let columns = run_event_columns(event)?;
     query = query
@@ -2697,7 +3160,10 @@ async fn insert_run_event(
         .bind(columns.requested_workspace_root_id)
         .bind(columns.requested_relative_directory)
         .bind(columns.effective_workspace_root_id)
-        .bind(columns.effective_relative_directory);
+        .bind(columns.effective_relative_directory)
+        .bind(columns.artifact_hash)
+        .bind(columns.stdout_artifact_hash)
+        .bind(columns.stderr_artifact_hash);
     query
         .execute(&mut **transaction)
         .await
@@ -2856,6 +3322,20 @@ fn parse_tool_call(row: &sqlx::sqlite::SqliteRow) -> Result<ToolCall, RunStoreEr
     let stderr: Option<String> = row
         .try_get("stderr")
         .map_err(|_| RunStoreError::Unavailable)?;
+    let stdout_artifact = parse_optional_artifact(
+        row,
+        "stdout_artifact_hash",
+        "stdout_artifact_media_type",
+        "stdout_artifact_size",
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let stderr_artifact = parse_optional_artifact(
+        row,
+        "stderr_artifact_hash",
+        "stderr_artifact_media_type",
+        "stderr_artifact_size",
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
     let exit_code: Option<i64> = row
         .try_get("exit_code")
         .map_err(|_| RunStoreError::Unavailable)?;
@@ -2871,6 +3351,8 @@ fn parse_tool_call(row: &sqlx::sqlite::SqliteRow) -> Result<ToolCall, RunStoreEr
         state,
         stdout,
         stderr,
+        stdout_artifact,
+        stderr_artifact,
         exit_code,
     })
     .map_err(|_| RunStoreError::Unavailable)
@@ -2924,11 +3406,20 @@ async fn load_snapshot(
         return Ok(None);
     };
     let rows = sqlx::query(
-        "SELECT tool_call_id, run_id, capability, state,
-                requested_workspace_root_id, requested_relative_directory,
-                effective_workspace_root_id, effective_relative_directory,
-                stdout, stderr, exit_code
-         FROM tool_calls WHERE run_id = ? ORDER BY rowid",
+        "SELECT t.tool_call_id, t.run_id, t.capability, t.state,
+                t.requested_workspace_root_id, t.requested_relative_directory,
+                t.effective_workspace_root_id, t.effective_relative_directory,
+                t.stdout, t.stderr, t.exit_code,
+                osa.content_hash AS stdout_artifact_hash,
+                osa.media_type AS stdout_artifact_media_type,
+                osa.size AS stdout_artifact_size,
+                esa.content_hash AS stderr_artifact_hash,
+                esa.media_type AS stderr_artifact_media_type,
+                esa.size AS stderr_artifact_size
+         FROM tool_calls t
+         LEFT JOIN artifacts osa ON osa.content_hash = t.stdout_artifact_hash
+         LEFT JOIN artifacts esa ON esa.content_hash = t.stderr_artifact_hash
+         WHERE t.run_id = ? ORDER BY t.rowid",
     )
     .bind(id.as_str())
     .fetch_all(&mut **transaction)

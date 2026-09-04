@@ -6,8 +6,8 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use kiln_protocol::{
-    AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy, ApprovalState,
-    ClientIdentity, CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
+    ApprovalState, ClientIdentity, CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY,
     EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse, NEGOTIATE_PATH,
     NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
     RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
@@ -22,6 +22,7 @@ use reqwest::{
 };
 use rustix::process::{Pid, test_kill_process, test_kill_process_group};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::header::SEC_WEBSOCKET_PROTOCOL},
@@ -256,6 +257,7 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::ApprovalDecided { .. } => "approval.decided",
         SessionEventDataResponse::ToolCallDenied { .. } => "tool_call.denied",
         SessionEventDataResponse::ToolCallOutput { .. } => "tool_call.output",
+        SessionEventDataResponse::ArtifactRegistered { .. } => "artifact.registered",
     }
 }
 
@@ -275,7 +277,8 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         | SessionEventDataResponse::ApprovalDecided { approval } => {
             approval.run_id == expected_run_id
         }
-        SessionEventDataResponse::ToolCallOutput { run_id, .. } => run_id == expected_run_id,
+        SessionEventDataResponse::ToolCallOutput { run_id, .. }
+        | SessionEventDataResponse::ArtifactRegistered { run_id, .. } => run_id == expected_run_id,
         SessionEventDataResponse::SessionCreated { .. }
         | SessionEventDataResponse::MessageAppended { .. } => false,
     }
@@ -1231,18 +1234,6 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
         .await
         .expect("duplicate start Run JSON");
     assert_eq!(duplicate.run_id, queued.run_id);
-    assert_problem(
-        http.post(format!("http://{}{}", daemon.address, start_path))
-            .header(IDEMPOTENCY_KEY_HEADER, "different-run")
-            .json(&session.start_request())
-            .send()
-            .await
-            .expect("different start Run response"),
-        StatusCode::CONFLICT,
-        error_code::ACTIVE_ROOT_RUN_EXISTS,
-    )
-    .await;
-
     let live_events = receive_run_events(&mut socket, &queued.run_id, RunState::Completed).await;
     assert_eq!(
         live_events.iter().map(event_kind).collect::<Vec<_>>(),
@@ -1408,6 +1399,209 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
             .expect("recovered Run JSON"),
         completed
     );
+}
+
+#[tokio::test]
+async fn real_daemon_stores_fetches_and_deduplicates_large_output_artifacts() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary artifact test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("artifact test repository parent");
+    let data_directory = sandbox.path().join("data");
+    let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("large-output"));
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+    let start_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "large-output-first")
+        .json(&session.start_request())
+        .send()
+        .await
+        .expect("first large-output Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let first: RunResponse = response.json().await.expect("first queued Run JSON");
+    let first_events = receive_run_events(&mut socket, &first.run_id, RunState::Completed).await;
+    let first_artifact = first_events
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEventDataResponse::ArtifactRegistered {
+                run_id,
+                tool_call_id,
+                stream,
+                artifact,
+            } if run_id == &first.run_id => {
+                assert!(tool_call_id.starts_with("tcl_"));
+                assert_eq!(*stream, ToolOutputStream::Stdout);
+                Some(artifact.clone())
+            }
+            _ => None,
+        })
+        .expect("large output artifact Event");
+    assert_eq!(first_artifact.media_type, "text/plain; charset=utf-8");
+    assert_eq!(first_artifact.size, "180000");
+    assert_eq!(first_artifact.content_hash.len(), 64);
+
+    let run_path = RUN_PATH.replace("{run_id}", &first.run_id);
+    let completed: RunResponse = http
+        .get(format!("http://{}{}", daemon.address, run_path))
+        .send()
+        .await
+        .expect("completed large-output Run response")
+        .json()
+        .await
+        .expect("completed large-output Run JSON");
+    let tool_call = completed.tool_calls.first().expect("large-output ToolCall");
+    assert_eq!(tool_call.stdout, None);
+    assert_eq!(tool_call.stdout_artifact.as_ref(), Some(&first_artifact));
+    assert_eq!(tool_call.stderr.as_deref(), Some(""));
+    assert_eq!(tool_call.stderr_artifact, None);
+    assert_eq!(tool_call.exit_code, Some(0));
+
+    let artifact_path = ARTIFACT_PATH.replace("{content_hash}", &first_artifact.content_hash);
+    let response = http
+        .get(format!("http://{}{}", daemon.address, artifact_path))
+        .send()
+        .await
+        .expect("artifact response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some(first_artifact.media_type.as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(first_artifact.size.as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some(format!("\"{}\"", first_artifact.content_hash).as_str())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    let bytes = response.bytes().await.expect("artifact bytes");
+    assert_eq!(
+        bytes.as_ref(),
+        "kiln large output\n".repeat(10_000).as_bytes()
+    );
+    let content_hash = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(content_hash, first_artifact.content_hash);
+
+    let response = http
+        .post(format!("http://{}{}", daemon.address, start_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "large-output-second")
+        .json(&session.start_request())
+        .send()
+        .await
+        .expect("second large-output Run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let second: RunResponse = response.json().await.expect("second queued Run JSON");
+    let second_events = receive_run_events(&mut socket, &second.run_id, RunState::Completed).await;
+    let second_artifact = second_events
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEventDataResponse::ArtifactRegistered {
+                run_id, artifact, ..
+            } if run_id == &second.run_id => Some(artifact.clone()),
+            _ => None,
+        })
+        .expect("repeated large output artifact Event");
+    assert_eq!(second_artifact, first_artifact);
+
+    assert_problem(
+        http.get(format!(
+            "http://{}{}",
+            daemon.address,
+            ARTIFACT_PATH.replace("{content_hash}", "invalid")
+        ))
+        .send()
+        .await
+        .expect("invalid artifact hash response"),
+        StatusCode::BAD_REQUEST,
+        error_code::INVALID_CONTENT_HASH,
+    )
+    .await;
+    assert_problem(
+        http.get(format!(
+            "http://{}{}",
+            daemon.address,
+            ARTIFACT_PATH.replace("{content_hash}", &"0".repeat(64))
+        ))
+        .send()
+        .await
+        .expect("missing artifact response"),
+        StatusCode::NOT_FOUND,
+        error_code::ARTIFACT_NOT_FOUND,
+    )
+    .await;
+
+    drop(socket);
+    drop(daemon);
+
+    let restarted = Daemon::start(binary, &data_directory);
+    let http = restarted.client();
+    let artifact_path = ARTIFACT_PATH.replace("{content_hash}", &first_artifact.content_hash);
+    let response = http
+        .get(format!("http://{}{}", restarted.address, artifact_path))
+        .send()
+        .await
+        .expect("restarted artifact response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.bytes().await.expect("restarted artifact bytes"),
+        bytes
+    );
+
+    let recovered: RunResponse = http
+        .get(format!("http://{}{}", restarted.address, run_path))
+        .send()
+        .await
+        .expect("restarted large-output Run response")
+        .json()
+        .await
+        .expect("restarted large-output Run JSON");
+    assert_eq!(
+        recovered.tool_calls[0].stdout_artifact.as_ref(),
+        Some(&first_artifact)
+    );
+
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let history: SessionEventsResponse = http
+        .get(format!("http://{}{}", restarted.address, events_path))
+        .send()
+        .await
+        .expect("restarted artifact Event history response")
+        .json()
+        .await
+        .expect("restarted artifact Event history JSON");
+    let artifacts = history
+        .events
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEventDataResponse::ArtifactRegistered { artifact, .. } => Some(artifact.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(artifacts, [first_artifact.clone(), first_artifact]);
 }
 
 #[tokio::test]

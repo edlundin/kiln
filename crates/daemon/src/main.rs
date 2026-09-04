@@ -9,8 +9,9 @@ use std::{
 use kiln_core::{RunApplication, SessionApplication, StoreMetadata, WorkspaceApplication};
 use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
-    DETERMINISTIC_SUBPROCESS_ARGUMENT, DETERMINISTIC_SUCCESS_ARGUMENT, DeterministicOutcome,
-    DeterministicSubprocessExecutor, GitWorkspaceRootDiscovery, LocalAuthCredential, SqliteStore,
+    DETERMINISTIC_LARGE_OUTPUT_ARGUMENT, DETERMINISTIC_SUBPROCESS_ARGUMENT,
+    DETERMINISTIC_SUCCESS_ARGUMENT, DeterministicOutcome, DeterministicSubprocessExecutor,
+    FileArtifactStore, GitWorkspaceRootDiscovery, LocalAuthCredential, SqliteStore,
     UlidIdGenerator,
 };
 use kiln_protocol::PROTOCOL_VERSION;
@@ -73,6 +74,13 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let artifacts = match FileArtifactStore::open_default() {
+        Ok(artifacts) => artifacts,
+        Err(_) => {
+            eprintln!("kilnd: cannot open artifact store");
+            return ExitCode::FAILURE;
+        }
+    };
     let workspaces =
         WorkspaceApplication::new(GitWorkspaceRootDiscovery, store.clone(), UlidIdGenerator);
     let sessions = SessionApplication::new(store.clone(), store.clone(), UlidIdGenerator);
@@ -82,6 +90,7 @@ async fn main() -> ExitCode {
         DeterministicSubprocessExecutor::new(subprocess_outcome),
         events.clone(),
         store,
+        artifacts,
     );
 
     let readiness = serde_json::json!({
@@ -144,6 +153,13 @@ fn deterministic_subprocess_fixture() -> Option<ExitCode> {
         return Some(ExitCode::FAILURE);
     }
 
+    if outcome.as_deref() == Some(DETERMINISTIC_LARGE_OUTPUT_ARGUMENT) {
+        for _ in 0..10_000 {
+            println!("kiln large output");
+        }
+        return Some(ExitCode::SUCCESS);
+    }
+
     println!("kiln deterministic subprocess stdout");
     match outcome.as_deref() {
         Some(DETERMINISTIC_SUCCESS_ARGUMENT) => {
@@ -172,9 +188,12 @@ fn configured_subprocess_outcome() -> Result<DeterministicOutcome, String> {
         Ok(value) if value == DETERMINISTIC_BLOCKING_TREE_ARGUMENT => {
             Ok(DeterministicOutcome::BlockingTree)
         }
+        Ok(value) if value == DETERMINISTIC_LARGE_OUTPUT_ARGUMENT => {
+            Ok(DeterministicOutcome::LargeOutput)
+        }
         Ok(_) => {
             Err(
-                "KILN_DETERMINISTIC_SUBPROCESS_OUTCOME must be `success`, `failure`, or `blocking-tree`"
+                "KILN_DETERMINISTIC_SUBPROCESS_OUTCOME must be `success`, `failure`, `blocking-tree`, or `large-output`"
                     .to_owned(),
             )
         }

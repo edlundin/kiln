@@ -1,15 +1,16 @@
 use kiln_protocol::{
-    APPEND_MESSAGE_OPERATION_ID, AppendMessageRequest, CANCEL_RUN_OPERATION_ID,
+    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, AppendMessageRequest, CANCEL_RUN_OPERATION_ID,
     CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
     CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
-    EVENTS_WEBSOCKET_PATH, GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
-    MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
-    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState,
-    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse, SessionResponse,
-    StoreIdentity, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
-    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, error_code,
+    EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
+    GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
+    LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
+    RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse,
+    SessionResponse, StoreIdentity, ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY,
+    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    error_code,
 };
 use serde_json::json;
 
@@ -263,6 +264,13 @@ fn catalogue_and_error_fixture_use_protocol_metadata() {
     assert_eq!(catalogue["http"][7]["operation"], START_RUN_OPERATION_ID);
     assert_eq!(catalogue["http"][8]["path"], RUN_PATH);
     assert_eq!(catalogue["http"][8]["operation"], GET_RUN_OPERATION_ID);
+    let artifact = catalogue["http"]
+        .as_array()
+        .expect("HTTP operations")
+        .iter()
+        .find(|operation| operation["operation"] == GET_ARTIFACT_OPERATION_ID)
+        .expect("artifact operation");
+    assert_eq!(artifact["path"], ARTIFACT_PATH);
     assert!(
         catalogue["http"]
             .as_array()
@@ -401,6 +409,7 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
             .expect("JSON Schema is valid JSON");
     for definition in [
         "AppendMessageRequest",
+        "ArtifactResponse",
         "SessionResponse",
         "MessageResponse",
         "SessionEventResponse",
@@ -463,6 +472,8 @@ fn run_fixtures_match_json_schema_typescript_and_openapi() {
         run.tool_calls[0].capability,
         DETERMINISTIC_SUBPROCESS_CAPABILITY
     );
+    assert_eq!(run.tool_calls[0].stdout_artifact, None);
+    assert_eq!(run.tool_calls[0].stderr_artifact, None);
     assert_eq!(run.tool_calls[0].state, ToolCallState::Completed);
     assert_eq!(run.tool_calls[0].exit_code, Some(0));
 

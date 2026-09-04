@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.8.0";
+pub const PROTOCOL_VERSION: &str = "0.9.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -26,6 +26,7 @@ pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
 pub const RUN_CANCEL_PATH: &str = "/v1/runs/{run_id}/cancel";
 pub const TOOL_CALL_APPROVAL_PATH: &str = "/v1/tool-calls/{tool_call_id}/approval";
+pub const ARTIFACT_PATH: &str = "/v1/artifacts/{content_hash}";
 pub const NEGOTIATE_OPERATION_ID: &str = "negotiate_protocol";
 pub const EVENT_STREAM_OPERATION_ID: &str = "event_stream";
 pub const CREATE_WORKSPACE_OPERATION_ID: &str = "create_workspace";
@@ -38,6 +39,7 @@ pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
+pub const GET_ARTIFACT_OPERATION_ID: &str = "get_artifact";
 
 pub mod error_code {
     pub const AUTHENTICATION_REQUIRED: &str = "authentication_required";
@@ -82,6 +84,9 @@ pub mod error_code {
     pub const APPROVAL_NOT_FOUND: &str = "approval_not_found";
     pub const APPROVAL_ALREADY_DECIDED: &str = "approval_already_decided";
     pub const IDEMPOTENCY_CONFLICT: &str = "idempotency_conflict";
+    pub const INVALID_CONTENT_HASH: &str = "invalid_content_hash";
+    pub const ARTIFACT_NOT_FOUND: &str = "artifact_not_found";
+    pub const ARTIFACT_STORE_UNAVAILABLE: &str = "artifact_store_unavailable";
 
     pub const ALL: &[&str] = &[
         AUTHENTICATION_REQUIRED,
@@ -126,6 +131,9 @@ pub mod error_code {
         APPROVAL_NOT_FOUND,
         APPROVAL_ALREADY_DECIDED,
         IDEMPOTENCY_CONFLICT,
+        INVALID_CONTENT_HASH,
+        ARTIFACT_NOT_FOUND,
+        ARTIFACT_STORE_UNAVAILABLE,
     ];
 }
 
@@ -307,6 +315,14 @@ pub enum ToolOutputStream {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct ArtifactResponse {
+    pub content_hash: String,
+    pub media_type: String,
+    pub size: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolCallResponse {
     pub tool_call_id: String,
     pub run_id: String,
@@ -320,6 +336,10 @@ pub struct ToolCallResponse {
     pub stdout: Option<String>,
     #[schemars(with = "RequiredNullableString")]
     pub stderr: Option<String>,
+    #[schemars(with = "RequiredNullableArtifact")]
+    pub stdout_artifact: Option<ArtifactResponse>,
+    #[schemars(with = "RequiredNullableArtifact")]
+    pub stderr_artifact: Option<ArtifactResponse>,
     #[schemars(with = "RequiredNullableI32")]
     pub exit_code: Option<i32>,
 }
@@ -399,6 +419,13 @@ pub enum SessionEventDataResponse {
         tool_call_id: String,
         stream: ToolOutputStream,
         content: String,
+    },
+    #[serde(rename = "artifact.registered")]
+    ArtifactRegistered {
+        run_id: String,
+        tool_call_id: String,
+        stream: ToolOutputStream,
+        artifact: ArtifactResponse,
     },
 }
 
@@ -481,5 +508,22 @@ impl JsonSchema for RequiredNullableApprovalPolicy {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let approval_policy = generator.subschema_for::<ApprovalPolicy>();
         json_schema!({"anyOf": [approval_policy, {"type": "null"}]})
+    }
+}
+
+struct RequiredNullableArtifact;
+
+impl JsonSchema for RequiredNullableArtifact {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableArtifact".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let artifact = generator.subschema_for::<ArtifactResponse>();
+        json_schema!({"anyOf": [artifact, {"type": "null"}]})
     }
 }

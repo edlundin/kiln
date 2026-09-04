@@ -4,6 +4,9 @@ use std::{fmt, future::Future, path::Path};
 
 use ulid::Ulid;
 
+pub const INLINE_TOOL_OUTPUT_LIMIT: usize = 4_096;
+pub const TOOL_OUTPUT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreMetadata {
     pub id: String,
@@ -166,6 +169,73 @@ impl ApprovalId {
         &self.0
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContentHash(String);
+
+impl ContentHash {
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidContentHash> {
+        let value = value.into();
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(InvalidContentHash);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidContentHash;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Artifact {
+    content_hash: ContentHash,
+    media_type: String,
+    size: u64,
+}
+
+impl Artifact {
+    pub fn new(
+        content_hash: ContentHash,
+        media_type: impl Into<String>,
+        size: u64,
+    ) -> Result<Self, InvalidArtifact> {
+        let media_type = media_type.into();
+        if media_type.is_empty()
+            || !media_type.is_ascii()
+            || media_type.bytes().any(|byte| byte.is_ascii_control())
+        {
+            return Err(InvalidArtifact);
+        }
+        Ok(Self {
+            content_hash,
+            media_type,
+            size,
+        })
+    }
+
+    pub fn content_hash(&self) -> &ContentHash {
+        &self.content_hash
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidArtifact;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalPolicy {
@@ -733,6 +803,8 @@ pub struct PersistedToolCall {
     pub state: ToolCallState,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
+    pub stdout_artifact: Option<Artifact>,
+    pub stderr_artifact: Option<Artifact>,
     pub exit_code: Option<i32>,
 }
 
@@ -746,6 +818,8 @@ pub struct ToolCall {
     state: ToolCallState,
     stdout: Option<String>,
     stderr: Option<String>,
+    stdout_artifact: Option<Artifact>,
+    stderr_artifact: Option<Artifact>,
     exit_code: Option<i32>,
 }
 
@@ -765,6 +839,8 @@ impl ToolCall {
             state: ToolCallState::Requested,
             stdout: None,
             stderr: None,
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code: None,
         }
     }
@@ -792,6 +868,8 @@ impl ToolCall {
             state,
             stdout,
             stderr,
+            stdout_artifact,
+            stderr_artifact,
             exit_code,
         } = persisted;
         let scoped = requested_scope.is_some();
@@ -811,6 +889,8 @@ impl ToolCall {
                     && effective_scope.is_none()
                     && stdout.is_none()
                     && stderr.is_none()
+                    && stdout_artifact.is_none()
+                    && stderr_artifact.is_none()
                     && exit_code.is_none()
             }
             ToolCallState::Ready | ToolCallState::Running => {
@@ -820,23 +900,28 @@ impl ToolCall {
                         && state == ToolCallState::Running))
                     && stdout.is_none()
                     && stderr.is_none()
+                    && stdout_artifact.is_none()
+                    && stderr_artifact.is_none()
                     && exit_code.is_none()
             }
             ToolCallState::Completed | ToolCallState::Failed => {
                 ((scoped && effective_scope.is_some()) || legacy_unscoped)
-                    && stdout.is_some()
-                    && stderr.is_some()
+                    && (stdout.is_some() ^ stdout_artifact.is_some())
+                    && (stderr.is_some() ^ stderr_artifact.is_some())
                     && terminal_exit_matches(state, exit_code)
             }
             ToolCallState::Cancelled => {
                 ((scoped && effective_scope.is_some()) || legacy_unscoped)
-                    && stdout.is_some() == stderr.is_some()
+                    && (stdout.is_some() ^ stdout_artifact.is_some())
+                        == (stderr.is_some() ^ stderr_artifact.is_some())
             }
             ToolCallState::Denied => {
                 scoped
                     && effective_scope.is_none()
                     && stdout.is_none()
                     && stderr.is_none()
+                    && stdout_artifact.is_none()
+                    && stderr_artifact.is_none()
                     && exit_code.is_none()
             }
         };
@@ -852,6 +937,8 @@ impl ToolCall {
             state,
             stdout,
             stderr,
+            stdout_artifact,
+            stderr_artifact,
             exit_code,
         })
     }
@@ -883,6 +970,12 @@ impl ToolCall {
     }
     pub fn stderr(&self) -> Option<&str> {
         self.stderr.as_deref()
+    }
+    pub fn stdout_artifact(&self) -> Option<&Artifact> {
+        self.stdout_artifact.as_ref()
+    }
+    pub fn stderr_artifact(&self) -> Option<&Artifact> {
+        self.stderr_artifact.as_ref()
     }
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
@@ -926,6 +1019,8 @@ impl ToolCall {
             state: ToolCallState::Ready,
             stdout: None,
             stderr: None,
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code: None,
             ..self.clone()
         })
@@ -938,8 +1033,10 @@ impl ToolCall {
         }
         Ok(Self {
             state,
-            stdout: Some(result.stdout.clone()),
-            stderr: Some(result.stderr.clone()),
+            stdout: result.stdout.clone(),
+            stderr: result.stderr.clone(),
+            stdout_artifact: result.stdout_artifact.clone(),
+            stderr_artifact: result.stderr_artifact.clone(),
             exit_code: result.exit_code,
             ..self.clone()
         })
@@ -961,8 +1058,10 @@ pub struct InvalidPersistedToolCall;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallResult {
     state: ToolCallState,
-    stdout: String,
-    stderr: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    stdout_artifact: Option<Artifact>,
+    stderr_artifact: Option<Artifact>,
     exit_code: Option<i32>,
 }
 
@@ -980,19 +1079,48 @@ impl ToolCallResult {
         }
         Ok(Self {
             state,
-            stdout,
-            stderr,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code,
+        })
+    }
+
+    pub fn from_subprocess(
+        state: ToolCallState,
+        output: SubprocessOutput,
+    ) -> Result<Self, RunError> {
+        if !matches!(state, ToolCallState::Completed | ToolCallState::Failed)
+            || !terminal_exit_matches(state, output.exit_code)
+            || (output.stdout_artifact.is_some() && !output.stdout.is_empty())
+            || (output.stderr_artifact.is_some() && !output.stderr.is_empty())
+        {
+            return Err(RunError::InvalidTransition);
+        }
+        Ok(Self {
+            state,
+            stdout: output.stdout_artifact.is_none().then_some(output.stdout),
+            stderr: output.stderr_artifact.is_none().then_some(output.stderr),
+            stdout_artifact: output.stdout_artifact,
+            stderr_artifact: output.stderr_artifact,
+            exit_code: output.exit_code,
         })
     }
     pub fn state(&self) -> ToolCallState {
         self.state
     }
-    pub fn stdout(&self) -> &str {
-        &self.stdout
+    pub fn stdout(&self) -> Option<&str> {
+        self.stdout.as_deref()
     }
-    pub fn stderr(&self) -> &str {
-        &self.stderr
+    pub fn stderr(&self) -> Option<&str> {
+        self.stderr.as_deref()
+    }
+    pub fn stdout_artifact(&self) -> Option<&Artifact> {
+        self.stdout_artifact.as_ref()
+    }
+    pub fn stderr_artifact(&self) -> Option<&Artifact> {
+        self.stderr_artifact.as_ref()
     }
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
@@ -1065,6 +1193,8 @@ impl RunSnapshot {
 pub struct SubprocessOutput {
     pub stdout: String,
     pub stderr: String,
+    pub stdout_artifact: Option<Artifact>,
+    pub stderr_artifact: Option<Artifact>,
     pub exit_code: Option<i32>,
     pub spawn_error: Option<String>,
 }
@@ -1110,6 +1240,8 @@ impl SubprocessOutput {
         Self {
             stdout: stdout.into(),
             stderr: stderr.into(),
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code: Some(exit_code),
             spawn_error: None,
         }
@@ -1123,6 +1255,8 @@ impl SubprocessOutput {
         Self {
             stdout: stdout.into(),
             stderr: stderr.into(),
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code,
             spawn_error: None,
         }
@@ -1132,6 +1266,8 @@ impl SubprocessOutput {
         Self {
             stdout: String::new(),
             stderr: message.into(),
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code: None,
             spawn_error: Some("subprocess failed to start".to_owned()),
         }
@@ -1200,6 +1336,12 @@ pub enum SessionEventPayload {
         tool_call_id: ToolCallId,
         stream: ToolOutputStream,
         content: String,
+    },
+    ArtifactRegistered {
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        stream: ToolOutputStream,
+        artifact: Artifact,
     },
 }
 
@@ -1333,6 +1475,26 @@ impl SessionEvent {
                 tool_call_id,
                 stream,
                 content,
+            },
+        }
+    }
+
+    pub fn artifact_registered(
+        event_id: EventId,
+        session_id: SessionId,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        stream: ToolOutputStream,
+        artifact: Artifact,
+    ) -> Self {
+        Self {
+            event_id,
+            session_id,
+            payload: SessionEventPayload::ArtifactRegistered {
+                run_id,
+                tool_call_id,
+                stream,
+                artifact,
             },
         }
     }
@@ -2077,8 +2239,7 @@ where
         } else {
             ToolCallState::Failed
         };
-        let result =
-            ToolCallResult::new(result_state, output.stdout, output.stderr, output.exit_code)?;
+        let result = ToolCallResult::from_subprocess(result_state, output)?;
         let terminal_tool_call = tool_call.with_result(&result)?;
         let terminal_run = snapshot.run.transition(if succeeded {
             RunState::Completed
@@ -2086,24 +2247,44 @@ where
             RunState::Failed
         })?;
         let mut events = Vec::new();
-        if !result.stdout.is_empty() {
+        if let Some(stdout) = result.stdout.as_ref().filter(|stdout| !stdout.is_empty()) {
             events.push(SessionEvent::tool_call_output(
                 self.ids.event_id(),
                 snapshot.run.session_id.clone(),
                 run_id.clone(),
                 tool_call_id.clone(),
                 ToolOutputStream::Stdout,
-                result.stdout.clone(),
+                stdout.clone(),
             ));
         }
-        if !result.stderr.is_empty() {
+        if let Some(artifact) = &result.stdout_artifact {
+            events.push(SessionEvent::artifact_registered(
+                self.ids.event_id(),
+                snapshot.run.session_id.clone(),
+                run_id.clone(),
+                tool_call_id.clone(),
+                ToolOutputStream::Stdout,
+                artifact.clone(),
+            ));
+        }
+        if let Some(stderr) = result.stderr.as_ref().filter(|stderr| !stderr.is_empty()) {
             events.push(SessionEvent::tool_call_output(
                 self.ids.event_id(),
                 snapshot.run.session_id.clone(),
-                run_id,
-                tool_call_id,
+                run_id.clone(),
+                tool_call_id.clone(),
                 ToolOutputStream::Stderr,
-                result.stderr.clone(),
+                stderr.clone(),
+            ));
+        }
+        if let Some(artifact) = &result.stderr_artifact {
+            events.push(SessionEvent::artifact_registered(
+                self.ids.event_id(),
+                snapshot.run.session_id.clone(),
+                run_id.clone(),
+                tool_call_id.clone(),
+                ToolOutputStream::Stderr,
+                artifact.clone(),
             ));
         }
         events.push(SessionEvent::tool_call_state_changed(
@@ -2144,14 +2325,22 @@ where
         }
         let cancelled_tool_call = ToolCall {
             state: ToolCallState::Cancelled,
-            stdout: Some(output.stdout.clone()),
-            stderr: Some(output.stderr.clone()),
+            stdout: output
+                .stdout_artifact
+                .is_none()
+                .then_some(output.stdout.clone()),
+            stderr: output
+                .stderr_artifact
+                .is_none()
+                .then_some(output.stderr.clone()),
+            stdout_artifact: output.stdout_artifact.clone(),
+            stderr_artifact: output.stderr_artifact.clone(),
             exit_code: output.exit_code,
             ..tool_call.clone()
         };
         let cancelled_run = snapshot.run.transition(RunState::Cancelled)?;
         let mut events = Vec::new();
-        if !output.stdout.is_empty() {
+        if output.stdout_artifact.is_none() && !output.stdout.is_empty() {
             events.push(SessionEvent::tool_call_output(
                 self.ids.event_id(),
                 snapshot.run.session_id.clone(),
@@ -2161,14 +2350,34 @@ where
                 output.stdout,
             ));
         }
-        if !output.stderr.is_empty() {
+        if let Some(artifact) = output.stdout_artifact {
+            events.push(SessionEvent::artifact_registered(
+                self.ids.event_id(),
+                snapshot.run.session_id.clone(),
+                run_id.clone(),
+                tool_call_id.clone(),
+                ToolOutputStream::Stdout,
+                artifact,
+            ));
+        }
+        if output.stderr_artifact.is_none() && !output.stderr.is_empty() {
             events.push(SessionEvent::tool_call_output(
+                self.ids.event_id(),
+                snapshot.run.session_id.clone(),
+                run_id.clone(),
+                tool_call_id.clone(),
+                ToolOutputStream::Stderr,
+                output.stderr,
+            ));
+        }
+        if let Some(artifact) = output.stderr_artifact {
+            events.push(SessionEvent::artifact_registered(
                 self.ids.event_id(),
                 snapshot.run.session_id.clone(),
                 run_id,
                 tool_call_id,
                 ToolOutputStream::Stderr,
-                output.stderr,
+                artifact,
             ));
         }
         events.push(SessionEvent::tool_call_state_changed(
@@ -3332,6 +3541,8 @@ mod run_tests {
                 state: ToolCallState::Requested,
                 stdout: None,
                 stderr: None,
+                stdout_artifact: None,
+                stderr_artifact: None,
                 exit_code: None,
             }),
             Err(InvalidPersistedToolCall)
@@ -3346,6 +3557,8 @@ mod run_tests {
                 state: ToolCallState::Requested,
                 stdout: None,
                 stderr: None,
+                stdout_artifact: None,
+                stderr_artifact: None,
                 exit_code: None,
             })
             .is_ok()
@@ -3359,6 +3572,8 @@ mod run_tests {
             state: ToolCallState::Completed,
             stdout: Some(String::new()),
             stderr: Some(String::new()),
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code: Some(0),
         })
         .unwrap();
@@ -3491,6 +3706,8 @@ mod run_tests {
                 state: ToolCallState::Requested,
                 stdout: Some(String::new()),
                 stderr: None,
+                stdout_artifact: None,
+                stderr_artifact: None,
                 exit_code: None,
             }),
             Err(InvalidPersistedToolCall)
@@ -3505,6 +3722,8 @@ mod run_tests {
                 state: ToolCallState::Completed,
                 stdout: Some(String::new()),
                 stderr: Some(String::new()),
+                stdout_artifact: None,
+                stderr_artifact: None,
                 exit_code: Some(7),
             }),
             Err(InvalidPersistedToolCall)
@@ -3519,6 +3738,8 @@ mod run_tests {
                 state: ToolCallState::Failed,
                 stdout: Some(String::new()),
                 stderr: Some(String::new()),
+                stdout_artifact: None,
+                stderr_artifact: None,
                 exit_code: Some(0),
             }),
             Err(InvalidPersistedToolCall)
@@ -3536,6 +3757,8 @@ mod run_tests {
             state: ToolCallState::Cancelled,
             stdout: Some(String::new()),
             stderr: Some(String::new()),
+            stdout_artifact: None,
+            stderr_artifact: None,
             exit_code: None,
         })
         .unwrap();

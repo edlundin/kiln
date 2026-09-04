@@ -9,6 +9,7 @@ build = "build.rs"
 directories.workspace = true
 kiln-core = { path = "../core" }
 rustix.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 ulid.workspace = true

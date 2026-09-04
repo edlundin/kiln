@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-04 — `feat`
+
+- Added content-addressed storage for tool output larger than 4,096 bytes.
+- Added durable artifact metadata, deduplication, and verified restart recovery.
+- Added protocol 0.9.0 with `artifact.registered` events and authenticated artifact downloads.
+- Added black-box coverage for artifact creation, fetch, missing content, deduplication, and restart.
+
+[Commit](pending)
+
 ## 2026-09-02 — `feat`
 
 - Added persistent loopback HTTP and WebSocket authentication with exact Host and Origin validation.

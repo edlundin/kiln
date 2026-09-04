@@ -9,21 +9,21 @@ use serde_json::{Value, json};
 use ts_rs::{Config, TS};
 
 use crate::{
-    APPEND_MESSAGE_OPERATION_ID, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
-    ApprovalPolicy, ApprovalResponse, ApprovalState, CANCEL_RUN_OPERATION_ID,
-    CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
-    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_RUN_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse, MessageRole, NEGOTIATE_OPERATION_ID,
-    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
-    RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, START_RUN_OPERATION_ID, SessionEventDataResponse,
-    SessionEventResponse, SessionEventsResponse, SessionResponse, StartRunRequest, StoreIdentity,
-    TOOL_CALL_APPROVAL_PATH, ToolCallResponse, ToolCallState, ToolOutputStream,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
-    WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
-    error_code,
+    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision,
+    ApprovalDecisionRequest, ApprovalPolicy, ApprovalResponse, ApprovalState, ArtifactResponse,
+    CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
+    ClientIdentity, CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
+    GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID,
+    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
+    MessageResponse, MessageRole, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest,
+    NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse,
+    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
+    SessionResponse, StartRunRequest, StoreIdentity, TOOL_CALL_APPROVAL_PATH, ToolCallResponse,
+    ToolCallState, ToolOutputStream, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    WORKSPACES_PATH, WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse,
+    WorkspaceScopeResponse, error_code,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -154,6 +154,7 @@ fn schema() -> String {
         ("RunState", schema_for!(RunState)),
         ("ToolCallState", schema_for!(ToolCallState)),
         ("ToolOutputStream", schema_for!(ToolOutputStream)),
+        ("ArtifactResponse", schema_for!(ArtifactResponse)),
         (
             "WorkspaceScopeResponse",
             schema_for!(WorkspaceScopeResponse),
@@ -209,6 +210,7 @@ fn typescript() -> String {
         RunState::decl(&config),
         ToolCallState::decl(&config),
         ToolOutputStream::decl(&config),
+        ArtifactResponse::decl(&config),
         WorkspaceScopeResponse::decl(&config),
         ApprovalState::decl(&config),
         ApprovalResponse::decl(&config),
@@ -274,6 +276,10 @@ fn catalogue() -> String {
             "method": "POST",
             "path": RUN_CANCEL_PATH,
             "operation": CANCEL_RUN_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": ARTIFACT_PATH,
+            "operation": GET_ARTIFACT_OPERATION_ID
         }],
         "websocket": [{
             "method": "GET",
@@ -452,6 +458,8 @@ fn fixture_tool_call() -> ToolCallResponse {
         effective_scope: Some(fixture_scope()),
         stdout: Some("Kiln deterministic subprocess completed.\n".to_owned()),
         stderr: Some(String::new()),
+        stdout_artifact: None,
+        stderr_artifact: None,
         exit_code: Some(0),
     }
 }
@@ -817,6 +825,31 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  {ARTIFACT_PATH}:
+    get:
+      operationId: {GET_ARTIFACT_OPERATION_ID}
+      parameters:
+        - name: content_hash
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^[0-9a-f]{{64}}$'}}
+      responses:
+        '200':
+          description: Immutable artifact bytes.
+          headers:
+            ETag:
+              schema: {{type: string}}
+            X-Content-Type-Options:
+              schema: {{type: string, const: nosniff}}
+          content:
+            application/octet-stream:
+              schema: {{type: string, format: binary}}
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
 components:
   securitySchemes:
     bearerAuth:
@@ -869,6 +902,7 @@ components:
         ("RunState", openapi_schema::<RunState>()),
         ("ToolCallState", openapi_schema::<ToolCallState>()),
         ("ToolOutputStream", openapi_schema::<ToolOutputStream>()),
+        ("ArtifactResponse", openapi_schema::<ArtifactResponse>()),
         (
             "WorkspaceScopeResponse",
             openapi_schema::<WorkspaceScopeResponse>(),
@@ -934,7 +968,7 @@ fn normalize_openapi_references(value: &mut Value) {
 
 fn reference() -> String {
     format!(
-        "# EDL-214 protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nAll loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header and a `StartRunRequest` containing the approval policy, immutable Workspace root ID, and normalized relative directory. The key is scoped to the start-run operation and Session. A repeated key with the same request returns the current durable Run snapshot and never dispatches another subprocess. A mismatched reuse is an idempotency conflict.\n\n`ask` records a pending Approval before execution. `read_only` durably denies the subprocess. `full_access` makes the requested scope effective without a prompt. `POST {TOOL_CALL_APPROVAL_PATH}` approves or rejects one pending ToolCall. Approval decisions are durable, first-decision-wins, and idempotent by their own `{IDEMPOTENCY_KEY_HEADER}`. An approval after daemon restart resumes the same Run.\n\n`POST {RUN_CANCEL_PATH}` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.\n\nSIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client connects to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}` and offers `{WEBSOCKET_CAPABILITY}` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `{WEBSOCKET_CAPABILITY}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
+        "# EDL-215 protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nAll loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header and a `StartRunRequest` containing the approval policy, immutable Workspace root ID, and normalized relative directory. The key is scoped to the start-run operation and Session. A repeated key with the same request returns the current durable Run snapshot and never dispatches another subprocess. A mismatched reuse is an idempotency conflict.\n\n`ask` records a pending Approval before execution. `read_only` durably denies the subprocess. `full_access` makes the requested scope effective without a prompt. `POST {TOOL_CALL_APPROVAL_PATH}` approves or rejects one pending ToolCall. Approval decisions are durable, first-decision-wins, and idempotent by their own `{IDEMPOTENCY_KEY_HEADER}`. An approval after daemon restart resumes the same Run.\n\nTool output larger than 4,096 bytes is stored as one immutable artifact instead of inline Event content. The `artifact.registered` Event and terminal ToolCall include the content hash, media type, and decimal byte size. `GET {ARTIFACT_PATH}` returns the verified bytes with safe download headers.\n\n`POST {RUN_CANCEL_PATH}` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.\n\nSIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client connects to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}` and offers `{WEBSOCKET_CAPABILITY}` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `{WEBSOCKET_CAPABILITY}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
     )
 }
 

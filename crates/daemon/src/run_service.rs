@@ -1,14 +1,18 @@
 use std::{collections::HashMap, sync::Arc};
 
 use kiln_core::{
-    ApprovalPolicy, RunApplication, RunError, RunId, RunMutation, RunSnapshot, RunState, RunStore,
-    SessionId, SessionStore, StartRunDisposition, SubprocessExecution, SubprocessExecutor,
-    SubprocessOutput, SubprocessRequest, ToolCallId, WorkspacePathScope, WorkspaceStore,
+    ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, RunApplication, RunError,
+    RunId, RunMutation, RunSnapshot, RunState, RunStore, SessionId, SessionStore,
+    StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
+    SubprocessRequest, TOOL_OUTPUT_MEDIA_TYPE, ToolCallId, WorkspacePathScope, WorkspaceStore,
 };
 use kiln_infrastructure::{
-    DeterministicSubprocessExecutor, SqliteStore, UlidIdGenerator, validate_subprocess_request,
+    DeterministicSubprocessExecutor, FileArtifactStore, SqliteStore, UlidIdGenerator,
+    validate_subprocess_request,
 };
-use kiln_server::{EventBroadcaster, RunOperations};
+use kiln_server::{
+    ArtifactDownload, ArtifactFetchError, ArtifactOperations, EventBroadcaster, RunOperations,
+};
 use tokio::sync::{Mutex, Notify, oneshot, watch};
 
 struct ActiveRun {
@@ -31,6 +35,7 @@ pub(crate) struct RunService {
     commit_sequence: Arc<Mutex<()>>,
     active: Arc<ActiveRuns>,
     store: SqliteStore,
+    artifacts: FileArtifactStore,
     approval_changed: watch::Sender<u64>,
 }
 
@@ -40,6 +45,7 @@ impl RunService {
         executor: DeterministicSubprocessExecutor,
         events: EventBroadcaster,
         store: SqliteStore,
+        artifacts: FileArtifactStore,
     ) -> Self {
         Self {
             runs: Arc::new(runs),
@@ -48,6 +54,7 @@ impl RunService {
             commit_sequence: Arc::new(Mutex::new(())),
             active: Arc::new(ActiveRuns::default()),
             store,
+            artifacts,
             approval_changed: watch::channel(0).0,
         }
     }
@@ -254,6 +261,15 @@ impl RunService {
                 let _ = cancellation.await;
             })
             .await;
+        let execution = match execution {
+            SubprocessExecution::Finished(output) => {
+                SubprocessExecution::Finished(self.archive_large_output(output).await)
+            }
+            SubprocessExecution::Cancelled(output) => {
+                SubprocessExecution::Cancelled(self.archive_large_output(output).await)
+            }
+            SubprocessExecution::CancellationFailed => SubprocessExecution::CancellationFailed,
+        };
 
         let _sequence = self.commit_sequence.lock().await;
         let snapshot = self.runs.get_run(run_id.clone()).await?;
@@ -310,6 +326,34 @@ impl RunService {
             root.filesystem_identity().clone(),
             scope,
         )
+    }
+
+    async fn archive_large_output(&self, mut output: SubprocessOutput) -> SubprocessOutput {
+        if output.stdout.len() > INLINE_TOOL_OUTPUT_LIMIT {
+            let content = std::mem::take(&mut output.stdout);
+            match self.store_output(content).await {
+                Ok(artifact) => output.stdout_artifact = Some(artifact),
+                Err(()) => return SubprocessOutput::spawn_failure("artifact storage unavailable"),
+            }
+        }
+        if output.stderr.len() > INLINE_TOOL_OUTPUT_LIMIT {
+            let content = std::mem::take(&mut output.stderr);
+            match self.store_output(content).await {
+                Ok(artifact) => output.stderr_artifact = Some(artifact),
+                Err(()) => return SubprocessOutput::spawn_failure("artifact storage unavailable"),
+            }
+        }
+        output
+    }
+
+    async fn store_output(&self, content: String) -> Result<Artifact, ()> {
+        let artifacts = self.artifacts.clone();
+        tokio::task::spawn_blocking(move || {
+            artifacts.store(content.as_bytes(), TOOL_OUTPUT_MEDIA_TYPE)
+        })
+        .await
+        .map_err(|_| ())?
+        .map_err(|_| ())
     }
 
     async fn finish_preflight_failure(
@@ -488,6 +532,8 @@ fn empty_output() -> SubprocessOutput {
     SubprocessOutput {
         stdout: String::new(),
         stderr: String::new(),
+        stdout_artifact: None,
+        stderr_artifact: None,
         exit_code: None,
         spawn_error: None,
     }
@@ -575,6 +621,30 @@ impl RunOperations for RunService {
     }
 }
 
+impl ArtifactOperations for RunService {
+    fn get_artifact(
+        &self,
+        content_hash: ContentHash,
+    ) -> impl Future<Output = Result<ArtifactDownload, ArtifactFetchError>> + Send {
+        let service = self.clone();
+        async move {
+            let artifact = service
+                .store
+                .get_artifact_metadata(&content_hash)
+                .await
+                .map_err(|_| ArtifactFetchError::Unavailable)?
+                .ok_or(ArtifactFetchError::NotFound)?;
+            let artifacts = service.artifacts.clone();
+            let bytes = tokio::task::spawn_blocking(move || artifacts.read(&content_hash))
+                .await
+                .map_err(|_| ArtifactFetchError::Unavailable)?
+                .map_err(|_| ArtifactFetchError::Unavailable)?
+                .ok_or(ArtifactFetchError::Unavailable)?;
+            ArtifactDownload::new(artifact, bytes)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,11 +654,13 @@ mod tests {
     async fn execution_failure_exits_the_registry_and_shutdown_returns_the_error() {
         let data_directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(data_directory.path()).await.unwrap();
+        let artifacts = FileArtifactStore::open(data_directory.path()).unwrap();
         let service = RunService::new(
             RunApplication::new(store.clone(), UlidIdGenerator),
             DeterministicSubprocessExecutor::new(DeterministicOutcome::Success),
             EventBroadcaster::default(),
             store,
+            artifacts,
         );
         let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
         let (cancellation, _) = oneshot::channel();

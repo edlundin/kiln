@@ -23,6 +23,8 @@
       },
       "stdout": "Kiln deterministic subprocess completed.\n",
       "stderr": "",
+      "stdout_artifact": null,
+      "stderr_artifact": null,
       "exit_code": 0
     }
   ],

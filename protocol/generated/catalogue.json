@@ -44,7 +44,10 @@
     "path_outside_workspace_root",
     "approval_not_found",
     "approval_already_decided",
-    "idempotency_conflict"
+    "idempotency_conflict",
+    "invalid_content_hash",
+    "artifact_not_found",
+    "artifact_store_unavailable"
   ],
   "http": [
     {
@@ -101,9 +104,14 @@
       "method": "POST",
       "operation": "cancel_run",
       "path": "/v1/runs/{run_id}/cancel"
+    },
+    {
+      "method": "GET",
+      "operation": "get_artifact",
+      "path": "/v1/artifacts/{content_hash}"
     }
   ],
-  "protocol_version": "0.8.0",
+  "protocol_version": "0.9.0",
   "websocket": [
     {
       "method": "GET",

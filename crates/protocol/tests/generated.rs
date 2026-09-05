@@ -6,16 +6,17 @@ use kiln_protocol::{
     EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
     GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
     IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID,
-    MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
-    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_PATH, RunInputMode,
-    RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID,
-    SessionEventDataResponse, SessionEventsResponse, SessionResponse, StartChildRunRequest,
-    StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
-    TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallState, ToolOutputStream,
-    TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UpdateTaskRequest, WEBSOCKET_CAPABILITY,
-    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
-    error_code,
+    MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
+    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode,
+    RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
+    START_RUN_OPERATION_ID, SendRunInputRequest, SessionEventDataResponse, SessionEventsResponse,
+    SessionResponse, StartChildRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH,
+    TASK_TRANSITION_PATH, TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallState,
+    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UpdateTaskRequest,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
+    WorkspaceResponse, error_code,
 };
 use serde_json::json;
 
@@ -73,6 +74,13 @@ fn command_types_reject_unknown_fields() {
     assert!(serde_json::from_value::<AssignTaskRequest>(value).is_err());
 
     let value = json!({
+        "content": "guidance",
+        "delivery_mode": "queued",
+        "unknown": true
+    });
+    assert!(serde_json::from_value::<SendRunInputRequest>(value).is_err());
+
+    let value = json!({
         "name": "Kiln",
         "roots": [{"name": "core", "path": "/work/kiln", "unknown": true}]
     });
@@ -103,6 +111,17 @@ fn child_run_task_link_is_present_but_nullable() {
     let error = serde_json::from_value::<StartChildRunRequest>(omitted)
         .expect_err("omitted Task link is invalid");
     assert!(error.to_string().contains("missing field `task_id`"));
+}
+
+#[test]
+fn run_input_request_is_strict_and_requires_explicit_delivery_mode() {
+    let request = serde_json::from_value::<SendRunInputRequest>(json!({
+        "content": "guidance",
+        "delivery_mode": "queued"
+    }))
+    .expect("queued guidance request");
+    assert_eq!(request.delivery_mode, MessageDeliveryMode::Queued);
+    assert!(serde_json::from_value::<SendRunInputRequest>(json!({"content": "guidance"})).is_err());
 }
 
 #[test]
@@ -448,6 +467,23 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
     )
     .expect("Message fixture follows the response DTO");
     assert_eq!(message.session_id, session.session_id);
+    assert_eq!(message.target_run_id, None);
+
+    let input_request = serde_json::from_str::<SendRunInputRequest>(
+        artifacts
+            .get("fixtures/send-run-input-request.json")
+            .expect("send Run input fixture"),
+    )
+    .expect("send Run input fixture follows the request DTO");
+    assert_eq!(input_request.delivery_mode, MessageDeliveryMode::Queued);
+    let delivery = serde_json::from_str::<MessageDeliveryResponse>(
+        artifacts
+            .get("fixtures/message-delivery-response.json")
+            .expect("Message delivery fixture"),
+    )
+    .expect("Message delivery fixture follows the response DTO");
+    assert_eq!(delivery.state, MessageDeliveryState::Queued);
+    assert!(delivery.message.target_run_id.is_some());
 
     let task_request = serde_json::from_str::<CreateTaskRequest>(
         artifacts
@@ -523,6 +559,7 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
         (TASK_ASSIGNMENT_PATH, ASSIGN_TASK_OPERATION_ID),
         (TASK_TRANSITION_PATH, TRANSITION_TASK_OPERATION_ID),
         (SESSION_EVENTS_PATH, LIST_SESSION_EVENTS_OPERATION_ID),
+        (RUN_INPUT_PATH, SEND_RUN_INPUT_OPERATION_ID),
     ] {
         assert!(openapi.contains(&format!("  {path}:")));
         assert!(openapi.contains(&format!("operationId: {operation}")));
@@ -540,6 +577,10 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
         "ArtifactResponse",
         "SessionResponse",
         "MessageResponse",
+        "MessageDeliveryMode",
+        "MessageDeliveryState",
+        "MessageDeliveryResponse",
+        "SendRunInputRequest",
         "TaskState",
         "TaskResponse",
         "SessionEventResponse",
@@ -547,6 +588,19 @@ fn session_fixtures_match_json_schema_typescript_and_openapi() {
     ] {
         assert!(schema["$defs"][definition].is_object());
     }
+
+    let message_required = schema["$defs"]["MessageResponse"]["required"]
+        .as_array()
+        .expect("Message required fields");
+    assert!(
+        message_required
+            .iter()
+            .any(|field| field == "target_run_id")
+    );
+    assert_eq!(
+        schema["$defs"]["MessageResponse"]["properties"]["target_run_id"]["type"],
+        json!(["string", "null"])
+    );
 }
 
 #[test]

@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use kiln_core::{
     ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, RunApplication, RunError,
-    RunId, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, SessionId, SessionStore,
-    StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
+    RunId, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, SendRunInput, SessionId,
+    SessionStore, StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
     SubprocessRequest, TOOL_OUTPUT_MEDIA_TYPE, TaskId, ToolCallId, WorkspacePathScope,
     WorkspaceStore,
 };
@@ -166,6 +166,22 @@ impl RunService {
             self.spawn_active(value.run().run_id().clone(), true).await;
         }
         Ok(kiln_core::StartRunMutation::new(
+            value,
+            Vec::new(),
+            disposition,
+        ))
+    }
+
+    async fn send_input(
+        &self,
+        command: SendRunInput,
+    ) -> Result<kiln_core::SendRunInputMutation, RunError> {
+        let _sequence = self.commit_sequence.lock().await;
+        let mutation = self.runs.send_run_input(command).await?;
+        let value = mutation.value.clone();
+        let disposition = mutation.disposition;
+        self.events.publish(mutation.events);
+        Ok(kiln_core::SendRunInputMutation::new(
             value,
             Vec::new(),
             disposition,
@@ -649,6 +665,13 @@ impl RunOperations for RunService {
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send {
         self.runs.get_run(run_id)
+    }
+
+    fn send_run_input(
+        &self,
+        command: SendRunInput,
+    ) -> impl Future<Output = Result<kiln_core::SendRunInputMutation, RunError>> + Send {
+        self.send_input(command)
     }
 
     fn cancel_run(

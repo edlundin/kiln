@@ -115,8 +115,9 @@ paths.
 | `AppendMessage` | required | Append user-visible content and existing artifact references | `message.appended` |
 
 Messages are immutable after append. A correction is another message. An
-artifact display name MUST NOT become a trusted path. A targeted message may
-name one active run in the same thread.
+artifact display name MUST NOT become a trusted path. `AppendMessage` creates
+only an untargeted message. `SendRunInput` is the only command that creates a
+message targeted to one run in the same thread.
 
 ### Tasks and subagents
 
@@ -148,6 +149,26 @@ Root Runs use immutable `interactive` user input mode. Child Runs store one immu
 `parent_run_id`, optional `task_id`, and `interactive` or `read_only` user input mode.
 `GET /v1/sessions/{session_id}/runs` returns the durable flat list whose parent IDs form
 the Session Run tree.
+
+`SendRunInput` accepts only non-empty content for an immutable `interactive`
+Run in `queued`, `running`, or `waiting_for_approval` state. Normal guidance
+uses `queued`; interrupt delivery must be explicit. The targeted Message,
+queued MessageDelivery, idempotency result, `message.appended`, and the matching
+`run.input_queued` or `run.interrupt_requested` Event commit atomically. An exact
+retry returns the first MessageDelivery without new Events, including after the
+Run becomes terminal. A mismatched key reuse conflicts.
+
+`RecordRunInputDelivery` applies only to the oldest queued delivery for that
+Run when it records `delivered` or `failed`. An already recorded exact outcome
+is idempotent; a different later outcome is invalid. A new `delivered` outcome
+is invalid after Run termination. A `cancelled` outcome requires a terminal
+Run. The durable query for pending runtime work returns the oldest queued
+delivery per Run.
+
+Provider delivery, safe-boundary consumption, automatic cancellation of queued
+input during Run termination, and the terminal eligibility guard for accepted
+guidance remain pending runtime and scheduler work. This slice stores and
+exposes the delivery boundary; it does not claim end-to-end steering.
 
 Cancelling a child does not cancel its parent or siblings. Cancelling a run
 requests cancellation for its descendants. A completion already committed

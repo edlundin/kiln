@@ -14,9 +14,11 @@ use directories::ProjectDirs;
 use kiln_core::{
     Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, AssignTask, ContentHash,
     CreateTaskDisposition, CreateTaskMutation, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
-    MessageRole, PersistedToolCall, RootDiscoveryError, Run, RunId, RunIdGenerator, RunInputMode,
-    RunMutation, RunSnapshot, RunState, RunStore, RunStoreError, Session, SessionEvent,
+    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageDelivery,
+    MessageDeliveryMode, MessageDeliveryState, MessageId, MessageRole, PersistedToolCall,
+    RecordRunInputDelivery, RecordRunInputDisposition, RecordRunInputMutation, RootDiscoveryError,
+    Run, RunId, RunIdGenerator, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore,
+    RunStoreError, SendRunInputDisposition, SendRunInputMutation, Session, SessionEvent,
     SessionEventPage, SessionEventPayload, SessionId, SessionIdGenerator, SessionStore,
     StartRunDisposition, StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution,
     SubprocessExecutor, SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId,
@@ -1216,7 +1218,10 @@ impl SessionStore for SqliteStore {
         else {
             return Err(StoreError::Unavailable);
         };
-        if event.session_id() != message.session_id() || event_message != message {
+        if event.session_id() != message.session_id()
+            || event_message != message
+            || message.target_run_id().is_some()
+        {
             return Err(StoreError::Unavailable);
         }
 
@@ -1226,12 +1231,13 @@ impl SessionStore for SqliteStore {
             .await
             .map_err(|_| StoreError::Unavailable)?;
         sqlx::query(
-            "INSERT INTO messages (message_id, session_id, role, content) VALUES (?, ?, ?, ?)",
+            "INSERT INTO messages (message_id, session_id, role, content, target_run_id) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(message.id().as_str())
         .bind(message.session_id().as_str())
         .bind(message.role().as_str())
         .bind(message.content())
+        .bind(message.target_run_id().map(RunId::as_str))
         .execute(&mut *transaction)
         .await
         .map_err(|_| StoreError::Unavailable)?;
@@ -1313,7 +1319,8 @@ impl SqliteStore {
                         esa.media_type AS stderr_artifact_media_type,
                         esa.size AS stderr_artifact_size,
                         m.message_id AS loaded_message_id, m.session_id AS message_session_id,
-                        m.role, m.content, s.workspace_id
+                        m.role, m.content, m.target_run_id AS message_target_run_id,
+                        s.workspace_id
                  FROM session_events e
                  JOIN sessions s ON s.session_id = e.session_id
                  LEFT JOIN messages m ON m.message_id = e.message_id
@@ -1347,7 +1354,8 @@ impl SqliteStore {
                         esa.media_type AS stderr_artifact_media_type,
                         esa.size AS stderr_artifact_size,
                         m.message_id AS loaded_message_id, m.session_id AS message_session_id,
-                        m.role, m.content, s.workspace_id
+                        m.role, m.content, m.target_run_id AS message_target_run_id,
+                        s.workspace_id
                  FROM session_events e
                  JOIN sessions s ON s.session_id = e.session_id
                  LEFT JOIN messages m ON m.message_id = e.message_id
@@ -2106,13 +2114,21 @@ fn parse_event_rows(
                         .as_str(),
                 )
                 .map_err(|_| StoreError::Unavailable)?;
-                let message = Message::new(
-                    message_id,
-                    message_session_id,
-                    role,
-                    row.try_get::<String, _>("content")
-                        .map_err(|_| StoreError::Unavailable)?,
-                )
+                let content = row
+                    .try_get::<String, _>("content")
+                    .map_err(|_| StoreError::Unavailable)?;
+                let target_run_id = row
+                    .try_get::<Option<String>, _>("message_target_run_id")
+                    .map_err(|_| StoreError::Unavailable)?
+                    .map(RunId::parse)
+                    .transpose()
+                    .map_err(|_| StoreError::Unavailable)?;
+                let message = match target_run_id {
+                    Some(run_id) => {
+                        Message::new_targeted(message_id, message_session_id, role, content, run_id)
+                    }
+                    None => Message::new(message_id, message_session_id, role, content),
+                }
                 .map_err(|_| StoreError::Unavailable)?;
                 StoredSessionEvent::message_appended(event_id, stored_session_id, cursor, message)
                     .map_err(|_| StoreError::Unavailable)?
@@ -2243,6 +2259,57 @@ fn parse_event_rows(
                     },
                 )
                 .map_err(|_| StoreError::Unavailable)?
+            }
+            "run.input_queued"
+            | "run.interrupt_requested"
+            | "run.input_delivered"
+            | "run.input_failed"
+            | "run.input_cancelled" => {
+                let message_id = MessageId::parse(message_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let loaded_message_id = MessageId::parse(
+                    row.try_get::<String, _>("loaded_message_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let target_run_id = RunId::parse(
+                    row.try_get::<String, _>("message_target_run_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                let message_session_id = SessionId::parse(
+                    row.try_get::<String, _>("message_session_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                if message_id != loaded_message_id
+                    || run_id != target_run_id
+                    || message_session_id != stored_session_id
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let payload = match event_type.as_str() {
+                    "run.input_queued" => {
+                        SessionEventPayload::RunInputQueued { run_id, message_id }
+                    }
+                    "run.interrupt_requested" => {
+                        SessionEventPayload::RunInterruptRequested { run_id, message_id }
+                    }
+                    "run.input_delivered" => {
+                        SessionEventPayload::RunInputDelivered { run_id, message_id }
+                    }
+                    "run.input_failed" => {
+                        SessionEventPayload::RunInputFailed { run_id, message_id }
+                    }
+                    "run.input_cancelled" => {
+                        SessionEventPayload::RunInputCancelled { run_id, message_id }
+                    }
+                    _ => unreachable!(),
+                };
+                StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
+                    .map_err(|_| StoreError::Unavailable)?
             }
             "run.cancellation_requested" => {
                 if message_id.is_some()
@@ -2794,6 +2861,270 @@ impl RunStore for SqliteStore {
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
         Ok(runs)
+    }
+
+    async fn send_run_input(
+        &self,
+        delivery: &MessageDelivery,
+        events: &[SessionEvent],
+        idempotency_key: &str,
+    ) -> Result<SendRunInputMutation, RunStoreError> {
+        if idempotency_key.is_empty() {
+            return Err(RunStoreError::IdempotencyKeyRequired);
+        }
+        let message = delivery.message();
+        let run_id = message
+            .target_run_id()
+            .ok_or(RunStoreError::InvalidMessageDelivery)?;
+        if delivery.state() != MessageDeliveryState::Queued
+            || events.len() != 2
+            || events[0]
+                != SessionEvent::message_appended(events[0].event_id().clone(), message.clone())
+            || events[1] != SessionEvent::run_input_queued(events[1].event_id().clone(), delivery)
+        {
+            return Err(RunStoreError::InvalidMessageDelivery);
+        }
+
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        if let Some(existing) = sqlx::query(
+            "SELECT message_id, content, delivery_mode
+             FROM send_run_input_idempotencies
+             WHERE run_id = ? AND idempotency_key = ?",
+        )
+        .bind(run_id.as_str())
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?
+        {
+            if existing
+                .try_get::<String, _>("content")
+                .map_err(|_| RunStoreError::Unavailable)?
+                != message.content()
+                || existing
+                    .try_get::<String, _>("delivery_mode")
+                    .map_err(|_| RunStoreError::Unavailable)?
+                    != delivery.mode().as_str()
+            {
+                return Err(RunStoreError::IdempotencyConflict);
+            }
+            let message_id = MessageId::parse(
+                existing
+                    .try_get::<String, _>("message_id")
+                    .map_err(|_| RunStoreError::Unavailable)?,
+            )
+            .map_err(|_| RunStoreError::Unavailable)?;
+            let existing = load_message_delivery(&mut transaction, &message_id)
+                .await?
+                .ok_or(RunStoreError::Unavailable)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+            return Ok(SendRunInputMutation::new(
+                existing,
+                Vec::new(),
+                SendRunInputDisposition::Duplicate,
+            ));
+        }
+
+        let run = load_run(&mut transaction, run_id)
+            .await?
+            .ok_or(RunStoreError::RunNotFound)?;
+        if run.session_id() != message.session_id() {
+            return Err(RunStoreError::InvalidMessageDelivery);
+        }
+        if run.user_input_mode() != RunInputMode::Interactive {
+            return Err(RunStoreError::RunInputReadOnly);
+        }
+        if !run.state().accepts_input() {
+            return Err(RunStoreError::RunNotAcceptingInput);
+        }
+
+        sqlx::query(
+            "INSERT INTO messages (message_id, session_id, role, content, target_run_id)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(message.id().as_str())
+        .bind(message.session_id().as_str())
+        .bind(message.role().as_str())
+        .bind(message.content())
+        .bind(run_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let message_event = insert_message_event(&mut transaction, &events[0]).await?;
+        let queued_cursor = i64::try_from(message_event.cursor().value())
+            .map_err(|_| RunStoreError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO message_deliveries
+                (message_id, run_id, delivery_mode, state, queued_cursor)
+             VALUES (?, ?, ?, 'queued', ?)",
+        )
+        .bind(message.id().as_str())
+        .bind(run_id.as_str())
+        .bind(delivery.mode().as_str())
+        .bind(queued_cursor)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let delivery_event = insert_run_event(&mut transaction, &events[1]).await?;
+        sqlx::query(
+            "INSERT INTO send_run_input_idempotencies
+                (run_id, idempotency_key, message_id, content, delivery_mode)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(run_id.as_str())
+        .bind(idempotency_key)
+        .bind(message.id().as_str())
+        .bind(message.content())
+        .bind(delivery.mode().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(SendRunInputMutation::new(
+            delivery.clone(),
+            vec![message_event, delivery_event],
+            SendRunInputDisposition::Created,
+        ))
+    }
+
+    async fn record_run_input_delivery(
+        &self,
+        command: &RecordRunInputDelivery,
+        event_id: EventId,
+    ) -> Result<RecordRunInputMutation, RunStoreError> {
+        if !command.state.is_terminal() {
+            return Err(RunStoreError::InvalidMessageDelivery);
+        }
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        let current = load_message_delivery(&mut transaction, &command.message_id)
+            .await?
+            .ok_or(RunStoreError::MessageDeliveryNotFound)?;
+        if current.state() != MessageDeliveryState::Queued {
+            if current.state() == command.state {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| RunStoreError::Unavailable)?;
+                return Ok(RecordRunInputMutation::new(
+                    current,
+                    Vec::new(),
+                    RecordRunInputDisposition::Duplicate,
+                ));
+            }
+            return Err(RunStoreError::InvalidMessageDelivery);
+        }
+        let run_id = current
+            .message()
+            .target_run_id()
+            .ok_or(RunStoreError::InvalidMessageDelivery)?;
+        let run = load_run(&mut transaction, run_id)
+            .await?
+            .ok_or(RunStoreError::RunNotFound)?;
+        match command.state {
+            MessageDeliveryState::Delivered if run.state().is_terminal() => {
+                return Err(RunStoreError::InvalidMessageDelivery);
+            }
+            MessageDeliveryState::Delivered | MessageDeliveryState::Failed => {
+                let next: String = sqlx::query_scalar(
+                    "SELECT message_id FROM message_deliveries
+                     WHERE run_id = ? AND state = 'queued'
+                     ORDER BY queued_cursor ASC LIMIT 1",
+                )
+                .bind(run_id.as_str())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+                if next != command.message_id.as_str() {
+                    return Err(RunStoreError::MessageDeliveryOutOfOrder);
+                }
+            }
+            MessageDeliveryState::Cancelled if !run.state().is_terminal() => {
+                return Err(RunStoreError::InvalidMessageDelivery);
+            }
+            MessageDeliveryState::Cancelled => {}
+            MessageDeliveryState::Queued => unreachable!(),
+        }
+        let delivery = current
+            .with_state(command.state)
+            .map_err(|_| RunStoreError::InvalidMessageDelivery)?;
+        sqlx::query(
+            "UPDATE message_deliveries SET state = ? WHERE message_id = ? AND state = 'queued'",
+        )
+        .bind(command.state.as_str())
+        .bind(command.message_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let event = match command.state {
+            MessageDeliveryState::Delivered => {
+                SessionEvent::run_input_delivered(event_id, &delivery)
+            }
+            MessageDeliveryState::Failed => SessionEvent::run_input_failed(event_id, &delivery),
+            MessageDeliveryState::Cancelled => {
+                SessionEvent::run_input_cancelled(event_id, &delivery)
+            }
+            MessageDeliveryState::Queued => unreachable!(),
+        };
+        let event = insert_run_event(&mut transaction, &event).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(RecordRunInputMutation::new(
+            delivery,
+            vec![event],
+            RecordRunInputDisposition::Applied,
+        ))
+    }
+
+    async fn next_queued_run_input(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<MessageDelivery>, RunStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        if load_run(&mut transaction, run_id).await?.is_none() {
+            return Err(RunStoreError::RunNotFound);
+        }
+        let message_id = sqlx::query_scalar::<_, String>(
+            "SELECT message_id FROM message_deliveries
+             WHERE run_id = ? AND state = 'queued'
+             ORDER BY queued_cursor ASC LIMIT 1",
+        )
+        .bind(run_id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let delivery = match message_id {
+            Some(message_id) => {
+                let message_id =
+                    MessageId::parse(message_id).map_err(|_| RunStoreError::Unavailable)?;
+                load_message_delivery(&mut transaction, &message_id).await?
+            }
+            None => None,
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(delivery)
     }
 
     async fn get_tool_call(
@@ -3877,6 +4208,34 @@ async fn insert_events(
     Ok(stored)
 }
 
+async fn insert_message_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event: &SessionEvent,
+) -> Result<StoredSessionEvent, RunStoreError> {
+    let SessionEventPayload::MessageAppended { message } = event.payload() else {
+        return Err(RunStoreError::InvalidMessageDelivery);
+    };
+    sqlx::query(
+        "INSERT INTO session_events (event_id, session_id, event_type, message_id)
+         VALUES (?, ?, 'message.appended', ?)",
+    )
+    .bind(event.event_id().as_str())
+    .bind(event.session_id().as_str())
+    .bind(message.id().as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let cursor: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+    StoredSessionEvent::from_event(
+        event,
+        committed_cursor(cursor).map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)
+}
+
 async fn insert_tool_call_artifacts(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     tool_call: &ToolCall,
@@ -4059,6 +4418,41 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
         SessionEventPayload::RunCancellationRequested { run_id } => Ok(RunEventColumns {
             event_type: "run.cancellation_requested",
             message_id: None,
+            run_id: Some(run_id.as_str()),
+            tool_call_id: None,
+            run_state: None,
+            tool_call_state: None,
+            capability: None,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            output_stream: None,
+            output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
+            approval_id: None,
+            approval_state: None,
+            approval_policy: None,
+            requested_workspace_root_id: None,
+            requested_relative_directory: None,
+            effective_workspace_root_id: None,
+            effective_relative_directory: None,
+        }),
+        SessionEventPayload::RunInputQueued { run_id, message_id }
+        | SessionEventPayload::RunInterruptRequested { run_id, message_id }
+        | SessionEventPayload::RunInputDelivered { run_id, message_id }
+        | SessionEventPayload::RunInputFailed { run_id, message_id }
+        | SessionEventPayload::RunInputCancelled { run_id, message_id } => Ok(RunEventColumns {
+            event_type: match event.payload() {
+                SessionEventPayload::RunInputQueued { .. } => "run.input_queued",
+                SessionEventPayload::RunInterruptRequested { .. } => "run.interrupt_requested",
+                SessionEventPayload::RunInputDelivered { .. } => "run.input_delivered",
+                SessionEventPayload::RunInputFailed { .. } => "run.input_failed",
+                SessionEventPayload::RunInputCancelled { .. } => "run.input_cancelled",
+                _ => unreachable!(),
+            },
+            message_id: Some(message_id.as_str()),
             run_id: Some(run_id.as_str()),
             tool_call_id: None,
             run_state: None,
@@ -4364,6 +4758,80 @@ async fn insert_run_event(
         committed_cursor(cursor).map_err(|_| RunStoreError::Unavailable)?,
     )
     .map_err(|_| RunStoreError::Unavailable)
+}
+
+async fn load_message_delivery(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message_id: &MessageId,
+) -> Result<Option<MessageDelivery>, RunStoreError> {
+    let row = sqlx::query(
+        "SELECT m.message_id, m.session_id, m.role, m.content, m.target_run_id,
+                d.run_id, d.delivery_mode, d.state
+         FROM message_deliveries d
+         JOIN messages m ON m.message_id = d.message_id
+         WHERE d.message_id = ?",
+    )
+    .bind(message_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
+    row.map(|row| {
+        let loaded_message_id = MessageId::parse(
+            row.try_get::<String, _>("message_id")
+                .map_err(|_| RunStoreError::Unavailable)?,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if &loaded_message_id != message_id {
+            return Err(RunStoreError::Unavailable);
+        }
+        let session_id = SessionId::parse(
+            row.try_get::<String, _>("session_id")
+                .map_err(|_| RunStoreError::Unavailable)?,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let role = MessageRole::parse(
+            &row.try_get::<String, _>("role")
+                .map_err(|_| RunStoreError::Unavailable)?,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let target_run_id = RunId::parse(
+            row.try_get::<String, _>("target_run_id")
+                .map_err(|_| RunStoreError::Unavailable)?,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let delivery_run_id = RunId::parse(
+            row.try_get::<String, _>("run_id")
+                .map_err(|_| RunStoreError::Unavailable)?,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if delivery_run_id != target_run_id {
+            return Err(RunStoreError::Unavailable);
+        }
+        let message = Message::new_targeted(
+            loaded_message_id,
+            session_id,
+            role,
+            row.try_get::<String, _>("content")
+                .map_err(|_| RunStoreError::Unavailable)?,
+            target_run_id,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
+        MessageDelivery::from_persisted(
+            message,
+            MessageDeliveryMode::parse(
+                &row.try_get::<String, _>("delivery_mode")
+                    .map_err(|_| RunStoreError::Unavailable)?,
+            )
+            .map_err(|_| RunStoreError::Unavailable)?,
+            MessageDeliveryState::parse(
+                &row.try_get::<String, _>("state")
+                    .map_err(|_| RunStoreError::Unavailable)?,
+            )
+            .map_err(|_| RunStoreError::Unavailable)?,
+        )
+        .map_err(|_| RunStoreError::Unavailable)
+    })
+    .transpose()
 }
 
 async fn load_run(
@@ -4865,6 +5333,10 @@ impl TaskIdGenerator for UlidIdGenerator {
 impl RunIdGenerator for UlidIdGenerator {
     fn run_id(&self) -> RunId {
         RunId::from_ulid(Ulid::generate())
+    }
+
+    fn message_id(&self) -> MessageId {
+        MessageId::from_ulid(Ulid::generate())
     }
 
     fn tool_call_id(&self) -> ToolCallId {

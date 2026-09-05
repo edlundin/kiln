@@ -240,6 +240,101 @@
       "title": "CreateWorkspaceRequest",
       "type": "object"
     },
+    "MessageDeliveryMode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "queued",
+        "interrupt"
+      ],
+      "title": "MessageDeliveryMode",
+      "type": "string"
+    },
+    "MessageDeliveryResponse": {
+      "$defs": {
+        "MessageDeliveryMode": {
+          "enum": [
+            "queued",
+            "interrupt"
+          ],
+          "type": "string"
+        },
+        "MessageDeliveryState": {
+          "enum": [
+            "queued",
+            "delivered",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        },
+        "MessageResponse": {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "role": {
+              "$ref": "#/$defs/MessageRole"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "target_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "message_id",
+            "session_id",
+            "role",
+            "content",
+            "target_run_id"
+          ],
+          "type": "object"
+        },
+        "MessageRole": {
+          "enum": [
+            "user"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "delivery_mode": {
+          "$ref": "#/$defs/MessageDeliveryMode"
+        },
+        "message": {
+          "$ref": "#/$defs/MessageResponse"
+        },
+        "state": {
+          "$ref": "#/$defs/MessageDeliveryState"
+        }
+      },
+      "required": [
+        "message",
+        "delivery_mode",
+        "state"
+      ],
+      "title": "MessageDeliveryResponse",
+      "type": "object"
+    },
+    "MessageDeliveryState": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "queued",
+        "delivered",
+        "failed",
+        "cancelled"
+      ],
+      "title": "MessageDeliveryState",
+      "type": "string"
+    },
     "MessageResponse": {
       "$defs": {
         "MessageRole": {
@@ -262,13 +357,20 @@
         },
         "session_id": {
           "type": "string"
+        },
+        "target_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "message_id",
         "session_id",
         "role",
-        "content"
+        "content",
+        "target_run_id"
       ],
       "title": "MessageResponse",
       "type": "object"
@@ -717,6 +819,33 @@
       "title": "RunState",
       "type": "string"
     },
+    "SendRunInputRequest": {
+      "$defs": {
+        "MessageDeliveryMode": {
+          "enum": [
+            "queued",
+            "interrupt"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "delivery_mode": {
+          "$ref": "#/$defs/MessageDeliveryMode"
+        }
+      },
+      "required": [
+        "content",
+        "delivery_mode"
+      ],
+      "title": "SendRunInputRequest",
+      "type": "object"
+    },
     "SessionEventDataResponse": {
       "$defs": {
         "ApprovalPolicy": {
@@ -794,13 +923,20 @@
             },
             "session_id": {
               "type": "string"
+            },
+            "target_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "message_id",
             "session_id",
             "role",
-            "content"
+            "content",
+            "target_run_id"
           ],
           "type": "object"
         },
@@ -1206,6 +1342,106 @@
         },
         {
           "properties": {
+            "message_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run.input_queued",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "message_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run.interrupt_requested",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "message_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run.input_delivered",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "message_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run.input_failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "message_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "message_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run.input_cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "message_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
             "run_id": {
               "type": "string"
             },
@@ -1456,13 +1692,20 @@
             },
             "session_id": {
               "type": "string"
+            },
+            "target_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "message_id",
             "session_id",
             "role",
-            "content"
+            "content",
+            "target_run_id"
           ],
           "type": "object"
         },
@@ -1682,6 +1925,106 @@
                 "type",
                 "parent_run_id",
                 "child_run_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_queued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.interrupt_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_delivered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
               ],
               "type": "object"
             },
@@ -2141,13 +2484,20 @@
             },
             "session_id": {
               "type": "string"
+            },
+            "target_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "message_id",
             "session_id",
             "role",
-            "content"
+            "content",
+            "target_run_id"
           ],
           "type": "object"
         },
@@ -2367,6 +2717,106 @@
                 "type",
                 "parent_run_id",
                 "child_run_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_queued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.interrupt_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_delivered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
               ],
               "type": "object"
             },
@@ -3536,13 +3986,20 @@
             },
             "session_id": {
               "type": "string"
+            },
+            "target_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "message_id",
             "session_id",
             "role",
-            "content"
+            "content",
+            "target_run_id"
           ],
           "type": "object"
         },
@@ -3762,6 +4219,106 @@
                 "type",
                 "parent_run_id",
                 "child_run_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_queued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.interrupt_requested",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_delivered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "message_id": {
+                  "type": "string"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.input_cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id",
+                "message_id"
               ],
               "type": "object"
             },
@@ -4349,7 +4906,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.12.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.13.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

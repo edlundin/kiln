@@ -32,7 +32,13 @@ export type SessionResponse = { session_id: string, workspace_id: string, };
 
 export type MessageRole = "user";
 
-export type MessageResponse = { message_id: string, session_id: string, role: MessageRole, content: string, };
+export type MessageResponse = { message_id: string, session_id: string, role: MessageRole, content: string, target_run_id: string | null, };
+
+export type MessageDeliveryMode = "queued" | "interrupt";
+
+export type MessageDeliveryState = "queued" | "delivered" | "failed" | "cancelled";
+
+export type MessageDeliveryResponse = { message: MessageResponse, delivery_mode: MessageDeliveryMode, state: MessageDeliveryState, };
 
 export type TaskState = "pending" | "ready" | "running" | "blocked" | "completed" | "failed" | "cancelled";
 
@@ -41,6 +47,8 @@ export type TaskResponse = { task_id: string, session_id: string, objective: str
 export type StartRunRequest = { approval_policy: ApprovalPolicy, workspace_root_id: string, relative_directory: string, };
 
 export type StartChildRunRequest = { approval_policy: ApprovalPolicy, workspace_root_id: string, relative_directory: string, user_input_mode: RunInputMode, task_id: string | null, };
+
+export type SendRunInputRequest = { content: string, delivery_mode: MessageDeliveryMode, };
 
 export type ApprovalPolicy = "ask" | "read_only" | "full_access";
 
@@ -70,7 +78,7 @@ export type RunResponse = { run_id: string, session_id: string, parent_run_id: s
 
 export type SessionRunsResponse = { runs: Array<RunResponse>, };
 
-export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "task.created", task: TaskResponse, } | { "type": "task.updated", task: TaskResponse, } | { "type": "task.assigned", task: TaskResponse, } | { "type": "task.state_changed", task: TaskResponse, } | { "type": "run.created", run_id: string, state: RunState, parent_run_id: string | null, task_id: string | null, user_input_mode: RunInputMode, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, } | { "type": "run.queued", run_id: string, } | { "type": "run.child_added", parent_run_id: string, child_run_id: string, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "run.cancellation_requested", run_id: string, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "approval.requested", approval: ApprovalResponse, } | { "type": "approval.decided", approval: ApprovalResponse, } | { "type": "tool_call.denied", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, } | { "type": "artifact.registered", run_id: string, tool_call_id: string, stream: ToolOutputStream, artifact: ArtifactResponse, };
+export type SessionEventDataResponse = { "type": "session.created", workspace_id: string, } | { "type": "message.appended", message: MessageResponse, } | { "type": "task.created", task: TaskResponse, } | { "type": "task.updated", task: TaskResponse, } | { "type": "task.assigned", task: TaskResponse, } | { "type": "task.state_changed", task: TaskResponse, } | { "type": "run.created", run_id: string, state: RunState, parent_run_id: string | null, task_id: string | null, user_input_mode: RunInputMode, approval_policy: ApprovalPolicy | null, requested_scope: WorkspaceScopeResponse | null, } | { "type": "run.queued", run_id: string, } | { "type": "run.child_added", parent_run_id: string, child_run_id: string, } | { "type": "run.input_queued", run_id: string, message_id: string, } | { "type": "run.interrupt_requested", run_id: string, message_id: string, } | { "type": "run.input_delivered", run_id: string, message_id: string, } | { "type": "run.input_failed", run_id: string, message_id: string, } | { "type": "run.input_cancelled", run_id: string, message_id: string, } | { "type": "run.state_changed", run_id: string, state: RunState, } | { "type": "run.cancellation_requested", run_id: string, } | { "type": "tool_call.requested", tool_call: ToolCallResponse, } | { "type": "approval.requested", approval: ApprovalResponse, } | { "type": "approval.decided", approval: ApprovalResponse, } | { "type": "tool_call.denied", tool_call: ToolCallResponse, } | { "type": "tool_call.state_changed", tool_call: ToolCallResponse, } | { "type": "tool_call.output", run_id: string, tool_call_id: string, stream: ToolOutputStream, content: string, } | { "type": "artifact.registered", run_id: string, tool_call_id: string, stream: ToolOutputStream, artifact: ArtifactResponse, };
 
 export type SessionEventResponse = { event_id: string, cursor: string, session_id: string, event: SessionEventDataResponse, };
 

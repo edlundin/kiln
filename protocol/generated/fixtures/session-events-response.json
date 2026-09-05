@@ -19,7 +19,8 @@
           "message_id": "msg_01ARZ3NDEKTSV4RRFFQ69G5FAV",
           "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
           "role": "user",
-          "content": "Inspect the Workspace event model."
+          "content": "Inspect the Workspace event model.",
+          "target_run_id": null
         }
       }
     }

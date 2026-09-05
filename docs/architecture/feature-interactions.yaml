@@ -28,6 +28,12 @@ features:
     status: current_partial
     consumes: [parent_run, task, agent, targeted_input]
     produces: [child_run, run_lineage, task_assignment, child_run_state]
+  - id: targeted_run_input
+    owner: core
+    phase: 1
+    status: current_partial
+    consumes: [interactive_run, targeted_input, delivery_mode]
+    produces: [message, message_delivery, durable_event]
   - id: context_builder
     owner: core
     phase: 1
@@ -122,6 +128,7 @@ flows:
       - event_transport
       - agent_workspace
       - event_transport
+      - targeted_run_input
       - subagent_orchestration
       - thread_event_log
   - id: attach_and_send_prompt
@@ -163,4 +170,5 @@ invariants:
   - "Every child run belongs to the same thread as its parent and has exactly one parent run."
   - "Run and task parent links are acyclic."
   - "Guidance is queued unless the user explicitly requests interrupt delivery."
+  - "A targeted input delivery is never redirected to another run."
   - "Cancelling a child run does not cancel its parent or siblings."

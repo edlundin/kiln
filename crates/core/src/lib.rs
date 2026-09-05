@@ -436,6 +436,7 @@ pub struct Message {
     session_id: SessionId,
     role: MessageRole,
     content: String,
+    target_run_id: Option<RunId>,
 }
 
 impl Message {
@@ -445,6 +446,26 @@ impl Message {
         role: MessageRole,
         content: String,
     ) -> Result<Self, SessionError> {
+        Self::new_with_target(id, session_id, role, content, None)
+    }
+
+    pub fn new_targeted(
+        id: MessageId,
+        session_id: SessionId,
+        role: MessageRole,
+        content: String,
+        target_run_id: RunId,
+    ) -> Result<Self, SessionError> {
+        Self::new_with_target(id, session_id, role, content, Some(target_run_id))
+    }
+
+    fn new_with_target(
+        id: MessageId,
+        session_id: SessionId,
+        role: MessageRole,
+        content: String,
+        target_run_id: Option<RunId>,
+    ) -> Result<Self, SessionError> {
         if content.trim().is_empty() {
             return Err(SessionError::MessageContentRequired);
         }
@@ -453,6 +474,7 @@ impl Message {
             session_id,
             role,
             content,
+            target_run_id,
         })
     }
 
@@ -470,6 +492,131 @@ impl Message {
 
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    pub fn target_run_id(&self) -> Option<&RunId> {
+        self.target_run_id.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageDeliveryMode {
+    #[default]
+    Queued,
+    Interrupt,
+}
+
+impl MessageDeliveryMode {
+    pub fn parse(value: &str) -> Result<Self, InvalidMessageDelivery> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "interrupt" => Ok(Self::Interrupt),
+            _ => Err(InvalidMessageDelivery),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Interrupt => "interrupt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageDeliveryState {
+    Queued,
+    Delivered,
+    Failed,
+    Cancelled,
+}
+
+impl MessageDeliveryState {
+    pub fn parse(value: &str) -> Result<Self, InvalidMessageDelivery> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "delivered" => Ok(Self::Delivered),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(InvalidMessageDelivery),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Delivered => "delivered",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Delivered | Self::Failed | Self::Cancelled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidMessageDelivery;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageDelivery {
+    message: Message,
+    mode: MessageDeliveryMode,
+    state: MessageDeliveryState,
+}
+
+impl MessageDelivery {
+    pub fn queued(
+        message: Message,
+        mode: MessageDeliveryMode,
+    ) -> Result<Self, InvalidMessageDelivery> {
+        if message.target_run_id().is_none() {
+            return Err(InvalidMessageDelivery);
+        }
+        Ok(Self {
+            message,
+            mode,
+            state: MessageDeliveryState::Queued,
+        })
+    }
+
+    pub fn from_persisted(
+        message: Message,
+        mode: MessageDeliveryMode,
+        state: MessageDeliveryState,
+    ) -> Result<Self, InvalidMessageDelivery> {
+        if message.target_run_id().is_none() {
+            return Err(InvalidMessageDelivery);
+        }
+        Ok(Self {
+            message,
+            mode,
+            state,
+        })
+    }
+
+    pub fn with_state(&self, state: MessageDeliveryState) -> Result<Self, InvalidMessageDelivery> {
+        if self.state != MessageDeliveryState::Queued || !state.is_terminal() {
+            return Err(InvalidMessageDelivery);
+        }
+        Ok(Self {
+            message: self.message.clone(),
+            mode: self.mode,
+            state,
+        })
+    }
+
+    pub fn message(&self) -> &Message {
+        &self.message
+    }
+
+    pub fn mode(&self) -> MessageDeliveryMode {
+        self.mode
+    }
+
+    pub fn state(&self) -> MessageDeliveryState {
+        self.state
     }
 }
 
@@ -736,6 +883,13 @@ impl RunState {
 
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+
+    pub fn accepts_input(self) -> bool {
+        matches!(
+            self,
+            Self::Queued | Self::Running | Self::WaitingForApproval
+        )
     }
 }
 
@@ -1665,6 +1819,26 @@ pub enum SessionEventPayload {
     RunCancellationRequested {
         run_id: RunId,
     },
+    RunInputQueued {
+        run_id: RunId,
+        message_id: MessageId,
+    },
+    RunInterruptRequested {
+        run_id: RunId,
+        message_id: MessageId,
+    },
+    RunInputDelivered {
+        run_id: RunId,
+        message_id: MessageId,
+    },
+    RunInputFailed {
+        run_id: RunId,
+        message_id: MessageId,
+    },
+    RunInputCancelled {
+        run_id: RunId,
+        message_id: MessageId,
+    },
     ToolCallRequested {
         tool_call: ToolCall,
     },
@@ -1809,6 +1983,63 @@ impl SessionEvent {
             payload: SessionEventPayload::RunCancellationRequested {
                 run_id: run.run_id.clone(),
             },
+        }
+    }
+
+    pub fn run_input_queued(event_id: EventId, delivery: &MessageDelivery) -> Self {
+        Self::run_input_event(event_id, delivery, MessageDeliveryState::Queued)
+    }
+
+    pub fn run_input_delivered(event_id: EventId, delivery: &MessageDelivery) -> Self {
+        Self::run_input_event(event_id, delivery, MessageDeliveryState::Delivered)
+    }
+
+    pub fn run_input_failed(event_id: EventId, delivery: &MessageDelivery) -> Self {
+        Self::run_input_event(event_id, delivery, MessageDeliveryState::Failed)
+    }
+
+    pub fn run_input_cancelled(event_id: EventId, delivery: &MessageDelivery) -> Self {
+        Self::run_input_event(event_id, delivery, MessageDeliveryState::Cancelled)
+    }
+
+    fn run_input_event(
+        event_id: EventId,
+        delivery: &MessageDelivery,
+        state: MessageDeliveryState,
+    ) -> Self {
+        let message = delivery.message();
+        let run_id = message
+            .target_run_id()
+            .expect("MessageDelivery has one target Run")
+            .clone();
+        let payload = match (delivery.mode(), state) {
+            (MessageDeliveryMode::Interrupt, MessageDeliveryState::Queued) => {
+                SessionEventPayload::RunInterruptRequested {
+                    run_id,
+                    message_id: message.id().clone(),
+                }
+            }
+            (_, MessageDeliveryState::Queued) => SessionEventPayload::RunInputQueued {
+                run_id,
+                message_id: message.id().clone(),
+            },
+            (_, MessageDeliveryState::Delivered) => SessionEventPayload::RunInputDelivered {
+                run_id,
+                message_id: message.id().clone(),
+            },
+            (_, MessageDeliveryState::Failed) => SessionEventPayload::RunInputFailed {
+                run_id,
+                message_id: message.id().clone(),
+            },
+            (_, MessageDeliveryState::Cancelled) => SessionEventPayload::RunInputCancelled {
+                run_id,
+                message_id: message.id().clone(),
+            },
+        };
+        Self {
+            event_id,
+            session_id: message.session_id().clone(),
+            payload,
         }
     }
 
@@ -2039,6 +2270,20 @@ pub struct AppendMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendRunInput {
+    pub run_id: RunId,
+    pub content: String,
+    pub delivery_mode: MessageDeliveryMode,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordRunInputDelivery {
+    pub message_id: MessageId,
+    pub state: MessageDeliveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTask {
     pub session_id: SessionId,
     pub objective: String,
@@ -2189,6 +2434,12 @@ pub enum RunError {
     TaskNotFound,
     TaskLinkOutsideSession,
     InvalidTaskAssignment,
+    InputContentRequired,
+    RunInputReadOnly,
+    RunNotAcceptingInput,
+    MessageDeliveryNotFound,
+    InvalidMessageDelivery,
+    MessageDeliveryOutOfOrder,
     ActiveRootRunExists,
     IdempotencyKeyRequired,
     InvalidTransition,
@@ -2202,11 +2453,17 @@ pub enum RunError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStoreError {
     ActiveRootRunExists,
+    RunNotFound,
     ParentRunNotFound,
     ParentRunTerminal,
     TaskNotFound,
     TaskLinkOutsideSession,
     InvalidTaskAssignment,
+    RunInputReadOnly,
+    RunNotAcceptingInput,
+    MessageDeliveryNotFound,
+    InvalidMessageDelivery,
+    MessageDeliveryOutOfOrder,
     IdempotencyKeyRequired,
     InvalidTransition,
     WorkspaceRootNotFound,
@@ -2221,6 +2478,60 @@ pub enum RunStoreError {
 pub enum StartRunDisposition {
     Created,
     Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendRunInputDisposition {
+    Created,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordRunInputDisposition {
+    Applied,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendRunInputMutation {
+    pub value: MessageDelivery,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: SendRunInputDisposition,
+}
+
+impl SendRunInputMutation {
+    pub fn new(
+        value: MessageDelivery,
+        events: Vec<StoredSessionEvent>,
+        disposition: SendRunInputDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordRunInputMutation {
+    pub value: MessageDelivery,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: RecordRunInputDisposition,
+}
+
+impl RecordRunInputMutation {
+    pub fn new(
+        value: MessageDelivery,
+        events: Vec<StoredSessionEvent>,
+        disposition: RecordRunInputDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2353,6 +2664,7 @@ pub trait TaskIdGenerator: Send + Sync {
 
 pub trait RunIdGenerator: Send + Sync {
     fn run_id(&self) -> RunId;
+    fn message_id(&self) -> MessageId;
     fn tool_call_id(&self) -> ToolCallId;
     fn approval_id(&self) -> ApprovalId;
     fn event_id(&self) -> EventId;
@@ -2380,6 +2692,21 @@ pub trait RunStore: SessionStore + WorkspaceStore {
         &self,
         session_id: &SessionId,
     ) -> impl Future<Output = Result<Vec<RunSnapshot>, RunStoreError>> + Send;
+    fn send_run_input(
+        &self,
+        delivery: &MessageDelivery,
+        events: &[SessionEvent],
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<SendRunInputMutation, RunStoreError>> + Send;
+    fn record_run_input_delivery(
+        &self,
+        command: &RecordRunInputDelivery,
+        event_id: EventId,
+    ) -> impl Future<Output = Result<RecordRunInputMutation, RunStoreError>> + Send;
+    fn next_queued_run_input(
+        &self,
+        run_id: &RunId,
+    ) -> impl Future<Output = Result<Option<MessageDelivery>, RunStoreError>> + Send;
     fn get_tool_call(
         &self,
         id: &ToolCallId,
@@ -2592,6 +2919,54 @@ where
             .ok_or(RunError::SessionNotFound)?;
         self.store
             .list_session_runs(&session_id)
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn send_run_input(
+        &self,
+        command: SendRunInput,
+    ) -> Result<SendRunInputMutation, RunError> {
+        if command.idempotency_key.is_empty() {
+            return Err(RunError::IdempotencyKeyRequired);
+        }
+        let run = self.get_run(command.run_id.clone()).await?.run;
+        let message = Message::new_targeted(
+            self.ids.message_id(),
+            run.session_id().clone(),
+            MessageRole::User,
+            command.content,
+            command.run_id,
+        )
+        .map_err(|_| RunError::InputContentRequired)?;
+        let delivery = MessageDelivery::queued(message.clone(), command.delivery_mode)
+            .map_err(|_| RunError::InvalidMessageDelivery)?;
+        let events = [
+            SessionEvent::message_appended(self.ids.event_id(), message),
+            SessionEvent::run_input_queued(self.ids.event_id(), &delivery),
+        ];
+        self.store
+            .send_run_input(&delivery, &events, &command.idempotency_key)
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn record_run_input_delivery(
+        &self,
+        command: RecordRunInputDelivery,
+    ) -> Result<RecordRunInputMutation, RunError> {
+        self.store
+            .record_run_input_delivery(&command, self.ids.event_id())
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn next_queued_run_input(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<MessageDelivery>, RunError> {
+        self.store
+            .next_queued_run_input(&run_id)
             .await
             .map_err(map_run_store_error)
     }
@@ -3081,11 +3456,17 @@ where
 fn map_run_store_error(error: RunStoreError) -> RunError {
     match error {
         RunStoreError::ActiveRootRunExists => RunError::ActiveRootRunExists,
+        RunStoreError::RunNotFound => RunError::RunNotFound,
         RunStoreError::ParentRunNotFound => RunError::ParentRunNotFound,
         RunStoreError::ParentRunTerminal => RunError::ParentRunTerminal,
         RunStoreError::TaskNotFound => RunError::TaskNotFound,
         RunStoreError::TaskLinkOutsideSession => RunError::TaskLinkOutsideSession,
         RunStoreError::InvalidTaskAssignment => RunError::InvalidTaskAssignment,
+        RunStoreError::RunInputReadOnly => RunError::RunInputReadOnly,
+        RunStoreError::RunNotAcceptingInput => RunError::RunNotAcceptingInput,
+        RunStoreError::MessageDeliveryNotFound => RunError::MessageDeliveryNotFound,
+        RunStoreError::InvalidMessageDelivery => RunError::InvalidMessageDelivery,
+        RunStoreError::MessageDeliveryOutOfOrder => RunError::MessageDeliveryOutOfOrder,
         RunStoreError::IdempotencyKeyRequired => RunError::IdempotencyKeyRequired,
         RunStoreError::InvalidTransition => RunError::InvalidTransition,
         RunStoreError::WorkspaceRootNotFound => RunError::WorkspaceRootNotFound,
@@ -4080,6 +4461,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(message.content(), "  keep surrounding whitespace  ");
+        assert_eq!(message.target_run_id(), None);
+        let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let targeted = Message::new_targeted(
+            MessageId::parse("msg_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
+            message.session_id().clone(),
+            MessageRole::User,
+            "guidance".to_owned(),
+            run_id.clone(),
+        )
+        .unwrap();
+        assert_eq!(targeted.target_run_id(), Some(&run_id));
+        let delivery = MessageDelivery::queued(targeted, MessageDeliveryMode::default()).unwrap();
+        assert_eq!(delivery.mode(), MessageDeliveryMode::Queued);
+        assert_eq!(delivery.state(), MessageDeliveryState::Queued);
+        assert_eq!(
+            delivery
+                .with_state(MessageDeliveryState::Delivered)
+                .unwrap()
+                .state(),
+            MessageDeliveryState::Delivered
+        );
+        assert_eq!(
+            delivery.with_state(MessageDeliveryState::Queued),
+            Err(InvalidMessageDelivery)
+        );
+        for state in [
+            RunState::Queued,
+            RunState::Running,
+            RunState::WaitingForApproval,
+        ] {
+            assert!(state.accepts_input());
+        }
+        for state in [
+            RunState::Cancelling,
+            RunState::Completed,
+            RunState::Failed,
+            RunState::Cancelled,
+        ] {
+            assert!(!state.accepts_input());
+        }
         assert_eq!(
             Message::new(
                 message.id().clone(),
@@ -4683,6 +5104,10 @@ mod run_tests {
             RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
         }
 
+        fn message_id(&self) -> MessageId {
+            MessageId::parse("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
+        }
+
         fn tool_call_id(&self) -> ToolCallId {
             ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap()
         }
@@ -4834,6 +5259,30 @@ mod run_tests {
                 .then_some(snapshot)
                 .into_iter()
                 .collect())
+        }
+
+        async fn send_run_input(
+            &self,
+            _delivery: &MessageDelivery,
+            _events: &[SessionEvent],
+            _idempotency_key: &str,
+        ) -> Result<SendRunInputMutation, RunStoreError> {
+            Err(RunStoreError::Unavailable)
+        }
+
+        async fn record_run_input_delivery(
+            &self,
+            _command: &RecordRunInputDelivery,
+            _event_id: EventId,
+        ) -> Result<RecordRunInputMutation, RunStoreError> {
+            Err(RunStoreError::Unavailable)
+        }
+
+        async fn next_queued_run_input(
+            &self,
+            _run_id: &RunId,
+        ) -> Result<Option<MessageDelivery>, RunStoreError> {
+            Ok(None)
         }
 
         async fn get_tool_call(

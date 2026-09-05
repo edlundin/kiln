@@ -10,15 +10,17 @@ use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
     ApprovalState, AssignTaskRequest, ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest,
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
-    MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_PATH, RunInputMode, RunResponse,
+    MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
+    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
+    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode, RunResponse,
     RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SESSION_TASKS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest,
-    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
-    TaskState, ToolCallState, ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
-    WorkspaceResponse, WorkspaceRootRequest, error_code,
+    SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse, SessionEventResponse,
+    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
+    StartRunRequest, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
+    TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallState, ToolOutputStream,
+    TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    WorkspaceRootRequest, error_code,
 };
 use reqwest::{
     StatusCode,
@@ -286,6 +288,11 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::RunCreated { .. } => "run.created",
         SessionEventDataResponse::RunQueued { .. } => "run.queued",
         SessionEventDataResponse::RunChildAdded { .. } => "run.child_added",
+        SessionEventDataResponse::RunInputQueued { .. } => "run.input_queued",
+        SessionEventDataResponse::RunInterruptRequested { .. } => "run.interrupt_requested",
+        SessionEventDataResponse::RunInputDelivered { .. } => "run.input_delivered",
+        SessionEventDataResponse::RunInputFailed { .. } => "run.input_failed",
+        SessionEventDataResponse::RunInputCancelled { .. } => "run.input_cancelled",
         SessionEventDataResponse::RunStateChanged { .. } => "run.state_changed",
         SessionEventDataResponse::RunCancellationRequested { .. } => "run.cancellation_requested",
         SessionEventDataResponse::ToolCallRequested { .. } => "tool_call.requested",
@@ -303,8 +310,14 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         SessionEventDataResponse::RunCreated { run_id, .. }
         | SessionEventDataResponse::RunQueued { run_id }
         | SessionEventDataResponse::RunStateChanged { run_id, .. }
-        | SessionEventDataResponse::RunCancellationRequested { run_id } => {
-            run_id == expected_run_id
+        | SessionEventDataResponse::RunCancellationRequested { run_id }
+        | SessionEventDataResponse::RunInputQueued { run_id, .. }
+        | SessionEventDataResponse::RunInterruptRequested { run_id, .. }
+        | SessionEventDataResponse::RunInputDelivered { run_id, .. }
+        | SessionEventDataResponse::RunInputFailed { run_id, .. }
+        | SessionEventDataResponse::RunInputCancelled { run_id, .. } => run_id == expected_run_id,
+        SessionEventDataResponse::MessageAppended { message } => {
+            message.target_run_id.as_deref() == Some(expected_run_id)
         }
         SessionEventDataResponse::ToolCallRequested { tool_call }
         | SessionEventDataResponse::ToolCallStateChanged { tool_call }
@@ -318,7 +331,6 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         SessionEventDataResponse::ToolCallOutput { run_id, .. }
         | SessionEventDataResponse::ArtifactRegistered { run_id, .. } => run_id == expected_run_id,
         SessionEventDataResponse::SessionCreated { .. }
-        | SessionEventDataResponse::MessageAppended { .. }
         | SessionEventDataResponse::TaskCreated { .. }
         | SessionEventDataResponse::TaskUpdated { .. }
         | SessionEventDataResponse::TaskAssigned { .. }
@@ -2067,6 +2079,90 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
     receive_run_events(&mut socket, &second.run_id, RunState::WaitingForApproval).await;
     assert_ne!(first.run_id, second.run_id);
 
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let before_input: SessionEventsResponse = http
+        .get(format!("http://{}{}", daemon.address, events_path))
+        .send()
+        .await
+        .expect("pre-input Event history response")
+        .json()
+        .await
+        .expect("pre-input Event history JSON");
+    let before_input_cursor = before_input.current_event_cursor.clone();
+    let input_path = RUN_INPUT_PATH.replace("{run_id}", &root.run_id);
+    let input_request = SendRunInputRequest {
+        content: "Use the durable cursor checkpoint.".to_owned(),
+        delivery_mode: MessageDeliveryMode::Queued,
+    };
+    let response = http
+        .post(format!("http://{}{}", daemon.address, input_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "root-guidance")
+        .json(&input_request)
+        .send()
+        .await
+        .expect("Run input response");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let delivery: MessageDeliveryResponse = response.json().await.expect("Run input JSON");
+    assert_eq!(delivery.delivery_mode, MessageDeliveryMode::Queued);
+    assert_eq!(delivery.state, MessageDeliveryState::Queued);
+    assert_eq!(
+        delivery.message.target_run_id.as_deref(),
+        Some(root.run_id.as_str())
+    );
+    let appended = receive_event(&mut socket).await;
+    let queued = receive_event(&mut socket).await;
+    assert!(matches!(
+        &appended.event,
+        SessionEventDataResponse::MessageAppended { message }
+            if message == &delivery.message
+    ));
+    assert!(matches!(
+        &queued.event,
+        SessionEventDataResponse::RunInputQueued { run_id, message_id }
+            if run_id == &root.run_id && message_id == &delivery.message.message_id
+    ));
+
+    assert_problem(
+        http.post(format!(
+            "http://{}{}",
+            daemon.address,
+            RUN_INPUT_PATH.replace("{run_id}", &first.run_id)
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "read-only-guidance")
+        .json(&input_request)
+        .send()
+        .await
+        .expect("read-only Run input response"),
+        StatusCode::CONFLICT,
+        error_code::RUN_INPUT_READ_ONLY,
+    )
+    .await;
+    let duplicate_delivery: MessageDeliveryResponse = http
+        .post(format!("http://{}{}", daemon.address, input_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "root-guidance")
+        .json(&input_request)
+        .send()
+        .await
+        .expect("duplicate Run input response")
+        .json()
+        .await
+        .expect("duplicate Run input JSON");
+    assert_eq!(duplicate_delivery, delivery);
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, input_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "root-guidance")
+            .json(&SendRunInputRequest {
+                content: "different guidance".to_owned(),
+                delivery_mode: MessageDeliveryMode::Interrupt,
+            })
+            .send()
+            .await
+            .expect("conflicting Run input response"),
+        StatusCode::CONFLICT,
+        error_code::IDEMPOTENCY_CONFLICT,
+    )
+    .await;
+
     let runs_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let listed: SessionRunsResponse = http
         .get(format!("http://{}{}", daemon.address, runs_path))
@@ -2104,7 +2200,6 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         task_after.assigned_run_id.as_deref(),
         Some(first.run_id.as_str())
     );
-    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
     let history: SessionEventsResponse = http
         .get(format!("http://{}{}", daemon.address, events_path))
         .send()
@@ -2113,6 +2208,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .json()
         .await
         .expect("tree Event history JSON");
+    assert_eq!(history.events.len(), before_input.events.len() + 2);
     let first_created = history
         .events
         .iter()
@@ -2150,6 +2246,13 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .await
         .expect("recovered Session Run list JSON");
     assert_eq!(recovered, listed);
+    let (mut replay_socket, _) =
+        open_event_socket_after(&restarted, Some(&before_input_cursor)).await;
+    let replayed_appended = receive_event(&mut replay_socket).await;
+    let replayed_queued = receive_event(&mut replay_socket).await;
+    assert_eq!(replayed_appended, appended);
+    assert_eq!(replayed_queued, queued);
+    drop(replay_socket);
     let duplicate: RunResponse = restarted_http
         .post(format!("http://{}{}", restarted.address, child_path))
         .header(IDEMPOTENCY_KEY_HEADER, "first-child")

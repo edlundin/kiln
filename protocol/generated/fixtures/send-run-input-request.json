@@ -1,0 +1,4 @@
+{
+  "content": "Use the durable event cursor as the next checkpoint.",
+  "delivery_mode": "queued"
+}

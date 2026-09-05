@@ -49,6 +49,11 @@
     "parent_run_terminal",
     "active_root_run_exists",
     "invalid_run_state",
+    "run_input_read_only",
+    "run_not_accepting_input",
+    "message_delivery_not_found",
+    "invalid_message_delivery",
+    "message_delivery_out_of_order",
     "run_store_unavailable",
     "run_cancellation_failed",
     "daemon_shutting_down",
@@ -144,6 +149,11 @@
     },
     {
       "method": "POST",
+      "operation": "send_run_input",
+      "path": "/v1/runs/{run_id}/input"
+    },
+    {
+      "method": "POST",
       "operation": "decide_approval",
       "path": "/v1/tool-calls/{tool_call_id}/approval"
     },
@@ -158,7 +168,7 @@
       "path": "/v1/artifacts/{content_hash}"
     }
   ],
-  "protocol_version": "0.12.0",
+  "protocol_version": "0.13.0",
   "websocket": [
     {
       "method": "GET",

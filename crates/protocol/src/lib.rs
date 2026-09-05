@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.12.0";
+pub const PROTOCOL_VERSION: &str = "0.13.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -26,6 +26,7 @@ pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_CHILDREN_PATH: &str = "/v1/runs/{parent_run_id}/children";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
+pub const RUN_INPUT_PATH: &str = "/v1/runs/{run_id}/input";
 pub const TASK_PATH: &str = "/v1/tasks/{task_id}";
 pub const TASK_ASSIGNMENT_PATH: &str = "/v1/tasks/{task_id}/assignment";
 pub const TASK_TRANSITION_PATH: &str = "/v1/tasks/{task_id}/transition";
@@ -49,6 +50,7 @@ pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const START_CHILD_RUN_OPERATION_ID: &str = "start_child_run";
 pub const LIST_SESSION_RUNS_OPERATION_ID: &str = "list_session_runs";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
+pub const SEND_RUN_INPUT_OPERATION_ID: &str = "send_run_input";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
 pub const GET_ARTIFACT_OPERATION_ID: &str = "get_artifact";
@@ -100,6 +102,11 @@ pub mod error_code {
     pub const PARENT_RUN_TERMINAL: &str = "parent_run_terminal";
     pub const ACTIVE_ROOT_RUN_EXISTS: &str = "active_root_run_exists";
     pub const INVALID_RUN_STATE: &str = "invalid_run_state";
+    pub const RUN_INPUT_READ_ONLY: &str = "run_input_read_only";
+    pub const RUN_NOT_ACCEPTING_INPUT: &str = "run_not_accepting_input";
+    pub const MESSAGE_DELIVERY_NOT_FOUND: &str = "message_delivery_not_found";
+    pub const INVALID_MESSAGE_DELIVERY: &str = "invalid_message_delivery";
+    pub const MESSAGE_DELIVERY_OUT_OF_ORDER: &str = "message_delivery_out_of_order";
     pub const RUN_STORE_UNAVAILABLE: &str = "run_store_unavailable";
     pub const RUN_CANCELLATION_FAILED: &str = "run_cancellation_failed";
     pub const DAEMON_SHUTTING_DOWN: &str = "daemon_shutting_down";
@@ -159,6 +166,11 @@ pub mod error_code {
         PARENT_RUN_TERMINAL,
         ACTIVE_ROOT_RUN_EXISTS,
         INVALID_RUN_STATE,
+        RUN_INPUT_READ_ONLY,
+        RUN_NOT_ACCEPTING_INPUT,
+        MESSAGE_DELIVERY_NOT_FOUND,
+        INVALID_MESSAGE_DELIVERY,
+        MESSAGE_DELIVERY_OUT_OF_ORDER,
         RUN_STORE_UNAVAILABLE,
         RUN_CANCELLATION_FAILED,
         DAEMON_SHUTTING_DOWN,
@@ -320,6 +332,14 @@ pub struct StartChildRunRequest {
     pub task_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct SendRunInputRequest {
+    pub content: String,
+    pub delivery_mode: MessageDeliveryMode,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicy {
@@ -362,6 +382,32 @@ pub struct MessageResponse {
     pub session_id: String,
     pub role: MessageRole,
     pub content: String,
+    #[schemars(with = "RequiredNullableString")]
+    pub target_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDeliveryMode {
+    Queued,
+    Interrupt,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDeliveryState {
+    Queued,
+    Delivered,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MessageDeliveryResponse {
+    pub message: MessageResponse,
+    pub delivery_mode: MessageDeliveryMode,
+    pub state: MessageDeliveryState,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -546,6 +592,16 @@ pub enum SessionEventDataResponse {
         parent_run_id: String,
         child_run_id: String,
     },
+    #[serde(rename = "run.input_queued")]
+    RunInputQueued { run_id: String, message_id: String },
+    #[serde(rename = "run.interrupt_requested")]
+    RunInterruptRequested { run_id: String, message_id: String },
+    #[serde(rename = "run.input_delivered")]
+    RunInputDelivered { run_id: String, message_id: String },
+    #[serde(rename = "run.input_failed")]
+    RunInputFailed { run_id: String, message_id: String },
+    #[serde(rename = "run.input_cancelled")]
+    RunInputCancelled { run_id: String, message_id: String },
     #[serde(rename = "run.state_changed")]
     RunStateChanged { run_id: String, state: RunState },
     #[serde(rename = "run.cancellation_requested")]

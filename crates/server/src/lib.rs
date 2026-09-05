@@ -23,28 +23,31 @@ use axum::{
 };
 use kiln_core::{
     AppendMessage, Artifact, AssignTask, ContentHash, CreateTask, CreateWorkspace, EventCursor,
-    Message, MessageRole as CoreMessageRole, RunError, RunId, RunInputMode as CoreRunInputMode,
-    RunSnapshot, RunState as CoreRunState, Session, SessionError, SessionEventPage,
-    SessionEventPayload, SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task,
-    TaskError, TaskId, TaskOperations, TaskState as CoreTaskState, ToolCall,
-    ToolCallState as CoreToolCallState, ToolOutputStream as CoreToolOutputStream, TransitionTask,
-    UpdateTask, WorkspaceError, WorkspaceId, WorkspaceOperations,
+    Message, MessageDelivery, MessageDeliveryMode as CoreMessageDeliveryMode,
+    MessageDeliveryState as CoreMessageDeliveryState, MessageRole as CoreMessageRole, RunError,
+    RunId, RunInputMode as CoreRunInputMode, RunSnapshot, RunState as CoreRunState, SendRunInput,
+    Session, SessionError, SessionEventPage, SessionEventPayload, SessionId, SessionOperations,
+    StoreMetadata, StoredSessionEvent, Task, TaskError, TaskId, TaskOperations,
+    TaskState as CoreTaskState, ToolCall, ToolCallState as CoreToolCallState,
+    ToolOutputStream as CoreToolOutputStream, TransitionTask, UpdateTask, WorkspaceError,
+    WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
     ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
     ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest, CreateTaskRequest,
-    CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse,
-    MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_PATH, RunInputMode, RunResponse,
-    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SESSION_TASKS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
-    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
-    TaskState, ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
-    UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
-    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse,
-    WorkspaceScopeResponse, error_code,
+    CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageDeliveryMode,
+    MessageDeliveryResponse, MessageDeliveryState, MessageResponse, MessageRole, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
+    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode, RunResponse, RunState,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse, SessionEventResponse,
+    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
+    StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
+    TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
+    ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY,
+    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -76,6 +79,11 @@ pub trait RunOperations: Send + Sync {
     ) -> impl Future<Output = Result<Vec<RunSnapshot>, RunError>> + Send;
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
+
+    fn send_run_input(
+        &self,
+        command: SendRunInput,
+    ) -> impl Future<Output = Result<kiln_core::SendRunInputMutation, RunError>> + Send;
 
     fn cancel_run(
         &self,
@@ -384,6 +392,7 @@ where
         .route(SESSION_RUNS_PATH, post(start_run).get(list_session_runs))
         .route(RUN_CHILDREN_PATH, post(start_child_run))
         .route(RUN_PATH, get(get_run))
+        .route(RUN_INPUT_PATH, post(send_run_input))
         .route(RUN_CANCEL_PATH, post(cancel_run))
         .route(TOOL_CALL_APPROVAL_PATH, post(decide_approval))
         .route(ARTIFACT_PATH, get(get_artifact))
@@ -866,6 +875,37 @@ where
     Ok((StatusCode::ACCEPTED, Json(run_response(&run.value))))
 }
 
+async fn send_run_input<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(run_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<SendRunInputRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let delivery = state
+        .run_operations
+        .send_run_input(SendRunInput {
+            run_id: RunId::parse(run_id).map_err(|_| PublicError::InvalidRequest)?,
+            content: request.content,
+            delivery_mode: match request.delivery_mode {
+                MessageDeliveryMode::Queued => CoreMessageDeliveryMode::Queued,
+                MessageDeliveryMode::Interrupt => CoreMessageDeliveryMode::Interrupt,
+            },
+            idempotency_key: required_idempotency_key(&headers)?,
+        })
+        .await
+        .map_err(PublicError::from)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(message_delivery_response(&delivery.value)),
+    ))
+}
+
 async fn list_session_runs<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(session_id): Path<String>,
@@ -1054,6 +1094,25 @@ fn message_response(message: &Message) -> MessageResponse {
             CoreMessageRole::User => MessageRole::User,
         },
         content: message.content().to_owned(),
+        target_run_id: message
+            .target_run_id()
+            .map(|run_id| run_id.as_str().to_owned()),
+    }
+}
+
+fn message_delivery_response(delivery: &MessageDelivery) -> MessageDeliveryResponse {
+    MessageDeliveryResponse {
+        message: message_response(delivery.message()),
+        delivery_mode: match delivery.mode() {
+            CoreMessageDeliveryMode::Queued => MessageDeliveryMode::Queued,
+            CoreMessageDeliveryMode::Interrupt => MessageDeliveryMode::Interrupt,
+        },
+        state: match delivery.state() {
+            CoreMessageDeliveryState::Queued => MessageDeliveryState::Queued,
+            CoreMessageDeliveryState::Delivered => MessageDeliveryState::Delivered,
+            CoreMessageDeliveryState::Failed => MessageDeliveryState::Failed,
+            CoreMessageDeliveryState::Cancelled => MessageDeliveryState::Cancelled,
+        },
     }
 }
 
@@ -1272,6 +1331,36 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
             parent_run_id: parent_run_id.as_str().to_owned(),
             child_run_id: child_run_id.as_str().to_owned(),
         },
+        SessionEventPayload::RunInputQueued { run_id, message_id } => {
+            SessionEventDataResponse::RunInputQueued {
+                run_id: run_id.as_str().to_owned(),
+                message_id: message_id.as_str().to_owned(),
+            }
+        }
+        SessionEventPayload::RunInterruptRequested { run_id, message_id } => {
+            SessionEventDataResponse::RunInterruptRequested {
+                run_id: run_id.as_str().to_owned(),
+                message_id: message_id.as_str().to_owned(),
+            }
+        }
+        SessionEventPayload::RunInputDelivered { run_id, message_id } => {
+            SessionEventDataResponse::RunInputDelivered {
+                run_id: run_id.as_str().to_owned(),
+                message_id: message_id.as_str().to_owned(),
+            }
+        }
+        SessionEventPayload::RunInputFailed { run_id, message_id } => {
+            SessionEventDataResponse::RunInputFailed {
+                run_id: run_id.as_str().to_owned(),
+                message_id: message_id.as_str().to_owned(),
+            }
+        }
+        SessionEventPayload::RunInputCancelled { run_id, message_id } => {
+            SessionEventDataResponse::RunInputCancelled {
+                run_id: run_id.as_str().to_owned(),
+                message_id: message_id.as_str().to_owned(),
+            }
+        }
         SessionEventPayload::RunStateChanged { run_id, state } => {
             SessionEventDataResponse::RunStateChanged {
                 run_id: run_id.as_str().to_owned(),
@@ -1981,6 +2070,36 @@ impl PublicError {
                     error_code::INVALID_RUN_STATE,
                     "Invalid run state",
                 ),
+                RunError::InputContentRequired => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::MESSAGE_CONTENT_REQUIRED,
+                    "Message content required",
+                ),
+                RunError::RunInputReadOnly => (
+                    StatusCode::CONFLICT,
+                    error_code::RUN_INPUT_READ_ONLY,
+                    "Run input is read-only",
+                ),
+                RunError::RunNotAcceptingInput => (
+                    StatusCode::CONFLICT,
+                    error_code::RUN_NOT_ACCEPTING_INPUT,
+                    "Run is not accepting input",
+                ),
+                RunError::MessageDeliveryNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::MESSAGE_DELIVERY_NOT_FOUND,
+                    "Message delivery not found",
+                ),
+                RunError::InvalidMessageDelivery => (
+                    StatusCode::CONFLICT,
+                    error_code::INVALID_MESSAGE_DELIVERY,
+                    "Invalid Message delivery",
+                ),
+                RunError::MessageDeliveryOutOfOrder => (
+                    StatusCode::CONFLICT,
+                    error_code::MESSAGE_DELIVERY_OUT_OF_ORDER,
+                    "Message delivery out of order",
+                ),
                 RunError::CancellationFailed => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::RUN_CANCELLATION_FAILED,
@@ -2160,6 +2279,26 @@ mod tests {
                 approval_policy: Some(ApprovalPolicy::FullAccess),
                 requested_scope: Some(path_scope()),
             },
+            SessionEventPayload::RunInputQueued {
+                run_id: run_id(),
+                message_id: kiln_core::MessageId::parse(MESSAGE_ID).unwrap(),
+            },
+            SessionEventPayload::RunInterruptRequested {
+                run_id: run_id(),
+                message_id: kiln_core::MessageId::parse(MESSAGE_ID).unwrap(),
+            },
+            SessionEventPayload::RunInputDelivered {
+                run_id: run_id(),
+                message_id: kiln_core::MessageId::parse(MESSAGE_ID).unwrap(),
+            },
+            SessionEventPayload::RunInputFailed {
+                run_id: run_id(),
+                message_id: kiln_core::MessageId::parse(MESSAGE_ID).unwrap(),
+            },
+            SessionEventPayload::RunInputCancelled {
+                run_id: run_id(),
+                message_id: kiln_core::MessageId::parse(MESSAGE_ID).unwrap(),
+            },
             SessionEventPayload::RunStateChanged {
                 run_id: run_id(),
                 state: CoreRunState::Running,
@@ -2210,26 +2349,46 @@ mod tests {
         ));
         assert!(matches!(
             events[3].event,
-            SessionEventDataResponse::RunStateChanged { .. }
+            SessionEventDataResponse::RunInputQueued { .. }
         ));
         assert!(matches!(
             events[4].event,
-            SessionEventDataResponse::RunCancellationRequested { .. }
+            SessionEventDataResponse::RunInterruptRequested { .. }
         ));
         assert!(matches!(
             events[5].event,
-            SessionEventDataResponse::ToolCallRequested { .. }
+            SessionEventDataResponse::RunInputDelivered { .. }
         ));
         assert!(matches!(
             events[6].event,
-            SessionEventDataResponse::ToolCallStateChanged { .. }
+            SessionEventDataResponse::RunInputFailed { .. }
         ));
         assert!(matches!(
             events[7].event,
-            SessionEventDataResponse::ToolCallOutput { .. }
+            SessionEventDataResponse::RunInputCancelled { .. }
         ));
         assert!(matches!(
             events[8].event,
+            SessionEventDataResponse::RunStateChanged { .. }
+        ));
+        assert!(matches!(
+            events[9].event,
+            SessionEventDataResponse::RunCancellationRequested { .. }
+        ));
+        assert!(matches!(
+            events[10].event,
+            SessionEventDataResponse::ToolCallRequested { .. }
+        ));
+        assert!(matches!(
+            events[11].event,
+            SessionEventDataResponse::ToolCallStateChanged { .. }
+        ));
+        assert!(matches!(
+            events[12].event,
+            SessionEventDataResponse::ToolCallOutput { .. }
+        ));
+        assert!(matches!(
+            events[13].event,
             SessionEventDataResponse::ArtifactRegistered { .. }
         ));
     }
@@ -2256,6 +2415,36 @@ mod tests {
                 RunError::InvalidTransition,
                 StatusCode::CONFLICT,
                 error_code::INVALID_RUN_STATE,
+            ),
+            (
+                RunError::InputContentRequired,
+                StatusCode::BAD_REQUEST,
+                error_code::MESSAGE_CONTENT_REQUIRED,
+            ),
+            (
+                RunError::RunInputReadOnly,
+                StatusCode::CONFLICT,
+                error_code::RUN_INPUT_READ_ONLY,
+            ),
+            (
+                RunError::RunNotAcceptingInput,
+                StatusCode::CONFLICT,
+                error_code::RUN_NOT_ACCEPTING_INPUT,
+            ),
+            (
+                RunError::MessageDeliveryNotFound,
+                StatusCode::NOT_FOUND,
+                error_code::MESSAGE_DELIVERY_NOT_FOUND,
+            ),
+            (
+                RunError::InvalidMessageDelivery,
+                StatusCode::CONFLICT,
+                error_code::INVALID_MESSAGE_DELIVERY,
+            ),
+            (
+                RunError::MessageDeliveryOutOfOrder,
+                StatusCode::CONFLICT,
+                error_code::MESSAGE_DELIVERY_OUT_OF_ORDER,
             ),
             (
                 RunError::CancellationFailed,

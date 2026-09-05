@@ -2,13 +2,14 @@ use std::{path::Path, process::Command};
 
 use kiln_core::{
     ApprovalPolicy, AssignTask, CreateTaskDisposition, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
-    MessageRole, Run, RunApplication, RunId, RunInputMode, RunState, RunStore, Session,
-    SessionEvent, SessionEventPayload, SessionId, SessionStore, StartRunDisposition,
-    SubprocessOutput, Task, TaskId, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError,
-    ToolCall, ToolCallId, ToolCallResult, ToolCallState, TransitionTask, UpdateTask, Workspace,
-    WorkspaceId, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId,
-    WorkspaceRootState, WorkspaceStore,
+    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message,
+    MessageDeliveryMode, MessageDeliveryState, MessageId, MessageRole, RecordRunInputDelivery,
+    RecordRunInputDisposition, Run, RunApplication, RunId, RunInputMode, RunState, RunStore,
+    SendRunInput, SendRunInputDisposition, Session, SessionEvent, SessionEventPayload, SessionId,
+    SessionStore, StartRunDisposition, SubprocessOutput, Task, TaskId, TaskMutationDisposition,
+    TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId, ToolCallResult, ToolCallState,
+    TransitionTask, UpdateTask, Workspace, WorkspaceId, WorkspacePathScope, WorkspaceRoot,
+    WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
@@ -1354,6 +1355,7 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
         include_str!("../migrations/0009_task_lifecycle.sql"),
         include_str!("../migrations/0010_task_assignment.sql"),
         include_str!("../migrations/0011_run_hierarchy.sql"),
+        include_str!("../migrations/0012_run_input.sql"),
     ] {
         sqlx::raw_sql(migration)
             .execute(&mut connection)
@@ -1734,6 +1736,250 @@ async fn child_runs_are_atomic_idempotent_and_recover_as_a_session_tree() {
             )
             .await,
         Err(kiln_core::RunError::ParentRunTerminal)
+    );
+}
+
+#[tokio::test]
+async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
+    let (data, store, session) = seeded_session().await;
+    let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
+    let root = app
+        .start_root_run(
+            session.id().clone(),
+            "input-root".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    let run_id = root.value.run().run_id().clone();
+    let read_only = app
+        .start_child_run(
+            run_id.clone(),
+            None,
+            RunInputMode::ReadOnly,
+            "input-read-only-child".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+
+    let first_command = SendRunInput {
+        run_id: run_id.clone(),
+        content: "first guidance".to_owned(),
+        delivery_mode: MessageDeliveryMode::Queued,
+        idempotency_key: "first-input".to_owned(),
+    };
+    let first = app.send_run_input(first_command.clone()).await.unwrap();
+    assert_eq!(first.disposition, SendRunInputDisposition::Created);
+    assert_eq!(first.value.state(), MessageDeliveryState::Queued);
+    assert_eq!(first.value.message().target_run_id(), Some(&run_id));
+    assert!(matches!(
+        first.events[0].payload(),
+        SessionEventPayload::MessageAppended { message }
+            if message.id() == first.value.message().id()
+    ));
+    assert!(matches!(
+        first.events[1].payload(),
+        SessionEventPayload::RunInputQueued {
+            run_id: event_run_id,
+            message_id,
+        } if event_run_id == &run_id && message_id == first.value.message().id()
+    ));
+
+    let second = app
+        .send_run_input(SendRunInput {
+            run_id: run_id.clone(),
+            content: "urgent guidance".to_owned(),
+            delivery_mode: MessageDeliveryMode::Interrupt,
+            idempotency_key: "second-input".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        second.events[1].payload(),
+        SessionEventPayload::RunInterruptRequested { .. }
+    ));
+    let third = app
+        .send_run_input(SendRunInput {
+            run_id: run_id.clone(),
+            content: "third guidance".to_owned(),
+            delivery_mode: MessageDeliveryMode::Queued,
+            idempotency_key: "third-input".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let duplicate = app.send_run_input(first_command.clone()).await.unwrap();
+    assert_eq!(duplicate.disposition, SendRunInputDisposition::Duplicate);
+    assert_eq!(duplicate.value, first.value);
+    assert!(duplicate.events.is_empty());
+    let mut conflicting = first_command.clone();
+    conflicting.content = "different guidance".to_owned();
+    assert_eq!(
+        app.send_run_input(conflicting).await,
+        Err(kiln_core::RunError::IdempotencyConflict)
+    );
+    assert_eq!(
+        app.send_run_input(SendRunInput {
+            run_id: read_only.value.run().run_id().clone(),
+            content: "not permitted".to_owned(),
+            delivery_mode: MessageDeliveryMode::Queued,
+            idempotency_key: "read-only-input".to_owned(),
+        })
+        .await,
+        Err(kiln_core::RunError::RunInputReadOnly)
+    );
+
+    let forged_message = Message::new_targeted(
+        MessageId::parse("msg_01ARZ3NDEKTSV4RRFFQ69G5FCE").unwrap(),
+        session.id().clone(),
+        MessageRole::User,
+        "bypass".to_owned(),
+        run_id.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .append_message(
+                &forged_message,
+                &SessionEvent::message_appended(
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FCE").unwrap(),
+                    forged_message.clone(),
+                ),
+            )
+            .await,
+        Err(kiln_core::StoreError::Unavailable)
+    );
+
+    assert_eq!(
+        app.next_queued_run_input(run_id.clone()).await.unwrap(),
+        Some(first.value.clone())
+    );
+    assert_eq!(
+        app.record_run_input_delivery(RecordRunInputDelivery {
+            message_id: second.value.message().id().clone(),
+            state: MessageDeliveryState::Delivered,
+        })
+        .await,
+        Err(kiln_core::RunError::MessageDeliveryOutOfOrder)
+    );
+    let delivered = app
+        .record_run_input_delivery(RecordRunInputDelivery {
+            message_id: first.value.message().id().clone(),
+            state: MessageDeliveryState::Delivered,
+        })
+        .await
+        .unwrap();
+    assert_eq!(delivered.disposition, RecordRunInputDisposition::Applied);
+    assert!(matches!(
+        delivered.events[0].payload(),
+        SessionEventPayload::RunInputDelivered { .. }
+    ));
+    let delivered_retry = app
+        .record_run_input_delivery(RecordRunInputDelivery {
+            message_id: first.value.message().id().clone(),
+            state: MessageDeliveryState::Delivered,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        delivered_retry.disposition,
+        RecordRunInputDisposition::Duplicate
+    );
+    assert!(delivered_retry.events.is_empty());
+    assert_eq!(
+        app.record_run_input_delivery(RecordRunInputDelivery {
+            message_id: first.value.message().id().clone(),
+            state: MessageDeliveryState::Failed,
+        })
+        .await,
+        Err(kiln_core::RunError::InvalidMessageDelivery)
+    );
+    let failed = app
+        .record_run_input_delivery(RecordRunInputDelivery {
+            message_id: second.value.message().id().clone(),
+            state: MessageDeliveryState::Failed,
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.value.state(), MessageDeliveryState::Failed);
+
+    app.request_cancellation(run_id.clone()).await.unwrap();
+    assert_eq!(
+        app.record_run_input_delivery(RecordRunInputDelivery {
+            message_id: third.value.message().id().clone(),
+            state: MessageDeliveryState::Delivered,
+        })
+        .await,
+        Err(kiln_core::RunError::InvalidMessageDelivery)
+    );
+    let cancelled = app
+        .record_run_input_delivery(RecordRunInputDelivery {
+            message_id: third.value.message().id().clone(),
+            state: MessageDeliveryState::Cancelled,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled.value.state(), MessageDeliveryState::Cancelled);
+    let terminal_retry = app.send_run_input(first_command).await.unwrap();
+    assert_eq!(
+        terminal_retry.disposition,
+        SendRunInputDisposition::Duplicate
+    );
+    assert_eq!(
+        terminal_retry.value.state(),
+        MessageDeliveryState::Delivered
+    );
+    assert_eq!(
+        app.send_run_input(SendRunInput {
+            run_id: run_id.clone(),
+            content: "late guidance".to_owned(),
+            delivery_mode: MessageDeliveryMode::Queued,
+            idempotency_key: "late-input".to_owned(),
+        })
+        .await,
+        Err(kiln_core::RunError::RunNotAcceptingInput)
+    );
+
+    drop(app);
+    drop(store);
+    let reopened = super::SqliteStore::open(data.path()).await.unwrap();
+    let reopened_app = RunApplication::new(reopened.clone(), super::UlidIdGenerator);
+    assert_eq!(
+        reopened_app
+            .next_queued_run_input(run_id.clone())
+            .await
+            .unwrap(),
+        None
+    );
+    let history = reopened
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    let kinds = history
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            SessionEventPayload::RunInputQueued { .. } => Some("queued"),
+            SessionEventPayload::RunInterruptRequested { .. } => Some("interrupt"),
+            SessionEventPayload::RunInputDelivered { .. } => Some("delivered"),
+            SessionEventPayload::RunInputFailed { .. } => Some("failed"),
+            SessionEventPayload::RunInputCancelled { .. } => Some("cancelled"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "queued",
+            "interrupt",
+            "queued",
+            "delivered",
+            "failed",
+            "cancelled"
+        ]
     );
 }
 

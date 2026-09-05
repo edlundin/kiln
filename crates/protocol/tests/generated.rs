@@ -5,11 +5,12 @@ use kiln_protocol::{
     CreateWorkspaceRequest, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
     EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
     GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, MessageResponse,
-    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
-    START_RUN_OPERATION_ID, SessionEventDataResponse, SessionEventsResponse, SessionResponse,
+    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID,
+    MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
+    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_PATH, RunInputMode,
+    RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID,
+    SessionEventDataResponse, SessionEventsResponse, SessionResponse, StartChildRunRequest,
     StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
     TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallState, ToolOutputStream,
     TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UpdateTaskRequest, WEBSOCKET_CAPABILITY,
@@ -79,6 +80,32 @@ fn command_types_reject_unknown_fields() {
 }
 
 #[test]
+fn child_run_task_link_is_present_but_nullable() {
+    let value = json!({
+        "approval_policy": "ask",
+        "workspace_root_id": "wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "relative_directory": ".",
+        "user_input_mode": "interactive",
+        "task_id": null
+    });
+    assert_eq!(
+        serde_json::from_value::<StartChildRunRequest>(value.clone())
+            .expect("explicit null Task link is valid")
+            .task_id,
+        None
+    );
+
+    let mut omitted = value;
+    omitted
+        .as_object_mut()
+        .expect("child Run request object")
+        .remove("task_id");
+    let error = serde_json::from_value::<StartChildRunRequest>(omitted)
+        .expect_err("omitted Task link is invalid");
+    assert!(error.to_string().contains("missing field `task_id`"));
+}
+
+#[test]
 fn response_types_accept_unknown_fields() {
     let value = json!({
         "selected_version": PROTOCOL_VERSION,
@@ -135,6 +162,9 @@ fn response_types_accept_unknown_fields() {
     let value = json!({
         "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "parent_run_id": null,
+        "task_id": null,
+        "user_input_mode": "interactive",
         "state": "queued",
         "approval_policy": "ask",
         "requested_scope": {
@@ -304,8 +334,18 @@ fn catalogue_and_error_fixture_use_protocol_metadata() {
     );
     assert_eq!(catalogue["http"][12]["path"], SESSION_RUNS_PATH);
     assert_eq!(catalogue["http"][12]["operation"], START_RUN_OPERATION_ID);
-    assert_eq!(catalogue["http"][13]["path"], RUN_PATH);
-    assert_eq!(catalogue["http"][13]["operation"], GET_RUN_OPERATION_ID);
+    assert_eq!(catalogue["http"][13]["path"], SESSION_RUNS_PATH);
+    assert_eq!(
+        catalogue["http"][13]["operation"],
+        LIST_SESSION_RUNS_OPERATION_ID
+    );
+    assert_eq!(catalogue["http"][14]["path"], RUN_CHILDREN_PATH);
+    assert_eq!(
+        catalogue["http"][14]["operation"],
+        START_CHILD_RUN_OPERATION_ID
+    );
+    assert_eq!(catalogue["http"][15]["path"], RUN_PATH);
+    assert_eq!(catalogue["http"][15]["operation"], GET_RUN_OPERATION_ID);
     let artifact = catalogue["http"]
         .as_array()
         .expect("HTTP operations")
@@ -607,6 +647,9 @@ fn run_fixtures_match_json_schema_typescript_and_openapi() {
         SessionEventDataResponse::RunCreated {
             run_id: run.run_id.clone(),
             state: RunState::Queued,
+            parent_run_id: None,
+            task_id: None,
+            user_input_mode: RunInputMode::Interactive,
             approval_policy: None,
             requested_scope: None,
         },

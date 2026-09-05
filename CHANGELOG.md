@@ -2,6 +2,14 @@
 
 ## 2026-09-04 — `feat`
 
+- Added durable parent/child Runs with immutable input mode and optional atomic Task assignment.
+- Added root/child queued and child-added events with replay and restart recovery.
+- Added child-start and Session Run-tree HTTP APIs in protocol version `0.12.0`.
+
+[Commit](pending)
+
+## 2026-09-04 — `feat`
+
 - Added idempotent Task-to-Run assignment for active Runs in the same Session.
 - Enforced one-to-one Task and Run assignment with durable `task.assigned` recovery.
 - Published the assignment endpoint and protocol version `0.11.0`.

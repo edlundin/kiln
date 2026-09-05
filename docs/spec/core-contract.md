@@ -136,13 +136,18 @@ active assigned run.
 | Command | Idempotency | Required behavior | Durable events |
 | --- | --- | --- | --- |
 | `StartRun` | required | Create a root run and committed provider work | `run.created`, `run.queued` |
-| `StartChildRun` | required | Create one child in the same thread with one parent and optional task | `run.created`, `run.queued`, `run.child_added` |
+| `StartChildRun` | required | Create one child in the same Session with one parent and optional Task assignment | `run.created`, `run.queued`, `run.child_added`, and optional `task.assigned` |
 | `ClaimRun` | required | Move queued work to running and record an execution claim | `run.state_changed` |
 | `SendRunInput` | required | Append targeted guidance with queued or explicit interrupt delivery | `message.appended`, `run.input_queued` or `run.interrupt_requested` |
 | `RecordRunInputDelivery` | required | Record delivery, failure, or cancellation for one targeted message | `run.input_delivered`, `run.input_failed`, or `run.input_cancelled` |
 | `RequestRunCancellation` | required | Cancel queued work or request cancellation of active work | `run.cancellation_requested`, `run.state_changed` |
 | `RecordProviderUpdate` | required | Convert one provider update into validated message, tool-call, usage, or run events | validated protocol events only |
 | `FinishRun` | required | Commit one terminal result and release its claim | `run.state_changed` |
+
+Root Runs use immutable `interactive` user input mode. Child Runs store one immutable
+`parent_run_id`, optional `task_id`, and `interactive` or `read_only` user input mode.
+`GET /v1/sessions/{session_id}/runs` returns the durable flat list whose parent IDs form
+the Session Run tree.
 
 Cancelling a child does not cancel its parent or siblings. Cancelling a run
 requests cancellation for its descendants. A completion already committed

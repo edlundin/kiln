@@ -1,6 +1,9 @@
 {
   "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "parent_run_id": null,
+  "task_id": null,
+  "user_input_mode": "interactive",
   "state": "completed",
   "approval_policy": "full_access",
   "requested_scope": {

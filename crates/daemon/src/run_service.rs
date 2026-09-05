@@ -2,9 +2,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use kiln_core::{
     ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, RunApplication, RunError,
-    RunId, RunMutation, RunSnapshot, RunState, RunStore, SessionId, SessionStore,
+    RunId, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, SessionId, SessionStore,
     StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
-    SubprocessRequest, TOOL_OUTPUT_MEDIA_TYPE, ToolCallId, WorkspacePathScope, WorkspaceStore,
+    SubprocessRequest, TOOL_OUTPUT_MEDIA_TYPE, TaskId, ToolCallId, WorkspacePathScope,
+    WorkspaceStore,
 };
 use kiln_infrastructure::{
     DeterministicSubprocessExecutor, FileArtifactStore, SqliteStore, UlidIdGenerator,
@@ -59,16 +60,14 @@ impl RunService {
         }
     }
 
-    async fn start(
+    async fn validate_start(
         &self,
-        session_id: SessionId,
-        idempotency_key: String,
-        approval_policy: ApprovalPolicy,
-        requested_scope: WorkspacePathScope,
-    ) -> Result<kiln_core::StartRunMutation, RunError> {
+        session_id: &SessionId,
+        requested_scope: &WorkspacePathScope,
+    ) -> Result<(), RunError> {
         let session = self
             .store
-            .get_session(&session_id)
+            .get_session(session_id)
             .await
             .map_err(|_| RunError::RunStoreUnavailable)?
             .ok_or(RunError::SessionNotFound)?;
@@ -87,6 +86,17 @@ impl RunService {
             requested_scope.clone(),
         )?;
         validate_subprocess_request(&request)?;
+        Ok(())
+    }
+
+    async fn start(
+        &self,
+        session_id: SessionId,
+        idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+    ) -> Result<kiln_core::StartRunMutation, RunError> {
+        self.validate_start(&session_id, &requested_scope).await?;
         let (value, disposition) = {
             let _sequence = self.commit_sequence.lock().await;
             let mutation = self
@@ -109,6 +119,52 @@ impl RunService {
             self.spawn_active(run_id, true).await;
         }
 
+        Ok(kiln_core::StartRunMutation::new(
+            value,
+            Vec::new(),
+            disposition,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_child(
+        &self,
+        parent_run_id: RunId,
+        task_id: Option<TaskId>,
+        user_input_mode: RunInputMode,
+        idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+    ) -> Result<kiln_core::StartRunMutation, RunError> {
+        let parent = self
+            .store
+            .get_run(&parent_run_id)
+            .await
+            .map_err(|_| RunError::RunStoreUnavailable)?
+            .ok_or(RunError::ParentRunNotFound)?;
+        self.validate_start(parent.run().session_id(), &requested_scope)
+            .await?;
+        let (value, disposition) = {
+            let _sequence = self.commit_sequence.lock().await;
+            let mutation = self
+                .runs
+                .start_child_run(
+                    parent_run_id,
+                    task_id,
+                    user_input_mode,
+                    idempotency_key,
+                    approval_policy,
+                    requested_scope,
+                )
+                .await?;
+            let value = mutation.value.clone();
+            let disposition = mutation.disposition;
+            self.events.publish(mutation.events);
+            (value, disposition)
+        };
+        if disposition == StartRunDisposition::Created {
+            self.spawn_active(value.run().run_id().clone(), true).await;
+        }
         Ok(kiln_core::StartRunMutation::new(
             value,
             Vec::new(),
@@ -563,6 +619,32 @@ impl RunOperations for RunService {
             approval_policy,
             requested_scope,
         )
+    }
+
+    fn start_child_run(
+        &self,
+        parent_run_id: RunId,
+        task_id: Option<TaskId>,
+        user_input_mode: RunInputMode,
+        idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+    ) -> impl Future<Output = Result<kiln_core::StartRunMutation, RunError>> + Send {
+        self.start_child(
+            parent_run_id,
+            task_id,
+            user_input_mode,
+            idempotency_key,
+            approval_policy,
+            requested_scope,
+        )
+    }
+
+    fn list_session_runs(
+        &self,
+        session_id: SessionId,
+    ) -> impl Future<Output = Result<Vec<RunSnapshot>, RunError>> + Send {
+        self.runs.list_session_runs(session_id)
     }
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send {

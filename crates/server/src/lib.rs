@@ -23,12 +23,12 @@ use axum::{
 };
 use kiln_core::{
     AppendMessage, Artifact, AssignTask, ContentHash, CreateTask, CreateWorkspace, EventCursor,
-    Message, MessageRole as CoreMessageRole, RunError, RunId, RunSnapshot,
-    RunState as CoreRunState, Session, SessionError, SessionEventPage, SessionEventPayload,
-    SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task, TaskError, TaskId,
-    TaskOperations, TaskState as CoreTaskState, ToolCall, ToolCallState as CoreToolCallState,
-    ToolOutputStream as CoreToolOutputStream, TransitionTask, UpdateTask, WorkspaceError,
-    WorkspaceId, WorkspaceOperations,
+    Message, MessageRole as CoreMessageRole, RunError, RunId, RunInputMode as CoreRunInputMode,
+    RunSnapshot, RunState as CoreRunState, Session, SessionError, SessionEventPage,
+    SessionEventPayload, SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task,
+    TaskError, TaskId, TaskOperations, TaskState as CoreTaskState, ToolCall,
+    ToolCallState as CoreToolCallState, ToolOutputStream as CoreToolOutputStream, TransitionTask,
+    UpdateTask, WorkspaceError, WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
@@ -36,14 +36,15 @@ use kiln_protocol::{
     ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest, CreateTaskRequest,
     CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageResponse,
     MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
-    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
-    TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
-    ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY,
-    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
-    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_PATH, RunInputMode, RunResponse,
+    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SESSION_TASKS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
+    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
+    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
+    TaskState, ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
+    UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse,
+    WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -58,6 +59,21 @@ pub trait RunOperations: Send + Sync {
         approval_policy: kiln_core::ApprovalPolicy,
         requested_scope: kiln_core::WorkspacePathScope,
     ) -> impl Future<Output = Result<kiln_core::StartRunMutation, RunError>> + Send;
+
+    fn start_child_run(
+        &self,
+        parent_run_id: RunId,
+        task_id: Option<TaskId>,
+        user_input_mode: CoreRunInputMode,
+        idempotency_key: String,
+        approval_policy: kiln_core::ApprovalPolicy,
+        requested_scope: kiln_core::WorkspacePathScope,
+    ) -> impl Future<Output = Result<kiln_core::StartRunMutation, RunError>> + Send;
+
+    fn list_session_runs(
+        &self,
+        session_id: SessionId,
+    ) -> impl Future<Output = Result<Vec<RunSnapshot>, RunError>> + Send;
 
     fn get_run(&self, run_id: RunId) -> impl Future<Output = Result<RunSnapshot, RunError>> + Send;
 
@@ -365,7 +381,8 @@ where
         .route(TASK_ASSIGNMENT_PATH, post(assign_task))
         .route(TASK_TRANSITION_PATH, post(transition_task))
         .route(SESSION_EVENTS_PATH, get(list_session_events))
-        .route(SESSION_RUNS_PATH, post(start_run))
+        .route(SESSION_RUNS_PATH, post(start_run).get(list_session_runs))
+        .route(RUN_CHILDREN_PATH, post(start_child_run))
         .route(RUN_PATH, get(get_run))
         .route(RUN_CANCEL_PATH, post(cancel_run))
         .route(TOOL_CALL_APPROVAL_PATH, post(decide_approval))
@@ -804,6 +821,70 @@ where
     Ok((StatusCode::ACCEPTED, Json(run_response(&run.value))))
 }
 
+async fn start_child_run<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(parent_run_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<StartChildRunRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let task_id = request
+        .task_id
+        .map(TaskId::parse)
+        .transpose()
+        .map_err(|_| PublicError::InvalidRequest)?;
+    let user_input_mode = match request.user_input_mode {
+        RunInputMode::Interactive => CoreRunInputMode::Interactive,
+        RunInputMode::ReadOnly => CoreRunInputMode::ReadOnly,
+    };
+    let approval_policy = match request.approval_policy {
+        ProtocolApprovalPolicy::Ask => kiln_core::ApprovalPolicy::Ask,
+        ProtocolApprovalPolicy::ReadOnly => kiln_core::ApprovalPolicy::ReadOnly,
+        ProtocolApprovalPolicy::FullAccess => kiln_core::ApprovalPolicy::FullAccess,
+    };
+    let root = kiln_core::WorkspaceRootId::parse(request.workspace_root_id)
+        .map_err(|_| PublicError::InvalidRequest)?;
+    let requested_scope = kiln_core::WorkspacePathScope::new(root, request.relative_directory)
+        .map_err(|_| PublicError::Run(RunError::PathOutsideWorkspaceRoot))?;
+    let run = state
+        .run_operations
+        .start_child_run(
+            RunId::parse(parent_run_id).map_err(|_| PublicError::InvalidRequest)?,
+            task_id,
+            user_input_mode,
+            required_idempotency_key(&headers)?,
+            approval_policy,
+            requested_scope,
+        )
+        .await
+        .map_err(PublicError::from)?;
+    Ok((StatusCode::ACCEPTED, Json(run_response(&run.value))))
+}
+
+async fn list_session_runs<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionRunsResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let runs = state
+        .run_operations
+        .list_session_runs(SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(SessionRunsResponse {
+        runs: runs.iter().map(run_response).collect(),
+    }))
+}
+
 async fn decide_approval<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(tool_call_id): Path<String>,
@@ -1024,6 +1105,18 @@ fn run_response(snapshot: &RunSnapshot) -> RunResponse {
     RunResponse {
         run_id: snapshot.run().run_id().as_str().to_owned(),
         session_id: snapshot.run().session_id().as_str().to_owned(),
+        parent_run_id: snapshot
+            .run()
+            .parent_run_id()
+            .map(|run_id| run_id.as_str().to_owned()),
+        task_id: snapshot
+            .run()
+            .task_id()
+            .map(|task_id| task_id.as_str().to_owned()),
+        user_input_mode: match snapshot.run().user_input_mode() {
+            CoreRunInputMode::Interactive => RunInputMode::Interactive,
+            CoreRunInputMode::ReadOnly => RunInputMode::ReadOnly,
+        },
         state: run_state_response(snapshot.run().state()),
         approval_policy: snapshot.run().approval_policy().map(|policy| match policy {
             kiln_core::ApprovalPolicy::Ask => ProtocolApprovalPolicy::Ask,
@@ -1146,17 +1239,38 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
         SessionEventPayload::RunCreated {
             run_id,
             state,
+            parent_run_id,
+            task_id,
+            user_input_mode,
             approval_policy,
             requested_scope,
         } => SessionEventDataResponse::RunCreated {
             run_id: run_id.as_str().to_owned(),
             state: run_state_response(*state),
+            parent_run_id: parent_run_id
+                .as_ref()
+                .map(|run_id| run_id.as_str().to_owned()),
+            task_id: task_id.as_ref().map(|task_id| task_id.as_str().to_owned()),
+            user_input_mode: match user_input_mode {
+                CoreRunInputMode::Interactive => RunInputMode::Interactive,
+                CoreRunInputMode::ReadOnly => RunInputMode::ReadOnly,
+            },
             approval_policy: approval_policy.map(|policy| match policy {
                 kiln_core::ApprovalPolicy::Ask => ProtocolApprovalPolicy::Ask,
                 kiln_core::ApprovalPolicy::ReadOnly => ProtocolApprovalPolicy::ReadOnly,
                 kiln_core::ApprovalPolicy::FullAccess => ProtocolApprovalPolicy::FullAccess,
             }),
             requested_scope: requested_scope.as_ref().map(scope_response),
+        },
+        SessionEventPayload::RunQueued { run_id } => SessionEventDataResponse::RunQueued {
+            run_id: run_id.as_str().to_owned(),
+        },
+        SessionEventPayload::RunChildAdded {
+            parent_run_id,
+            child_run_id,
+        } => SessionEventDataResponse::RunChildAdded {
+            parent_run_id: parent_run_id.as_str().to_owned(),
+            child_run_id: child_run_id.as_str().to_owned(),
         },
         SessionEventPayload::RunStateChanged { run_id, state } => {
             SessionEventDataResponse::RunStateChanged {
@@ -1827,6 +1941,31 @@ impl PublicError {
                     error_code::RUN_NOT_FOUND,
                     "Run not found",
                 ),
+                RunError::ParentRunNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::PARENT_RUN_NOT_FOUND,
+                    "Parent run not found",
+                ),
+                RunError::ParentRunTerminal => (
+                    StatusCode::CONFLICT,
+                    error_code::PARENT_RUN_TERMINAL,
+                    "Parent run is terminal",
+                ),
+                RunError::TaskNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::TASK_NOT_FOUND,
+                    "Task not found",
+                ),
+                RunError::TaskLinkOutsideSession => (
+                    StatusCode::CONFLICT,
+                    error_code::TASK_LINK_OUTSIDE_SESSION,
+                    "Task link outside Session",
+                ),
+                RunError::InvalidTaskAssignment => (
+                    StatusCode::CONFLICT,
+                    error_code::INVALID_TASK_ASSIGNMENT,
+                    "Invalid Task assignment",
+                ),
                 RunError::ActiveRootRunExists => (
                     StatusCode::CONFLICT,
                     error_code::ACTIVE_ROOT_RUN_EXISTS,
@@ -2015,6 +2154,9 @@ mod tests {
             SessionEventPayload::RunCreated {
                 run_id: run_id(),
                 state: CoreRunState::Queued,
+                parent_run_id: None,
+                task_id: None,
+                user_input_mode: CoreRunInputMode::Interactive,
                 approval_policy: Some(ApprovalPolicy::FullAccess),
                 requested_scope: Some(path_scope()),
             },
@@ -2150,6 +2292,9 @@ mod tests {
             SessionEventPayload::RunCreated {
                 run_id: run_id(),
                 state: CoreRunState::Queued,
+                parent_run_id: None,
+                task_id: None,
+                user_input_mode: CoreRunInputMode::Interactive,
                 approval_policy: Some(ApprovalPolicy::FullAccess),
                 requested_scope: Some(path_scope()),
             },

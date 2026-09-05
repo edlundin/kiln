@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.11.0";
+pub const PROTOCOL_VERSION: &str = "0.12.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -24,6 +24,7 @@ pub const SESSION_MESSAGES_PATH: &str = "/v1/sessions/{session_id}/messages";
 pub const SESSION_TASKS_PATH: &str = "/v1/sessions/{session_id}/tasks";
 pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
+pub const RUN_CHILDREN_PATH: &str = "/v1/runs/{parent_run_id}/children";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
 pub const TASK_PATH: &str = "/v1/tasks/{task_id}";
 pub const TASK_ASSIGNMENT_PATH: &str = "/v1/tasks/{task_id}/assignment";
@@ -45,6 +46,8 @@ pub const ASSIGN_TASK_OPERATION_ID: &str = "assign_task";
 pub const TRANSITION_TASK_OPERATION_ID: &str = "transition_task";
 pub const LIST_SESSION_EVENTS_OPERATION_ID: &str = "list_session_events";
 pub const START_RUN_OPERATION_ID: &str = "start_run";
+pub const START_CHILD_RUN_OPERATION_ID: &str = "start_child_run";
+pub const LIST_SESSION_RUNS_OPERATION_ID: &str = "list_session_runs";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
@@ -93,6 +96,8 @@ pub mod error_code {
     pub const INVALID_IDEMPOTENCY_KEY: &str = "invalid_idempotency_key";
     pub const SESSION_STORE_UNAVAILABLE: &str = "session_store_unavailable";
     pub const RUN_NOT_FOUND: &str = "run_not_found";
+    pub const PARENT_RUN_NOT_FOUND: &str = "parent_run_not_found";
+    pub const PARENT_RUN_TERMINAL: &str = "parent_run_terminal";
     pub const ACTIVE_ROOT_RUN_EXISTS: &str = "active_root_run_exists";
     pub const INVALID_RUN_STATE: &str = "invalid_run_state";
     pub const RUN_STORE_UNAVAILABLE: &str = "run_store_unavailable";
@@ -150,6 +155,8 @@ pub mod error_code {
         INVALID_IDEMPOTENCY_KEY,
         SESSION_STORE_UNAVAILABLE,
         RUN_NOT_FOUND,
+        PARENT_RUN_NOT_FOUND,
+        PARENT_RUN_TERMINAL,
         ACTIVE_ROOT_RUN_EXISTS,
         INVALID_RUN_STATE,
         RUN_STORE_UNAVAILABLE,
@@ -300,6 +307,19 @@ pub struct StartRunRequest {
     pub relative_directory: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct StartChildRunRequest {
+    pub approval_policy: ApprovalPolicy,
+    pub workspace_root_id: String,
+    pub relative_directory: String,
+    pub user_input_mode: RunInputMode,
+    #[schemars(with = "RequiredNullableString")]
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    pub task_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicy {
@@ -382,6 +402,13 @@ pub enum RunState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunInputMode {
+    Interactive,
+    ReadOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallState {
@@ -438,6 +465,11 @@ pub struct ToolCallResponse {
 pub struct RunResponse {
     pub run_id: String,
     pub session_id: String,
+    #[schemars(with = "RequiredNullableString")]
+    pub parent_run_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub task_id: Option<String>,
+    pub user_input_mode: RunInputMode,
     pub state: RunState,
     #[schemars(with = "RequiredNullableApprovalPolicy")]
     pub approval_policy: Option<ApprovalPolicy>,
@@ -445,6 +477,12 @@ pub struct RunResponse {
     pub requested_scope: Option<WorkspaceScopeResponse>,
     pub tool_calls: Vec<ToolCallResponse>,
     pub approvals: Vec<ApprovalResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionRunsResponse {
+    pub runs: Vec<RunResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -491,10 +529,22 @@ pub enum SessionEventDataResponse {
     RunCreated {
         run_id: String,
         state: RunState,
+        #[schemars(with = "RequiredNullableString")]
+        parent_run_id: Option<String>,
+        #[schemars(with = "RequiredNullableString")]
+        task_id: Option<String>,
+        user_input_mode: RunInputMode,
         #[schemars(with = "RequiredNullableApprovalPolicy")]
         approval_policy: Option<ApprovalPolicy>,
         #[schemars(with = "RequiredNullableScope")]
         requested_scope: Option<WorkspaceScopeResponse>,
+    },
+    #[serde(rename = "run.queued")]
+    RunQueued { run_id: String },
+    #[serde(rename = "run.child_added")]
+    RunChildAdded {
+        parent_run_id: String,
+        child_run_id: String,
     },
     #[serde(rename = "run.state_changed")]
     RunStateChanged { run_id: String, state: RunState },
@@ -540,6 +590,13 @@ pub struct SessionEventResponse {
 pub struct SessionEventsResponse {
     pub events: Vec<SessionEventResponse>,
     pub current_event_cursor: String,
+}
+
+fn deserialize_required_nullable_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 struct RequiredNullableString;

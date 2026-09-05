@@ -11,14 +11,14 @@ use kiln_protocol::{
     ApprovalState, AssignTaskRequest, ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest,
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
     MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_PATH, RunResponse, RunState, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
-    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    StartRunRequest, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
-    TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallState, ToolOutputStream,
-    TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
-    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
-    WorkspaceRootRequest, error_code,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_PATH, RunInputMode, RunResponse,
+    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SESSION_TASKS_PATH, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
+    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest,
+    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
+    TaskState, ToolCallState, ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
+    WorkspaceResponse, WorkspaceRootRequest, error_code,
 };
 use reqwest::{
     StatusCode,
@@ -284,6 +284,8 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::TaskAssigned { .. } => "task.assigned",
         SessionEventDataResponse::TaskStateChanged { .. } => "task.state_changed",
         SessionEventDataResponse::RunCreated { .. } => "run.created",
+        SessionEventDataResponse::RunQueued { .. } => "run.queued",
+        SessionEventDataResponse::RunChildAdded { .. } => "run.child_added",
         SessionEventDataResponse::RunStateChanged { .. } => "run.state_changed",
         SessionEventDataResponse::RunCancellationRequested { .. } => "run.cancellation_requested",
         SessionEventDataResponse::ToolCallRequested { .. } => "tool_call.requested",
@@ -299,6 +301,7 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
 fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> bool {
     match &event.event {
         SessionEventDataResponse::RunCreated { run_id, .. }
+        | SessionEventDataResponse::RunQueued { run_id }
         | SessionEventDataResponse::RunStateChanged { run_id, .. }
         | SessionEventDataResponse::RunCancellationRequested { run_id } => {
             run_id == expected_run_id
@@ -320,6 +323,9 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         | SessionEventDataResponse::TaskUpdated { .. }
         | SessionEventDataResponse::TaskAssigned { .. }
         | SessionEventDataResponse::TaskStateChanged { .. } => false,
+        SessionEventDataResponse::RunChildAdded { child_run_id, .. } => {
+            child_run_id == expected_run_id
+        }
     }
 }
 
@@ -1782,6 +1788,7 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
         live_events.iter().map(event_kind).collect::<Vec<_>>(),
         [
             "run.created",
+            "run.queued",
             "run.state_changed",
             "tool_call.requested",
             "tool_call.state_changed",
@@ -1942,6 +1949,242 @@ async fn real_daemon_runs_a_subprocess_publishes_events_and_recovers_the_result(
             .expect("recovered Run JSON"),
         completed
     );
+}
+
+#[tokio::test]
+async fn child_runs_list_replay_and_recover_as_one_session_tree() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary child Run test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("child Run repository parent");
+    let data_directory = sandbox.path().join("data");
+    let daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let mut socket = open_event_socket(&daemon).await;
+    let root: RunResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            SESSION_RUNS_PATH.replace("{session_id}", &session.session_id)
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "tree-root")
+        .json(&session.request_with_policy(ApprovalPolicy::Ask))
+        .send()
+        .await
+        .expect("tree root response")
+        .json()
+        .await
+        .expect("tree root JSON");
+    receive_run_events(&mut socket, &root.run_id, RunState::WaitingForApproval).await;
+    assert_eq!(root.parent_run_id, None);
+    assert_eq!(root.task_id, None);
+    assert_eq!(root.user_input_mode, RunInputMode::Interactive);
+
+    let task: TaskResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            SESSION_TASKS_PATH.replace("{session_id}", &session.session_id)
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "tree-task")
+        .json(&CreateTaskRequest {
+            objective: "delegated child".to_owned(),
+            parent_task_id: None,
+            dependency_task_ids: Vec::new(),
+        })
+        .send()
+        .await
+        .expect("tree Task response")
+        .json()
+        .await
+        .expect("tree Task JSON");
+    let child_path = RUN_CHILDREN_PATH.replace("{parent_run_id}", &root.run_id);
+    let first_request = StartChildRunRequest {
+        approval_policy: ApprovalPolicy::Ask,
+        workspace_root_id: session.workspace_root_id.clone(),
+        relative_directory: ".".to_owned(),
+        user_input_mode: RunInputMode::ReadOnly,
+        task_id: Some(task.task_id.clone()),
+    };
+    let first: RunResponse = http
+        .post(format!("http://{}{}", daemon.address, child_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "first-child")
+        .json(&first_request)
+        .send()
+        .await
+        .expect("first child response")
+        .json()
+        .await
+        .expect("first child JSON");
+    let first_events =
+        receive_run_events(&mut socket, &first.run_id, RunState::WaitingForApproval).await;
+    assert_eq!(
+        first_events
+            .iter()
+            .filter(|event| event_belongs_to_run(event, &first.run_id))
+            .take(3)
+            .map(event_kind)
+            .collect::<Vec<_>>(),
+        ["run.created", "run.queued", "run.child_added"]
+    );
+    assert_eq!(first.parent_run_id.as_deref(), Some(root.run_id.as_str()));
+    assert_eq!(first.task_id.as_deref(), Some(task.task_id.as_str()));
+    assert_eq!(first.user_input_mode, RunInputMode::ReadOnly);
+
+    let second_request = StartChildRunRequest {
+        approval_policy: ApprovalPolicy::Ask,
+        workspace_root_id: session.workspace_root_id.clone(),
+        relative_directory: ".".to_owned(),
+        user_input_mode: RunInputMode::Interactive,
+        task_id: None,
+    };
+    assert_problem(
+        http.post(format!(
+            "http://{}{}",
+            daemon.address,
+            RUN_CHILDREN_PATH.replace("{parent_run_id}", "run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "missing-parent-child")
+        .json(&second_request)
+        .send()
+        .await
+        .expect("missing parent child response"),
+        StatusCode::NOT_FOUND,
+        error_code::PARENT_RUN_NOT_FOUND,
+    )
+    .await;
+    let second: RunResponse = http
+        .post(format!("http://{}{}", daemon.address, child_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "second-child")
+        .json(&second_request)
+        .send()
+        .await
+        .expect("second child response")
+        .json()
+        .await
+        .expect("second child JSON");
+    receive_run_events(&mut socket, &second.run_id, RunState::WaitingForApproval).await;
+    assert_ne!(first.run_id, second.run_id);
+
+    let runs_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
+    let listed: SessionRunsResponse = http
+        .get(format!("http://{}{}", daemon.address, runs_path))
+        .send()
+        .await
+        .expect("Session Run list response")
+        .json()
+        .await
+        .expect("Session Run list JSON");
+    assert_eq!(
+        listed
+            .runs
+            .iter()
+            .map(|run| run.run_id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            root.run_id.as_str(),
+            first.run_id.as_str(),
+            second.run_id.as_str()
+        ]
+    );
+    let task_after: TaskResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            TASK_PATH.replace("{task_id}", &task.task_id)
+        ))
+        .send()
+        .await
+        .expect("assigned Task response")
+        .json()
+        .await
+        .expect("assigned Task JSON");
+    assert_eq!(
+        task_after.assigned_run_id.as_deref(),
+        Some(first.run_id.as_str())
+    );
+    let events_path = SESSION_EVENTS_PATH.replace("{session_id}", &session.session_id);
+    let history: SessionEventsResponse = http
+        .get(format!("http://{}{}", daemon.address, events_path))
+        .send()
+        .await
+        .expect("tree Event history response")
+        .json()
+        .await
+        .expect("tree Event history JSON");
+    let first_created = history
+        .events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.event,
+                SessionEventDataResponse::RunCreated { run_id, .. } if run_id == &first.run_id
+            )
+        })
+        .expect("first child create Event");
+    assert_eq!(
+        history.events[first_created..first_created + 4]
+            .iter()
+            .map(event_kind)
+            .collect::<Vec<_>>(),
+        [
+            "run.created",
+            "run.queued",
+            "run.child_added",
+            "task.assigned"
+        ]
+    );
+    let event_count = history.events.len();
+
+    drop(socket);
+    drop(daemon);
+    let restarted = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let restarted_http = restarted.client();
+    let recovered: SessionRunsResponse = restarted_http
+        .get(format!("http://{}{}", restarted.address, runs_path))
+        .send()
+        .await
+        .expect("recovered Session Run list response")
+        .json()
+        .await
+        .expect("recovered Session Run list JSON");
+    assert_eq!(recovered, listed);
+    let duplicate: RunResponse = restarted_http
+        .post(format!("http://{}{}", restarted.address, child_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "first-child")
+        .json(&first_request)
+        .send()
+        .await
+        .expect("recovered duplicate child response")
+        .json()
+        .await
+        .expect("recovered duplicate child JSON");
+    assert_eq!(duplicate.run_id, first.run_id);
+    let replay: SessionEventsResponse = restarted_http
+        .get(format!("http://{}{}", restarted.address, events_path))
+        .send()
+        .await
+        .expect("recovered tree Event history response")
+        .json()
+        .await
+        .expect("recovered tree Event history JSON");
+    assert_eq!(replay.events.len(), event_count);
+    assert_problem(
+        restarted_http
+            .post(format!("http://{}{}", restarted.address, child_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "first-child")
+            .json(&StartChildRunRequest {
+                user_input_mode: RunInputMode::Interactive,
+                ..first_request
+            })
+            .send()
+            .await
+            .expect("conflicting child response"),
+        StatusCode::CONFLICT,
+        error_code::IDEMPOTENCY_CONFLICT,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -2175,6 +2418,7 @@ async fn ask_approval_survives_restart_resumes_once_and_is_idempotent() {
         waiting_events.iter().map(event_kind).collect::<Vec<_>>(),
         [
             "run.created",
+            "run.queued",
             "run.state_changed",
             "tool_call.requested",
             "tool_call.state_changed",
@@ -2512,6 +2756,7 @@ async fn rejection_and_read_only_deny_without_starting_a_process() {
         read_only_events.iter().map(event_kind).collect::<Vec<_>>(),
         [
             "run.created",
+            "run.queued",
             "run.state_changed",
             "tool_call.requested",
             "tool_call.denied",
@@ -3049,7 +3294,7 @@ async fn real_daemon_persists_a_failed_subprocess_result() {
     let queued: RunResponse = response.json().await.expect("queued failed Run JSON");
 
     let events = receive_run_events(&mut socket, &queued.run_id, RunState::Failed).await;
-    assert_eq!(events.len(), 9);
+    assert_eq!(events.len(), 10);
     assert!(matches!(
         &events.last().expect("terminal failed Run Event").event,
         SessionEventDataResponse::RunStateChanged {
@@ -3151,7 +3396,7 @@ async fn concurrent_runs_publish_in_global_cursor_order() {
         events.push(event);
     }
 
-    assert_eq!(events.len(), 18);
+    assert_eq!(events.len(), 20);
     let cursors = events
         .iter()
         .map(|event| event.cursor.parse::<u64>().expect("numeric Event cursor"))
@@ -3197,7 +3442,7 @@ async fn concurrent_same_key_starts_one_run_and_one_tool_lifecycle() {
     assert_eq!(first.run_id, second.run_id);
 
     let events = receive_run_events(&mut socket, &first.run_id, RunState::Completed).await;
-    assert_eq!(events.len(), 9);
+    assert_eq!(events.len(), 10);
     assert_eq!(
         events
             .iter()
@@ -3318,6 +3563,7 @@ async fn complete_first_vertical_slice() {
         waiting_events.iter().map(event_kind).collect::<Vec<_>>(),
         [
             "run.created",
+            "run.queued",
             "run.state_changed",
             "tool_call.requested",
             "tool_call.state_changed",

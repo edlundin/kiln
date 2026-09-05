@@ -419,6 +419,15 @@
       "title": "ProblemDetails",
       "type": "object"
     },
+    "RunInputMode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "interactive",
+        "read_only"
+      ],
+      "title": "RunInputMode",
+      "type": "string"
+    },
     "RunResponse": {
       "$defs": {
         "ApprovalPolicy": {
@@ -482,6 +491,13 @@
             "size"
           ],
           "type": "object"
+        },
+        "RunInputMode": {
+          "enum": [
+            "interactive",
+            "read_only"
+          ],
+          "type": "string"
         },
         "RunState": {
           "enum": [
@@ -631,6 +647,12 @@
           },
           "type": "array"
         },
+        "parent_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "requested_scope": {
           "anyOf": [
             {
@@ -650,16 +672,28 @@
         "state": {
           "$ref": "#/$defs/RunState"
         },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tool_calls": {
           "items": {
             "$ref": "#/$defs/ToolCallResponse"
           },
           "type": "array"
+        },
+        "user_input_mode": {
+          "$ref": "#/$defs/RunInputMode"
         }
       },
       "required": [
         "run_id",
         "session_id",
+        "parent_run_id",
+        "task_id",
+        "user_input_mode",
         "state",
         "approval_policy",
         "requested_scope",
@@ -773,6 +807,13 @@
         "MessageRole": {
           "enum": [
             "user"
+          ],
+          "type": "string"
+        },
+        "RunInputMode": {
+          "enum": [
+            "interactive",
+            "read_only"
           ],
           "type": "string"
         },
@@ -1079,6 +1120,12 @@
                 }
               ]
             },
+            "parent_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "requested_scope": {
               "anyOf": [
                 {
@@ -1095,17 +1142,65 @@
             "state": {
               "$ref": "#/$defs/RunState"
             },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "const": "run.created",
               "type": "string"
+            },
+            "user_input_mode": {
+              "$ref": "#/$defs/RunInputMode"
             }
           },
           "required": [
             "type",
             "run_id",
             "state",
+            "parent_run_id",
+            "task_id",
+            "user_input_mode",
             "approval_policy",
             "requested_scope"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run.queued",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "child_run_id": {
+              "type": "string"
+            },
+            "parent_run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "run.child_added",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "parent_run_id",
+            "child_run_id"
           ],
           "type": "object"
         },
@@ -1377,6 +1472,13 @@
           ],
           "type": "string"
         },
+        "RunInputMode": {
+          "enum": [
+            "interactive",
+            "read_only"
+          ],
+          "type": "string"
+        },
         "RunState": {
           "enum": [
             "queued",
@@ -1499,6 +1601,12 @@
                     }
                   ]
                 },
+                "parent_run_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "requested_scope": {
                   "anyOf": [
                     {
@@ -1515,17 +1623,65 @@
                 "state": {
                   "$ref": "#/$defs/RunState"
                 },
+                "task_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "type": {
                   "const": "run.created",
                   "type": "string"
+                },
+                "user_input_mode": {
+                  "$ref": "#/$defs/RunInputMode"
                 }
               },
               "required": [
                 "type",
                 "run_id",
                 "state",
+                "parent_run_id",
+                "task_id",
+                "user_input_mode",
                 "approval_policy",
                 "requested_scope"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.queued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "child_run_id": {
+                  "type": "string"
+                },
+                "parent_run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.child_added",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "parent_run_id",
+                "child_run_id"
               ],
               "type": "object"
             },
@@ -2001,6 +2157,13 @@
           ],
           "type": "string"
         },
+        "RunInputMode": {
+          "enum": [
+            "interactive",
+            "read_only"
+          ],
+          "type": "string"
+        },
         "RunState": {
           "enum": [
             "queued",
@@ -2123,6 +2286,12 @@
                     }
                   ]
                 },
+                "parent_run_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "requested_scope": {
                   "anyOf": [
                     {
@@ -2139,17 +2308,65 @@
                 "state": {
                   "$ref": "#/$defs/RunState"
                 },
+                "task_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "type": {
                   "const": "run.created",
                   "type": "string"
+                },
+                "user_input_mode": {
+                  "$ref": "#/$defs/RunInputMode"
                 }
               },
               "required": [
                 "type",
                 "run_id",
                 "state",
+                "parent_run_id",
+                "task_id",
+                "user_input_mode",
                 "approval_policy",
                 "requested_scope"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.queued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "child_run_id": {
+                  "type": "string"
+                },
+                "parent_run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.child_added",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "parent_run_id",
+                "child_run_id"
               ],
               "type": "object"
             },
@@ -2565,6 +2782,345 @@
         "workspace_id"
       ],
       "title": "SessionResponse",
+      "type": "object"
+    },
+    "SessionRunsResponse": {
+      "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "approval_id": {
+              "type": "string"
+            },
+            "requested_scope": {
+              "$ref": "#/$defs/WorkspaceScopeResponse"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approval_id",
+            "run_id",
+            "tool_call_id",
+            "requested_scope",
+            "state"
+          ],
+          "type": "object"
+        },
+        "ApprovalState": {
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
+        "ArtifactResponse": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_hash",
+            "media_type",
+            "size"
+          ],
+          "type": "object"
+        },
+        "RunInputMode": {
+          "enum": [
+            "interactive",
+            "read_only"
+          ],
+          "type": "string"
+        },
+        "RunResponse": {
+          "properties": {
+            "approval_policy": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "approvals": {
+              "items": {
+                "$ref": "#/$defs/ApprovalResponse"
+              },
+              "type": "array"
+            },
+            "parent_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/RunState"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool_calls": {
+              "items": {
+                "$ref": "#/$defs/ToolCallResponse"
+              },
+              "type": "array"
+            },
+            "user_input_mode": {
+              "$ref": "#/$defs/RunInputMode"
+            }
+          },
+          "required": [
+            "run_id",
+            "session_id",
+            "parent_run_id",
+            "task_id",
+            "user_input_mode",
+            "state",
+            "approval_policy",
+            "requested_scope",
+            "tool_calls",
+            "approvals"
+          ],
+          "type": "object"
+        },
+        "RunState": {
+          "enum": [
+            "queued",
+            "running",
+            "waiting_for_approval",
+            "cancelling",
+            "completed",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        },
+        "ToolCallResponse": {
+          "properties": {
+            "capability": {
+              "type": "string"
+            },
+            "effective_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "exit_code": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "requested_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceScopeResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/$defs/ToolCallState"
+            },
+            "stderr": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stderr_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "stdout": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stdout_artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ArtifactResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tool_call_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tool_call_id",
+            "run_id",
+            "capability",
+            "state",
+            "requested_scope",
+            "effective_scope",
+            "stdout",
+            "stderr",
+            "stdout_artifact",
+            "stderr_artifact",
+            "exit_code"
+          ],
+          "type": "object"
+        },
+        "ToolCallState": {
+          "enum": [
+            "requested",
+            "awaiting_approval",
+            "ready",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "denied"
+          ],
+          "type": "string"
+        },
+        "WorkspaceScopeResponse": {
+          "properties": {
+            "relative_directory": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "relative_directory"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/RunResponse"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runs"
+      ],
+      "title": "SessionRunsResponse",
+      "type": "object"
+    },
+    "StartChildRunRequest": {
+      "$defs": {
+        "ApprovalPolicy": {
+          "enum": [
+            "ask",
+            "read_only",
+            "full_access"
+          ],
+          "type": "string"
+        },
+        "RunInputMode": {
+          "enum": [
+            "interactive",
+            "read_only"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "approval_policy": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        },
+        "relative_directory": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_input_mode": {
+          "$ref": "#/$defs/RunInputMode"
+        },
+        "workspace_root_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_policy",
+        "workspace_root_id",
+        "relative_directory",
+        "user_input_mode",
+        "task_id"
+      ],
+      "title": "StartChildRunRequest",
       "type": "object"
     },
     "StartRunRequest": {
@@ -2996,6 +3552,13 @@
           ],
           "type": "string"
         },
+        "RunInputMode": {
+          "enum": [
+            "interactive",
+            "read_only"
+          ],
+          "type": "string"
+        },
         "RunState": {
           "enum": [
             "queued",
@@ -3118,6 +3681,12 @@
                     }
                   ]
                 },
+                "parent_run_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "requested_scope": {
                   "anyOf": [
                     {
@@ -3134,17 +3703,65 @@
                 "state": {
                   "$ref": "#/$defs/RunState"
                 },
+                "task_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "type": {
                   "const": "run.created",
                   "type": "string"
+                },
+                "user_input_mode": {
+                  "$ref": "#/$defs/RunInputMode"
                 }
               },
               "required": [
                 "type",
                 "run_id",
                 "state",
+                "parent_run_id",
+                "task_id",
+                "user_input_mode",
                 "approval_policy",
                 "requested_scope"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.queued",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "run_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "child_run_id": {
+                  "type": "string"
+                },
+                "parent_run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "run.child_added",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "parent_run_id",
+                "child_run_id"
               ],
               "type": "object"
             },
@@ -3732,7 +4349,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.11.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.12.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

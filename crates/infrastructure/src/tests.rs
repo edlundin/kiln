@@ -3,12 +3,12 @@ use std::{path::Path, process::Command};
 use kiln_core::{
     ApprovalPolicy, AssignTask, CreateTaskDisposition, DETERMINISTIC_SUBPROCESS_CAPABILITY,
     DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
-    MessageRole, Run, RunApplication, RunId, RunState, RunStore, Session, SessionEvent,
-    SessionEventPayload, SessionId, SessionStore, StartRunDisposition, SubprocessOutput, Task,
-    TaskId, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
-    ToolCallResult, ToolCallState, TransitionTask, UpdateTask, Workspace, WorkspaceId,
-    WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState,
-    WorkspaceStore,
+    MessageRole, Run, RunApplication, RunId, RunInputMode, RunState, RunStore, Session,
+    SessionEvent, SessionEventPayload, SessionId, SessionStore, StartRunDisposition,
+    SubprocessOutput, Task, TaskId, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError,
+    ToolCall, ToolCallId, ToolCallResult, ToolCallState, TransitionTask, UpdateTask, Workspace,
+    WorkspaceId, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId,
+    WorkspaceRootState, WorkspaceStore,
 };
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
@@ -734,10 +734,16 @@ async fn tasks_are_idempotent_validate_lifecycle_and_survive_reopen() {
     store
         .start_root_run(
             &run,
-            &SessionEvent::run_created(
-                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBK").unwrap(),
-                &run,
-            ),
+            &[
+                SessionEvent::run_created(
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBK").unwrap(),
+                    &run,
+                ),
+                SessionEvent::run_queued(
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBN").unwrap(),
+                    &run,
+                ),
+            ],
             "first-task-run",
         )
         .await
@@ -751,10 +757,16 @@ async fn tasks_are_idempotent_validate_lifecycle_and_survive_reopen() {
     store
         .start_root_run(
             &outside_run,
-            &SessionEvent::run_created(
-                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBM").unwrap(),
-                &outside_run,
-            ),
+            &[
+                SessionEvent::run_created(
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBM").unwrap(),
+                    &outside_run,
+                ),
+                SessionEvent::run_queued(
+                    EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBP").unwrap(),
+                    &outside_run,
+                ),
+            ],
             "outside-task-run",
         )
         .await
@@ -803,6 +815,16 @@ async fn tasks_are_idempotent_validate_lifecycle_and_survive_reopen() {
         assigned.events[0].payload(),
         SessionEventPayload::TaskAssigned { .. }
     ));
+    assert_eq!(
+        store
+            .get_run(run.run_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .run()
+            .task_id(),
+        Some(child.task_id())
+    );
     let other = Task::new(
         TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FB0").unwrap(),
         first_session.id().clone(),
@@ -1326,6 +1348,68 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
             .unwrap(),
         6
     );
+    for migration in [
+        include_str!("../migrations/0007_artifacts.sql"),
+        include_str!("../migrations/0008_tasks.sql"),
+        include_str!("../migrations/0009_task_lifecycle.sql"),
+        include_str!("../migrations/0010_task_assignment.sql"),
+        include_str!("../migrations/0011_run_hierarchy.sql"),
+    ] {
+        sqlx::raw_sql(migration)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT user_input_mode FROM runs WHERE run_id = 'run_01ARZ3NDEKTSV4RRFFQ69G5FAV'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        "interactive"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT user_input_mode FROM session_events WHERE event_id = 'evt_01ARZ3NDEKTSV4RRFFQ69G5FB0'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        "interactive"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'session_events'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        6
+    );
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query(
+        "INSERT INTO session_events (event_id, session_id, event_type) VALUES (?, ?, 'session.created')",
+    )
+    .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FBD")
+    .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT cursor FROM session_events WHERE event_id = ?")
+            .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FBD")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        7
+    );
 }
 
 #[tokio::test]
@@ -1387,7 +1471,7 @@ async fn run_creation_is_atomic_and_has_a_global_cursor_event() {
         )
         .await
         .unwrap();
-    assert_eq!(mutation.events.len(), 1);
+    assert_eq!(mutation.events.len(), 2);
     assert_eq!(mutation.events[0].cursor().value(), 2);
     assert_eq!(mutation.value.run().state(), RunState::Queued);
     assert!(matches!(
@@ -1397,6 +1481,260 @@ async fn run_creation_is_atomic_and_has_a_global_cursor_event() {
             ..
         }
     ));
+    assert!(matches!(
+        mutation.events[1].payload(),
+        SessionEventPayload::RunQueued { .. }
+    ));
+    assert_eq!(mutation.value.run().parent_run_id(), None);
+    assert_eq!(mutation.value.run().task_id(), None);
+    assert_eq!(
+        mutation.value.run().user_input_mode(),
+        RunInputMode::Interactive
+    );
+}
+
+#[tokio::test]
+async fn child_runs_are_atomic_idempotent_and_recover_as_a_session_tree() {
+    let (data, store, session) = seeded_session().await;
+    let task = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FCA").unwrap(),
+        session.id().clone(),
+        "delegated task".to_owned(),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    store
+        .create_task(
+            &task,
+            &SessionEvent::task_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FCA").unwrap(),
+                task.clone(),
+            ),
+            "child-task",
+        )
+        .await
+        .unwrap();
+    let app = RunApplication::new(store.clone(), super::UlidIdGenerator);
+    let root = app
+        .start_root_run(
+            session.id().clone(),
+            "tree-root".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    let parent_run_id = root.value.run().run_id().clone();
+    let first = app
+        .start_child_run(
+            parent_run_id.clone(),
+            Some(task.task_id().clone()),
+            RunInputMode::ReadOnly,
+            "first-child".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.disposition, StartRunDisposition::Created);
+    assert_eq!(first.events.len(), 4);
+    assert!(matches!(
+        first.events[0].payload(),
+        SessionEventPayload::RunCreated {
+            parent_run_id: Some(parent),
+            task_id: Some(linked_task),
+            user_input_mode: RunInputMode::ReadOnly,
+            ..
+        } if parent == &parent_run_id && linked_task == task.task_id()
+    ));
+    assert!(matches!(
+        first.events[1].payload(),
+        SessionEventPayload::RunQueued { .. }
+    ));
+    assert!(matches!(
+        first.events[2].payload(),
+        SessionEventPayload::RunChildAdded {
+            parent_run_id: parent,
+            child_run_id,
+        } if parent == &parent_run_id && child_run_id == first.value.run().run_id()
+    ));
+    assert!(matches!(
+        first.events[3].payload(),
+        SessionEventPayload::TaskAssigned { task: assigned }
+            if assigned.assigned_run_id() == Some(first.value.run().run_id())
+    ));
+    let second = app
+        .start_child_run(
+            parent_run_id.clone(),
+            None,
+            RunInputMode::Interactive,
+            "second-child".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.disposition, StartRunDisposition::Created);
+    assert_eq!(second.events.len(), 3);
+
+    assert_eq!(
+        app.start_child_run(
+            RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FCB").unwrap(),
+            None,
+            RunInputMode::Interactive,
+            "missing-parent".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
+        Err(kiln_core::RunError::ParentRunNotFound)
+    );
+    assert_eq!(
+        app.start_child_run(
+            parent_run_id.clone(),
+            Some(TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FCB").unwrap()),
+            RunInputMode::Interactive,
+            "missing-task".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
+        Err(kiln_core::RunError::TaskNotFound)
+    );
+    let outside_session = Session::new(
+        SessionId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FCB").unwrap(),
+        session.workspace_id().clone(),
+    );
+    store
+        .create_session(
+            &outside_session,
+            &SessionEvent::session_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FCB").unwrap(),
+                outside_session.id().clone(),
+                outside_session.workspace_id().clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let outside_task = Task::new(
+        TaskId::parse("tsk_01ARZ3NDEKTSV4RRFFQ69G5FCC").unwrap(),
+        outside_session.id().clone(),
+        "outside task".to_owned(),
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    store
+        .create_task(
+            &outside_task,
+            &SessionEvent::task_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FCC").unwrap(),
+                outside_task.clone(),
+            ),
+            "outside-child-task",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        app.start_child_run(
+            parent_run_id.clone(),
+            Some(outside_task.task_id().clone()),
+            RunInputMode::Interactive,
+            "outside-task".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
+        Err(kiln_core::RunError::TaskLinkOutsideSession)
+    );
+
+    let duplicate = app
+        .start_child_run(
+            parent_run_id.clone(),
+            Some(task.task_id().clone()),
+            RunInputMode::ReadOnly,
+            "first-child".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.disposition, StartRunDisposition::Duplicate);
+    assert_eq!(duplicate.value, first.value);
+    assert!(duplicate.events.is_empty());
+    assert_eq!(
+        app.start_child_run(
+            parent_run_id.clone(),
+            Some(task.task_id().clone()),
+            RunInputMode::Interactive,
+            "first-child".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
+        Err(kiln_core::RunError::IdempotencyConflict)
+    );
+    assert_eq!(
+        app.start_child_run(
+            parent_run_id.clone(),
+            Some(task.task_id().clone()),
+            RunInputMode::Interactive,
+            "assigned-task".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await,
+        Err(kiln_core::RunError::InvalidTaskAssignment)
+    );
+
+    drop(app);
+    drop(store);
+    let reopened = super::SqliteStore::open(data.path()).await.unwrap();
+    let recovered = RunApplication::new(reopened.clone(), super::UlidIdGenerator)
+        .list_session_runs(session.id().clone())
+        .await
+        .unwrap();
+    assert_eq!(recovered.len(), 3);
+    assert_eq!(recovered[0].run().run_id(), &parent_run_id);
+    assert_eq!(recovered[1].run(), first.value.run());
+    assert_eq!(recovered[2].run(), second.value.run());
+
+    let reopened_app = RunApplication::new(reopened, super::UlidIdGenerator);
+    reopened_app
+        .request_cancellation(parent_run_id.clone())
+        .await
+        .unwrap();
+    let terminal_duplicate = reopened_app
+        .start_child_run(
+            parent_run_id.clone(),
+            Some(task.task_id().clone()),
+            RunInputMode::ReadOnly,
+            "first-child".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal_duplicate.disposition,
+        StartRunDisposition::Duplicate
+    );
+    assert_eq!(terminal_duplicate.value, first.value);
+    assert!(terminal_duplicate.events.is_empty());
+    assert_eq!(
+        reopened_app
+            .start_child_run(
+                parent_run_id,
+                None,
+                RunInputMode::Interactive,
+                "terminal-parent".to_owned(),
+                ApprovalPolicy::FullAccess,
+                test_scope(),
+            )
+            .await,
+        Err(kiln_core::RunError::ParentRunTerminal)
+    );
 }
 
 #[tokio::test]
@@ -1530,10 +1868,16 @@ async fn failed_start_transaction_does_not_reserve_the_idempotency_key() {
         ApprovalPolicy::FullAccess,
         test_scope(),
     );
-    let duplicate_event_id = SessionEvent::run_created(
-        EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
-        &rejected,
-    );
+    let duplicate_event_id = [
+        SessionEvent::run_created(
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            &rejected,
+        ),
+        SessionEvent::run_queued(
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBQ").unwrap(),
+            &rejected,
+        ),
+    ];
 
     assert_eq!(
         store
@@ -1549,10 +1893,16 @@ async fn failed_start_transaction_does_not_reserve_the_idempotency_key() {
         ApprovalPolicy::FullAccess,
         test_scope(),
     );
-    let event = SessionEvent::run_created(
-        EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
-        &accepted,
-    );
+    let event = [
+        SessionEvent::run_created(
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+            &accepted,
+        ),
+        SessionEvent::run_queued(
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBR").unwrap(),
+            &accepted,
+        ),
+    ];
     let mutation = store
         .start_root_run(&accepted, &event, "retryable-key")
         .await
@@ -1622,10 +1972,16 @@ async fn run_store_rejects_state_machine_bypass_inputs() {
         None,
     )
     .unwrap();
-    let forged_event = SessionEvent::run_created(
-        EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
-        &forged,
-    );
+    let forged_event = [
+        SessionEvent::run_created(
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+            &forged,
+        ),
+        SessionEvent::run_queued(
+            EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FBT").unwrap(),
+            &forged,
+        ),
+    ];
     assert_eq!(
         store
             .start_root_run(&forged, &forged_event, "forged-run")
@@ -1778,7 +2134,7 @@ async fn run_transitions_persist_historical_events_and_results() {
         .list_session_events(value.id(), EventCursor::zero())
         .await
         .unwrap();
-    assert_eq!(history.events().len(), 10);
+    assert_eq!(history.events().len(), 11);
     assert!(matches!(
         history.events()[1].payload(),
         SessionEventPayload::RunCreated {
@@ -1787,14 +2143,14 @@ async fn run_transitions_persist_historical_events_and_results() {
         }
     ));
     assert!(matches!(
-        history.events()[2].payload(),
+        history.events()[3].payload(),
         SessionEventPayload::RunStateChanged {
             state: RunState::Running,
             ..
         }
     ));
     assert!(matches!(
-        history.events()[9].payload(),
+        history.events()[10].payload(),
         SessionEventPayload::RunStateChanged {
             state: RunState::Completed,
             ..
@@ -1846,7 +2202,7 @@ async fn queued_cancellation_is_atomic_and_replayed_in_order() {
             .iter()
             .map(|event| event.cursor().value())
             .collect::<Vec<_>>(),
-        [3, 4]
+        [4, 5]
     );
 
     let repeated = app.request_cancellation(run_id).await.unwrap();
@@ -1856,13 +2212,13 @@ async fn queued_cancellation_is_atomic_and_replayed_in_order() {
         .list_session_events(session.id(), EventCursor::zero())
         .await
         .unwrap();
-    assert_eq!(history.events().len(), 4);
+    assert_eq!(history.events().len(), 5);
     assert!(matches!(
-        history.events()[2].payload(),
+        history.events()[3].payload(),
         SessionEventPayload::RunCancellationRequested { .. }
     ));
     assert!(matches!(
-        history.events()[3].payload(),
+        history.events()[4].payload(),
         SessionEventPayload::RunStateChanged {
             state: RunState::Cancelled,
             ..
@@ -1931,11 +2287,11 @@ async fn running_cancellation_finishes_with_output_and_event_order() {
         .await
         .unwrap();
     assert!(matches!(
-        history.events()[5].payload(),
+        history.events()[6].payload(),
         SessionEventPayload::RunCancellationRequested { .. }
     ));
     assert!(matches!(
-        history.events()[10].payload(),
+        history.events()[11].payload(),
         SessionEventPayload::RunStateChanged {
             state: RunState::Cancelled,
             ..

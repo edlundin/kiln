@@ -1,0 +1,39 @@
+{
+  "runs": [
+    {
+      "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "parent_run_id": null,
+      "task_id": null,
+      "user_input_mode": "interactive",
+      "state": "completed",
+      "approval_policy": "full_access",
+      "requested_scope": {
+        "workspace_root_id": "wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "relative_directory": "."
+      },
+      "tool_calls": [
+        {
+          "tool_call_id": "tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "capability": "kiln.deterministic.subprocess",
+          "state": "completed",
+          "requested_scope": {
+            "workspace_root_id": "wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "relative_directory": "."
+          },
+          "effective_scope": {
+            "workspace_root_id": "wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "relative_directory": "."
+          },
+          "stdout": "Kiln deterministic subprocess completed.\n",
+          "stderr": "",
+          "stdout_artifact": null,
+          "stderr_artifact": null,
+          "exit_code": 0
+        }
+      ],
+      "approvals": []
+    }
+  ]
+}

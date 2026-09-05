@@ -733,6 +733,10 @@ impl RunState {
                 | (Self::Cancelling, Self::Cancelled)
         )
     }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -823,10 +827,39 @@ impl ToolOutputStream {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidToolOutputStream;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunInputMode {
+    Interactive,
+    ReadOnly,
+}
+
+impl RunInputMode {
+    pub fn parse(value: &str) -> Result<Self, InvalidRunInputMode> {
+        match value {
+            "interactive" => Ok(Self::Interactive),
+            "read_only" => Ok(Self::ReadOnly),
+            _ => Err(InvalidRunInputMode),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::ReadOnly => "read_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidRunInputMode;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
     run_id: RunId,
     session_id: SessionId,
+    parent_run_id: Option<RunId>,
+    task_id: Option<TaskId>,
+    user_input_mode: RunInputMode,
     approval_policy: Option<ApprovalPolicy>,
     requested_scope: Option<WorkspacePathScope>,
     state: RunState,
@@ -842,6 +875,9 @@ impl Run {
         Self {
             run_id,
             session_id,
+            parent_run_id: None,
+            task_id: None,
+            user_input_mode: RunInputMode::Interactive,
             approval_policy: Some(approval_policy),
             requested_scope: Some(requested_scope),
             state: RunState::Queued,
@@ -855,9 +891,35 @@ impl Run {
         approval_policy: Option<ApprovalPolicy>,
         requested_scope: Option<WorkspacePathScope>,
     ) -> Result<Self, InvalidPersistedRun> {
+        Self::from_persisted_hierarchy(
+            run_id,
+            session_id,
+            state,
+            None,
+            None,
+            RunInputMode::Interactive,
+            approval_policy,
+            requested_scope,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_persisted_hierarchy(
+        run_id: RunId,
+        session_id: SessionId,
+        state: RunState,
+        parent_run_id: Option<RunId>,
+        task_id: Option<TaskId>,
+        user_input_mode: RunInputMode,
+        approval_policy: Option<ApprovalPolicy>,
+        requested_scope: Option<WorkspacePathScope>,
+    ) -> Result<Self, InvalidPersistedRun> {
         let scoped = approval_policy.is_some() && requested_scope.is_some();
         let legacy_terminal = approval_policy.is_none()
             && requested_scope.is_none()
+            && parent_run_id.is_none()
+            && task_id.is_none()
+            && user_input_mode == RunInputMode::Interactive
             && matches!(
                 state,
                 RunState::Completed | RunState::Failed | RunState::Cancelled
@@ -865,13 +927,40 @@ impl Run {
         if !scoped && !legacy_terminal {
             return Err(InvalidPersistedRun);
         }
+        if parent_run_id.is_none() && user_input_mode != RunInputMode::Interactive {
+            return Err(InvalidPersistedRun);
+        }
         Ok(Self {
             run_id,
             session_id,
+            parent_run_id,
+            task_id,
+            user_input_mode,
             approval_policy,
             requested_scope,
             state,
         })
+    }
+
+    pub fn new_child(
+        run_id: RunId,
+        session_id: SessionId,
+        parent_run_id: RunId,
+        task_id: Option<TaskId>,
+        user_input_mode: RunInputMode,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+    ) -> Self {
+        Self {
+            run_id,
+            session_id,
+            parent_run_id: Some(parent_run_id),
+            task_id,
+            user_input_mode,
+            approval_policy: Some(approval_policy),
+            requested_scope: Some(requested_scope),
+            state: RunState::Queued,
+        }
     }
 
     pub fn run_id(&self) -> &RunId {
@@ -883,6 +972,15 @@ impl Run {
     }
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+    pub fn parent_run_id(&self) -> Option<&RunId> {
+        self.parent_run_id.as_ref()
+    }
+    pub fn task_id(&self) -> Option<&TaskId> {
+        self.task_id.as_ref()
+    }
+    pub fn user_input_mode(&self) -> RunInputMode {
+        self.user_input_mode
     }
     pub fn approval_policy(&self) -> Option<ApprovalPolicy> {
         self.approval_policy
@@ -901,6 +999,9 @@ impl Run {
         Ok(Self {
             run_id: self.run_id.clone(),
             session_id: self.session_id.clone(),
+            parent_run_id: self.parent_run_id.clone(),
+            task_id: self.task_id.clone(),
+            user_input_mode: self.user_input_mode,
             approval_policy: self.approval_policy,
             requested_scope: self.requested_scope.clone(),
             state,
@@ -1544,8 +1645,18 @@ pub enum SessionEventPayload {
     RunCreated {
         run_id: RunId,
         state: RunState,
+        parent_run_id: Option<RunId>,
+        task_id: Option<TaskId>,
+        user_input_mode: RunInputMode,
         approval_policy: Option<ApprovalPolicy>,
         requested_scope: Option<WorkspacePathScope>,
+    },
+    RunQueued {
+        run_id: RunId,
+    },
+    RunChildAdded {
+        parent_run_id: RunId,
+        child_run_id: RunId,
     },
     RunStateChanged {
         run_id: RunId,
@@ -1650,8 +1761,32 @@ impl SessionEvent {
             payload: SessionEventPayload::RunCreated {
                 run_id: run.run_id.clone(),
                 state: run.state,
+                parent_run_id: run.parent_run_id.clone(),
+                task_id: run.task_id.clone(),
+                user_input_mode: run.user_input_mode,
                 approval_policy: run.approval_policy,
                 requested_scope: run.requested_scope.clone(),
+            },
+        }
+    }
+
+    pub fn run_queued(event_id: EventId, run: &Run) -> Self {
+        Self {
+            event_id,
+            session_id: run.session_id.clone(),
+            payload: SessionEventPayload::RunQueued {
+                run_id: run.run_id.clone(),
+            },
+        }
+    }
+
+    pub fn run_child_added(event_id: EventId, parent: &Run, child: &Run) -> Self {
+        Self {
+            event_id,
+            session_id: parent.session_id.clone(),
+            payload: SessionEventPayload::RunChildAdded {
+                parent_run_id: parent.run_id.clone(),
+                child_run_id: child.run_id.clone(),
             },
         }
     }
@@ -2049,6 +2184,11 @@ pub enum RunError {
     WorkspaceRootNotFound,
     PathOutsideWorkspaceRoot,
     RunNotFound,
+    ParentRunNotFound,
+    ParentRunTerminal,
+    TaskNotFound,
+    TaskLinkOutsideSession,
+    InvalidTaskAssignment,
     ActiveRootRunExists,
     IdempotencyKeyRequired,
     InvalidTransition,
@@ -2062,6 +2202,11 @@ pub enum RunError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStoreError {
     ActiveRootRunExists,
+    ParentRunNotFound,
+    ParentRunTerminal,
+    TaskNotFound,
+    TaskLinkOutsideSession,
+    InvalidTaskAssignment,
     IdempotencyKeyRequired,
     InvalidTransition,
     WorkspaceRootNotFound,
@@ -2217,13 +2362,24 @@ pub trait RunStore: SessionStore + WorkspaceStore {
     fn start_root_run(
         &self,
         run: &Run,
-        event: &SessionEvent,
+        events: &[SessionEvent],
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<StartRunMutation, RunStoreError>> + Send;
+    fn start_child_run(
+        &self,
+        run: &Run,
+        events: &[SessionEvent],
+        task_assignment_event_id: Option<&EventId>,
         idempotency_key: &str,
     ) -> impl Future<Output = Result<StartRunMutation, RunStoreError>> + Send;
     fn get_run(
         &self,
         id: &RunId,
     ) -> impl Future<Output = Result<Option<RunSnapshot>, RunStoreError>> + Send;
+    fn list_session_runs(
+        &self,
+        session_id: &SessionId,
+    ) -> impl Future<Output = Result<Vec<RunSnapshot>, RunStoreError>> + Send;
     fn get_tool_call(
         &self,
         id: &ToolCallId,
@@ -2354,9 +2510,88 @@ where
             return Err(RunError::SessionNotFound);
         }
         let run = Run::new(run_id, session_id, approval_policy, requested_scope);
-        let event = SessionEvent::run_created(self.ids.event_id(), &run);
+        let events = [
+            SessionEvent::run_created(self.ids.event_id(), &run),
+            SessionEvent::run_queued(self.ids.event_id(), &run),
+        ];
         self.store
-            .start_root_run(&run, &event, &idempotency_key)
+            .start_root_run(&run, &events, &idempotency_key)
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn start_child_run(
+        &self,
+        parent_run_id: RunId,
+        task_id: Option<TaskId>,
+        user_input_mode: RunInputMode,
+        idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+    ) -> Result<StartRunMutation, RunError> {
+        if idempotency_key.is_empty() {
+            return Err(RunError::IdempotencyKeyRequired);
+        }
+        let parent = self
+            .store
+            .get_run(&parent_run_id)
+            .await
+            .map_err(|_| RunError::RunStoreUnavailable)?
+            .ok_or(RunError::ParentRunNotFound)?
+            .run;
+        let session = self
+            .store
+            .get_session(parent.session_id())
+            .await
+            .map_err(|_| RunError::RunStoreUnavailable)?
+            .ok_or(RunError::SessionNotFound)?;
+        let workspace = self
+            .store
+            .get_workspace(session.workspace_id())
+            .await
+            .map_err(|_| RunError::RunStoreUnavailable)?
+            .ok_or(RunError::WorkspaceRootNotFound)?;
+        if workspace
+            .root(requested_scope.workspace_root_id())
+            .is_none()
+        {
+            return Err(RunError::WorkspaceRootNotFound);
+        }
+        if requested_scope.relative_directory().is_empty() {
+            return Err(RunError::PathOutsideWorkspaceRoot);
+        }
+        let run = Run::new_child(
+            self.ids.run_id(),
+            parent.session_id().clone(),
+            parent_run_id,
+            task_id.clone(),
+            user_input_mode,
+            approval_policy,
+            requested_scope,
+        );
+        let events = [
+            SessionEvent::run_created(self.ids.event_id(), &run),
+            SessionEvent::run_queued(self.ids.event_id(), &run),
+            SessionEvent::run_child_added(self.ids.event_id(), &parent, &run),
+        ];
+        let task_event_id = task_id.as_ref().map(|_| self.ids.event_id());
+        self.store
+            .start_child_run(&run, &events, task_event_id.as_ref(), &idempotency_key)
+            .await
+            .map_err(map_run_store_error)
+    }
+
+    pub async fn list_session_runs(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<RunSnapshot>, RunError> {
+        self.store
+            .get_session(&session_id)
+            .await
+            .map_err(|_| RunError::RunStoreUnavailable)?
+            .ok_or(RunError::SessionNotFound)?;
+        self.store
+            .list_session_runs(&session_id)
             .await
             .map_err(map_run_store_error)
     }
@@ -2846,6 +3081,11 @@ where
 fn map_run_store_error(error: RunStoreError) -> RunError {
     match error {
         RunStoreError::ActiveRootRunExists => RunError::ActiveRootRunExists,
+        RunStoreError::ParentRunNotFound => RunError::ParentRunNotFound,
+        RunStoreError::ParentRunTerminal => RunError::ParentRunTerminal,
+        RunStoreError::TaskNotFound => RunError::TaskNotFound,
+        RunStoreError::TaskLinkOutsideSession => RunError::TaskLinkOutsideSession,
+        RunStoreError::InvalidTaskAssignment => RunError::InvalidTaskAssignment,
         RunStoreError::IdempotencyKeyRequired => RunError::IdempotencyKeyRequired,
         RunStoreError::InvalidTransition => RunError::InvalidTransition,
         RunStoreError::WorkspaceRootNotFound => RunError::WorkspaceRootNotFound,
@@ -4186,6 +4426,19 @@ mod run_tests {
         .unwrap();
         assert_eq!(legacy_run.approval_policy(), None);
         assert_eq!(legacy_run.requested_scope(), None);
+        assert_eq!(
+            Run::from_persisted_hierarchy(
+                run_id.clone(),
+                session_id(),
+                RunState::Completed,
+                Some(RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap()),
+                None,
+                RunInputMode::ReadOnly,
+                None,
+                None,
+            ),
+            Err(InvalidPersistedRun)
+        );
 
         let tool_call_id = ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
         assert_eq!(
@@ -4551,7 +4804,17 @@ mod run_tests {
         async fn start_root_run(
             &self,
             _run: &Run,
-            _event: &SessionEvent,
+            _events: &[SessionEvent],
+            _idempotency_key: &str,
+        ) -> Result<StartRunMutation, RunStoreError> {
+            Err(RunStoreError::Unavailable)
+        }
+
+        async fn start_child_run(
+            &self,
+            _run: &Run,
+            _events: &[SessionEvent],
+            _task_assignment_event_id: Option<&EventId>,
             _idempotency_key: &str,
         ) -> Result<StartRunMutation, RunStoreError> {
             Err(RunStoreError::Unavailable)
@@ -4560,6 +4823,17 @@ mod run_tests {
         async fn get_run(&self, id: &RunId) -> Result<Option<RunSnapshot>, RunStoreError> {
             let snapshot = self.snapshot.lock().unwrap().clone();
             Ok((snapshot.run().run_id() == id).then_some(snapshot))
+        }
+
+        async fn list_session_runs(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Vec<RunSnapshot>, RunStoreError> {
+            let snapshot = self.snapshot.lock().unwrap().clone();
+            Ok((snapshot.run().session_id() == session_id)
+                .then_some(snapshot)
+                .into_iter()
+                .collect())
         }
 
         async fn get_tool_call(

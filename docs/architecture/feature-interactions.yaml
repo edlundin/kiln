@@ -19,13 +19,13 @@ features:
   - id: run_scheduler
     owner: core
     phase: 1
-    status: planned
+    status: current_partial
     consumes: [thread, agent, task_graph]
     produces: [run_state, task_state]
   - id: subagent_orchestration
     owner: core
     phase: 1
-    status: planned
+    status: current_partial
     consumes: [parent_run, task, agent, targeted_input]
     produces: [child_run, run_lineage, task_assignment, child_run_state]
   - id: context_builder

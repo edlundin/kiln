@@ -15,14 +15,14 @@ use kiln_core::{
     Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, AssignTask, ContentHash,
     CreateTaskDisposition, CreateTaskMutation, DETERMINISTIC_SUBPROCESS_CAPABILITY,
     DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageId,
-    MessageRole, PersistedToolCall, RootDiscoveryError, Run, RunId, RunIdGenerator, RunMutation,
-    RunSnapshot, RunState, RunStore, RunStoreError, Session, SessionEvent, SessionEventPage,
-    SessionEventPayload, SessionId, SessionIdGenerator, SessionStore, StartRunDisposition,
-    StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor,
-    SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId, TaskIdGenerator, TaskMutation,
-    TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
-    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceId,
-    WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
+    MessageRole, PersistedToolCall, RootDiscoveryError, Run, RunId, RunIdGenerator, RunInputMode,
+    RunMutation, RunSnapshot, RunState, RunStore, RunStoreError, Session, SessionEvent,
+    SessionEventPage, SessionEventPayload, SessionId, SessionIdGenerator, SessionStore,
+    StartRunDisposition, StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution,
+    SubprocessExecutor, SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId,
+    TaskIdGenerator, TaskMutation, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError,
+    ToolCall, ToolCallId, ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace,
+    WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
     WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
 };
 use sha2::{Digest, Sha256};
@@ -1299,7 +1299,8 @@ impl SqliteStore {
                     "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
                         e.task_id, e.task_objective, e.task_state, e.parent_task_id,
                         e.dependency_task_ids, e.assigned_run_id,
-                        e.run_id, e.tool_call_id, e.run_state, e.tool_call_state,
+                        e.run_id, e.parent_run_id, e.child_run_id, e.user_input_mode,
+                        e.tool_call_id, e.run_state, e.tool_call_state,
                         e.approval_id, e.approval_state, e.approval_policy,
                         e.requested_workspace_root_id, e.requested_relative_directory,
                         e.effective_workspace_root_id, e.effective_relative_directory,
@@ -1332,7 +1333,8 @@ impl SqliteStore {
                     "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
                         e.task_id, e.task_objective, e.task_state, e.parent_task_id,
                         e.dependency_task_ids, e.assigned_run_id,
-                        e.run_id, e.tool_call_id, e.run_state, e.tool_call_state,
+                        e.run_id, e.parent_run_id, e.child_run_id, e.user_input_mode,
+                        e.tool_call_id, e.run_state, e.tool_call_state,
                         e.approval_id, e.approval_state, e.approval_policy,
                         e.requested_workspace_root_id, e.requested_relative_directory,
                         e.effective_workspace_root_id, e.effective_relative_directory,
@@ -1989,6 +1991,15 @@ fn parse_event_rows(
             .try_get("assigned_run_id")
             .map_err(|_| StoreError::Unavailable)?;
         let run_id: Option<String> = row.try_get("run_id").map_err(|_| StoreError::Unavailable)?;
+        let parent_run_id: Option<String> = row
+            .try_get("parent_run_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let child_run_id: Option<String> = row
+            .try_get("child_run_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let user_input_mode: Option<String> = row
+            .try_get("user_input_mode")
+            .map_err(|_| StoreError::Unavailable)?;
         let tool_call_id: Option<String> = row
             .try_get("tool_call_id")
             .map_err(|_| StoreError::Unavailable)?;
@@ -2152,7 +2163,7 @@ fn parse_event_rows(
                 StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
                     .map_err(|_| StoreError::Unavailable)?
             }
-            "run.created" | "run.state_changed" => {
+            "run.created" => {
                 if message_id.is_some()
                     || tool_call_id.is_some()
                     || run_state.is_none()
@@ -2170,30 +2181,68 @@ fn parse_event_rows(
                     .map_err(|_| StoreError::Unavailable)?;
                 let state = RunState::parse(&run_state.ok_or(StoreError::Unavailable)?)
                     .map_err(|_| StoreError::Unavailable)?;
-                if (event_type == "run.created" && state != RunState::Queued)
-                    || (event_type == "run.state_changed" && state == RunState::Queued)
-                {
+                if state != RunState::Queued {
                     return Err(StoreError::Unavailable);
                 }
-                let payload = if event_type == "run.created" {
-                    let policy = approval_policy
-                        .as_deref()
-                        .map(ApprovalPolicy::parse)
+                let policy = approval_policy
+                    .as_deref()
+                    .map(ApprovalPolicy::parse)
+                    .transpose()
+                    .map_err(|_| StoreError::Unavailable)?;
+                let requested_scope = parse_scope(requested_root, requested_directory)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let payload = SessionEventPayload::RunCreated {
+                    run_id,
+                    state,
+                    parent_run_id: parent_run_id
+                        .map(RunId::parse)
                         .transpose()
-                        .map_err(|_| StoreError::Unavailable)?;
-                    let requested_scope = parse_scope(requested_root, requested_directory)
-                        .map_err(|_| StoreError::Unavailable)?;
-                    SessionEventPayload::RunCreated {
-                        run_id,
-                        state,
-                        approval_policy: policy,
-                        requested_scope,
-                    }
+                        .map_err(|_| StoreError::Unavailable)?,
+                    task_id: task_id
+                        .map(TaskId::parse)
+                        .transpose()
+                        .map_err(|_| StoreError::Unavailable)?,
+                    user_input_mode: RunInputMode::parse(
+                        &user_input_mode.ok_or(StoreError::Unavailable)?,
+                    )
+                    .map_err(|_| StoreError::Unavailable)?,
+                    approval_policy: policy,
+                    requested_scope,
+                };
+                StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
+                    .map_err(|_| StoreError::Unavailable)?
+            }
+            "run.queued" | "run.state_changed" => {
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let payload = if event_type == "run.queued" {
+                    SessionEventPayload::RunQueued { run_id }
                 } else {
+                    let state = RunState::parse(&run_state.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?;
+                    if state == RunState::Queued {
+                        return Err(StoreError::Unavailable);
+                    }
                     SessionEventPayload::RunStateChanged { run_id, state }
                 };
                 StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
                     .map_err(|_| StoreError::Unavailable)?
+            }
+            "run.child_added" => {
+                let parent_run_id = RunId::parse(parent_run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let child_run_id = RunId::parse(child_run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::RunChildAdded {
+                        parent_run_id,
+                        child_run_id,
+                    },
+                )
+                .map_err(|_| StoreError::Unavailable)?
             }
             "run.cancellation_requested" => {
                 if message_id.is_some()
@@ -2365,14 +2414,19 @@ impl RunStore for SqliteStore {
     async fn start_root_run(
         &self,
         run: &Run,
-        event: &SessionEvent,
+        events: &[SessionEvent],
         idempotency_key: &str,
     ) -> Result<StartRunMutation, RunStoreError> {
         if idempotency_key.is_empty() {
             return Err(RunStoreError::IdempotencyKeyRequired);
         }
         if run.state() != RunState::Queued
-            || event != &SessionEvent::run_created(event.event_id().clone(), run)
+            || run.parent_run_id().is_some()
+            || run.task_id().is_some()
+            || run.user_input_mode() != RunInputMode::Interactive
+            || events.len() != 2
+            || events[0] != SessionEvent::run_created(events[0].event_id().clone(), run)
+            || events[1] != SessionEvent::run_queued(events[1].event_id().clone(), run)
         {
             return Err(RunStoreError::InvalidTransition);
         }
@@ -2443,7 +2497,7 @@ impl RunStore for SqliteStore {
         let policy = run
             .approval_policy()
             .ok_or(RunStoreError::InvalidTransition)?;
-        let result = sqlx::query("INSERT INTO runs (run_id, session_id, state, approval_policy, workspace_root_id, relative_directory) VALUES (?, ?, ?, ?, ?, ?)")
+        let result = sqlx::query("INSERT INTO runs (run_id, session_id, state, approval_policy, workspace_root_id, relative_directory, parent_run_id, user_input_mode) VALUES (?, ?, ?, ?, ?, ?, NULL, 'interactive')")
             .bind(run.run_id().as_str())
             .bind(run.session_id().as_str())
             .bind(run.state().as_str())
@@ -2455,7 +2509,7 @@ impl RunStore for SqliteStore {
         if let Err(error) = result {
             if is_unique_constraint(&error) {
                 let active: Option<String> = sqlx::query_scalar(
-                        "SELECT run_id FROM runs WHERE session_id = ? AND state IN ('queued', 'running', 'waiting_for_approval', 'cancelling') LIMIT 1",
+                        "SELECT run_id FROM runs WHERE session_id = ? AND parent_run_id IS NULL AND state IN ('queued', 'running', 'waiting_for_approval', 'cancelling') LIMIT 1",
                 )
                 .bind(run.session_id().as_str())
                 .fetch_optional(&mut *transaction)
@@ -2467,7 +2521,7 @@ impl RunStore for SqliteStore {
             }
             return Err(RunStoreError::Unavailable);
         }
-        let stored_event = insert_run_event(&mut transaction, event).await?;
+        let stored_events = insert_events(&mut transaction, events).await?;
         sqlx::query(
             "INSERT INTO start_run_idempotencies (session_id, idempotency_key, run_id, approval_policy, workspace_root_id, relative_directory) VALUES (?, ?, ?, ?, ?, ?)",
         )
@@ -2486,7 +2540,206 @@ impl RunStore for SqliteStore {
             .map_err(|_| RunStoreError::Unavailable)?;
         Ok(StartRunMutation::new(
             RunSnapshot::new(run.clone(), Vec::new()),
-            vec![stored_event],
+            stored_events,
+            StartRunDisposition::Created,
+        ))
+    }
+
+    async fn start_child_run(
+        &self,
+        run: &Run,
+        events: &[SessionEvent],
+        task_assignment_event_id: Option<&EventId>,
+        idempotency_key: &str,
+    ) -> Result<StartRunMutation, RunStoreError> {
+        if idempotency_key.is_empty() {
+            return Err(RunStoreError::IdempotencyKeyRequired);
+        }
+        let parent_run_id = run
+            .parent_run_id()
+            .ok_or(RunStoreError::InvalidTransition)?;
+        if run.state() != RunState::Queued
+            || events.len() != 3
+            || events[0] != SessionEvent::run_created(events[0].event_id().clone(), run)
+            || events[1] != SessionEvent::run_queued(events[1].event_id().clone(), run)
+            || task_assignment_event_id.is_some() != run.task_id().is_some()
+        {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        if let Some(existing) = sqlx::query(
+            "SELECT run_id, task_id, user_input_mode, approval_policy, workspace_root_id, relative_directory
+             FROM start_child_run_idempotencies
+             WHERE parent_run_id = ? AND idempotency_key = ?",
+        )
+        .bind(parent_run_id.as_str())
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?
+        {
+            let scope = run
+                .requested_scope()
+                .ok_or(RunStoreError::InvalidTransition)?;
+            let policy = run
+                .approval_policy()
+                .ok_or(RunStoreError::InvalidTransition)?;
+            if existing
+                .try_get::<Option<String>, _>("task_id")
+                .map_err(|_| RunStoreError::Unavailable)?
+                .as_deref()
+                != run.task_id().map(TaskId::as_str)
+                || existing
+                    .try_get::<String, _>("user_input_mode")
+                    .map_err(|_| RunStoreError::Unavailable)?
+                    != run.user_input_mode().as_str()
+                || existing
+                    .try_get::<String, _>("approval_policy")
+                    .map_err(|_| RunStoreError::Unavailable)?
+                    != policy.as_str()
+                || existing
+                    .try_get::<String, _>("workspace_root_id")
+                    .map_err(|_| RunStoreError::Unavailable)?
+                    != scope.workspace_root_id().as_str()
+                || existing
+                    .try_get::<String, _>("relative_directory")
+                    .map_err(|_| RunStoreError::Unavailable)?
+                    != scope.relative_directory()
+            {
+                return Err(RunStoreError::IdempotencyConflict);
+            }
+            let existing_run_id = RunId::parse(
+                existing
+                    .try_get::<String, _>("run_id")
+                    .map_err(|_| RunStoreError::Unavailable)?,
+            )
+            .map_err(|_| RunStoreError::Unavailable)?;
+            let snapshot = load_snapshot(&mut transaction, &existing_run_id)
+                .await?
+                .ok_or(RunStoreError::Unavailable)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+            return Ok(StartRunMutation::new(
+                snapshot,
+                Vec::new(),
+                StartRunDisposition::Duplicate,
+            ));
+        }
+
+        let parent = load_run(&mut transaction, parent_run_id)
+            .await?
+            .ok_or(RunStoreError::ParentRunNotFound)?;
+        if parent.session_id() != run.session_id() {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        if parent.state().is_terminal() {
+            return Err(RunStoreError::ParentRunTerminal);
+        }
+        if events[2] != SessionEvent::run_child_added(events[2].event_id().clone(), &parent, run) {
+            return Err(RunStoreError::InvalidTransition);
+        }
+
+        let assigned_task = if let Some(task_id) = run.task_id() {
+            let task = load_task(&mut transaction, task_id)
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?
+                .ok_or(RunStoreError::TaskNotFound)?;
+            if task.session_id() != run.session_id() {
+                return Err(RunStoreError::TaskLinkOutsideSession);
+            }
+            if let Some(assigned_run_id) = task.assigned_run_id() {
+                let assigned_state =
+                    sqlx::query_scalar::<_, String>("SELECT state FROM runs WHERE run_id = ?")
+                        .bind(assigned_run_id.as_str())
+                        .fetch_optional(&mut *transaction)
+                        .await
+                        .map_err(|_| RunStoreError::Unavailable)?
+                        .ok_or(RunStoreError::Unavailable)?;
+                if !RunState::parse(&assigned_state)
+                    .map_err(|_| RunStoreError::Unavailable)?
+                    .is_terminal()
+                {
+                    return Err(RunStoreError::InvalidTaskAssignment);
+                }
+            }
+            Some(
+                task.assign(run.run_id().clone())
+                    .map_err(|_| RunStoreError::InvalidTaskAssignment)?,
+            )
+        } else {
+            None
+        };
+
+        let scope = run
+            .requested_scope()
+            .ok_or(RunStoreError::InvalidTransition)?;
+        let policy = run
+            .approval_policy()
+            .ok_or(RunStoreError::InvalidTransition)?;
+        sqlx::query(
+            "INSERT INTO runs
+                (run_id, session_id, state, approval_policy, workspace_root_id,
+                 relative_directory, parent_run_id, user_input_mode)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(run.run_id().as_str())
+        .bind(run.session_id().as_str())
+        .bind(run.state().as_str())
+        .bind(policy.as_str())
+        .bind(scope.workspace_root_id().as_str())
+        .bind(scope.relative_directory())
+        .bind(parent_run_id.as_str())
+        .bind(run.user_input_mode().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if let Some(task) = assigned_task.as_ref() {
+            sqlx::query("UPDATE tasks SET assigned_run_id = ? WHERE task_id = ?")
+                .bind(run.run_id().as_str())
+                .bind(task.task_id().as_str())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+        }
+        let mut stored_events = insert_events(&mut transaction, events).await?;
+        if let (Some(task), Some(event_id)) = (assigned_task, task_assignment_event_id) {
+            let event = SessionEvent::task_assigned(event_id.clone(), task);
+            stored_events.push(
+                persist_task_event(&mut transaction, &event)
+                    .await
+                    .map_err(|_| RunStoreError::Unavailable)?,
+            );
+        }
+        sqlx::query(
+            "INSERT INTO start_child_run_idempotencies
+                (parent_run_id, idempotency_key, run_id, task_id, user_input_mode,
+                 approval_policy, workspace_root_id, relative_directory)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(parent_run_id.as_str())
+        .bind(idempotency_key)
+        .bind(run.run_id().as_str())
+        .bind(run.task_id().map(TaskId::as_str))
+        .bind(run.user_input_mode().as_str())
+        .bind(policy.as_str())
+        .bind(scope.workspace_root_id().as_str())
+        .bind(scope.relative_directory())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(StartRunMutation::new(
+            RunSnapshot::new(run.clone(), Vec::new()),
+            stored_events,
             StartRunDisposition::Created,
         ))
     }
@@ -2505,6 +2758,44 @@ impl RunStore for SqliteStore {
         Ok(snapshot)
     }
 
+    async fn list_session_runs(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<RunSnapshot>, RunStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        let rows = sqlx::query_scalar::<_, String>(
+            "SELECT r.run_id FROM runs r
+             WHERE r.session_id = ?
+             ORDER BY (
+                 SELECT e.cursor FROM session_events e
+                 WHERE e.event_type = 'run.created' AND e.run_id = r.run_id
+                 LIMIT 1
+             ) ASC, r.run_id ASC",
+        )
+        .bind(session_id.as_str())
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        let mut runs = Vec::with_capacity(rows.len());
+        for run_id in rows {
+            let run_id = RunId::parse(run_id).map_err(|_| RunStoreError::Unavailable)?;
+            runs.push(
+                load_snapshot(&mut transaction, &run_id)
+                    .await?
+                    .ok_or(RunStoreError::Unavailable)?,
+            );
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(runs)
+    }
+
     async fn get_tool_call(
         &self,
         id: &ToolCallId,
@@ -2516,6 +2807,10 @@ impl RunStore for SqliteStore {
             .map_err(|_| RunStoreError::Unavailable)?;
         let row = sqlx::query(
             "SELECT r.run_id, r.session_id, r.state, r.approval_policy, r.workspace_root_id, r.relative_directory,
+                    r.parent_run_id, r.user_input_mode,
+                    (SELECT e.task_id FROM session_events e
+                     WHERE e.event_type = 'run.created' AND e.run_id = r.run_id
+                     ORDER BY e.cursor ASC LIMIT 1) AS task_id,
                     t.tool_call_id, t.run_id AS tool_run_id, t.capability, t.state AS tool_state,
                     t.requested_workspace_root_id, t.requested_relative_directory,
                     t.effective_workspace_root_id, t.effective_relative_directory,
@@ -3660,6 +3955,7 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             state,
             approval_policy,
             requested_scope,
+            ..
         } => Ok(RunEventColumns {
             event_type: "run.created",
             message_id: None,
@@ -3685,6 +3981,54 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
             requested_relative_directory: requested_scope
                 .as_ref()
                 .map(WorkspacePathScope::relative_directory),
+            effective_workspace_root_id: None,
+            effective_relative_directory: None,
+        }),
+        SessionEventPayload::RunQueued { run_id } => Ok(RunEventColumns {
+            event_type: "run.queued",
+            message_id: None,
+            run_id: Some(run_id.as_str()),
+            tool_call_id: None,
+            run_state: None,
+            tool_call_state: None,
+            capability: None,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            output_stream: None,
+            output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
+            approval_id: None,
+            approval_state: None,
+            approval_policy: None,
+            requested_workspace_root_id: None,
+            requested_relative_directory: None,
+            effective_workspace_root_id: None,
+            effective_relative_directory: None,
+        }),
+        SessionEventPayload::RunChildAdded { .. } => Ok(RunEventColumns {
+            event_type: "run.child_added",
+            message_id: None,
+            run_id: None,
+            tool_call_id: None,
+            run_state: None,
+            tool_call_state: None,
+            capability: None,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+            output_stream: None,
+            output_content: None,
+            artifact_hash: None,
+            stdout_artifact_hash: None,
+            stderr_artifact_hash: None,
+            approval_id: None,
+            approval_state: None,
+            approval_policy: None,
+            requested_workspace_root_id: None,
+            requested_relative_directory: None,
             effective_workspace_root_id: None,
             effective_relative_directory: None,
         }),
@@ -3945,21 +4289,49 @@ async fn insert_run_event(
 ) -> Result<StoredSessionEvent, RunStoreError> {
     let mut query = sqlx::query(
         "INSERT INTO session_events (
-            event_id, session_id, event_type, message_id, run_id, tool_call_id,
+            event_id, session_id, event_type, message_id, task_id, run_id,
+            parent_run_id, child_run_id, user_input_mode, tool_call_id,
             run_state, tool_call_state, capability, stdout, stderr, exit_code,
             output_stream, output_content, approval_id, approval_state, approval_policy,
             requested_workspace_root_id, requested_relative_directory,
             effective_workspace_root_id, effective_relative_directory,
             artifact_hash, stdout_artifact_hash, stderr_artifact_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     let columns = run_event_columns(event)?;
+    let (task_id, parent_run_id, child_run_id, user_input_mode) = match event.payload() {
+        SessionEventPayload::RunCreated {
+            task_id,
+            parent_run_id,
+            user_input_mode,
+            ..
+        } => (
+            task_id.as_ref().map(TaskId::as_str),
+            parent_run_id.as_ref().map(RunId::as_str),
+            None,
+            Some(user_input_mode.as_str()),
+        ),
+        SessionEventPayload::RunChildAdded {
+            parent_run_id,
+            child_run_id,
+        } => (
+            None,
+            Some(parent_run_id.as_str()),
+            Some(child_run_id.as_str()),
+            None,
+        ),
+        _ => (None, None, None, None),
+    };
     query = query
         .bind(event.event_id().as_str())
         .bind(event.session_id().as_str())
         .bind(columns.event_type)
         .bind(columns.message_id)
+        .bind(task_id)
         .bind(columns.run_id)
+        .bind(parent_run_id)
+        .bind(child_run_id)
+        .bind(user_input_mode)
         .bind(columns.tool_call_id)
         .bind(columns.run_state)
         .bind(columns.tool_call_state)
@@ -3998,11 +4370,21 @@ async fn load_run(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &RunId,
 ) -> Result<Option<Run>, RunStoreError> {
-    let row = sqlx::query("SELECT run_id, session_id, state, approval_policy, workspace_root_id, relative_directory FROM runs WHERE run_id = ?")
-        .bind(id.as_str())
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|_| RunStoreError::Unavailable)?;
+    let row = sqlx::query(
+        "SELECT r.run_id, r.session_id, r.state, r.approval_policy,
+                r.workspace_root_id, r.relative_directory, r.parent_run_id,
+                r.user_input_mode,
+                (SELECT e.task_id FROM session_events e
+                 WHERE e.task_id IS NOT NULL
+                   AND ((e.event_type = 'run.created' AND e.run_id = r.run_id)
+                     OR (e.event_type = 'task.assigned' AND e.assigned_run_id = r.run_id))
+                 ORDER BY e.cursor ASC LIMIT 1) AS task_id
+         FROM runs r WHERE r.run_id = ?",
+    )
+    .bind(id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
     row.map(|row| {
         let run_id = RunId::parse(
             row.try_get::<String, _>("run_id")
@@ -4033,8 +4415,34 @@ async fn load_run(
             row.try_get("relative_directory")
                 .map_err(|_| RunStoreError::Unavailable)?,
         )?;
-        Run::from_persisted(run_id, session_id, state, policy, scope)
-            .map_err(|_| RunStoreError::Unavailable)
+        let parent_run_id = row
+            .try_get::<Option<String>, _>("parent_run_id")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .map(RunId::parse)
+            .transpose()
+            .map_err(|_| RunStoreError::Unavailable)?;
+        let task_id = row
+            .try_get::<Option<String>, _>("task_id")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .map(TaskId::parse)
+            .transpose()
+            .map_err(|_| RunStoreError::Unavailable)?;
+        let input_mode = RunInputMode::parse(
+            &row.try_get::<String, _>("user_input_mode")
+                .map_err(|_| RunStoreError::Unavailable)?,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
+        Run::from_persisted_hierarchy(
+            run_id,
+            session_id,
+            state,
+            parent_run_id,
+            task_id,
+            input_mode,
+            policy,
+            scope,
+        )
+        .map_err(|_| RunStoreError::Unavailable)
     })
     .transpose()
 }
@@ -4206,9 +4614,35 @@ fn parse_run_and_tool_call(
         row.try_get("relative_directory")
             .map_err(|_| RunStoreError::Unavailable)?,
     )?;
-    Ok((
-        Run::from_persisted(run_id, session_id, run_state, policy, scope)
+    let parent_run_id = row
+        .try_get::<Option<String>, _>("parent_run_id")
+        .map_err(|_| RunStoreError::Unavailable)?
+        .map(RunId::parse)
+        .transpose()
+        .map_err(|_| RunStoreError::Unavailable)?;
+    let task_id = row
+        .try_get::<Option<String>, _>("task_id")
+        .map_err(|_| RunStoreError::Unavailable)?
+        .map(TaskId::parse)
+        .transpose()
+        .map_err(|_| RunStoreError::Unavailable)?;
+    let input_mode = RunInputMode::parse(
+        &row.try_get::<String, _>("user_input_mode")
             .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    Ok((
+        Run::from_persisted_hierarchy(
+            run_id,
+            session_id,
+            run_state,
+            parent_run_id,
+            task_id,
+            input_mode,
+            policy,
+            scope,
+        )
+        .map_err(|_| RunStoreError::Unavailable)?,
         tool_call,
     ))
 }

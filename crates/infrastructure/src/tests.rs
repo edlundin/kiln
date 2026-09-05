@@ -1703,10 +1703,11 @@ async fn child_runs_are_atomic_idempotent_and_recover_as_a_session_tree() {
     assert_eq!(recovered[2].run(), second.value.run());
 
     let reopened_app = RunApplication::new(reopened, super::UlidIdGenerator);
-    reopened_app
+    let cancelling = reopened_app
         .request_cancellation(parent_run_id.clone())
         .await
         .unwrap();
+    assert_eq!(cancelling.value.run().state(), RunState::Cancelling);
     let terminal_duplicate = reopened_app
         .start_child_run(
             parent_run_id.clone(),
@@ -1727,16 +1728,42 @@ async fn child_runs_are_atomic_idempotent_and_recover_as_a_session_tree() {
     assert_eq!(
         reopened_app
             .start_child_run(
-                parent_run_id,
+                first.value.run().run_id().clone(),
                 None,
                 RunInputMode::Interactive,
-                "terminal-parent".to_owned(),
+                "cancelling-ancestor".to_owned(),
                 ApprovalPolicy::FullAccess,
                 test_scope(),
             )
             .await,
-        Err(kiln_core::RunError::ParentRunTerminal)
+        Err(kiln_core::RunError::InvalidTransition)
     );
+
+    drop(reopened_app);
+    let reopened = super::SqliteStore::open(data.path()).await.unwrap();
+    let reopened_app = RunApplication::new(reopened, super::UlidIdGenerator);
+    assert_eq!(
+        reopened_app
+            .get_run(parent_run_id.clone())
+            .await
+            .unwrap()
+            .run()
+            .state(),
+        RunState::Cancelling
+    );
+    reopened_app
+        .request_cancellation(first.value.run().run_id().clone())
+        .await
+        .unwrap();
+    reopened_app
+        .request_cancellation(second.value.run().run_id().clone())
+        .await
+        .unwrap();
+    let cancelled = reopened_app
+        .request_cancellation(parent_run_id)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.value.run().state(), RunState::Cancelled);
 }
 
 #[tokio::test]
@@ -1906,7 +1933,17 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
         .unwrap();
     assert_eq!(failed.value.state(), MessageDeliveryState::Failed);
 
-    app.request_cancellation(run_id.clone()).await.unwrap();
+    app.request_cancellation(read_only.value.run().run_id().clone())
+        .await
+        .unwrap();
+    let terminal = app.request_cancellation(run_id.clone()).await.unwrap();
+    assert!(matches!(
+        terminal.events.last().map(|event| event.payload()),
+        Some(SessionEventPayload::RunInputCancelled {
+            run_id: event_run_id,
+            message_id,
+        }) if event_run_id == &run_id && message_id == third.value.message().id()
+    ));
     assert_eq!(
         app.record_run_input_delivery(RecordRunInputDelivery {
             message_id: third.value.message().id().clone(),
@@ -1923,6 +1960,8 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
         .await
         .unwrap();
     assert_eq!(cancelled.value.state(), MessageDeliveryState::Cancelled);
+    assert_eq!(cancelled.disposition, RecordRunInputDisposition::Duplicate);
+    assert!(cancelled.events.is_empty());
     let terminal_retry = app.send_run_input(first_command).await.unwrap();
     assert_eq!(
         terminal_retry.disposition,

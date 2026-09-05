@@ -872,6 +872,7 @@ impl RunState {
         matches!(
             (self, next),
             (Self::Queued, Self::Running | Self::Cancelled)
+                | (Self::Queued, Self::Cancelling)
                 | (
                     Self::Running,
                     Self::WaitingForApproval | Self::Completed | Self::Failed | Self::Cancelling
@@ -948,6 +949,13 @@ impl ToolCallState {
                     Self::Running,
                     Self::Completed | Self::Failed | Self::Cancelled
                 )
+        )
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Denied
         )
     }
 }
@@ -2707,6 +2715,10 @@ pub trait RunStore: SessionStore + WorkspaceStore {
         &self,
         run_id: &RunId,
     ) -> impl Future<Output = Result<Option<MessageDelivery>, RunStoreError>> + Send;
+    fn list_queued_run_inputs(
+        &self,
+        run_id: &RunId,
+    ) -> impl Future<Output = Result<Vec<MessageDelivery>, RunStoreError>> + Send;
     fn get_tool_call(
         &self,
         id: &ToolCallId,
@@ -2757,12 +2769,14 @@ pub trait RunStore: SessionStore + WorkspaceStore {
         run: &Run,
         tool_call: Option<&ToolCall>,
         approval: Option<&Approval>,
+        cancelled_inputs: &[MessageDelivery],
         events: &[SessionEvent],
     ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
     fn finish_cancellation(
         &self,
         run: &Run,
         tool_call: &ToolCall,
+        cancelled_inputs: &[MessageDelivery],
         events: &[SessionEvent],
     ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
 }
@@ -2971,14 +2985,38 @@ where
             .map_err(map_run_store_error)
     }
 
+    pub async fn list_run_subtree(&self, run_id: RunId) -> Result<Vec<RunSnapshot>, RunError> {
+        let root = self.get_run(run_id.clone()).await?;
+        let runs = self
+            .store
+            .list_session_runs(root.run().session_id())
+            .await
+            .map_err(map_run_store_error)?;
+        Ok(run_subtree(runs, &run_id))
+    }
+
     pub async fn request_cancellation(
         &self,
         run_id: RunId,
     ) -> Result<RunMutation<RunSnapshot>, RunError> {
-        let snapshot = self.get_run(run_id).await?;
-        let (run, tool_call, approval, events) = match snapshot.run.state() {
+        let subtree = self.list_run_subtree(run_id).await?;
+        let snapshot = subtree.first().ok_or(RunError::RunNotFound)?;
+        let descendants_terminal = subtree
+            .iter()
+            .skip(1)
+            .all(|descendant| descendant.run().state().is_terminal());
+        let own_work_terminal = snapshot
+            .tool_calls()
+            .iter()
+            .all(|tool_call| tool_call.state().is_terminal());
+        let (run, tool_call, approval, mut events) = match snapshot.run.state() {
             RunState::Queued => {
-                let run = snapshot.run.transition(RunState::Cancelled)?;
+                let next = if descendants_terminal {
+                    RunState::Cancelled
+                } else {
+                    RunState::Cancelling
+                };
+                let run = snapshot.run.transition(next)?;
                 let events = vec![
                     SessionEvent::run_cancellation_requested(self.ids.event_id(), &snapshot.run),
                     SessionEvent::run_state_changed(self.ids.event_id(), &run),
@@ -3005,8 +3043,12 @@ where
                     .ok_or(RunError::RunNotFound)?
                     .transition(ToolCallState::Denied)?;
                 let cancelling = snapshot.run.transition(RunState::Cancelling)?;
-                let run = cancelling.transition(RunState::Cancelled)?;
-                let events = vec![
+                let run = if descendants_terminal {
+                    cancelling.transition(RunState::Cancelled)?
+                } else {
+                    cancelling.clone()
+                };
+                let mut events = vec![
                     SessionEvent::run_cancellation_requested(self.ids.event_id(), &snapshot.run),
                     SessionEvent::run_state_changed(self.ids.event_id(), &cancelling),
                     SessionEvent::approval_decided(
@@ -3019,18 +3061,56 @@ where
                         snapshot.run.session_id.clone(),
                         tool_call.clone(),
                     ),
-                    SessionEvent::run_state_changed(self.ids.event_id(), &run),
                 ];
+                if run.state() == RunState::Cancelled {
+                    events.push(SessionEvent::run_state_changed(self.ids.event_id(), &run));
+                }
                 (run, Some(tool_call), Some(approval), events)
+            }
+            RunState::Cancelling if descendants_terminal && own_work_terminal => {
+                let run = snapshot.run.transition(RunState::Cancelled)?;
+                let event = SessionEvent::run_state_changed(self.ids.event_id(), &run);
+                (run, None, None, vec![event])
             }
             RunState::Cancelling | RunState::Completed | RunState::Failed | RunState::Cancelled => {
                 (snapshot.run.clone(), None, None, Vec::new())
             }
         };
+        let cancelled_inputs =
+            if run.state() == RunState::Cancelled && snapshot.run.state() != RunState::Cancelled {
+                self.cancelled_run_inputs(run.run_id()).await?
+            } else {
+                Vec::new()
+            };
+        events.extend(
+            cancelled_inputs
+                .iter()
+                .map(|delivery| SessionEvent::run_input_cancelled(self.ids.event_id(), delivery)),
+        );
         self.store
-            .request_cancellation(&run, tool_call.as_ref(), approval.as_ref(), &events)
+            .request_cancellation(
+                &run,
+                tool_call.as_ref(),
+                approval.as_ref(),
+                &cancelled_inputs,
+                &events,
+            )
             .await
             .map_err(map_run_store_error)
+    }
+
+    async fn cancelled_run_inputs(&self, run_id: &RunId) -> Result<Vec<MessageDelivery>, RunError> {
+        self.store
+            .list_queued_run_inputs(run_id)
+            .await
+            .map_err(map_run_store_error)?
+            .into_iter()
+            .map(|delivery| {
+                delivery
+                    .with_state(MessageDeliveryState::Cancelled)
+                    .map_err(|_| RunError::InvalidMessageDelivery)
+            })
+            .collect()
     }
 
     pub async fn get_run(&self, run_id: RunId) -> Result<RunSnapshot, RunError> {
@@ -3352,8 +3432,16 @@ where
         tool_call_id: ToolCallId,
         output: SubprocessOutput,
     ) -> Result<RunMutation<RunSnapshot>, RunError> {
-        let snapshot = self.get_run(run_id.clone()).await?;
+        let subtree = self.list_run_subtree(run_id.clone()).await?;
+        let snapshot = subtree.first().ok_or(RunError::RunNotFound)?;
         if snapshot.run.state() != RunState::Cancelling {
+            return Err(RunError::InvalidTransition);
+        }
+        if subtree
+            .iter()
+            .skip(1)
+            .any(|descendant| !descendant.run().state().is_terminal())
+        {
             return Err(RunError::InvalidTransition);
         }
         let tool_call = snapshot
@@ -3418,8 +3506,8 @@ where
             events.push(SessionEvent::artifact_registered(
                 self.ids.event_id(),
                 snapshot.run.session_id.clone(),
-                run_id,
-                tool_call_id,
+                run_id.clone(),
+                tool_call_id.clone(),
                 ToolOutputStream::Stderr,
                 artifact,
             ));
@@ -3433,8 +3521,19 @@ where
             self.ids.event_id(),
             &cancelled_run,
         ));
+        let cancelled_inputs = self.cancelled_run_inputs(&run_id).await?;
+        events.extend(
+            cancelled_inputs
+                .iter()
+                .map(|delivery| SessionEvent::run_input_cancelled(self.ids.event_id(), delivery)),
+        );
         self.store
-            .finish_cancellation(&cancelled_run, &cancelled_tool_call, &events)
+            .finish_cancellation(
+                &cancelled_run,
+                &cancelled_tool_call,
+                &cancelled_inputs,
+                &events,
+            )
             .await
             .map_err(map_run_store_error)
     }
@@ -3451,6 +3550,37 @@ where
             .ok_or(RunError::RunNotFound)?;
         self.get_run(run.run_id.clone()).await
     }
+}
+
+fn run_subtree(runs: Vec<RunSnapshot>, root_run_id: &RunId) -> Vec<RunSnapshot> {
+    // ponytail: This scans one Session in memory; replace it with an indexed descendant query if
+    // Session Run counts make cancellation planning expensive.
+    let mut included = vec![root_run_id.clone()];
+    let mut subtree = runs
+        .iter()
+        .find(|run| run.run().run_id() == root_run_id)
+        .cloned()
+        .into_iter()
+        .collect::<Vec<_>>();
+    loop {
+        let mut changed = false;
+        for run in &runs {
+            if !included.contains(run.run().run_id())
+                && run
+                    .run()
+                    .parent_run_id()
+                    .is_some_and(|parent| included.contains(parent))
+            {
+                included.push(run.run().run_id().clone());
+                subtree.push(run.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    subtree
 }
 
 fn map_run_store_error(error: RunStoreError) -> RunError {
@@ -4958,6 +5088,10 @@ mod run_tests {
             run.transition(RunState::Cancelled).unwrap().state(),
             RunState::Cancelled
         );
+        assert_eq!(
+            run.transition(RunState::Cancelling).unwrap().state(),
+            RunState::Cancelling
+        );
         let cancelling = run
             .transition(RunState::Running)
             .unwrap()
@@ -5285,6 +5419,13 @@ mod run_tests {
             Ok(None)
         }
 
+        async fn list_queued_run_inputs(
+            &self,
+            _run_id: &RunId,
+        ) -> Result<Vec<MessageDelivery>, RunStoreError> {
+            Ok(Vec::new())
+        }
+
         async fn get_tool_call(
             &self,
             id: &ToolCallId,
@@ -5465,6 +5606,7 @@ mod run_tests {
             run: &Run,
             tool_call: Option<&ToolCall>,
             approval: Option<&Approval>,
+            _cancelled_inputs: &[MessageDelivery],
             events: &[SessionEvent],
         ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
             *self.request_count.lock().unwrap() += 1;
@@ -5495,6 +5637,7 @@ mod run_tests {
             &self,
             run: &Run,
             tool_call: &ToolCall,
+            _cancelled_inputs: &[MessageDelivery],
             events: &[SessionEvent],
         ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
             *self.finish_count.lock().unwrap() += 1;

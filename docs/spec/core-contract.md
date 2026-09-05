@@ -165,14 +165,29 @@ is invalid after Run termination. A `cancelled` outcome requires a terminal
 Run. The durable query for pending runtime work returns the oldest queued
 delivery per Run.
 
-Provider delivery, safe-boundary consumption, automatic cancellation of queued
-input during Run termination, and the terminal eligibility guard for accepted
-guidance remain pending runtime and scheduler work. This slice stores and
-exposes the delivery boundary; it does not claim end-to-end steering.
+Provider delivery, safe-boundary consumption, queued-input handling on successful
+or failed completion, and the terminal eligibility guard for accepted guidance
+remain pending runtime and scheduler work.
 
 Cancelling a child does not cancel its parent or siblings. Cancelling a run
 requests cancellation for its descendants. A completion already committed
 before cancellation wins; the cancellation command returns the terminal run.
+
+The daemon commits cancellation intent before signalling owned execution. It
+signals the selected subtree before waiting for any owned process to stop.
+New child Runs are rejected below a cancelling ancestor. A queued or
+approval-waiting parent remains `cancelling` until its own ToolCalls and all
+descendants are terminal. The terminal storage transaction checks these
+conditions again.
+
+When a Run becomes `cancelled`, its remaining queued MessageDeliveries become
+`cancelled` in the same transaction, with one `run.input_cancelled` Event per
+Message. Messages remain immutable and are never redirected. Exact input
+retries return the stored cancelled delivery without new Events.
+
+After restart, durable queued work and pending approvals can be cancelled.
+Missing ownership of non-terminal external execution returns
+`cancellation_failed`; process reconciliation remains pending.
 
 ### Tools, permissions, and approvals
 

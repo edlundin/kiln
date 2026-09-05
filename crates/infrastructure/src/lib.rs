@@ -2708,6 +2708,23 @@ impl RunStore for SqliteStore {
         if parent.state().is_terminal() {
             return Err(RunStoreError::ParentRunTerminal);
         }
+        let cancelling_ancestor = sqlx::query_scalar::<_, bool>(
+            "WITH RECURSIVE ancestors(run_id, parent_run_id, state) AS (
+                 SELECT run_id, parent_run_id, state FROM runs WHERE run_id = ?
+                 UNION ALL
+                 SELECT parent.run_id, parent.parent_run_id, parent.state
+                 FROM runs parent
+                 JOIN ancestors child ON parent.run_id = child.parent_run_id
+             )
+             SELECT EXISTS(SELECT 1 FROM ancestors WHERE state = 'cancelling')",
+        )
+        .bind(parent_run_id.as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?;
+        if cancelling_ancestor {
+            return Err(RunStoreError::InvalidTransition);
+        }
         if events[2] != SessionEvent::run_child_added(events[2].event_id().clone(), &parent, run) {
             return Err(RunStoreError::InvalidTransition);
         }
@@ -3125,6 +3142,26 @@ impl RunStore for SqliteStore {
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
         Ok(delivery)
+    }
+
+    async fn list_queued_run_inputs(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<MessageDelivery>, RunStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        if load_run(&mut transaction, run_id).await?.is_none() {
+            return Err(RunStoreError::RunNotFound);
+        }
+        let deliveries = load_queued_run_inputs(&mut transaction, run_id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        Ok(deliveries)
     }
 
     async fn get_tool_call(
@@ -3852,6 +3889,7 @@ impl RunStore for SqliteStore {
         run: &Run,
         tool_call: Option<&ToolCall>,
         approval: Option<&Approval>,
+        cancelled_inputs: &[MessageDelivery],
         events: &[SessionEvent],
     ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
         let mut connection = self.connection.lock().await;
@@ -3866,133 +3904,242 @@ impl RunStore for SqliteStore {
         if current.session_id() != run.session_id() {
             return Err(RunStoreError::InvalidTransition);
         }
-        if current.state() == RunState::WaitingForApproval {
-            let Some(tool_call) = tool_call else {
-                return Err(RunStoreError::InvalidTransition);
-            };
-            let Some(approval) = approval else {
-                return Err(RunStoreError::InvalidTransition);
-            };
-            if events.len() != 5 {
-                return Err(RunStoreError::InvalidTransition);
+        let has_active_descendants =
+            has_non_terminal_descendants(&mut transaction, current.run_id()).await?;
+        let own_work_terminal = current_snapshot
+            .tool_calls()
+            .iter()
+            .all(|tool| tool.state().is_terminal());
+        let (expected_run, expected_tool, expected_approval, expected_events) = match current
+            .state()
+        {
+            RunState::Queued => {
+                let next = if has_active_descendants {
+                    RunState::Cancelling
+                } else {
+                    RunState::Cancelled
+                };
+                let expected_run = current
+                    .transition(next)
+                    .map_err(|_| RunStoreError::InvalidTransition)?;
+                let expected_events = vec![
+                    SessionEvent::run_cancellation_requested(
+                        events
+                            .first()
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        &current,
+                    ),
+                    SessionEvent::run_state_changed(
+                        events
+                            .get(1)
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        &expected_run,
+                    ),
+                ];
+                (expected_run, None, None, expected_events)
             }
-            let current_approval = current_snapshot
-                .approval(approval.approval_id())
-                .ok_or(RunStoreError::InvalidTransition)?;
-            let current_tool_call = current_snapshot
-                .tool_call(tool_call.tool_call_id())
-                .ok_or(RunStoreError::InvalidTransition)?;
-            if current_approval.run_id() != current.run_id()
-                || current_approval.tool_call_id() != current_tool_call.tool_call_id()
-                || current_approval.state() != ApprovalState::Pending
-                || current_tool_call.run_id() != current.run_id()
-                || current_tool_call.state() != ToolCallState::AwaitingApproval
-            {
-                return Err(RunStoreError::InvalidTransition);
+            RunState::Running => {
+                let expected_run = current
+                    .transition(RunState::Cancelling)
+                    .map_err(|_| RunStoreError::InvalidTransition)?;
+                let expected_events = vec![
+                    SessionEvent::run_cancellation_requested(
+                        events
+                            .first()
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        &current,
+                    ),
+                    SessionEvent::run_state_changed(
+                        events
+                            .get(1)
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        &expected_run,
+                    ),
+                ];
+                (expected_run, None, None, expected_events)
             }
-            let expected_approval = current_approval
-                .decide(ApprovalState::Rejected)
-                .map_err(|_| RunStoreError::InvalidTransition)?;
-            let expected_tool_call = current_tool_call
-                .transition(ToolCallState::Denied)
-                .map_err(|_| RunStoreError::InvalidTransition)?;
-            let cancelling = current
-                .transition(RunState::Cancelling)
-                .map_err(|_| RunStoreError::InvalidTransition)?;
-            let expected_run = cancelling
-                .transition(RunState::Cancelled)
-                .map_err(|_| RunStoreError::InvalidTransition)?;
-            let expected_events = vec![
-                SessionEvent::run_cancellation_requested(events[0].event_id().clone(), &current),
-                SessionEvent::run_state_changed(events[1].event_id().clone(), &cancelling),
-                SessionEvent::approval_decided(
-                    events[2].event_id().clone(),
-                    current.session_id().clone(),
-                    expected_approval.clone(),
-                ),
-                SessionEvent::tool_call_denied(
-                    events[3].event_id().clone(),
-                    current.session_id().clone(),
-                    expected_tool_call.clone(),
-                ),
-                SessionEvent::run_state_changed(events[4].event_id().clone(), &expected_run),
-            ];
-            if run != &expected_run
-                || tool_call != &expected_tool_call
-                || approval != &expected_approval
-                || events != expected_events
-            {
-                return Err(RunStoreError::InvalidTransition);
+            RunState::WaitingForApproval => {
+                let proposed_tool = tool_call.ok_or(RunStoreError::InvalidTransition)?;
+                let proposed_approval = approval.ok_or(RunStoreError::InvalidTransition)?;
+                let current_approval = current_snapshot
+                    .approval(proposed_approval.approval_id())
+                    .ok_or(RunStoreError::InvalidTransition)?;
+                let current_tool = current_snapshot
+                    .tool_call(proposed_tool.tool_call_id())
+                    .ok_or(RunStoreError::InvalidTransition)?;
+                if current_approval.run_id() != current.run_id()
+                    || current_approval.tool_call_id() != current_tool.tool_call_id()
+                    || current_approval.state() != ApprovalState::Pending
+                    || current_tool.run_id() != current.run_id()
+                    || current_tool.state() != ToolCallState::AwaitingApproval
+                {
+                    return Err(RunStoreError::InvalidTransition);
+                }
+                let expected_approval = current_approval
+                    .decide(ApprovalState::Rejected)
+                    .map_err(|_| RunStoreError::InvalidTransition)?;
+                let expected_tool = current_tool
+                    .transition(ToolCallState::Denied)
+                    .map_err(|_| RunStoreError::InvalidTransition)?;
+                let cancelling = current
+                    .transition(RunState::Cancelling)
+                    .map_err(|_| RunStoreError::InvalidTransition)?;
+                let expected_run = if has_active_descendants {
+                    cancelling.clone()
+                } else {
+                    cancelling
+                        .transition(RunState::Cancelled)
+                        .map_err(|_| RunStoreError::InvalidTransition)?
+                };
+                let mut expected_events = vec![
+                    SessionEvent::run_cancellation_requested(
+                        events
+                            .first()
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        &current,
+                    ),
+                    SessionEvent::run_state_changed(
+                        events
+                            .get(1)
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        &cancelling,
+                    ),
+                    SessionEvent::approval_decided(
+                        events
+                            .get(2)
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        current.session_id().clone(),
+                        expected_approval.clone(),
+                    ),
+                    SessionEvent::tool_call_denied(
+                        events
+                            .get(3)
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        current.session_id().clone(),
+                        expected_tool.clone(),
+                    ),
+                ];
+                if expected_run.state() == RunState::Cancelled {
+                    expected_events.push(SessionEvent::run_state_changed(
+                        events
+                            .get(4)
+                            .ok_or(RunStoreError::InvalidTransition)?
+                            .event_id()
+                            .clone(),
+                        &expected_run,
+                    ));
+                }
+                (
+                    expected_run,
+                    Some(expected_tool),
+                    Some(expected_approval),
+                    expected_events,
+                )
             }
-            let approval_updated = sqlx::query("UPDATE approvals SET state = 'rejected' WHERE approval_id = ? AND state = 'pending'")
-                .bind(approval.approval_id().as_str()).execute(&mut *transaction).await
-                .map_err(|_| RunStoreError::Unavailable)?;
-            let tool_updated = sqlx::query("UPDATE tool_calls SET state = 'denied' WHERE tool_call_id = ? AND state = 'awaiting_approval'")
-                .bind(tool_call.tool_call_id().as_str()).execute(&mut *transaction).await
-                .map_err(|_| RunStoreError::Unavailable)?;
-            let run_updated = sqlx::query("UPDATE runs SET state = 'cancelled' WHERE run_id = ? AND state = 'waiting_for_approval'")
-                .bind(run.run_id().as_str()).execute(&mut *transaction).await
-                .map_err(|_| RunStoreError::Unavailable)?;
-            if approval_updated.rows_affected() != 1
-                || tool_updated.rows_affected() != 1
-                || run_updated.rows_affected() != 1
-            {
-                return Err(RunStoreError::InvalidTransition);
+            RunState::Cancelling if !has_active_descendants && own_work_terminal => {
+                let expected_run = current
+                    .transition(RunState::Cancelled)
+                    .map_err(|_| RunStoreError::InvalidTransition)?;
+                let expected_events = vec![SessionEvent::run_state_changed(
+                    events
+                        .first()
+                        .ok_or(RunStoreError::InvalidTransition)?
+                        .event_id()
+                        .clone(),
+                    &expected_run,
+                )];
+                (expected_run, None, None, expected_events)
             }
-            let stored_events = insert_events(&mut transaction, events).await?;
-            let snapshot = load_snapshot(&mut transaction, run.run_id())
-                .await?
-                .ok_or(RunStoreError::Unavailable)?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RunStoreError::Unavailable)?;
-            return Ok(RunMutation::new(snapshot, stored_events));
-        }
-
-        let transition = match (current.state(), run.state()) {
-            (RunState::Queued, RunState::Cancelled) => Some(RunState::Queued),
-            (RunState::Running, RunState::Cancelling) => Some(RunState::Running),
-            (RunState::Cancelling, RunState::Cancelling)
-            | (RunState::Completed, RunState::Completed)
-            | (RunState::Failed, RunState::Failed)
-            | (RunState::Cancelled, RunState::Cancelled) => None,
-            _ => return Err(RunStoreError::InvalidTransition),
+            RunState::Cancelling | RunState::Completed | RunState::Failed | RunState::Cancelled => {
+                (current.clone(), None, None, Vec::new())
+            }
         };
-
-        let Some(expected_old_state) = transition else {
-            if !events.is_empty() {
-                return Err(RunStoreError::InvalidTransition);
-            }
-            let snapshot = load_snapshot(&mut transaction, run.run_id())
-                .await?
-                .ok_or(RunStoreError::Unavailable)?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| RunStoreError::Unavailable)?;
-            return Ok(RunMutation::new(snapshot, Vec::new()));
-        };
-
-        if events.len() != 2
-            || events[0]
-                != SessionEvent::run_cancellation_requested(events[0].event_id().clone(), &current)
-            || events[1] != SessionEvent::run_state_changed(events[1].event_id().clone(), run)
+        if run != &expected_run
+            || tool_call != expected_tool.as_ref()
+            || approval != expected_approval.as_ref()
+            || events.len() < expected_events.len()
+            || events[..expected_events.len()] != expected_events
         {
             return Err(RunStoreError::InvalidTransition);
         }
-        let updated = sqlx::query(
-            "UPDATE runs SET state = ? WHERE run_id = ? AND session_id = ? AND state = ?",
-        )
-        .bind(run.state().as_str())
-        .bind(run.run_id().as_str())
-        .bind(run.session_id().as_str())
-        .bind(expected_old_state.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| RunStoreError::Unavailable)?;
-        if updated.rows_affected() != 1 {
+        let input_events = &events[expected_events.len()..];
+        let becomes_terminal =
+            current.state() != RunState::Cancelled && expected_run.state() == RunState::Cancelled;
+        if becomes_terminal {
+            if has_active_descendants {
+                return Err(RunStoreError::InvalidTransition);
+            }
+            validate_cancelled_run_inputs(
+                &mut transaction,
+                run.run_id(),
+                cancelled_inputs,
+                input_events,
+            )
+            .await?;
+        } else if !cancelled_inputs.is_empty() || !input_events.is_empty() {
             return Err(RunStoreError::InvalidTransition);
+        }
+
+        if let Some(expected_approval) = expected_approval {
+            let updated = sqlx::query(
+                "UPDATE approvals SET state = 'rejected'
+                 WHERE approval_id = ? AND state = 'pending'",
+            )
+            .bind(expected_approval.approval_id().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(RunStoreError::InvalidTransition);
+            }
+        }
+        if let Some(expected_tool) = expected_tool {
+            let updated = sqlx::query(
+                "UPDATE tool_calls SET state = 'denied'
+                 WHERE tool_call_id = ? AND state = 'awaiting_approval'",
+            )
+            .bind(expected_tool.tool_call_id().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(RunStoreError::InvalidTransition);
+            }
+        }
+        if current.state() != expected_run.state() {
+            let updated = sqlx::query(
+                "UPDATE runs SET state = ? WHERE run_id = ? AND session_id = ? AND state = ?",
+            )
+            .bind(expected_run.state().as_str())
+            .bind(run.run_id().as_str())
+            .bind(run.session_id().as_str())
+            .bind(current.state().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(RunStoreError::InvalidTransition);
+            }
+        }
+        if becomes_terminal {
+            cancel_queued_run_inputs(&mut transaction, run.run_id(), cancelled_inputs.len())
+                .await?;
         }
         let stored_events = insert_events(&mut transaction, events).await?;
         let snapshot = load_snapshot(&mut transaction, run.run_id())
@@ -4009,6 +4156,7 @@ impl RunStore for SqliteStore {
         &self,
         run: &Run,
         tool_call: &ToolCall,
+        cancelled_inputs: &[MessageDelivery],
         events: &[SessionEvent],
     ) -> Result<RunMutation<RunSnapshot>, RunStoreError> {
         let mut connection = self.connection.lock().await;
@@ -4035,6 +4183,8 @@ impl RunStore for SqliteStore {
         .map_err(|_| RunStoreError::Unavailable)?
         .ok_or(RunStoreError::Unavailable)
         .and_then(|row| parse_tool_call(&row))?;
+        let base_event_count = finish_events_prefix_len(events, run, tool_call)
+            .ok_or(RunStoreError::InvalidTransition)?;
         if current_run.state() != RunState::Cancelling
             || run.state() != RunState::Cancelled
             || current_run.session_id() != run.session_id()
@@ -4051,10 +4201,19 @@ impl RunStore for SqliteStore {
             || tool_call.state() != ToolCallState::Cancelled
             || (tool_call.stdout().is_none() == tool_call.stdout_artifact().is_none())
             || (tool_call.stderr().is_none() == tool_call.stderr_artifact().is_none())
-            || !finish_events_match(events, run, tool_call)
         {
             return Err(RunStoreError::InvalidTransition);
         }
+        if has_non_terminal_descendants(&mut transaction, run.run_id()).await? {
+            return Err(RunStoreError::InvalidTransition);
+        }
+        validate_cancelled_run_inputs(
+            &mut transaction,
+            run.run_id(),
+            cancelled_inputs,
+            &events[base_event_count..],
+        )
+        .await?;
         insert_tool_call_artifacts(&mut transaction, tool_call).await?;
         let updated_tool = sqlx::query(
             "UPDATE tool_calls
@@ -4085,6 +4244,7 @@ impl RunStore for SqliteStore {
         if updated_run.rows_affected() != 1 {
             return Err(RunStoreError::InvalidTransition);
         }
+        cancel_queued_run_inputs(&mut transaction, run.run_id(), cancelled_inputs.len()).await?;
         let stored_events = insert_events(&mut transaction, events).await?;
         let snapshot = load_snapshot(&mut transaction, run.run_id())
             .await?
@@ -4098,7 +4258,15 @@ impl RunStore for SqliteStore {
 }
 
 fn finish_events_match(events: &[SessionEvent], run: &Run, tool_call: &ToolCall) -> bool {
-    let Some(index) = output_event_index(
+    finish_events_prefix_len(events, run, tool_call) == Some(events.len())
+}
+
+fn finish_events_prefix_len(
+    events: &[SessionEvent],
+    run: &Run,
+    tool_call: &ToolCall,
+) -> Option<usize> {
+    let index = output_event_index(
         events,
         run,
         tool_call,
@@ -4106,10 +4274,8 @@ fn finish_events_match(events: &[SessionEvent], run: &Run, tool_call: &ToolCall)
         tool_call.stdout(),
         tool_call.stdout_artifact(),
         0,
-    ) else {
-        return false;
-    };
-    let Some(mut index) = output_event_index(
+    )?;
+    let mut index = output_event_index(
         events,
         run,
         tool_call,
@@ -4117,12 +4283,8 @@ fn finish_events_match(events: &[SessionEvent], run: &Run, tool_call: &ToolCall)
         tool_call.stderr(),
         tool_call.stderr_artifact(),
         index,
-    ) else {
-        return false;
-    };
-    let Some(tool_event) = events.get(index) else {
-        return false;
-    };
+    )?;
+    let tool_event = events.get(index)?;
     if tool_event
         != &SessionEvent::tool_call_state_changed(
             tool_event.event_id().clone(),
@@ -4130,14 +4292,12 @@ fn finish_events_match(events: &[SessionEvent], run: &Run, tool_call: &ToolCall)
             tool_call.clone(),
         )
     {
-        return false;
+        return None;
     }
     index += 1;
-    let Some(run_event) = events.get(index) else {
-        return false;
-    };
-    run_event == &SessionEvent::run_state_changed(run_event.event_id().clone(), run)
-        && index + 1 == events.len()
+    let run_event = events.get(index)?;
+    (run_event == &SessionEvent::run_state_changed(run_event.event_id().clone(), run))
+        .then_some(index + 1)
 }
 
 fn output_event_index(
@@ -4832,6 +4992,99 @@ async fn load_message_delivery(
         .map_err(|_| RunStoreError::Unavailable)
     })
     .transpose()
+}
+
+async fn load_queued_run_inputs(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &RunId,
+) -> Result<Vec<MessageDelivery>, RunStoreError> {
+    let message_ids = sqlx::query_scalar::<_, String>(
+        "SELECT message_id FROM message_deliveries
+         WHERE run_id = ? AND state = 'queued'
+         ORDER BY queued_cursor ASC",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let mut deliveries = Vec::with_capacity(message_ids.len());
+    for message_id in message_ids {
+        let message_id = MessageId::parse(message_id).map_err(|_| RunStoreError::Unavailable)?;
+        deliveries.push(
+            load_message_delivery(transaction, &message_id)
+                .await?
+                .ok_or(RunStoreError::Unavailable)?,
+        );
+    }
+    Ok(deliveries)
+}
+
+async fn has_non_terminal_descendants(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &RunId,
+) -> Result<bool, RunStoreError> {
+    sqlx::query_scalar::<_, bool>(
+        "WITH RECURSIVE descendants(run_id, state) AS (
+             SELECT run_id, state FROM runs WHERE parent_run_id = ?
+             UNION ALL
+             SELECT child.run_id, child.state
+             FROM runs child
+             JOIN descendants parent ON child.parent_run_id = parent.run_id
+         )
+         SELECT EXISTS(
+             SELECT 1 FROM descendants
+             WHERE state NOT IN ('completed', 'failed', 'cancelled')
+         )",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)
+}
+
+async fn validate_cancelled_run_inputs(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &RunId,
+    cancelled_inputs: &[MessageDelivery],
+    events: &[SessionEvent],
+) -> Result<(), RunStoreError> {
+    let expected = load_queued_run_inputs(transaction, run_id)
+        .await?
+        .into_iter()
+        .map(|delivery| {
+            delivery
+                .with_state(MessageDeliveryState::Cancelled)
+                .map_err(|_| RunStoreError::InvalidMessageDelivery)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if expected != cancelled_inputs || events.len() != cancelled_inputs.len() {
+        return Err(RunStoreError::InvalidTransition);
+    }
+    for (delivery, event) in cancelled_inputs.iter().zip(events) {
+        if event != &SessionEvent::run_input_cancelled(event.event_id().clone(), delivery) {
+            return Err(RunStoreError::InvalidTransition);
+        }
+    }
+    Ok(())
+}
+
+async fn cancel_queued_run_inputs(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &RunId,
+    expected_count: usize,
+) -> Result<(), RunStoreError> {
+    let updated = sqlx::query(
+        "UPDATE message_deliveries SET state = 'cancelled'
+         WHERE run_id = ? AND state = 'queued'",
+    )
+    .bind(run_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
+    if updated.rows_affected() != u64::try_from(expected_count).unwrap_or(u64::MAX) {
+        return Err(RunStoreError::InvalidTransition);
+    }
+    Ok(())
 }
 
 async fn load_run(

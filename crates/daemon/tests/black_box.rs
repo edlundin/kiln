@@ -2163,6 +2163,57 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
     )
     .await;
 
+    let root_path = RUN_PATH.replace("{run_id}", &root.run_id);
+    let waiting_root: RunResponse = http
+        .get(format!("http://{}{}", daemon.address, root_path))
+        .send()
+        .await
+        .expect("waiting root response")
+        .json()
+        .await
+        .expect("waiting root JSON");
+    let approval_path =
+        TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &waiting_root.tool_calls[0].tool_call_id);
+    let approval = http
+        .post(format!("http://{}{}", daemon.address, approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "complete-tree-root")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        })
+        .send()
+        .await
+        .expect("root approval response");
+    assert_eq!(approval.status(), StatusCode::OK);
+    receive_run_events(&mut socket, &root.run_id, RunState::Completed).await;
+    let completed_root: RunResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            RUN_CANCEL_PATH.replace("{run_id}", &root.run_id)
+        ))
+        .send()
+        .await
+        .expect("completed root cancellation response")
+        .json()
+        .await
+        .expect("completed root cancellation JSON");
+    assert_eq!(completed_root.state, RunState::Completed);
+    for sibling_run_id in [&first.run_id, &second.run_id] {
+        let sibling: RunResponse = http
+            .get(format!(
+                "http://{}{}",
+                daemon.address,
+                RUN_PATH.replace("{run_id}", sibling_run_id)
+            ))
+            .send()
+            .await
+            .expect("completed root sibling response")
+            .json()
+            .await
+            .expect("completed root sibling JSON");
+        assert_eq!(sibling.state, RunState::WaitingForApproval);
+    }
+
     let runs_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let listed: SessionRunsResponse = http
         .get(format!("http://{}{}", daemon.address, runs_path))
@@ -2208,7 +2259,17 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .json()
         .await
         .expect("tree Event history JSON");
-    assert_eq!(history.events.len(), before_input.events.len() + 2);
+    assert_eq!(
+        history
+            .events
+            .iter()
+            .filter(|event| {
+                event_belongs_to_run(event, &root.run_id)
+                    && event_kind(event) == "run.cancellation_requested"
+            })
+            .count(),
+        0
+    );
     let first_created = history
         .events
         .iter()
@@ -2288,6 +2349,180 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         error_code::IDEMPOTENCY_CONFLICT,
     )
     .await;
+
+    let mut cancellation_socket = open_event_socket(&restarted).await;
+    let grandchild: RunResponse = restarted_http
+        .post(format!(
+            "http://{}{}",
+            restarted.address,
+            RUN_CHILDREN_PATH.replace("{parent_run_id}", &second.run_id)
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "tree-grandchild")
+        .json(&second_request)
+        .send()
+        .await
+        .expect("grandchild response")
+        .json()
+        .await
+        .expect("grandchild JSON");
+    receive_run_events(
+        &mut cancellation_socket,
+        &grandchild.run_id,
+        RunState::WaitingForApproval,
+    )
+    .await;
+    let second_input_request = SendRunInputRequest {
+        content: "Preserve this guidance while cancelling the subtree.".to_owned(),
+        delivery_mode: MessageDeliveryMode::Queued,
+    };
+    let second_input_path = RUN_INPUT_PATH.replace("{run_id}", &second.run_id);
+    let queued_input: MessageDeliveryResponse = restarted_http
+        .post(format!("http://{}{}", restarted.address, second_input_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "second-guidance")
+        .json(&second_input_request)
+        .send()
+        .await
+        .expect("second Run input response")
+        .json()
+        .await
+        .expect("second Run input JSON");
+    assert_eq!(queued_input.state, MessageDeliveryState::Queued);
+    receive_event(&mut cancellation_socket).await;
+    receive_event(&mut cancellation_socket).await;
+    let before_cancellation: SessionEventsResponse = restarted_http
+        .get(format!("http://{}{}", restarted.address, events_path))
+        .send()
+        .await
+        .expect("pre-cancellation Event history response")
+        .json()
+        .await
+        .expect("pre-cancellation Event history JSON");
+    let cancellation_replay_cursor = before_cancellation.current_event_cursor.clone();
+    let cancellation_replay_offset = before_cancellation.events.len();
+
+    let cancelled_second: RunResponse = restarted_http
+        .post(format!(
+            "http://{}{}",
+            restarted.address,
+            RUN_CANCEL_PATH.replace("{run_id}", &second.run_id)
+        ))
+        .send()
+        .await
+        .expect("child subtree cancellation response")
+        .json()
+        .await
+        .expect("child subtree cancellation JSON");
+    assert_eq!(cancelled_second.state, RunState::Cancelled);
+    assert_eq!(cancelled_second.approvals[0].state, ApprovalState::Rejected);
+    let mut cancellation_events = receive_run_events(
+        &mut cancellation_socket,
+        &second.run_id,
+        RunState::Cancelled,
+    )
+    .await;
+    cancellation_events.push(receive_event(&mut cancellation_socket).await);
+    let second_cancellation_kinds = cancellation_events
+        .iter()
+        .filter(|event| event_belongs_to_run(event, &second.run_id))
+        .map(event_kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        second_cancellation_kinds,
+        [
+            "run.cancellation_requested",
+            "run.state_changed",
+            "approval.decided",
+            "tool_call.denied",
+            "run.state_changed",
+            "run.input_cancelled",
+        ]
+    );
+    let grandchild_after: RunResponse = restarted_http
+        .get(format!(
+            "http://{}{}",
+            restarted.address,
+            RUN_PATH.replace("{run_id}", &grandchild.run_id)
+        ))
+        .send()
+        .await
+        .expect("cancelled grandchild response")
+        .json()
+        .await
+        .expect("cancelled grandchild JSON");
+    assert_eq!(grandchild_after.state, RunState::Cancelled);
+    let first_after: RunResponse = restarted_http
+        .get(format!(
+            "http://{}{}",
+            restarted.address,
+            RUN_PATH.replace("{run_id}", &first.run_id)
+        ))
+        .send()
+        .await
+        .expect("sibling after child cancellation response")
+        .json()
+        .await
+        .expect("sibling after child cancellation JSON");
+    assert_eq!(first_after.state, RunState::WaitingForApproval);
+    let after_cancellation: SessionEventsResponse = restarted_http
+        .get(format!("http://{}{}", restarted.address, events_path))
+        .send()
+        .await
+        .expect("post-cancellation Event history response")
+        .json()
+        .await
+        .expect("post-cancellation Event history JSON");
+    let cancellation_replay = after_cancellation.events[cancellation_replay_offset..].to_vec();
+    assert!(!cancellation_replay.is_empty());
+
+    drop(cancellation_socket);
+    drop(restarted);
+    let recovered_daemon = Daemon::start_with_outcome(binary, &data_directory, Some("success"));
+    let recovered_http = recovered_daemon.client();
+    let (mut replay_socket, _) =
+        open_event_socket_after(&recovered_daemon, Some(&cancellation_replay_cursor)).await;
+    for expected in &cancellation_replay {
+        assert_eq!(&receive_event(&mut replay_socket).await, expected);
+    }
+    let recovered_tree: SessionRunsResponse = recovered_http
+        .get(format!("http://{}{}", recovered_daemon.address, runs_path))
+        .send()
+        .await
+        .expect("recovered cancelled tree response")
+        .json()
+        .await
+        .expect("recovered cancelled tree JSON");
+    assert_eq!(recovered_tree.runs.len(), 4);
+    for (run_id, expected_state) in [
+        (&root.run_id, RunState::Completed),
+        (&first.run_id, RunState::WaitingForApproval),
+        (&second.run_id, RunState::Cancelled),
+        (&grandchild.run_id, RunState::Cancelled),
+    ] {
+        assert_eq!(
+            recovered_tree
+                .runs
+                .iter()
+                .find(|run| &run.run_id == run_id)
+                .expect("recovered tree Run")
+                .state,
+            expected_state
+        );
+    }
+    let cancelled_input_retry: MessageDeliveryResponse = recovered_http
+        .post(format!(
+            "http://{}{}",
+            recovered_daemon.address, second_input_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "second-guidance")
+        .json(&second_input_request)
+        .send()
+        .await
+        .expect("cancelled input retry response")
+        .json()
+        .await
+        .expect("cancelled input retry JSON");
+    assert_eq!(cancelled_input_retry.message, queued_input.message);
+    assert_eq!(cancelled_input_retry.state, MessageDeliveryState::Cancelled);
 }
 
 #[tokio::test]

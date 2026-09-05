@@ -31,12 +31,13 @@ machines:
         meaning: cancellation_finished_or_queued_work_cancelled
     transitions:
       - { from: queued, to: running, command: ClaimRun, event: run.state_changed }
-      - { from: queued, to: cancelled, command: RequestRunCancellation, event: run.state_changed }
+      - { from: queued, to: cancelled, command: RequestRunCancellation, guard: descendants_terminal, event: run.state_changed }
+      - { from: queued, to: cancelling, command: RequestRunCancellation, guard: non_terminal_descendants, event: run.state_changed }
       - { from: running, to: waiting_for_approval, command: DecideToolCallPolicy, event: run.state_changed }
       - { from: waiting_for_approval, to: running, command: DecideApproval, guard: decision_delivered_to_provider, event: run.state_changed }
       - { from: running, to: cancelling, command: RequestRunCancellation, event: run.state_changed }
       - { from: waiting_for_approval, to: cancelling, command: RequestRunCancellation, event: run.state_changed }
-      - { from: cancelling, to: cancelled, command: FinishRun, event: run.state_changed }
+      - { from: cancelling, to: cancelled, command: FinishRun, guard: own_tool_calls_and_descendants_terminal, event: run.state_changed }
       - { from: running, to: completed, command: FinishRun, event: run.state_changed }
       - { from: running, to: failed, command: FinishRun, event: run.state_changed }
     invariants:
@@ -46,6 +47,8 @@ machines:
       - terminal_result_is_committed_once
       - cancelling_child_does_not_cancel_parent_or_siblings
       - cancelling_parent_requests_cancellation_for_descendants
+      - cancelling_ancestor_prevents_new_child_runs
+      - cancelled_run_has_no_queued_message_deliveries
 
   Task:
     initial: pending
@@ -156,6 +159,7 @@ machines:
       - { from: queued, to: delivered, command: RecordRunInputDelivery, event: run.input_delivered }
       - { from: queued, to: failed, command: RecordRunInputDelivery, event: run.input_failed }
       - { from: queued, to: cancelled, command: RecordRunInputDelivery, guard: target_run_terminal, event: run.input_cancelled }
+      - { from: queued, to: cancelled, cause: target_run_cancelled, event: run.input_cancelled }
     invariants:
       - message_is_immutable
       - target_run_shares_message_thread

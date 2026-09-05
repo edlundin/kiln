@@ -2,6 +2,14 @@
 
 ## 2026-09-05 — `feat`
 
+- Added targeted Run cancellation for a selected Run and its descendants while preserving the parent and siblings when a child is selected.
+- Waits for owned execution and descendants before entering cancelled state, and cancels queued targeted input with durable replay events.
+- Scheduler/provider/unknown-process restart reconciliation remains out of scope.
+
+[Commit](pending)
+
+## 2026-09-05 — `feat`
+
 - Added the storage/API boundary for immutable targeted user Messages, queued and explicit interrupt requests, and durable FIFO delivery state with retry and recovery semantics.
 - Added the HTTP Run input endpoint in protocol version `0.13.0`; provider delivery and scheduler execution remain out of scope.
 

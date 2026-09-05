@@ -18,7 +18,6 @@ use tokio::sync::{Mutex, Notify, oneshot, watch};
 
 struct ActiveRun {
     cancellation: Option<oneshot::Sender<()>>,
-    completion: watch::Receiver<Option<Result<RunSnapshot, RunError>>>,
 }
 
 #[derive(Default)]
@@ -192,7 +191,6 @@ impl RunService {
         &self,
         run_id: RunId,
         cancellation: oneshot::Receiver<()>,
-        completion: watch::Sender<Option<Result<RunSnapshot, RunError>>>,
         approval_revision: watch::Receiver<u64>,
         initialize: bool,
     ) {
@@ -215,7 +213,6 @@ impl RunService {
             eprintln!("kilnd: Run execution stopped without a terminal state: {error:?}");
             self.active.failure.lock().await.get_or_insert(*error);
         }
-        completion.send_replace(Some(result));
         self.active.entries.lock().await.remove(&run_id);
         self.active.changed.notify_waiters();
     }
@@ -228,7 +225,7 @@ impl RunService {
         initialize: bool,
     ) -> Result<RunSnapshot, RunError> {
         if cancellation.try_recv().is_ok() {
-            return self.runs.get_run(run_id).await;
+            return self.wait_for_cancelled_run(run_id).await;
         }
 
         let running = if initialize {
@@ -253,9 +250,17 @@ impl RunService {
                 let changed = approval_revision.changed();
                 tokio::select! {
                     _ = &mut cancellation => {
-                        let _sequence = self.commit_sequence.lock().await;
+                        let sequence = self.commit_sequence.lock().await;
                         let mutation = self.runs.request_cancellation(run_id.clone()).await?;
+                        let changed = !mutation.events.is_empty();
                         self.events.publish(mutation.events.clone());
+                        if changed {
+                            self.active.changed.notify_waiters();
+                        }
+                        if mutation.value.run().state() == RunState::Cancelling {
+                            drop(sequence);
+                            return self.wait_for_cancelled_run(run_id).await;
+                        }
                         return Ok(mutation.value);
                     }
                     _ = changed => {}
@@ -274,7 +279,7 @@ impl RunService {
             .ok_or(RunError::InvalidTransition)?;
 
         {
-            let _sequence = self.commit_sequence.lock().await;
+            let sequence = self.commit_sequence.lock().await;
             let snapshot = self.runs.get_run(run_id.clone()).await?;
             match snapshot.run().state() {
                 RunState::Running
@@ -299,8 +304,9 @@ impl RunService {
                     return Ok(value);
                 }
                 RunState::Cancelling => {
+                    drop(sequence);
                     return self
-                        .finish_cancellation(run_id, tool_call_id, empty_output())
+                        .finish_owned_cancellation(run_id, tool_call_id, empty_output())
                         .await;
                 }
                 RunState::Cancelled => return Ok(snapshot),
@@ -343,7 +349,7 @@ impl RunService {
             SubprocessExecution::CancellationFailed => SubprocessExecution::CancellationFailed,
         };
 
-        let _sequence = self.commit_sequence.lock().await;
+        let sequence = self.commit_sequence.lock().await;
         let snapshot = self.runs.get_run(run_id.clone()).await?;
         match (snapshot.run().state(), execution) {
             (RunState::Running, SubprocessExecution::Finished(output)) => {
@@ -360,7 +366,11 @@ impl RunService {
             (
                 RunState::Cancelling,
                 SubprocessExecution::Finished(output) | SubprocessExecution::Cancelled(output),
-            ) => self.finish_cancellation(run_id, tool_call_id, output).await,
+            ) => {
+                drop(sequence);
+                self.finish_owned_cancellation(run_id, tool_call_id, output)
+                    .await
+            }
             (_, SubprocessExecution::CancellationFailed) => Err(RunError::CancellationFailed),
             (RunState::Cancelled | RunState::Completed | RunState::Failed, _) => Ok(snapshot),
             _ => Err(RunError::InvalidTransition),
@@ -435,7 +445,7 @@ impl RunService {
         message: &'static str,
     ) -> Result<RunSnapshot, RunError> {
         let output = SubprocessOutput::spawn_failure(message);
-        let _sequence = self.commit_sequence.lock().await;
+        let sequence = self.commit_sequence.lock().await;
         let snapshot = self.runs.get_run(run_id.clone()).await?;
         match snapshot.run().state() {
             RunState::Running => {
@@ -449,7 +459,11 @@ impl RunService {
                 self.events.publish(events);
                 Ok(terminal)
             }
-            RunState::Cancelling => self.finish_cancellation(run_id, tool_call_id, output).await,
+            RunState::Cancelling => {
+                drop(sequence);
+                self.finish_owned_cancellation(run_id, tool_call_id, output)
+                    .await
+            }
             RunState::Cancelled | RunState::Completed | RunState::Failed => Ok(snapshot),
             _ => Err(RunError::InvalidTransition),
         }
@@ -461,12 +475,10 @@ impl RunService {
             return;
         }
         let (cancellation_sender, cancellation_receiver) = oneshot::channel();
-        let (completion_sender, completion_receiver) = watch::channel(None);
         entries.insert(
             run_id.clone(),
             ActiveRun {
                 cancellation: Some(cancellation_sender),
-                completion: completion_receiver,
             },
         );
         drop(entries);
@@ -474,13 +486,7 @@ impl RunService {
         let approval_revision = self.approval_changed.subscribe();
         tokio::spawn(async move {
             service
-                .execute(
-                    run_id,
-                    cancellation_receiver,
-                    completion_sender,
-                    approval_revision,
-                    initialize,
-                )
+                .execute(run_id, cancellation_receiver, approval_revision, initialize)
                 .await;
         });
     }
@@ -499,56 +505,166 @@ impl RunService {
             .finish_cancellation(run_id, tool_call_id, output)
             .await?;
         self.events.publish(events);
+        self.active.changed.notify_waiters();
         Ok(terminal)
     }
 
+    async fn finish_owned_cancellation(
+        &self,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        output: SubprocessOutput,
+    ) -> Result<RunSnapshot, RunError> {
+        self.wait_for_descendants_terminal(&run_id).await?;
+        let _sequence = self.commit_sequence.lock().await;
+        let snapshot = self.runs.get_run(run_id.clone()).await?;
+        match snapshot.run().state() {
+            RunState::Cancelling => self.finish_cancellation(run_id, tool_call_id, output).await,
+            RunState::Completed | RunState::Failed | RunState::Cancelled => Ok(snapshot),
+            _ => Err(RunError::InvalidTransition),
+        }
+    }
+
+    async fn wait_for_descendants_terminal(&self, run_id: &RunId) -> Result<(), RunError> {
+        loop {
+            let changed = self.active.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+            if subtree
+                .iter()
+                .skip(1)
+                .all(|snapshot| snapshot.run().state().is_terminal())
+            {
+                return Ok(());
+            }
+            if self.has_lost_execution(&subtree[1..]).await {
+                return Err(RunError::CancellationFailed);
+            }
+            if let Some(error) = *self.active.failure.lock().await {
+                return Err(error);
+            }
+            changed.await;
+        }
+    }
+
+    async fn has_lost_execution(&self, snapshots: &[RunSnapshot]) -> bool {
+        let entries = self.active.entries.lock().await;
+        snapshots.iter().any(|snapshot| {
+            !snapshot.run().state().is_terminal()
+                && snapshot
+                    .tool_calls()
+                    .iter()
+                    .any(|tool_call| !tool_call.state().is_terminal())
+                && !entries.contains_key(snapshot.run().run_id())
+        })
+    }
+
+    async fn wait_for_cancelled_run(&self, run_id: RunId) -> Result<RunSnapshot, RunError> {
+        loop {
+            let changed = self.active.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+            let snapshot = subtree.first().ok_or(RunError::RunNotFound)?;
+            if snapshot.run().state().is_terminal() {
+                return Ok(snapshot.clone());
+            }
+            if self.has_lost_execution(&subtree).await {
+                return Err(RunError::CancellationFailed);
+            }
+            if let Some(error) = *self.active.failure.lock().await {
+                return Err(error);
+            }
+            changed.await;
+        }
+    }
+
     async fn cancel(&self, run_id: RunId) -> Result<RunSnapshot, RunError> {
-        let requested = {
+        let subtree_run_ids = {
             let _sequence = self.commit_sequence.lock().await;
-            let RunMutation { value, events } =
-                self.runs.request_cancellation(run_id.clone()).await?;
-            self.events.publish(events);
-            value
-        };
-
-        let state = requested.run().state();
-        if matches!(state, RunState::Completed | RunState::Failed) {
-            return Ok(requested);
-        }
-
-        let active = {
-            let mut entries = self.active.entries.lock().await;
-            entries
-                .get_mut(&run_id)
-                .map(|active| (active.cancellation.take(), active.completion.clone()))
-        };
-
-        let Some((cancellation, mut completion)) = active else {
-            let current = self.runs.get_run(run_id).await?;
-            return if matches!(
-                current.run().state(),
-                RunState::Completed | RunState::Failed | RunState::Cancelled
+            let root = self.runs.request_cancellation(run_id.clone()).await?;
+            let mut changed = !root.events.is_empty();
+            let root_snapshot = root.value;
+            self.events.publish(root.events);
+            if matches!(
+                root_snapshot.run().state(),
+                RunState::Completed | RunState::Failed
             ) {
-                Ok(current)
-            } else {
-                Err(RunError::CancellationFailed)
-            };
+                return Ok(root_snapshot);
+            }
+            let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+            for descendant in subtree.iter().skip(1) {
+                let mutation = self
+                    .runs
+                    .request_cancellation(descendant.run().run_id().clone())
+                    .await?;
+                changed |= !mutation.events.is_empty();
+                self.events.publish(mutation.events);
+            }
+            if changed {
+                self.active.changed.notify_waiters();
+            }
+            subtree
+                .into_iter()
+                .map(|snapshot| snapshot.run().run_id().clone())
+                .collect::<Vec<_>>()
         };
-        if let Some(cancellation) = cancellation {
+
+        let cancellations = {
+            let mut entries = self.active.entries.lock().await;
+            subtree_run_ids
+                .iter()
+                .filter_map(|run_id| {
+                    entries
+                        .get_mut(run_id)
+                        .and_then(|active| active.cancellation.take())
+                })
+                .collect::<Vec<_>>()
+        };
+        for cancellation in cancellations {
             let _ = cancellation.send(());
-        }
-        if state == RunState::Cancelled {
-            return Ok(requested);
         }
 
         loop {
-            if let Some(result) = completion.borrow().clone() {
-                return result;
+            let changed = self.active.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let subtree = {
+                let _sequence = self.commit_sequence.lock().await;
+                let snapshots = self.runs.list_run_subtree(run_id.clone()).await?;
+                let mut published = false;
+                for snapshot in snapshots.iter().rev() {
+                    if snapshot.run().state() == RunState::Cancelling {
+                        let mutation = self
+                            .runs
+                            .request_cancellation(snapshot.run().run_id().clone())
+                            .await?;
+                        published |= !mutation.events.is_empty();
+                        self.events.publish(mutation.events);
+                    }
+                }
+                if published {
+                    self.active.changed.notify_waiters();
+                }
+                self.runs.list_run_subtree(run_id.clone()).await?
+            };
+            if subtree.iter().all(|snapshot| {
+                snapshot.run().state().is_terminal()
+                    && snapshot
+                        .tool_calls()
+                        .iter()
+                        .all(|tool_call| tool_call.state().is_terminal())
+            }) {
+                return subtree
+                    .into_iter()
+                    .find(|snapshot| snapshot.run().run_id() == &run_id)
+                    .ok_or(RunError::RunNotFound);
             }
-            completion
-                .changed()
-                .await
-                .map_err(|_| RunError::CancellationFailed)?;
+            if self.has_lost_execution(&subtree).await {
+                return Err(RunError::CancellationFailed);
+            }
+            changed.await;
         }
     }
 
@@ -592,6 +708,8 @@ impl RunService {
     async fn wait_until_idle(&self) {
         loop {
             let changed = self.active.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             if self.active.entries.lock().await.is_empty() {
                 return;
             }
@@ -756,6 +874,124 @@ mod tests {
     use kiln_infrastructure::DeterministicOutcome;
 
     #[tokio::test]
+    async fn a_cancelled_parent_exits_when_descendant_execution_ownership_is_lost() {
+        let data_directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(data_directory.path()).await.unwrap();
+        let workspace_id = kiln_core::WorkspaceId::parse("wsp_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let workspace_root_id =
+            kiln_core::WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let workspace_root = kiln_core::WorkspaceRoot::new(
+            workspace_root_id.clone(),
+            "main".to_owned(),
+            "/main".to_owned(),
+            kiln_core::DiscoveredWorkspaceRoot {
+                canonical_path: "/main".to_owned(),
+                git_common_directory_path: "/main/.git".to_owned(),
+                filesystem_identity: kiln_core::FilesystemIdentity::new("test:/main").unwrap(),
+            },
+            0,
+            kiln_core::WorkspaceRootState::Available,
+        )
+        .unwrap();
+        store
+            .create_workspace(
+                &kiln_core::Workspace::new(
+                    workspace_id.clone(),
+                    "Workspace".to_owned(),
+                    vec![workspace_root],
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let session = kiln_core::Session::new(
+            SessionId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            workspace_id.clone(),
+        );
+        store
+            .create_session(
+                &session,
+                &kiln_core::SessionEvent::session_created(
+                    kiln_core::EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+                    session.id().clone(),
+                    workspace_id,
+                ),
+            )
+            .await
+            .unwrap();
+        let runs = RunApplication::new(store.clone(), UlidIdGenerator);
+        let scope = WorkspacePathScope::new(workspace_root_id, ".").unwrap();
+        let root = runs
+            .start_root_run(
+                session.id().clone(),
+                "lost-owner-root".to_owned(),
+                ApprovalPolicy::FullAccess,
+                scope.clone(),
+            )
+            .await
+            .unwrap();
+        let root_id = root.value.run().run_id().clone();
+        let child = runs
+            .start_child_run(
+                root_id.clone(),
+                None,
+                RunInputMode::Interactive,
+                "lost-owner-child".to_owned(),
+                ApprovalPolicy::FullAccess,
+                scope,
+            )
+            .await
+            .unwrap();
+        let child_id = child.value.run().run_id().clone();
+        runs.begin_execution(child_id.clone()).await.unwrap();
+        assert_eq!(
+            runs.request_cancellation(root_id.clone())
+                .await
+                .unwrap()
+                .value
+                .run()
+                .state(),
+            RunState::Cancelling
+        );
+        runs.request_cancellation(child_id).await.unwrap();
+        let artifacts = FileArtifactStore::open(data_directory.path()).unwrap();
+        let service = RunService::new(
+            runs,
+            DeterministicSubprocessExecutor::new(DeterministicOutcome::Success),
+            EventBroadcaster::default(),
+            store,
+            artifacts,
+        );
+        let (cancellation, receiver) = oneshot::channel();
+        service
+            .active
+            .entries
+            .lock()
+            .await
+            .insert(root_id.clone(), ActiveRun { cancellation: None });
+        cancellation.send(()).unwrap();
+        let execution_service = service.clone();
+        let execution = tokio::spawn(async move {
+            execution_service
+                .execute(
+                    root_id.clone(),
+                    receiver,
+                    execution_service.approval_changed.subscribe(),
+                    false,
+                )
+                .await;
+        });
+
+        assert_eq!(service.shutdown().await, Err(RunError::CancellationFailed));
+        execution.await.unwrap();
+        assert!(service.active.entries.lock().await.is_empty());
+        assert_eq!(
+            *service.active.failure.lock().await,
+            Some(RunError::CancellationFailed)
+        );
+    }
+
+    #[tokio::test]
     async fn execution_failure_exits_the_registry_and_shutdown_returns_the_error() {
         let data_directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(data_directory.path()).await.unwrap();
@@ -769,12 +1005,10 @@ mod tests {
         );
         let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
         let (cancellation, _) = oneshot::channel();
-        let (completion_sender, mut completion) = watch::channel(None);
         service.active.entries.lock().await.insert(
             run_id.clone(),
             ActiveRun {
                 cancellation: Some(cancellation),
-                completion: completion.clone(),
             },
         );
 
@@ -782,17 +1016,15 @@ mod tests {
             .execute(
                 run_id.clone(),
                 oneshot::channel().1,
-                completion_sender,
                 service.approval_changed.subscribe(),
                 true,
             )
             .await;
 
         assert!(!service.active.entries.lock().await.contains_key(&run_id));
-        completion.changed().await.unwrap();
         assert_eq!(
-            completion.borrow().clone(),
-            Some(Err(RunError::RunNotFound))
+            *service.active.failure.lock().await,
+            Some(RunError::RunNotFound)
         );
         assert_eq!(service.shutdown().await, Err(RunError::RunNotFound));
     }

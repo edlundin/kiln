@@ -22,7 +22,7 @@ The client creates a durable Workspace with `POST /v1/workspaces`, providing a n
 
 Tool output larger than 4,096 bytes is stored as one immutable artifact instead of inline Event content. The `artifact.registered` Event and terminal ToolCall include the content hash, media type, and decimal byte size. `GET /v1/artifacts/{content_hash}` returns the verified bytes with safe download headers.
 
-`POST /v1/runs/{run_id}/cancel` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.
+`POST /v1/runs/{run_id}/cancel` is naturally idempotent for the addressed Run and its descendants. It preserves the addressed Run's parent and siblings, records durable cancellation intent across the selected subtree before signalling owned processes, and returns only after descendant Runs and ToolCalls are terminal. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. Each Run cancellation terminal commit atomically marks its queued MessageDeliveries cancelled and records `run.input_cancelled`; exact input retries return that cancelled delivery. A completion committed before the cancellation request remains authoritative.
 
 SIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.
 

@@ -1271,6 +1271,19 @@ fn tool_output_stream_response(stream: CoreToolOutputStream) -> ToolOutputStream
 
 fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
     let event_data = match event.payload() {
+        SessionEventPayload::ContextManifestCreated {
+            context_manifest_id,
+            run_id,
+            content_hash,
+            entry_count,
+        } => SessionEventDataResponse::ContextManifestCreated(
+            kiln_protocol::ContextManifestCreatedResponse {
+                context_manifest_id: context_manifest_id.as_str().to_owned(),
+                run_id: run_id.as_str().to_owned(),
+                content_hash: content_hash.as_str().to_owned(),
+                entry_count: *entry_count,
+            },
+        ),
         SessionEventPayload::SessionCreated { workspace_id } => {
             SessionEventDataResponse::SessionCreated {
                 workspace_id: workspace_id.as_str().to_owned(),
@@ -2325,6 +2338,15 @@ mod tests {
                 )
                 .unwrap(),
             },
+            SessionEventPayload::ContextManifestCreated {
+                context_manifest_id: kiln_core::ContextManifestId::parse(
+                    "cmf_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                )
+                .unwrap(),
+                run_id: run_id(),
+                content_hash: ContentHash::parse("a".repeat(64)).unwrap(),
+                entry_count: 3,
+            },
         ];
 
         let events: Vec<_> = payloads
@@ -2391,6 +2413,16 @@ mod tests {
             events[13].event,
             SessionEventDataResponse::ArtifactRegistered { .. }
         ));
+        assert_eq!(
+            serde_json::to_value(&events[14].event).unwrap(),
+            serde_json::json!({
+                "type": "context.manifest_created",
+                "context_manifest_id": "cmf_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "run_id": RUN_ID,
+                "content_hash": "a".repeat(64),
+                "entry_count": 3,
+            })
+        );
     }
 
     #[test]

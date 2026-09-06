@@ -44,6 +44,23 @@ entities:
     relationships:
       run_id: optional_target_Run
       artifact_ids: many_Artifact
+  ContextManifest:
+    required:
+      - id
+      - thread_id
+      - run_id
+      - content_hash
+      - ordered_entries
+    relationships:
+      run_id: one_Run
+      message_ids: explicitly_selected_Messages
+    invariants:
+      - immutable_after_commit
+      - exact_content_order_and_provenance_are_hashed
+      - message_sources_share_run_thread
+      - targeted_messages_require_matching_run_and_delivered_state
+      - creation_does_not_deliver_input_or_start_provider_work
+    initial_slice: durable_text_instructions_and_message_snapshots
   Run:
     required:
       - id

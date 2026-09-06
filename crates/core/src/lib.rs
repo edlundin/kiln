@@ -1,6 +1,6 @@
 //! Process-independent Kiln domain and application operations.
 
-use std::{fmt, future::Future, path::Path};
+use std::{collections::HashSet, fmt, future::Future, path::Path};
 
 use ulid::Ulid;
 
@@ -112,6 +112,23 @@ impl MessageId {
 
     pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
         parse_id(value.into(), "msg_").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContextManifestId(String);
+
+impl ContextManifestId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("cmf_{value}"))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
+        parse_id(value.into(), "cmf_").map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -497,6 +514,276 @@ impl Message {
     pub fn target_run_id(&self) -> Option<&RunId> {
         self.target_run_id.as_ref()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextInstructionProvenance {
+    Runtime,
+    User,
+    Workspace { workspace_root_id: WorkspaceRootId },
+    Run { run_id: RunId },
+}
+
+impl ContextInstructionProvenance {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::User => "user",
+            Self::Workspace { .. } => "workspace",
+            Self::Run { .. } => "run",
+        }
+    }
+
+    pub fn workspace_root_id(&self) -> Option<&WorkspaceRootId> {
+        match self {
+            Self::Workspace { workspace_root_id } => Some(workspace_root_id),
+            _ => None,
+        }
+    }
+
+    pub fn run_id(&self) -> Option<&RunId> {
+        match self {
+            Self::Run { run_id } => Some(run_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextManifestEntryInput {
+    Instruction {
+        provenance: ContextInstructionProvenance,
+        content: String,
+    },
+    Message {
+        message_id: MessageId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextManifestEntry {
+    Instruction {
+        provenance: ContextInstructionProvenance,
+        content: String,
+    },
+    MessageSnapshot {
+        message_id: MessageId,
+        role: MessageRole,
+        content: String,
+    },
+}
+
+impl ContextManifestEntry {
+    pub fn instruction(
+        provenance: ContextInstructionProvenance,
+        content: String,
+    ) -> Result<Self, InvalidContextManifest> {
+        if content.trim().is_empty() {
+            return Err(InvalidContextManifest::InstructionContentRequired);
+        }
+        Ok(Self::Instruction {
+            provenance,
+            content,
+        })
+    }
+
+    pub fn message_snapshot(
+        message_id: MessageId,
+        role: MessageRole,
+        content: String,
+    ) -> Result<Self, InvalidContextManifest> {
+        if content.trim().is_empty() {
+            return Err(InvalidContextManifest::MessageContentRequired);
+        }
+        Ok(Self::MessageSnapshot {
+            message_id,
+            role,
+            content,
+        })
+    }
+
+    pub fn content(&self) -> &str {
+        match self {
+            Self::Instruction { content, .. } | Self::MessageSnapshot { content, .. } => content,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextManifest {
+    context_manifest_id: ContextManifestId,
+    session_id: SessionId,
+    run_id: RunId,
+    content_hash: ContentHash,
+    entries: Vec<ContextManifestEntry>,
+}
+
+impl ContextManifest {
+    pub fn new(
+        context_manifest_id: ContextManifestId,
+        session_id: SessionId,
+        run_id: RunId,
+        content_hash: ContentHash,
+        entries: Vec<ContextManifestEntry>,
+    ) -> Result<Self, InvalidContextManifest> {
+        let mut message_ids = HashSet::new();
+        for entry in &entries {
+            if entry.content().trim().is_empty() {
+                return Err(match entry {
+                    ContextManifestEntry::Instruction { .. } => {
+                        InvalidContextManifest::InstructionContentRequired
+                    }
+                    ContextManifestEntry::MessageSnapshot { .. } => {
+                        InvalidContextManifest::MessageContentRequired
+                    }
+                });
+            }
+            match entry {
+                ContextManifestEntry::Instruction {
+                    provenance:
+                        ContextInstructionProvenance::Run {
+                            run_id: source_run_id,
+                        },
+                    ..
+                } if source_run_id != &run_id => {
+                    return Err(InvalidContextManifest::InvalidRunProvenance);
+                }
+                ContextManifestEntry::MessageSnapshot { message_id, .. }
+                    if !message_ids.insert(message_id) =>
+                {
+                    return Err(InvalidContextManifest::DuplicateMessage);
+                }
+                _ => {}
+            }
+        }
+        Ok(Self {
+            context_manifest_id,
+            session_id,
+            run_id,
+            content_hash,
+            entries,
+        })
+    }
+
+    pub fn context_manifest_id(&self) -> &ContextManifestId {
+        &self.context_manifest_id
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn content_hash(&self) -> &ContentHash {
+        &self.content_hash
+    }
+
+    pub fn entries(&self) -> &[ContextManifestEntry] {
+        &self.entries
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidContextManifest {
+    InstructionContentRequired,
+    MessageContentRequired,
+    DuplicateMessage,
+    InvalidRunProvenance,
+}
+
+pub const CONTEXT_MANIFEST_ENCODING_VERSION: u8 = 1;
+
+pub fn canonical_context_manifest_bytes(
+    session_id: &SessionId,
+    run_id: &RunId,
+    entries: &[ContextManifestEntry],
+) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    push_context_field(&mut encoded, b"kiln.context-manifest");
+    push_context_field(&mut encoded, &[CONTEXT_MANIFEST_ENCODING_VERSION]);
+    push_context_field(&mut encoded, session_id.as_str().as_bytes());
+    push_context_field(&mut encoded, run_id.as_str().as_bytes());
+    push_context_field(&mut encoded, &usize_context_bytes(entries.len()));
+    for (position, entry) in entries.iter().enumerate() {
+        push_context_field(&mut encoded, &usize_context_bytes(position));
+        match entry {
+            ContextManifestEntry::Instruction {
+                provenance,
+                content,
+            } => {
+                push_context_field(&mut encoded, b"instruction");
+                push_context_field(&mut encoded, provenance.as_str().as_bytes());
+                let source_id = provenance
+                    .workspace_root_id()
+                    .map(WorkspaceRootId::as_str)
+                    .or_else(|| provenance.run_id().map(RunId::as_str))
+                    .unwrap_or("");
+                push_context_field(&mut encoded, source_id.as_bytes());
+                push_context_field(&mut encoded, b"");
+                push_context_field(&mut encoded, content.as_bytes());
+            }
+            ContextManifestEntry::MessageSnapshot {
+                message_id,
+                role,
+                content,
+            } => {
+                push_context_field(&mut encoded, b"message");
+                push_context_field(&mut encoded, b"session_message");
+                push_context_field(&mut encoded, message_id.as_str().as_bytes());
+                push_context_field(&mut encoded, role.as_str().as_bytes());
+                push_context_field(&mut encoded, content.as_bytes());
+            }
+        }
+    }
+    encoded
+}
+
+pub fn canonical_context_manifest_request_bytes(command: &CreateContextManifest) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    push_context_field(&mut encoded, b"kiln.context-manifest.request");
+    push_context_field(&mut encoded, &[CONTEXT_MANIFEST_ENCODING_VERSION]);
+    push_context_field(&mut encoded, command.run_id.as_str().as_bytes());
+    push_context_field(&mut encoded, &usize_context_bytes(command.entries.len()));
+    for (position, entry) in command.entries.iter().enumerate() {
+        push_context_field(&mut encoded, &usize_context_bytes(position));
+        match entry {
+            ContextManifestEntryInput::Instruction {
+                provenance,
+                content,
+            } => {
+                push_context_field(&mut encoded, b"instruction");
+                push_context_field(&mut encoded, provenance.as_str().as_bytes());
+                let source_id = provenance
+                    .workspace_root_id()
+                    .map(WorkspaceRootId::as_str)
+                    .or_else(|| provenance.run_id().map(RunId::as_str))
+                    .unwrap_or("");
+                push_context_field(&mut encoded, source_id.as_bytes());
+                push_context_field(&mut encoded, content.as_bytes());
+            }
+            ContextManifestEntryInput::Message { message_id } => {
+                push_context_field(&mut encoded, b"message");
+                push_context_field(&mut encoded, b"session_message");
+                push_context_field(&mut encoded, message_id.as_str().as_bytes());
+                push_context_field(&mut encoded, b"");
+            }
+        }
+    }
+    encoded
+}
+
+fn usize_context_bytes(value: usize) -> [u8; 8] {
+    u64::try_from(value)
+        .expect("usize fits in the context manifest u64 encoding")
+        .to_be_bytes()
+}
+
+fn push_context_field(encoded: &mut Vec<u8>, value: &[u8]) {
+    encoded.extend_from_slice(&usize_context_bytes(value.len()));
+    encoded.extend_from_slice(value);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1792,6 +2079,12 @@ pub enum SessionEventPayload {
     MessageAppended {
         message: Message,
     },
+    ContextManifestCreated {
+        context_manifest_id: ContextManifestId,
+        run_id: RunId,
+        content_hash: ContentHash,
+        entry_count: u64,
+    },
     TaskCreated {
         task: Task,
     },
@@ -1980,6 +2273,20 @@ impl SessionEvent {
             payload: SessionEventPayload::RunStateChanged {
                 run_id: run.run_id.clone(),
                 state: run.state,
+            },
+        }
+    }
+
+    pub fn context_manifest_created(event_id: EventId, manifest: &ContextManifest) -> Self {
+        Self {
+            event_id,
+            session_id: manifest.session_id.clone(),
+            payload: SessionEventPayload::ContextManifestCreated {
+                context_manifest_id: manifest.context_manifest_id.clone(),
+                run_id: manifest.run_id.clone(),
+                content_hash: manifest.content_hash.clone(),
+                entry_count: u64::try_from(manifest.entries.len())
+                    .expect("context manifest entry count fits in u64"),
             },
         }
     }
@@ -2278,6 +2585,13 @@ pub struct AppendMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateContextManifest {
+    pub run_id: RunId,
+    pub entries: Vec<ContextManifestEntryInput>,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendRunInput {
     pub run_id: RunId,
     pub content: String,
@@ -2432,6 +2746,43 @@ pub enum SessionError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextManifestError {
+    ContextManifestNotFound,
+    RunNotFound,
+    RunNotAcceptingWork,
+    WorkspaceProvenanceMismatch,
+    RunProvenanceMismatch,
+    InstructionContentRequired,
+    MessageNotFound,
+    MessageOutsideSession,
+    MessageTargetMismatch,
+    MessageDeliveryNotDelivered,
+    DuplicateMessage,
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
+    IntegrityViolation,
+    StoreUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextManifestStoreError {
+    RunNotFound,
+    RunNotAcceptingWork,
+    WorkspaceProvenanceMismatch,
+    RunProvenanceMismatch,
+    InstructionContentRequired,
+    MessageNotFound,
+    MessageOutsideSession,
+    MessageTargetMismatch,
+    MessageDeliveryNotDelivered,
+    DuplicateMessage,
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
+    IntegrityViolation,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunError {
     SessionNotFound,
     WorkspaceRootNotFound,
@@ -2498,6 +2849,33 @@ pub enum SendRunInputDisposition {
 pub enum RecordRunInputDisposition {
     Applied,
     Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateContextManifestDisposition {
+    Created,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateContextManifestMutation {
+    pub value: ContextManifest,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: CreateContextManifestDisposition,
+}
+
+impl CreateContextManifestMutation {
+    pub fn new(
+        value: ContextManifest,
+        events: Vec<StoredSessionEvent>,
+        disposition: CreateContextManifestDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2631,6 +3009,23 @@ pub trait SessionStore: Send + Sync {
     ) -> impl Future<Output = Result<Option<EventCursor>, StoreError>> + Send;
 }
 
+pub trait ContextManifestStore: Send + Sync {
+    fn create_context_manifest(
+        &self,
+        command: &CreateContextManifest,
+        context_manifest_id: ContextManifestId,
+        event_id: EventId,
+    ) -> impl Future<Output = Result<CreateContextManifestMutation, ContextManifestStoreError>> + Send;
+    fn get_context_manifest(
+        &self,
+        context_manifest_id: &ContextManifestId,
+    ) -> impl Future<Output = Result<Option<ContextManifest>, ContextManifestStoreError>> + Send;
+    fn list_context_manifests(
+        &self,
+        run_id: &RunId,
+    ) -> impl Future<Output = Result<Vec<ContextManifest>, ContextManifestStoreError>> + Send;
+}
+
 pub trait TaskStore: Send + Sync {
     fn create_task(
         &self,
@@ -2675,6 +3070,11 @@ pub trait RunIdGenerator: Send + Sync {
     fn message_id(&self) -> MessageId;
     fn tool_call_id(&self) -> ToolCallId;
     fn approval_id(&self) -> ApprovalId;
+    fn event_id(&self) -> EventId;
+}
+
+pub trait ContextManifestIdGenerator: Send + Sync {
+    fn context_manifest_id(&self) -> ContextManifestId;
     fn event_id(&self) -> EventId;
 }
 
@@ -2779,6 +3179,94 @@ pub trait RunStore: SessionStore + WorkspaceStore {
         cancelled_inputs: &[MessageDelivery],
         events: &[SessionEvent],
     ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
+}
+
+pub struct ContextManifestApplication<S, I> {
+    store: S,
+    ids: I,
+}
+
+impl<S, I> ContextManifestApplication<S, I> {
+    pub fn new(store: S, ids: I) -> Self {
+        Self { store, ids }
+    }
+}
+
+impl<S, I> ContextManifestApplication<S, I>
+where
+    S: ContextManifestStore,
+    I: ContextManifestIdGenerator,
+{
+    pub async fn create_context_manifest(
+        &self,
+        command: CreateContextManifest,
+    ) -> Result<CreateContextManifestMutation, ContextManifestError> {
+        if command.idempotency_key.is_empty() {
+            return Err(ContextManifestError::IdempotencyKeyRequired);
+        }
+        self.store
+            .create_context_manifest(
+                &command,
+                self.ids.context_manifest_id(),
+                self.ids.event_id(),
+            )
+            .await
+            .map_err(map_context_manifest_store_error)
+    }
+
+    pub async fn get_context_manifest(
+        &self,
+        context_manifest_id: ContextManifestId,
+    ) -> Result<ContextManifest, ContextManifestError> {
+        self.store
+            .get_context_manifest(&context_manifest_id)
+            .await
+            .map_err(map_context_manifest_store_error)?
+            .ok_or(ContextManifestError::ContextManifestNotFound)
+    }
+
+    pub async fn list_context_manifests(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<ContextManifest>, ContextManifestError> {
+        self.store
+            .list_context_manifests(&run_id)
+            .await
+            .map_err(map_context_manifest_store_error)
+    }
+}
+
+fn map_context_manifest_store_error(error: ContextManifestStoreError) -> ContextManifestError {
+    match error {
+        ContextManifestStoreError::RunNotFound => ContextManifestError::RunNotFound,
+        ContextManifestStoreError::RunNotAcceptingWork => ContextManifestError::RunNotAcceptingWork,
+        ContextManifestStoreError::WorkspaceProvenanceMismatch => {
+            ContextManifestError::WorkspaceProvenanceMismatch
+        }
+        ContextManifestStoreError::RunProvenanceMismatch => {
+            ContextManifestError::RunProvenanceMismatch
+        }
+        ContextManifestStoreError::InstructionContentRequired => {
+            ContextManifestError::InstructionContentRequired
+        }
+        ContextManifestStoreError::MessageNotFound => ContextManifestError::MessageNotFound,
+        ContextManifestStoreError::MessageOutsideSession => {
+            ContextManifestError::MessageOutsideSession
+        }
+        ContextManifestStoreError::MessageTargetMismatch => {
+            ContextManifestError::MessageTargetMismatch
+        }
+        ContextManifestStoreError::MessageDeliveryNotDelivered => {
+            ContextManifestError::MessageDeliveryNotDelivered
+        }
+        ContextManifestStoreError::DuplicateMessage => ContextManifestError::DuplicateMessage,
+        ContextManifestStoreError::IdempotencyKeyRequired => {
+            ContextManifestError::IdempotencyKeyRequired
+        }
+        ContextManifestStoreError::IdempotencyConflict => ContextManifestError::IdempotencyConflict,
+        ContextManifestStoreError::IntegrityViolation => ContextManifestError::IntegrityViolation,
+        ContextManifestStoreError::Unavailable => ContextManifestError::StoreUnavailable,
+    }
 }
 
 pub struct RunApplication<S, I> {
@@ -5905,5 +6393,106 @@ mod run_tests {
         ));
         assert_eq!(*finishes.lock().unwrap(), 1);
         assert_eq!(events.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn context_manifest_validates_public_entries_and_has_canonical_order() {
+        let session_id = SessionId::parse("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let other_run_id = RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap();
+        let manifest_id = ContextManifestId::parse("cmf_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let content_hash = ContentHash::parse("a".repeat(64)).unwrap();
+        let message_id = MessageId::parse("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+
+        assert_eq!(
+            ContextManifest::new(
+                manifest_id.clone(),
+                session_id.clone(),
+                run_id.clone(),
+                content_hash.clone(),
+                vec![ContextManifestEntry::Instruction {
+                    provenance: ContextInstructionProvenance::Runtime,
+                    content: " \n ".to_owned(),
+                }],
+            ),
+            Err(InvalidContextManifest::InstructionContentRequired)
+        );
+        assert_eq!(
+            ContextManifest::new(
+                manifest_id.clone(),
+                session_id.clone(),
+                run_id.clone(),
+                content_hash.clone(),
+                vec![
+                    ContextManifestEntry::message_snapshot(
+                        message_id.clone(),
+                        MessageRole::User,
+                        "one".to_owned(),
+                    )
+                    .unwrap(),
+                    ContextManifestEntry::message_snapshot(
+                        message_id,
+                        MessageRole::User,
+                        "two".to_owned(),
+                    )
+                    .unwrap(),
+                ],
+            ),
+            Err(InvalidContextManifest::DuplicateMessage)
+        );
+        assert_eq!(
+            ContextManifest::new(
+                manifest_id,
+                session_id.clone(),
+                run_id.clone(),
+                content_hash,
+                vec![
+                    ContextManifestEntry::instruction(
+                        ContextInstructionProvenance::Run {
+                            run_id: other_run_id,
+                        },
+                        "run rules".to_owned(),
+                    )
+                    .unwrap()
+                ],
+            ),
+            Err(InvalidContextManifest::InvalidRunProvenance)
+        );
+
+        let first = ContextManifestEntry::instruction(
+            ContextInstructionProvenance::Runtime,
+            "runtime rules".to_owned(),
+        )
+        .unwrap();
+        let second = ContextManifestEntry::instruction(
+            ContextInstructionProvenance::User,
+            "user rules".to_owned(),
+        )
+        .unwrap();
+        let ordered = canonical_context_manifest_bytes(
+            &session_id,
+            &run_id,
+            &[first.clone(), second.clone()],
+        );
+        assert_eq!(
+            ordered,
+            canonical_context_manifest_bytes(
+                &session_id,
+                &run_id,
+                &[first.clone(), second.clone()]
+            )
+        );
+        assert_ne!(
+            ordered,
+            canonical_context_manifest_bytes(&session_id, &run_id, &[second, first])
+        );
+        assert_ne!(
+            ordered,
+            canonical_context_manifest_request_bytes(&CreateContextManifest {
+                run_id,
+                entries: Vec::new(),
+                idempotency_key: "ignored-by-encoding".to_owned(),
+            })
+        );
     }
 }

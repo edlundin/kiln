@@ -1,6 +1,6 @@
 {
   "type": "ack",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "capability": "kiln.events.websocket",
   "current_event_cursor": null
 }

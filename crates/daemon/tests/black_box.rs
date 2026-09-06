@@ -279,6 +279,7 @@ impl RunSession {
 
 fn event_kind(event: &SessionEventResponse) -> &'static str {
     match &event.event {
+        SessionEventDataResponse::ContextManifestCreated(_) => "context.manifest_created",
         SessionEventDataResponse::SessionCreated { .. } => "session.created",
         SessionEventDataResponse::MessageAppended { .. } => "message.appended",
         SessionEventDataResponse::TaskCreated { .. } => "task.created",
@@ -307,6 +308,9 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
 
 fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> bool {
     match &event.event {
+        SessionEventDataResponse::ContextManifestCreated(manifest) => {
+            manifest.run_id == expected_run_id
+        }
         SessionEventDataResponse::RunCreated { run_id, .. }
         | SessionEventDataResponse::RunQueued { run_id }
         | SessionEventDataResponse::RunStateChanged { run_id, .. }

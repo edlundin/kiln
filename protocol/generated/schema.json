@@ -173,6 +173,34 @@
       "title": "ClientIdentity",
       "type": "object"
     },
+    "ContextManifestCreatedResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "type": "string"
+        },
+        "context_manifest_id": {
+          "type": "string"
+        },
+        "entry_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "context_manifest_id",
+        "run_id",
+        "content_hash",
+        "entry_count"
+      ],
+      "title": "ContextManifestCreatedResponse",
+      "type": "object"
+    },
     "CreateTaskRequest": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1149,6 +1177,37 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
         {
+          "additionalProperties": false,
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "context_manifest_id": {
+              "type": "string"
+            },
+            "entry_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "context.manifest_created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "context_manifest_id",
+            "run_id",
+            "content_hash",
+            "entry_count"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "type": {
               "const": "session.created",
@@ -1736,6 +1795,37 @@
         },
         "SessionEventDataResponse": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "content_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "entry_count": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "context.manifest_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "context_manifest_id",
+                "run_id",
+                "content_hash",
+                "entry_count"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "type": {
@@ -2528,6 +2618,37 @@
         },
         "SessionEventDataResponse": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "content_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "entry_count": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "context.manifest_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "context_manifest_id",
+                "run_id",
+                "content_hash",
+                "entry_count"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "type": {
@@ -4031,6 +4152,37 @@
         "SessionEventDataResponse": {
           "oneOf": [
             {
+              "additionalProperties": false,
+              "properties": {
+                "content_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "entry_count": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "context.manifest_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "context_manifest_id",
+                "run_id",
+                "content_hash",
+                "entry_count"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "type": {
                   "const": "session.created",
@@ -4906,7 +5058,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.13.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.14.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

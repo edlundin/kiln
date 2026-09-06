@@ -13,6 +13,9 @@ use std::{
 use directories::ProjectDirs;
 use kiln_core::{
     Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, AssignTask, ContentHash,
+    ContextInstructionProvenance, ContextManifest, ContextManifestEntry, ContextManifestEntryInput,
+    ContextManifestId, ContextManifestIdGenerator, ContextManifestStore, ContextManifestStoreError,
+    CreateContextManifest, CreateContextManifestDisposition, CreateContextManifestMutation,
     CreateTaskDisposition, CreateTaskMutation, DETERMINISTIC_SUBPROCESS_CAPABILITY,
     DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageDelivery,
     MessageDeliveryMode, MessageDeliveryState, MessageId, MessageRole, PersistedToolCall,
@@ -25,7 +28,8 @@ use kiln_core::{
     TaskIdGenerator, TaskMutation, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError,
     ToolCall, ToolCallId, ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace,
     WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
-    WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
+    WorkspaceRootId, WorkspaceRootState, WorkspaceStore, canonical_context_manifest_bytes,
+    canonical_context_manifest_request_bytes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
@@ -1313,6 +1317,11 @@ impl SqliteStore {
                         e.capability, e.stdout, e.stderr, e.exit_code,
                         e.output_stream, e.output_content, e.artifact_hash,
                         e.stdout_artifact_hash, e.stderr_artifact_hash,
+                        e.context_manifest_id,
+                        cm.session_id AS manifest_session_id,
+                        cm.run_id AS manifest_run_id,
+                        cm.content_hash AS manifest_content_hash,
+                        cm.entry_count AS manifest_entry_count,
                         a.media_type AS artifact_media_type, a.size AS artifact_size,
                         osa.media_type AS stdout_artifact_media_type,
                         osa.size AS stdout_artifact_size,
@@ -1327,6 +1336,8 @@ impl SqliteStore {
                  LEFT JOIN artifacts a ON a.content_hash = e.artifact_hash
                  LEFT JOIN artifacts osa ON osa.content_hash = e.stdout_artifact_hash
                  LEFT JOIN artifacts esa ON esa.content_hash = e.stderr_artifact_hash
+                 LEFT JOIN context_manifests cm
+                    ON cm.context_manifest_id = e.context_manifest_id
                  WHERE e.session_id = ? AND e.cursor > ?
                  ORDER BY e.cursor ASC",
                 )
@@ -1348,6 +1359,11 @@ impl SqliteStore {
                         e.capability, e.stdout, e.stderr, e.exit_code,
                         e.output_stream, e.output_content, e.artifact_hash,
                         e.stdout_artifact_hash, e.stderr_artifact_hash,
+                        e.context_manifest_id,
+                        cm.session_id AS manifest_session_id,
+                        cm.run_id AS manifest_run_id,
+                        cm.content_hash AS manifest_content_hash,
+                        cm.entry_count AS manifest_entry_count,
                         a.media_type AS artifact_media_type, a.size AS artifact_size,
                         osa.media_type AS stdout_artifact_media_type,
                         osa.size AS stdout_artifact_size,
@@ -1362,6 +1378,8 @@ impl SqliteStore {
                  LEFT JOIN artifacts a ON a.content_hash = e.artifact_hash
                  LEFT JOIN artifacts osa ON osa.content_hash = e.stdout_artifact_hash
                  LEFT JOIN artifacts esa ON esa.content_hash = e.stderr_artifact_hash
+                 LEFT JOIN context_manifests cm
+                    ON cm.context_manifest_id = e.context_manifest_id
                  WHERE e.cursor > ?
                  ORDER BY e.cursor ASC",
                 )
@@ -2070,6 +2088,21 @@ fn parse_event_rows(
             "stderr_artifact_media_type",
             "stderr_artifact_size",
         )?;
+        let context_manifest_id = row
+            .try_get::<Option<String>, _>("context_manifest_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let manifest_session_id = row
+            .try_get::<Option<String>, _>("manifest_session_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let manifest_run_id = row
+            .try_get::<Option<String>, _>("manifest_run_id")
+            .map_err(|_| StoreError::Unavailable)?;
+        let manifest_content_hash = row
+            .try_get::<Option<String>, _>("manifest_content_hash")
+            .map_err(|_| StoreError::Unavailable)?;
+        let manifest_entry_count = row
+            .try_get::<Option<i64>, _>("manifest_entry_count")
+            .map_err(|_| StoreError::Unavailable)?;
         let workspace_id = WorkspaceId::parse(
             row.try_get::<String, _>("workspace_id")
                 .map_err(|_| StoreError::Unavailable)?,
@@ -2132,6 +2165,39 @@ fn parse_event_rows(
                 .map_err(|_| StoreError::Unavailable)?;
                 StoredSessionEvent::message_appended(event_id, stored_session_id, cursor, message)
                     .map_err(|_| StoreError::Unavailable)?
+            }
+            "context.manifest_created" => {
+                let context_manifest_id =
+                    ContextManifestId::parse(context_manifest_id.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?;
+                let manifest_session_id =
+                    SessionId::parse(manifest_session_id.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?;
+                let event_run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                let manifest_run_id = RunId::parse(manifest_run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                if manifest_session_id != stored_session_id || manifest_run_id != event_run_id {
+                    return Err(StoreError::Unavailable);
+                }
+                let content_hash =
+                    ContentHash::parse(manifest_content_hash.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?;
+                let entry_count =
+                    u64::try_from(manifest_entry_count.ok_or(StoreError::Unavailable)?)
+                        .map_err(|_| StoreError::Unavailable)?;
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::ContextManifestCreated {
+                        context_manifest_id,
+                        run_id: event_run_id,
+                        content_hash,
+                        entry_count,
+                    },
+                )
+                .map_err(|_| StoreError::Unavailable)?
             }
             "task.created" | "task.updated" | "task.assigned" | "task.state_changed" => {
                 let task_id = TaskId::parse(task_id.ok_or(StoreError::Unavailable)?)
@@ -2475,6 +2541,579 @@ fn parse_event_rows(
     }
 
     Ok(events)
+}
+
+impl ContextManifestStore for SqliteStore {
+    async fn create_context_manifest(
+        &self,
+        command: &CreateContextManifest,
+        context_manifest_id: ContextManifestId,
+        event_id: EventId,
+    ) -> Result<CreateContextManifestMutation, ContextManifestStoreError> {
+        if command.idempotency_key.is_empty() {
+            return Err(ContextManifestStoreError::IdempotencyKeyRequired);
+        }
+        let request = canonical_context_manifest_request_bytes(command);
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?;
+
+        if let Some(row) = sqlx::query(
+            "SELECT request, context_manifest_id
+             FROM create_context_manifest_idempotencies
+             WHERE run_id = ? AND idempotency_key = ?",
+        )
+        .bind(command.run_id.as_str())
+        .bind(&command.idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ContextManifestStoreError::Unavailable)?
+        {
+            if row
+                .try_get::<Vec<u8>, _>("request")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                != request
+            {
+                return Err(ContextManifestStoreError::IdempotencyConflict);
+            }
+            let stored_id = ContextManifestId::parse(
+                row.try_get::<String, _>("context_manifest_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let value = load_context_manifest(&mut transaction, &stored_id)
+                .await?
+                .ok_or(ContextManifestStoreError::IntegrityViolation)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ContextManifestStoreError::Unavailable)?;
+            return Ok(CreateContextManifestMutation::new(
+                value,
+                Vec::new(),
+                CreateContextManifestDisposition::Duplicate,
+            ));
+        }
+
+        let run = load_run(&mut transaction, &command.run_id)
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?
+            .ok_or(ContextManifestStoreError::RunNotFound)?;
+        if !run.state().accepts_input() {
+            return Err(ContextManifestStoreError::RunNotAcceptingWork);
+        }
+        let entries =
+            resolve_context_manifest_entries(&mut transaction, &run, &command.entries).await?;
+        let content_hash = hash_bytes(&canonical_context_manifest_bytes(
+            run.session_id(),
+            run.run_id(),
+            &entries,
+        ));
+        let manifest = ContextManifest::new(
+            context_manifest_id,
+            run.session_id().clone(),
+            run.run_id().clone(),
+            content_hash,
+            entries,
+        )
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let entry_count = i64::try_from(manifest.entries().len())
+            .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO context_manifests
+                (context_manifest_id, session_id, run_id, content_hash, entry_count)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(manifest.context_manifest_id().as_str())
+        .bind(manifest.session_id().as_str())
+        .bind(manifest.run_id().as_str())
+        .bind(manifest.content_hash().as_str())
+        .bind(entry_count)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        persist_context_manifest_entries(&mut transaction, &manifest).await?;
+        sqlx::query(
+            "INSERT INTO create_context_manifest_idempotencies
+                (run_id, idempotency_key, request, context_manifest_id)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(command.run_id.as_str())
+        .bind(&command.idempotency_key)
+        .bind(request)
+        .bind(manifest.context_manifest_id().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        let event = SessionEvent::context_manifest_created(event_id, &manifest);
+        let stored_event = insert_context_manifest_event(&mut transaction, &event).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        Ok(CreateContextManifestMutation::new(
+            manifest,
+            vec![stored_event],
+            CreateContextManifestDisposition::Created,
+        ))
+    }
+
+    async fn get_context_manifest(
+        &self,
+        context_manifest_id: &ContextManifestId,
+    ) -> Result<Option<ContextManifest>, ContextManifestStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        let manifest = load_context_manifest(&mut transaction, context_manifest_id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        Ok(manifest)
+    }
+
+    async fn list_context_manifests(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<ContextManifest>, ContextManifestStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        if load_run(&mut transaction, run_id)
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?
+            .is_none()
+        {
+            return Err(ContextManifestStoreError::RunNotFound);
+        }
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT context_manifest_id FROM context_manifests
+             WHERE run_id = ? ORDER BY sequence ASC",
+        )
+        .bind(run_id.as_str())
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        let mut manifests = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = ContextManifestId::parse(id)
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            manifests.push(
+                load_context_manifest(&mut transaction, &id)
+                    .await?
+                    .ok_or(ContextManifestStoreError::IntegrityViolation)?,
+            );
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?;
+        Ok(manifests)
+    }
+}
+
+async fn resolve_context_manifest_entries(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run: &Run,
+    inputs: &[ContextManifestEntryInput],
+) -> Result<Vec<ContextManifestEntry>, ContextManifestStoreError> {
+    let mut entries = Vec::with_capacity(inputs.len());
+    let mut message_ids = std::collections::HashSet::new();
+    for input in inputs {
+        let entry = match input {
+            ContextManifestEntryInput::Instruction {
+                provenance,
+                content,
+            } => {
+                if content.trim().is_empty() {
+                    return Err(ContextManifestStoreError::InstructionContentRequired);
+                }
+                validate_instruction_provenance(run, provenance)?;
+                ContextManifestEntry::instruction(provenance.clone(), content.clone())
+                    .map_err(|_| ContextManifestStoreError::InstructionContentRequired)?
+            }
+            ContextManifestEntryInput::Message { message_id } => {
+                if !message_ids.insert(message_id) {
+                    return Err(ContextManifestStoreError::DuplicateMessage);
+                }
+                let (message, delivery_state) =
+                    load_context_source_message(transaction, message_id)
+                        .await?
+                        .ok_or(ContextManifestStoreError::MessageNotFound)?;
+                validate_context_source_message(run, &message, delivery_state)?;
+                ContextManifestEntry::message_snapshot(
+                    message.id().clone(),
+                    message.role(),
+                    message.content().to_owned(),
+                )
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+            }
+        };
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+fn validate_instruction_provenance(
+    run: &Run,
+    provenance: &ContextInstructionProvenance,
+) -> Result<(), ContextManifestStoreError> {
+    if let ContextInstructionProvenance::Workspace { workspace_root_id } = provenance
+        && run
+            .requested_scope()
+            .is_none_or(|scope| scope.workspace_root_id() != workspace_root_id)
+    {
+        return Err(ContextManifestStoreError::WorkspaceProvenanceMismatch);
+    }
+    if let ContextInstructionProvenance::Run {
+        run_id: source_run_id,
+    } = provenance
+        && source_run_id != run.run_id()
+    {
+        return Err(ContextManifestStoreError::RunProvenanceMismatch);
+    }
+    Ok(())
+}
+
+fn validate_context_source_message(
+    run: &Run,
+    message: &Message,
+    delivery_state: Option<MessageDeliveryState>,
+) -> Result<(), ContextManifestStoreError> {
+    if message.session_id() != run.session_id() {
+        return Err(ContextManifestStoreError::MessageOutsideSession);
+    }
+    if let Some(target_run_id) = message.target_run_id() {
+        if target_run_id != run.run_id() {
+            return Err(ContextManifestStoreError::MessageTargetMismatch);
+        }
+        if delivery_state != Some(MessageDeliveryState::Delivered) {
+            return Err(ContextManifestStoreError::MessageDeliveryNotDelivered);
+        }
+    } else if delivery_state.is_some() {
+        return Err(ContextManifestStoreError::IntegrityViolation);
+    }
+    Ok(())
+}
+
+async fn load_context_source_message(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message_id: &MessageId,
+) -> Result<Option<(Message, Option<MessageDeliveryState>)>, ContextManifestStoreError> {
+    let row = sqlx::query(
+        "SELECT m.message_id, m.session_id, m.role, m.content, m.target_run_id,
+                d.run_id AS delivery_run_id, d.state AS delivery_state
+         FROM messages m
+         LEFT JOIN message_deliveries d ON d.message_id = m.message_id
+         WHERE m.message_id = ?",
+    )
+    .bind(message_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| ContextManifestStoreError::Unavailable)?;
+    row.map(|row| {
+        let loaded_message_id = MessageId::parse(
+            row.try_get::<String, _>("message_id")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        if &loaded_message_id != message_id {
+            return Err(ContextManifestStoreError::IntegrityViolation);
+        }
+        let session_id = SessionId::parse(
+            row.try_get::<String, _>("session_id")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let role = MessageRole::parse(
+            &row.try_get::<String, _>("role")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let content = row
+            .try_get::<String, _>("content")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let target_run_id = row
+            .try_get::<Option<String>, _>("target_run_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+            .map(RunId::parse)
+            .transpose()
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let delivery_run_id = row
+            .try_get::<Option<String>, _>("delivery_run_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+            .map(RunId::parse)
+            .transpose()
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        if delivery_run_id
+            .as_ref()
+            .is_some_and(|delivery_run_id| Some(delivery_run_id) != target_run_id.as_ref())
+        {
+            return Err(ContextManifestStoreError::IntegrityViolation);
+        }
+        let delivery_state = row
+            .try_get::<Option<String>, _>("delivery_state")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+            .as_deref()
+            .map(MessageDeliveryState::parse)
+            .transpose()
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let message = match target_run_id {
+            Some(target_run_id) => {
+                Message::new_targeted(loaded_message_id, session_id, role, content, target_run_id)
+            }
+            None => Message::new(loaded_message_id, session_id, role, content),
+        }
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        Ok((message, delivery_state))
+    })
+    .transpose()
+}
+
+async fn persist_context_manifest_entries(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    manifest: &ContextManifest,
+) -> Result<(), ContextManifestStoreError> {
+    for (position, entry) in manifest.entries().iter().enumerate() {
+        let position =
+            i64::try_from(position).map_err(|_| ContextManifestStoreError::Unavailable)?;
+        let (entry_kind, provenance, workspace_root_id, source_run_id, message_id, role, content) =
+            match entry {
+                ContextManifestEntry::Instruction {
+                    provenance,
+                    content,
+                } => (
+                    "instruction",
+                    provenance.as_str(),
+                    provenance.workspace_root_id().map(WorkspaceRootId::as_str),
+                    provenance.run_id().map(RunId::as_str),
+                    None,
+                    None,
+                    content.as_str(),
+                ),
+                ContextManifestEntry::MessageSnapshot {
+                    message_id,
+                    role,
+                    content,
+                } => (
+                    "message",
+                    "session_message",
+                    None,
+                    None,
+                    Some(message_id.as_str()),
+                    Some(role.as_str()),
+                    content.as_str(),
+                ),
+            };
+        sqlx::query(
+            "INSERT INTO context_manifest_entries
+                (context_manifest_id, position, entry_kind, provenance, workspace_root_id,
+                 source_run_id, message_id, message_role, content)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(manifest.context_manifest_id().as_str())
+        .bind(position)
+        .bind(entry_kind)
+        .bind(provenance)
+        .bind(workspace_root_id)
+        .bind(source_run_id)
+        .bind(message_id)
+        .bind(role)
+        .bind(content)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| ContextManifestStoreError::Unavailable)?;
+    }
+    Ok(())
+}
+
+async fn insert_context_manifest_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event: &SessionEvent,
+) -> Result<StoredSessionEvent, ContextManifestStoreError> {
+    let SessionEventPayload::ContextManifestCreated {
+        context_manifest_id,
+        run_id,
+        ..
+    } = event.payload()
+    else {
+        return Err(ContextManifestStoreError::IntegrityViolation);
+    };
+    let result = sqlx::query(
+        "INSERT INTO session_events
+            (event_id, session_id, event_type, run_id, context_manifest_id)
+         VALUES (?, ?, 'context.manifest_created', ?, ?)",
+    )
+    .bind(event.event_id().as_str())
+    .bind(event.session_id().as_str())
+    .bind(run_id.as_str())
+    .bind(context_manifest_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| ContextManifestStoreError::Unavailable)?;
+    StoredSessionEvent::from_event(
+        event,
+        committed_cursor(result.last_insert_rowid())
+            .map_err(|_| ContextManifestStoreError::Unavailable)?,
+    )
+    .map_err(|_| ContextManifestStoreError::IntegrityViolation)
+}
+
+async fn load_context_manifest(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    context_manifest_id: &ContextManifestId,
+) -> Result<Option<ContextManifest>, ContextManifestStoreError> {
+    let Some(row) = sqlx::query(
+        "SELECT session_id, run_id, content_hash, entry_count
+         FROM context_manifests WHERE context_manifest_id = ?",
+    )
+    .bind(context_manifest_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| ContextManifestStoreError::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    let session_id = SessionId::parse(
+        row.try_get::<String, _>("session_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+    )
+    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+    let run_id = RunId::parse(
+        row.try_get::<String, _>("run_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+    )
+    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+    let stored_hash = ContentHash::parse(
+        row.try_get::<String, _>("content_hash")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+    )
+    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+    let entry_count = usize::try_from(
+        row.try_get::<i64, _>("entry_count")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+    )
+    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+    let run = load_run(transaction, &run_id)
+        .await
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+        .ok_or(ContextManifestStoreError::IntegrityViolation)?;
+    if run.session_id() != &session_id {
+        return Err(ContextManifestStoreError::IntegrityViolation);
+    }
+    let rows = sqlx::query(
+        "SELECT position, entry_kind, provenance, workspace_root_id, source_run_id,
+                message_id, message_role, content
+         FROM context_manifest_entries WHERE context_manifest_id = ? ORDER BY position ASC",
+    )
+    .bind(context_manifest_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| ContextManifestStoreError::Unavailable)?;
+    if rows.len() != entry_count {
+        return Err(ContextManifestStoreError::IntegrityViolation);
+    }
+    let mut entries = Vec::with_capacity(rows.len());
+    for (expected_position, row) in rows.into_iter().enumerate() {
+        let position = usize::try_from(
+            row.try_get::<i64, _>("position")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        if position != expected_position {
+            return Err(ContextManifestStoreError::IntegrityViolation);
+        }
+        let entry_kind = row
+            .try_get::<String, _>("entry_kind")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let provenance = row
+            .try_get::<String, _>("provenance")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let content = row
+            .try_get::<String, _>("content")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let entry = if entry_kind == "instruction" {
+            let workspace_root_id = row
+                .try_get::<Option<String>, _>("workspace_root_id")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let source_run_id = row
+                .try_get::<Option<String>, _>("source_run_id")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let provenance = match provenance.as_str() {
+                "runtime" if workspace_root_id.is_none() && source_run_id.is_none() => {
+                    ContextInstructionProvenance::Runtime
+                }
+                "user" if workspace_root_id.is_none() && source_run_id.is_none() => {
+                    ContextInstructionProvenance::User
+                }
+                "workspace" if source_run_id.is_none() => ContextInstructionProvenance::Workspace {
+                    workspace_root_id: WorkspaceRootId::parse(
+                        workspace_root_id.ok_or(ContextManifestStoreError::IntegrityViolation)?,
+                    )
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+                },
+                "run" if workspace_root_id.is_none() => ContextInstructionProvenance::Run {
+                    run_id: RunId::parse(
+                        source_run_id.ok_or(ContextManifestStoreError::IntegrityViolation)?,
+                    )
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+                },
+                _ => return Err(ContextManifestStoreError::IntegrityViolation),
+            };
+            validate_instruction_provenance(&run, &provenance)
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            ContextManifestEntry::instruction(provenance, content)
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+        } else if entry_kind == "message" && provenance == "session_message" {
+            let message_id = MessageId::parse(
+                row.try_get::<String, _>("message_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let role = MessageRole::parse(
+                &row.try_get::<String, _>("message_role")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let (source, delivery_state) = load_context_source_message(transaction, &message_id)
+                .await?
+                .ok_or(ContextManifestStoreError::IntegrityViolation)?;
+            validate_context_source_message(&run, &source, delivery_state)
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            if source.role() != role || source.content() != content {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
+            ContextManifestEntry::message_snapshot(message_id, role, content)
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+        } else {
+            return Err(ContextManifestStoreError::IntegrityViolation);
+        };
+        entries.push(entry);
+    }
+    let actual_hash = hash_bytes(&canonical_context_manifest_bytes(
+        &session_id,
+        &run_id,
+        &entries,
+    ));
+    if actual_hash != stored_hash {
+        return Err(ContextManifestStoreError::IntegrityViolation);
+    }
+    ContextManifest::new(
+        context_manifest_id.clone(),
+        session_id,
+        run_id,
+        stored_hash,
+        entries,
+    )
+    .map(Some)
+    .map_err(|_| ContextManifestStoreError::IntegrityViolation)
 }
 
 impl RunStore for SqliteStore {
@@ -4830,6 +5469,7 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
         }),
         SessionEventPayload::SessionCreated { .. }
         | SessionEventPayload::MessageAppended { .. }
+        | SessionEventPayload::ContextManifestCreated { .. }
         | SessionEventPayload::TaskCreated { .. }
         | SessionEventPayload::TaskUpdated { .. }
         | SessionEventPayload::TaskAssigned { .. }
@@ -5576,6 +6216,16 @@ impl SessionIdGenerator for UlidIdGenerator {
 impl TaskIdGenerator for UlidIdGenerator {
     fn task_id(&self) -> TaskId {
         TaskId::from_ulid(Ulid::generate())
+    }
+
+    fn event_id(&self) -> EventId {
+        EventId::from_ulid(Ulid::generate())
+    }
+}
+
+impl ContextManifestIdGenerator for UlidIdGenerator {
+    fn context_manifest_id(&self) -> ContextManifestId {
+        ContextManifestId::from_ulid(Ulid::generate())
     }
 
     fn event_id(&self) -> EventId {

@@ -2,6 +2,13 @@
 
 ## 2026-09-05 — `feat`
 
+- Added durable immutable ContextManifest snapshots with exact instruction/Message ordering, provenance and hashes, same-Session and delivered-targeted Message validation, and retry-safe storage/replay metadata.
+- Added the protocol `0.14.0` metadata-only `context.manifest_created` event; provider calls, ModelInvocation claims, native loop/context building, and input consumption remain out of scope.
+
+[Commit](pending)
+
+## 2026-09-05 — `feat`
+
 - Added targeted Run cancellation for a selected Run and its descendants while preserving the parent and siblings when a child is selected.
 - Waits for owned execution and descendants before entering cancelled state, and cancels queued targeted input with durable replay events.
 - Scheduler/provider/unknown-process restart reconciliation remains out of scope.

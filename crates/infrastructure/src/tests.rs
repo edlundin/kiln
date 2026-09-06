@@ -1,15 +1,18 @@
 use std::{path::Path, process::Command};
 
 use kiln_core::{
-    ApprovalPolicy, AssignTask, CreateTaskDisposition, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message,
-    MessageDeliveryMode, MessageDeliveryState, MessageId, MessageRole, RecordRunInputDelivery,
-    RecordRunInputDisposition, Run, RunApplication, RunId, RunInputMode, RunState, RunStore,
-    SendRunInput, SendRunInputDisposition, Session, SessionEvent, SessionEventPayload, SessionId,
-    SessionStore, StartRunDisposition, SubprocessOutput, Task, TaskId, TaskMutationDisposition,
-    TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId, ToolCallResult, ToolCallState,
-    TransitionTask, UpdateTask, Workspace, WorkspaceId, WorkspacePathScope, WorkspaceRoot,
-    WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
+    ApprovalPolicy, AssignTask, ContextInstructionProvenance, ContextManifestApplication,
+    ContextManifestEntryInput, ContextManifestError, ContextManifestId, ContextManifestStore,
+    CreateContextManifest, CreateContextManifestDisposition, CreateTaskDisposition,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor, EventId,
+    FilesystemIdentity, Message, MessageDeliveryMode, MessageDeliveryState, MessageId, MessageRole,
+    RecordRunInputDelivery, RecordRunInputDisposition, Run, RunApplication, RunId, RunInputMode,
+    RunState, RunStore, SendRunInput, SendRunInputDisposition, Session, SessionEvent,
+    SessionEventPayload, SessionId, SessionStore, StartRunDisposition, SubprocessOutput, Task,
+    TaskId, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
+    ToolCallResult, ToolCallState, TransitionTask, UpdateTask, Workspace, WorkspaceId,
+    WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState,
+    WorkspaceStore,
 };
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
@@ -1389,6 +1392,92 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
         .unwrap(),
         6
     );
+    sqlx::query(
+        "INSERT INTO messages (message_id, session_id, role, content, target_run_id)
+         VALUES (?, ?, 'user', 'queued before migration', ?)",
+    )
+    .bind("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO session_events (event_id, session_id, event_type, message_id)
+         VALUES (?, ?, 'message.appended', ?)",
+    )
+    .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FBE")
+    .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO session_events (event_id, session_id, event_type, message_id, run_id)
+         VALUES (?, ?, 'run.input_queued', ?, ?)",
+    )
+    .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FBF")
+    .bind("ses_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO message_deliveries
+            (message_id, run_id, delivery_mode, state, queued_cursor)
+         VALUES (?, ?, 'queued', 'queued', ?)",
+    )
+    .bind("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind("run_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    .bind(8_i64)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0013_context_manifests.sql"))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM session_events")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap(),
+        7
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT session_id, event_type FROM session_events WHERE event_id = ?",
+        )
+        .bind("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        (
+            "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            "session.created".to_owned(),
+        )
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT delivery_mode, state, queued_cursor FROM message_deliveries
+             WHERE message_id = ?",
+        )
+        .bind("msg_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        ("queued".to_owned(), "queued".to_owned(), 8)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'session_events'",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap(),
+        8
+    );
     assert!(
         sqlx::query("PRAGMA foreign_key_check")
             .fetch_all(&mut connection)
@@ -1410,7 +1499,7 @@ async fn run_migration_preserves_the_event_cursor_high_water_mark() {
             .fetch_one(&mut connection)
             .await
             .unwrap(),
-        7
+        9
     );
 }
 
@@ -2019,6 +2108,403 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
             "failed",
             "cancelled"
         ]
+    );
+}
+
+#[tokio::test]
+async fn context_manifests_validate_sources_hash_atomically_and_survive_termination() {
+    let (data, store, session_value) = seeded_session().await;
+    let run_app = RunApplication::new(store.clone(), super::UlidIdGenerator);
+    let manifest_app = ContextManifestApplication::new(store.clone(), super::UlidIdGenerator);
+    let root = run_app
+        .start_root_run(
+            session_value.id().clone(),
+            "manifest-root".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    let run_id = root.value.run().run_id().clone();
+    let child = run_app
+        .start_child_run(
+            run_id.clone(),
+            None,
+            RunInputMode::Interactive,
+            "manifest-child".to_owned(),
+            ApprovalPolicy::FullAccess,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    let child_run_id = child.value.run().run_id().clone();
+
+    let session_message = message(
+        "msg_01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        session_value.id().as_str(),
+        "session context",
+    );
+    store
+        .append_message(
+            &session_message,
+            &SessionEvent::message_appended(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
+                session_message.clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let other_session = session(
+        "ses_01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        session_value.workspace_id().as_str(),
+    );
+    store
+        .create_session(
+            &other_session,
+            &SessionEvent::session_created(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAX").unwrap(),
+                other_session.id().clone(),
+                other_session.workspace_id().clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let other_message = message(
+        "msg_01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        other_session.id().as_str(),
+        "other session",
+    );
+    store
+        .append_message(
+            &other_message,
+            &SessionEvent::message_appended(
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
+                other_message.clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let targeted = run_app
+        .send_run_input(SendRunInput {
+            run_id: run_id.clone(),
+            content: "delivered guidance".to_owned(),
+            delivery_mode: MessageDeliveryMode::Queued,
+            idempotency_key: "manifest-input".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let one_message =
+        |target_run_id: RunId, message_id: MessageId, key: &str| CreateContextManifest {
+            run_id: target_run_id,
+            entries: vec![ContextManifestEntryInput::Message { message_id }],
+            idempotency_key: key.to_owned(),
+        };
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(one_message(
+                run_id.clone(),
+                targeted.value.message().id().clone(),
+                "queued-message",
+            ))
+            .await,
+        Err(ContextManifestError::MessageDeliveryNotDelivered)
+    );
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(one_message(
+                child_run_id.clone(),
+                targeted.value.message().id().clone(),
+                "wrong-target",
+            ))
+            .await,
+        Err(ContextManifestError::MessageTargetMismatch)
+    );
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(one_message(
+                run_id.clone(),
+                other_message.id().clone(),
+                "other-session",
+            ))
+            .await,
+        Err(ContextManifestError::MessageOutsideSession)
+    );
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(one_message(
+                run_id.clone(),
+                MessageId::parse("msg_01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap(),
+                "missing-message",
+            ))
+            .await,
+        Err(ContextManifestError::MessageNotFound)
+    );
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(CreateContextManifest {
+                run_id: run_id.clone(),
+                entries: vec![ContextManifestEntryInput::Instruction {
+                    provenance: ContextInstructionProvenance::Runtime,
+                    content: " \n ".to_owned(),
+                }],
+                idempotency_key: "blank-instruction".to_owned(),
+            })
+            .await,
+        Err(ContextManifestError::InstructionContentRequired)
+    );
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(CreateContextManifest {
+                run_id: run_id.clone(),
+                entries: vec![ContextManifestEntryInput::Instruction {
+                    provenance: ContextInstructionProvenance::Workspace {
+                        workspace_root_id:
+                            WorkspaceRootId::parse("wrt_01ARZ3NDEKTSV4RRFFQ69G5FAW",).unwrap(),
+                    },
+                    content: "wrong workspace".to_owned(),
+                }],
+                idempotency_key: "wrong-workspace".to_owned(),
+            })
+            .await,
+        Err(ContextManifestError::WorkspaceProvenanceMismatch)
+    );
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(CreateContextManifest {
+                run_id: run_id.clone(),
+                entries: vec![
+                    ContextManifestEntryInput::Message {
+                        message_id: session_message.id().clone(),
+                    },
+                    ContextManifestEntryInput::Message {
+                        message_id: session_message.id().clone(),
+                    },
+                ],
+                idempotency_key: "duplicate-message".to_owned(),
+            })
+            .await,
+        Err(ContextManifestError::DuplicateMessage)
+    );
+
+    run_app
+        .record_run_input_delivery(RecordRunInputDelivery {
+            message_id: targeted.value.message().id().clone(),
+            state: MessageDeliveryState::Delivered,
+        })
+        .await
+        .unwrap();
+    let entries = vec![
+        ContextManifestEntryInput::Instruction {
+            provenance: ContextInstructionProvenance::Runtime,
+            content: " \0é runtime instruction\n".to_owned(),
+        },
+        ContextManifestEntryInput::Instruction {
+            provenance: ContextInstructionProvenance::Workspace {
+                workspace_root_id: test_scope().workspace_root_id().clone(),
+            },
+            content: "workspace instruction".to_owned(),
+        },
+        ContextManifestEntryInput::Instruction {
+            provenance: ContextInstructionProvenance::Run {
+                run_id: run_id.clone(),
+            },
+            content: "run instruction".to_owned(),
+        },
+        ContextManifestEntryInput::Message {
+            message_id: session_message.id().clone(),
+        },
+        ContextManifestEntryInput::Message {
+            message_id: targeted.value.message().id().clone(),
+        },
+    ];
+    let first_command = CreateContextManifest {
+        run_id: run_id.clone(),
+        entries: entries.clone(),
+        idempotency_key: "manifest-first".to_owned(),
+    };
+    let first = manifest_app
+        .create_context_manifest(first_command.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.disposition, CreateContextManifestDisposition::Created);
+    assert_eq!(
+        first.value.entries()[0].content(),
+        " \0é runtime instruction\n"
+    );
+    assert!(matches!(
+        first.events[0].payload(),
+        SessionEventPayload::ContextManifestCreated {
+            context_manifest_id,
+            run_id: event_run_id,
+            content_hash,
+            entry_count: 5,
+        } if context_manifest_id == first.value.context_manifest_id()
+            && event_run_id == &run_id
+            && content_hash == first.value.content_hash()
+    ));
+    assert_eq!(
+        run_app.get_run(run_id.clone()).await.unwrap().run().state(),
+        RunState::Queued
+    );
+    assert_eq!(
+        store
+            .get_context_manifest(first.value.context_manifest_id())
+            .await
+            .unwrap(),
+        Some(first.value.clone())
+    );
+    let duplicate = manifest_app
+        .create_context_manifest(first_command.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate.disposition,
+        CreateContextManifestDisposition::Duplicate
+    );
+    assert_eq!(duplicate.value, first.value);
+    assert!(duplicate.events.is_empty());
+    let mut conflicting = first_command.clone();
+    conflicting.entries.reverse();
+    assert_eq!(
+        manifest_app.create_context_manifest(conflicting).await,
+        Err(ContextManifestError::IdempotencyConflict)
+    );
+    let equivalent = manifest_app
+        .create_context_manifest(CreateContextManifest {
+            run_id: run_id.clone(),
+            entries: entries.clone(),
+            idempotency_key: "manifest-equivalent".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(equivalent.value.content_hash(), first.value.content_hash());
+    let mut reversed_entries = entries.clone();
+    reversed_entries.reverse();
+    let reversed = manifest_app
+        .create_context_manifest(CreateContextManifest {
+            run_id: run_id.clone(),
+            entries: reversed_entries,
+            idempotency_key: "manifest-reversed".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_ne!(reversed.value.content_hash(), first.value.content_hash());
+    assert_eq!(
+        manifest_app
+            .list_context_manifests(run_id.clone())
+            .await
+            .unwrap()
+            .iter()
+            .map(|manifest| manifest.context_manifest_id())
+            .collect::<Vec<_>>(),
+        [
+            first.value.context_manifest_id(),
+            equivalent.value.context_manifest_id(),
+            reversed.value.context_manifest_id(),
+        ]
+    );
+
+    let cursor_before_failed_create = store.current_event_cursor().await.unwrap();
+    let rollback_id = ContextManifestId::parse("cmf_01ARZ3NDEKTSV4RRFFQ69G5FB0").unwrap();
+    assert_eq!(
+        store
+            .create_context_manifest(
+                &CreateContextManifest {
+                    run_id: run_id.clone(),
+                    entries: entries.clone(),
+                    idempotency_key: "manifest-rollback".to_owned(),
+                },
+                rollback_id.clone(),
+                EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            )
+            .await,
+        Err(kiln_core::ContextManifestStoreError::Unavailable)
+    );
+    assert_eq!(
+        store.current_event_cursor().await.unwrap(),
+        cursor_before_failed_create
+    );
+    assert_eq!(
+        store.get_context_manifest(&rollback_id).await.unwrap(),
+        None
+    );
+    {
+        let mut connection = store.connection.lock().await;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM create_context_manifest_idempotencies
+                 WHERE run_id = ? AND idempotency_key = 'manifest-rollback'",
+            )
+            .bind(run_id.as_str())
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap(),
+            0
+        );
+    }
+
+    run_app.request_cancellation(child_run_id).await.unwrap();
+    run_app.request_cancellation(run_id.clone()).await.unwrap();
+    let terminal_retry = manifest_app
+        .create_context_manifest(first_command)
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal_retry.disposition,
+        CreateContextManifestDisposition::Duplicate
+    );
+    assert_eq!(terminal_retry.value, first.value);
+    assert_eq!(
+        manifest_app
+            .create_context_manifest(CreateContextManifest {
+                run_id: run_id.clone(),
+                entries,
+                idempotency_key: "manifest-after-terminal".to_owned(),
+            })
+            .await,
+        Err(ContextManifestError::RunNotAcceptingWork)
+    );
+
+    drop(manifest_app);
+    drop(run_app);
+    drop(store);
+    let reopened = super::SqliteStore::open(data.path()).await.unwrap();
+    let reopened_app = ContextManifestApplication::new(reopened.clone(), super::UlidIdGenerator);
+    assert_eq!(
+        reopened_app
+            .get_context_manifest(first.value.context_manifest_id().clone())
+            .await
+            .unwrap(),
+        first.value
+    );
+    assert!(
+        reopened
+            .list_session_events(session_value.id(), EventCursor::zero())
+            .await
+            .unwrap()
+            .events()
+            .iter()
+            .any(|event| matches!(
+                event.payload(),
+                SessionEventPayload::ContextManifestCreated { context_manifest_id, .. }
+                    if context_manifest_id == first.value.context_manifest_id()
+            ))
+    );
+    {
+        let mut connection = reopened.connection.lock().await;
+        sqlx::query("UPDATE context_manifests SET content_hash = ? WHERE context_manifest_id = ?")
+            .bind("b".repeat(64))
+            .bind(first.value.context_manifest_id().as_str())
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        reopened_app
+            .get_context_manifest(first.value.context_manifest_id().clone())
+            .await,
+        Err(ContextManifestError::IntegrityViolation)
     );
 }
 

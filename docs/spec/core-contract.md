@@ -189,6 +189,43 @@ After restart, durable queued work and pending approvals can be cancelled.
 Missing ownership of non-terminal external execution returns
 `cancellation_failed`; process reconciliation remains pending.
 
+### Context manifests
+
+The internal context boundary stores an immutable, ordered snapshot for one Run.
+It does not invoke a provider, change Run state, or acknowledge input delivery.
+There is no public manifest mutation endpoint in this slice.
+
+Manifest entries contain explicit instruction text with provenance or selected
+Message IDs. Storage loads Message content from the immutable source records;
+callers cannot supply replacement Message content. Sources must share the Run's
+Session. A targeted Message must target that exact Run and already have a
+`delivered` MessageDelivery. Queued, failed, and cancelled deliveries cannot
+enter a new manifest. Duplicate Message references are rejected.
+
+Instruction provenance is attribution supplied by the trusted internal caller,
+not proof of a file read or user authentication. Workspace and Run identities
+are checked against the owning Run. Attribution never grants permission or
+causes a filesystem read.
+
+The caller supplies the order. Kiln does not automatically copy a Session or
+parent transcript into a child Run. Instruction text retains its exact bytes;
+blank text is invalid. A versioned, domain-separated, length-prefixed encoding
+covers Session and Run identity, entry order, kind, provenance, and exact content.
+The manifest hash is computed from this encoding and verified when read. Reads
+also check Message snapshots against their immutable sources and delivery state.
+
+A new manifest requires a Run that accepts work. The manifest, ordered entries,
+idempotency result, and `context.manifest_created` Event commit together. The
+Event exposes metadata, not instruction content. An exact retry returns the
+original manifest before checking current Run acceptability; stored source and
+delivery integrity are still verified. Changed input with the same key conflicts.
+Queries retain committed snapshots after Run termination and list them in
+durable creation order.
+
+The first slice supports text instructions and Message snapshots only. Context
+assembly, attachment and tool representations, ModelInvocation records, provider
+streaming, and safe-boundary input consumption remain pending native-loop work.
+
 ### Tools, permissions, and approvals
 
 | Command | Idempotency | Required behavior | Durable events |

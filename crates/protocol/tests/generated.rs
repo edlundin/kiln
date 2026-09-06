@@ -771,3 +771,51 @@ fn run_fixtures_match_json_schema_typescript_and_openapi() {
         json!(["integer", "null"])
     );
 }
+
+#[test]
+fn context_manifest_event_is_strict_metadata() {
+    let value = json!({
+        "type": "context.manifest_created",
+        "context_manifest_id": "cmf_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "content_hash": "a".repeat(64),
+        "entry_count": 3,
+    });
+    let event: SessionEventDataResponse = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(event).unwrap(), value);
+    for field in [
+        "context_manifest_id",
+        "run_id",
+        "content_hash",
+        "entry_count",
+    ] {
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<SessionEventDataResponse>(missing).is_err());
+    }
+    for field in ["content", "instructions", "prompt", "unexpected"] {
+        let mut extra = value.clone();
+        extra[field] = json!("private instruction content");
+        assert!(serde_json::from_value::<SessionEventDataResponse>(extra).is_err());
+    }
+    for count in [json!(-1), json!(1.5), json!("3"), json!(null)] {
+        let mut invalid = value.clone();
+        invalid["entry_count"] = count;
+        assert!(serde_json::from_value::<SessionEventDataResponse>(invalid).is_err());
+    }
+
+    let artifacts = kiln_protocol::artifact_files();
+    let schema: serde_json::Value =
+        serde_json::from_str(artifacts.get("schema.json").unwrap()).unwrap();
+    let variant = schema["$defs"]["SessionEventDataResponse"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["type"]["const"] == "context.manifest_created")
+        .unwrap();
+    assert_eq!(variant["additionalProperties"], false);
+    assert_eq!(variant["properties"].as_object().unwrap().len(), 5);
+    assert_eq!(variant["required"].as_array().unwrap().len(), 5);
+    assert_eq!(variant["properties"]["entry_count"]["type"], "integer");
+    assert_eq!(variant["properties"]["entry_count"]["minimum"], 0);
+}

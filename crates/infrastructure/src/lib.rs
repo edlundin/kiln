@@ -2,6 +2,7 @@
 
 mod assistant_message;
 mod model_output;
+mod native_run;
 mod usage;
 
 use std::{

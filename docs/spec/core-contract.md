@@ -384,6 +384,11 @@ produce an incomplete Message. Tool-request completions are excluded. This does
 not change the terminal Run state or choose a failure policy. Incomplete Messages
 remain visible but cannot be selected for context.
 
+The internal native Run failure boundary moves a running Run to failed only
+when it has no ToolCalls, all invocations and descendants are terminal, and at
+least one generation attempt exists. The failed Run and its state Event commit
+together. An already failed Run returns without another Event.
+
 An exact retry returns the existing Message without new Events, including after
 Run completion. Public append operations remain user-only. Native daemon
 dispatch and publication of these finalization Events remain pending.

@@ -6,11 +6,13 @@ use ulid::Ulid;
 
 mod assistant_message;
 mod model_output;
+mod native_run;
 mod provider;
 mod usage;
 mod usage_store;
 pub use assistant_message::*;
 pub use model_output::*;
+pub use native_run::*;
 pub use provider::*;
 pub use usage::*;
 pub use usage_store::*;

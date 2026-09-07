@@ -2,6 +2,13 @@
 
 ## 2026-09-08 — `feat`
 
+- Added the native Run failure boundary, atomically failing Running Runs without ToolCalls after generation attempts complete and descendants are terminal.
+- Duplicate failed requests now return the existing Run without creating new events.
+
+[Commit](pending)
+
+## 2026-09-08 — `feat`
+
 - Added `ProviderApplication` validation of provider updates against stored invocation identity before routing output, partial usage, and terminal outcome/final usage to the existing atomic stores.
 - Provider application now returns committed mutations and events while preserving existing duplicate handling.
 - Native daemon dispatch remains pending.

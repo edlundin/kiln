@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.17.0";
+pub const PROTOCOL_VERSION: &str = "0.18.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -373,6 +373,14 @@ pub struct SessionResponse {
 #[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageStatus {
+    Complete,
+    Incomplete,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -382,6 +390,11 @@ pub struct MessageResponse {
     pub session_id: String,
     pub role: MessageRole,
     pub content: String,
+    pub status: MessageStatus,
+    #[schemars(with = "RequiredNullableString")]
+    pub origin_run_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub model_invocation_id: Option<String>,
     #[schemars(with = "RequiredNullableString")]
     pub target_run_id: Option<String>,
 }

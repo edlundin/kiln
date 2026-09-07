@@ -4,6 +4,9 @@
     "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "role": "user",
     "content": "Inspect the Workspace event model.",
+    "status": "complete",
+    "origin_run_id": null,
+    "model_invocation_id": null,
     "target_run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV"
   },
   "delivery_mode": "queued",

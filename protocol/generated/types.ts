@@ -30,9 +30,11 @@ export type AssignTaskRequest = { run_id: string, };
 
 export type SessionResponse = { session_id: string, workspace_id: string, };
 
-export type MessageRole = "user";
+export type MessageRole = "user" | "assistant";
 
-export type MessageResponse = { message_id: string, session_id: string, role: MessageRole, content: string, target_run_id: string | null, };
+export type MessageStatus = "complete" | "incomplete";
+
+export type MessageResponse = { message_id: string, session_id: string, role: MessageRole, content: string, status: MessageStatus, origin_run_id: string | null, model_invocation_id: string | null, target_run_id: string | null, };
 
 export type MessageDeliveryMode = "queued" | "interrupt";
 

@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Kiln daemon protocol
-  version: 0.17.0
+  version: 0.18.0
   description: Kiln loopback protocol contract.
 security:
   - bearerAuth: []
@@ -623,8 +623,9 @@ components:
     TransitionTaskRequest: {"additionalProperties":false,"properties":{"state":{"$ref":"#/components/schemas/TaskState"}},"required":["state"],"type":"object"}
     AssignTaskRequest: {"additionalProperties":false,"properties":{"run_id":{"type":"string"}},"required":["run_id"],"type":"object"}
     SessionResponse: {"properties":{"session_id":{"type":"string"},"workspace_id":{"type":"string"}},"required":["session_id","workspace_id"],"type":"object"}
-    MessageRole: {"enum":["user"],"type":"string"}
-    MessageResponse: {"properties":{"content":{"type":"string"},"message_id":{"type":"string"},"role":{"$ref":"#/components/schemas/MessageRole"},"session_id":{"type":"string"},"target_run_id":{"type":["string","null"]}},"required":["message_id","session_id","role","content","target_run_id"],"type":"object"}
+    MessageRole: {"enum":["user","assistant"],"type":"string"}
+    MessageStatus: {"enum":["complete","incomplete"],"type":"string"}
+    MessageResponse: {"properties":{"content":{"type":"string"},"message_id":{"type":"string"},"model_invocation_id":{"type":["string","null"]},"origin_run_id":{"type":["string","null"]},"role":{"$ref":"#/components/schemas/MessageRole"},"session_id":{"type":"string"},"status":{"$ref":"#/components/schemas/MessageStatus"},"target_run_id":{"type":["string","null"]}},"required":["message_id","session_id","role","content","status","origin_run_id","model_invocation_id","target_run_id"],"type":"object"}
     MessageDeliveryMode: {"enum":["queued","interrupt"],"type":"string"}
     MessageDeliveryState: {"enum":["queued","delivered","failed","cancelled"],"type":"string"}
     MessageDeliveryResponse: {"properties":{"delivery_mode":{"$ref":"#/components/schemas/MessageDeliveryMode"},"message":{"$ref":"#/components/schemas/MessageResponse"},"state":{"$ref":"#/components/schemas/MessageDeliveryState"}},"required":["message","delivery_mode","state"],"type":"object"}

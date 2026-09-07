@@ -303,11 +303,26 @@
             "message_id": {
               "type": "string"
             },
+            "model_invocation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "origin_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "$ref": "#/$defs/MessageRole"
             },
             "session_id": {
               "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MessageStatus"
             },
             "target_run_id": {
               "type": [
@@ -321,13 +336,24 @@
             "session_id",
             "role",
             "content",
+            "status",
+            "origin_run_id",
+            "model_invocation_id",
             "target_run_id"
           ],
           "type": "object"
         },
         "MessageRole": {
           "enum": [
-            "user"
+            "user",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "MessageStatus": {
+          "enum": [
+            "complete",
+            "incomplete"
           ],
           "type": "string"
         }
@@ -367,7 +393,15 @@
       "$defs": {
         "MessageRole": {
           "enum": [
-            "user"
+            "user",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "MessageStatus": {
+          "enum": [
+            "complete",
+            "incomplete"
           ],
           "type": "string"
         }
@@ -380,11 +414,26 @@
         "message_id": {
           "type": "string"
         },
+        "model_invocation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "role": {
           "$ref": "#/$defs/MessageRole"
         },
         "session_id": {
           "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/MessageStatus"
         },
         "target_run_id": {
           "type": [
@@ -398,6 +447,9 @@
         "session_id",
         "role",
         "content",
+        "status",
+        "origin_run_id",
+        "model_invocation_id",
         "target_run_id"
       ],
       "title": "MessageResponse",
@@ -406,9 +458,19 @@
     "MessageRole": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [
-        "user"
+        "user",
+        "assistant"
       ],
       "title": "MessageRole",
+      "type": "string"
+    },
+    "MessageStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "complete",
+        "incomplete"
+      ],
+      "title": "MessageStatus",
       "type": "string"
     },
     "ModelInvocationCompletionKind": {
@@ -1308,11 +1370,26 @@
             "message_id": {
               "type": "string"
             },
+            "model_invocation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "origin_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "$ref": "#/$defs/MessageRole"
             },
             "session_id": {
               "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MessageStatus"
             },
             "target_run_id": {
               "type": [
@@ -1326,13 +1403,24 @@
             "session_id",
             "role",
             "content",
+            "status",
+            "origin_run_id",
+            "model_invocation_id",
             "target_run_id"
           ],
           "type": "object"
         },
         "MessageRole": {
           "enum": [
-            "user"
+            "user",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "MessageStatus": {
+          "enum": [
+            "complete",
+            "incomplete"
           ],
           "type": "string"
         },
@@ -2448,11 +2536,26 @@
             "message_id": {
               "type": "string"
             },
+            "model_invocation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "origin_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "$ref": "#/$defs/MessageRole"
             },
             "session_id": {
               "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MessageStatus"
             },
             "target_run_id": {
               "type": [
@@ -2466,13 +2569,24 @@
             "session_id",
             "role",
             "content",
+            "status",
+            "origin_run_id",
+            "model_invocation_id",
             "target_run_id"
           ],
           "type": "object"
         },
         "MessageRole": {
           "enum": [
-            "user"
+            "user",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "MessageStatus": {
+          "enum": [
+            "complete",
+            "incomplete"
           ],
           "type": "string"
         },
@@ -3611,11 +3725,26 @@
             "message_id": {
               "type": "string"
             },
+            "model_invocation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "origin_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "$ref": "#/$defs/MessageRole"
             },
             "session_id": {
               "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MessageStatus"
             },
             "target_run_id": {
               "type": [
@@ -3629,13 +3758,24 @@
             "session_id",
             "role",
             "content",
+            "status",
+            "origin_run_id",
+            "model_invocation_id",
             "target_run_id"
           ],
           "type": "object"
         },
         "MessageRole": {
           "enum": [
-            "user"
+            "user",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "MessageStatus": {
+          "enum": [
+            "complete",
+            "incomplete"
           ],
           "type": "string"
         },
@@ -5555,11 +5695,26 @@
             "message_id": {
               "type": "string"
             },
+            "model_invocation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "origin_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "role": {
               "$ref": "#/$defs/MessageRole"
             },
             "session_id": {
               "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/MessageStatus"
             },
             "target_run_id": {
               "type": [
@@ -5573,13 +5728,24 @@
             "session_id",
             "role",
             "content",
+            "status",
+            "origin_run_id",
+            "model_invocation_id",
             "target_run_id"
           ],
           "type": "object"
         },
         "MessageRole": {
           "enum": [
-            "user"
+            "user",
+            "assistant"
+          ],
+          "type": "string"
+        },
+        "MessageStatus": {
+          "enum": [
+            "complete",
+            "incomplete"
           ],
           "type": "string"
         },
@@ -6851,7 +7017,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.17.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.18.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

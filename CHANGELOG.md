@@ -2,6 +2,13 @@
 
 ## 2026-09-07 — `feat`
 
+- Defined protocol `0.18.0` assistant Messages with an exposed `assistant` role, complete/incomplete status, and originating Run and ModelInvocation identifiers.
+- Kept public Message append operations user-only.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Added durable immutable assistant-text and exposed reasoning-summary chunks committed with their events, with contiguous per-attempt ordering and exact duplicate retries after terminal state.
 - Partial output is retained and replayed; provider updates carry storage command identity, and the deterministic adapter generates stable positions and IDs.
 - Final assistant Messages and daemon dispatch remain pending.

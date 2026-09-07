@@ -10,9 +10,9 @@ use kiln_core::{RunApplication, SessionApplication, StoreMetadata, WorkspaceAppl
 use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
     DETERMINISTIC_LARGE_OUTPUT_ARGUMENT, DETERMINISTIC_SUBPROCESS_ARGUMENT,
-    DETERMINISTIC_SUCCESS_ARGUMENT, DeterministicOutcome, DeterministicSubprocessExecutor,
-    FileArtifactStore, GitWorkspaceRootDiscovery, KILN_DETERMINISTIC_PID_FILE, LocalAuthCredential,
-    SqliteStore, UlidIdGenerator,
+    DETERMINISTIC_SUCCESS_ARGUMENT, DaemonStoreLock, DeterministicOutcome,
+    DeterministicSubprocessExecutor, FileArtifactStore, GitWorkspaceRootDiscovery,
+    KILN_DETERMINISTIC_PID_FILE, LocalAuthCredential, SqliteStore, UlidIdGenerator,
 };
 use kiln_protocol::PROTOCOL_VERSION;
 use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
@@ -70,6 +70,20 @@ async fn main() -> ExitCode {
         }
     };
 
+    let _store_lock = match DaemonStoreLock::open_default() {
+        Ok(lock) => lock,
+        Err(kiln_infrastructure::InfrastructureError::Filesystem(error))
+            if error.kind() == std::io::ErrorKind::WouldBlock =>
+        {
+            eprintln!("kilnd: another daemon owns this data directory");
+            return ExitCode::FAILURE;
+        }
+        Err(_) => {
+            eprintln!("kilnd: cannot acquire daemon store lock");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let credential = match LocalAuthCredential::open_default() {
         Ok(credential) => credential,
         Err(_) => {
@@ -104,6 +118,11 @@ async fn main() -> ExitCode {
         artifacts,
     )
     .with_deterministic_model(deterministic_model);
+
+    if let Err(error) = runs.reconcile_deterministic_model_runs().await {
+        eprintln!("kilnd: cannot reconcile deterministic native Runs: {error:?}");
+        return ExitCode::FAILURE;
+    }
 
     let readiness = serde_json::json!({
         "event": "ready",

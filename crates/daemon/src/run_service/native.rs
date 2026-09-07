@@ -20,6 +20,138 @@ use kiln_providers::{
 use super::*;
 
 impl RunService {
+    pub(crate) async fn reconcile_deterministic_model_runs(&self) -> Result<(), RunError> {
+        use kiln_core::UsageStore;
+
+        let provider = ProviderType::parse(DETERMINISTIC_PROVIDER_TYPE)
+            .map_err(|_| RunError::InvalidTransition)?;
+        let snapshots = NativeRunApplication::new(self.store.clone(), UlidIdGenerator)
+            .list_recoverable_native_runs(provider)
+            .await?;
+        let parents = snapshots
+            .iter()
+            .map(|snapshot| {
+                (
+                    snapshot.run().run_id().clone(),
+                    snapshot.run().parent_run_id().cloned(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut ordered = Vec::with_capacity(snapshots.len());
+        for snapshot in snapshots {
+            let mut ancestors = std::collections::HashSet::new();
+            let mut parent = snapshot.run().parent_run_id();
+            while let Some(id) = parent {
+                if !ancestors.insert(id.clone()) {
+                    return Err(RunError::InvalidTransition);
+                }
+                parent = parents.get(id).and_then(Option::as_ref);
+            }
+            ordered.push((ancestors.len(), snapshot));
+        }
+        ordered.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+        for (_, snapshot) in ordered {
+            if snapshot.model_invocations().iter().any(|invocation| {
+                invocation.settings().model().as_str() != DETERMINISTIC_MODEL_ID
+                    || invocation.provider_account_id().as_str() != "pac_00000000000000000000000000"
+            }) {
+                continue;
+            }
+            let run_id = snapshot.run().run_id().clone();
+            for invocation in snapshot.model_invocations() {
+                match invocation.state() {
+                    ModelInvocationState::Pending => {
+                        let mutation =
+                            ModelInvocationApplication::new(self.store.clone(), UlidIdGenerator)
+                                .finish_model_invocation(
+                                    invocation.clone(),
+                                    ModelInvocationOutcome::cancelled(),
+                                )
+                                .await
+                                .map_err(|_| RunError::RunStoreUnavailable)?;
+                        self.events.publish(mutation.events);
+                    }
+                    ModelInvocationState::InFlight => {
+                        // The deterministic adapter owns no external process or request after restart.
+                        let usage = self
+                            .store
+                            .list_usage_observations(invocation.invocation_id())
+                            .await
+                            .map_err(|_| RunError::RunStoreUnavailable)?;
+                        if usage.last().is_some_and(|usage| usage.is_terminal) {
+                            let mutation = ModelInvocationApplication::new(
+                                self.store.clone(),
+                                UlidIdGenerator,
+                            )
+                            .finish_model_invocation(
+                                invocation.clone(),
+                                ModelInvocationOutcome::interrupted(),
+                            )
+                            .await
+                            .map_err(|_| RunError::RunStoreUnavailable)?;
+                            self.events.publish(mutation.events);
+                        } else {
+                            self.persist_native_update(
+                                invocation.invocation_id(),
+                                unknown_terminal(
+                                    invocation,
+                                    ModelInvocationOutcome::interrupted(),
+                                )?,
+                            )
+                            .await?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+            if subtree
+                .iter()
+                .skip(1)
+                .any(|descendant| !descendant.run().state().is_terminal())
+            {
+                eprintln!(
+                    "kilnd: native Run {} requires descendant reconciliation",
+                    run_id.as_str()
+                );
+                continue;
+            }
+            let snapshot = self.runs.get_run(run_id.clone()).await?;
+            match snapshot.run().state() {
+                RunState::Queued | RunState::Cancelling => {
+                    self.finish_native_cancellation(run_id).await?;
+                }
+                RunState::Running => {
+                    let latest = snapshot
+                        .model_invocations()
+                        .last()
+                        .ok_or(RunError::InvalidTransition)?;
+                    let completion =
+                        AssistantMessageApplication::new(self.store.clone(), UlidIdGenerator)
+                            .finalize_assistant_message(latest.invocation_id().clone())
+                            .await;
+                    match completion {
+                        Ok(mutation) => self.events.publish(mutation.events),
+                        Err(
+                            AssistantMessageStoreError::InvocationNotComplete
+                            | AssistantMessageStoreError::FinalUsageRequired
+                            | AssistantMessageStoreError::QueuedInputPending
+                            | AssistantMessageStoreError::NoAssistantText,
+                        ) => {
+                            self.finish_native_failure(run_id).await?;
+                        }
+                        Err(_) => return Err(RunError::RunStoreUnavailable),
+                    }
+                }
+                RunState::Failed | RunState::Cancelled => {
+                    self.retain_incomplete_native_messages(&snapshot).await?
+                }
+                _ => return Err(RunError::InvalidTransition),
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn execute_native(
         &self,
         run_id: RunId,
@@ -233,16 +365,9 @@ impl RunService {
                         _ => None,
                     };
                     if let Err(error) = update.validate_for(invocation) {
-                        operation
-                            .cancel()
-                            .await
-                            .map_err(|_| RunError::CancellationFailed)?;
                         let outcome = failure_outcome(error);
-                        self.persist_native_update(
-                            invocation.invocation_id(),
-                            unknown_terminal(invocation, outcome)?,
-                        )
-                        .await?;
+                        self.stop_native_after_error(invocation, operation, outcome)
+                            .await?;
                         return Ok((outcome, false));
                     }
                     if let Err(error) = self
@@ -260,24 +385,53 @@ impl RunService {
                     }
                 }
                 other => {
-                    operation
-                        .cancel()
-                        .await
-                        .map_err(|_| RunError::CancellationFailed)?;
                     let outcome = failure_outcome(
                         other
                             .err()
                             .unwrap_or(ProviderError::ProviderStreamInterrupted),
                     );
-                    self.persist_native_update(
-                        invocation.invocation_id(),
-                        unknown_terminal(invocation, outcome)?,
-                    )
-                    .await?;
+                    self.stop_native_after_error(invocation, operation, outcome)
+                        .await?;
                     return Ok((outcome, false));
                 }
             }
         }
+    }
+
+    async fn stop_native_after_error<O: ModelProviderOperation>(
+        &self,
+        invocation: &ModelInvocation,
+        operation: &mut O,
+        outcome: ModelInvocationOutcome,
+    ) -> Result<(), RunError> {
+        operation
+            .cancel()
+            .await
+            .map_err(|_| RunError::CancellationFailed)?;
+        while let Ok(Some(update)) = operation.next_update().await {
+            if update.validate_for(invocation).is_err() {
+                break;
+            }
+            match update {
+                ProviderUpdate::Finished { usage, .. } => {
+                    return self
+                        .persist_native_update(
+                            invocation.invocation_id(),
+                            ProviderUpdate::Finished { outcome, usage },
+                        )
+                        .await;
+                }
+                update => {
+                    self.persist_native_update(invocation.invocation_id(), update)
+                        .await?
+                }
+            }
+        }
+        self.persist_native_update(
+            invocation.invocation_id(),
+            unknown_terminal(invocation, outcome)?,
+        )
+        .await
     }
 
     async fn persist_native_update(

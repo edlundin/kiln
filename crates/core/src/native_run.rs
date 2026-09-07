@@ -1,8 +1,15 @@
 use std::future::Future;
 
-use crate::{EventId, RunError, RunId, RunIdGenerator, RunMutation, RunSnapshot, RunStoreError};
+use crate::{
+    EventId, ProviderType, RunError, RunId, RunIdGenerator, RunMutation, RunSnapshot, RunStoreError,
+};
 
 pub trait NativeRunStore: Send + Sync {
+    fn list_recoverable_native_runs(
+        &self,
+        provider: &ProviderType,
+    ) -> impl Future<Output = Result<Vec<RunSnapshot>, RunStoreError>> + Send;
+
     fn fail_native_run(
         &self,
         run_id: &RunId,
@@ -22,6 +29,16 @@ impl<S, I> NativeRunApplication<S, I> {
 }
 
 impl<S: NativeRunStore, I: RunIdGenerator> NativeRunApplication<S, I> {
+    pub async fn list_recoverable_native_runs(
+        &self,
+        provider: ProviderType,
+    ) -> Result<Vec<RunSnapshot>, RunError> {
+        self.store
+            .list_recoverable_native_runs(&provider)
+            .await
+            .map_err(crate::map_run_store_error)
+    }
+
     pub async fn fail_native_run(
         &self,
         run_id: RunId,

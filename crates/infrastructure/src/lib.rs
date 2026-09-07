@@ -1,6 +1,8 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
 mod assistant_message;
+mod daemon_lock;
+pub use daemon_lock::DaemonStoreLock;
 mod model_output;
 mod native_run;
 mod usage;

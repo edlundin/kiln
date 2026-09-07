@@ -2,6 +2,14 @@
 
 ## 2026-09-08 — `feat`
 
+- Added an exclusive data-directory lock before store open; startup reconciles known deterministic fixture attempts without redispatch, preserving final usage and counts.
+- Reconciliation completes stored-success Runs or retains incomplete assistant Messages, processes descendants first, and leaves foreign ownership for explicit reconciliation.
+- Provider-error cleanup now consumes remaining valid terminal usage before falling back to unknown usage.
+
+[Commit](pending)
+
+## 2026-09-08 — `feat`
+
 - Added deterministic native daemon execution selected explicitly with `KILN_RUN_EXECUTOR=deterministic-model`, using stored context and claims with durable output and usage persistence.
 - Wired assistant finalization, FIFO guidance, interrupt handling, and cancellation/failed output retention into the execution path.
 - The default subprocess executor remains unchanged.

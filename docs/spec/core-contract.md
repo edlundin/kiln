@@ -277,9 +277,10 @@ of the retry chain.
 
 Run cancellation preserves `cancelling` while invocation work is active. The
 daemon can cancel a pending invocation because dispatch has not begun. It does
-not claim ownership of an in-flight provider request. After restart, an
-in-flight record remains durable and blocks another claim; cancellation returns
-`cancellation_failed` until explicit internal reconciliation finishes it.
+not infer ownership of an unknown in-flight provider request. The deterministic
+fixture is reconciled at startup because it owns no external work after process
+exit. Other in-flight records remain durable and block another claim; cancellation
+returns `cancellation_failed` until explicit internal reconciliation finishes them.
 Finishing an invocation does not itself complete its Run.
 
 Live provider transport, automatic retries, and broader native-loop scheduling
@@ -361,9 +362,29 @@ The daemon claims the invocation before dispatch, publishes only committed
 Events, and consumes final usage before completing the Run. Cancellation stops
 the operation before recording terminal invocation state, waits for descendants,
 and retains incomplete assistant text. Provider errors and streams without a
-terminal update record unknown final usage and fail the native Run after all
-work is terminal. Storage failure stops execution and leaves the failure visible
+terminal update stop the operation and consume any valid terminal usage it
+still supplies. If none is available, they record unknown final usage while
+retaining prior counted quantities. The native Run then fails after all work
+is terminal. Storage failure stops execution and leaves the failure visible
 to shutdown handling.
+
+The daemon holds an exclusive `auth/daemon.lock` file lock for its process
+lifetime. A second daemon using the same data directory exits before opening
+the store. The lock file is never removed or truncated.
+
+Before readiness, the daemon reconciles stored deterministic native Runs even
+when the current executor setting selects subprocesses. Only the known fixture
+provider, model, and synthetic account qualify; tool Runs and mixed-provider
+histories are excluded. Pending attempts are cancelled without dispatch. In-flight
+attempts become interrupted with unknown final usage; existing counted quantities
+and final usage are retained. No attempt is dispatched again.
+
+Descendants are handled before parents. A stored successful invocation can still
+finalize its assistant Message and Run. Other unfinished generations fail after
+all work is terminal. Missing incomplete Messages on failed or cancelled Runs
+are rebuilt from stored assistant chunks. Non-fixture descendants that still
+require reconciliation are reported, and their parent remains nonterminal.
+Runs without a stored invocation are not classified as deterministic model Runs.
 
 ### Durable model output
 

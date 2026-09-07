@@ -1342,6 +1342,32 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
                 entry_count: *entry_count,
             },
         ),
+        SessionEventPayload::UsageObserved { observation } => {
+            SessionEventDataResponse::UsageObserved(kiln_protocol::UsageObservedResponse {
+                usage_observation_id: observation.observation_id.as_str().to_owned(),
+                model_invocation_id: observation.model_invocation_id.as_str().to_owned(),
+                work_id: observation.work_id.as_str().to_owned(),
+                run_id: observation.run_id.as_str().to_owned(),
+                provider_account_id: observation.provider_account_id.as_str().to_owned(),
+                revision: observation.revision,
+                supersedes_usage_observation_id: observation
+                    .supersedes
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned()),
+                completeness: match observation.completeness {
+                    kiln_core::UsageCompleteness::Complete => {
+                        kiln_protocol::UsageCompleteness::Complete
+                    }
+                    kiln_core::UsageCompleteness::Partial => {
+                        kiln_protocol::UsageCompleteness::Partial
+                    }
+                    kiln_core::UsageCompleteness::Unknown => {
+                        kiln_protocol::UsageCompleteness::Unknown
+                    }
+                },
+                is_terminal: observation.is_terminal,
+            })
+        }
         SessionEventPayload::ModelInvocationCreated { invocation } => {
             SessionEventDataResponse::ModelInvocationCreated(model_invocation_event_response(
                 invocation,

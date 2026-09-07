@@ -1,5 +1,7 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
+mod usage;
+
 use std::{
     env,
     fs::{self, OpenOptions},
@@ -1332,7 +1334,7 @@ impl SqliteStore {
                         e.model_capability_version, e.model_capability_tool_calls,
                         e.model_capability_vision, e.model_capability_structured_output,
                         e.model_purpose, e.model_retry_of, e.model_invocation_state,
-                        e.model_completion_kind, e.model_terminal_reason,
+                        e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
                         cm.session_id AS manifest_session_id,
                         cm.run_id AS manifest_run_id,
                         cm.content_hash AS manifest_content_hash,
@@ -1382,7 +1384,7 @@ impl SqliteStore {
                         e.model_capability_version, e.model_capability_tool_calls,
                         e.model_capability_vision, e.model_capability_structured_output,
                         e.model_purpose, e.model_retry_of, e.model_invocation_state,
-                        e.model_completion_kind, e.model_terminal_reason,
+                        e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
                         cm.session_id AS manifest_session_id,
                         cm.run_id AS manifest_run_id,
                         cm.content_hash AS manifest_content_hash,
@@ -1412,7 +1414,7 @@ impl SqliteStore {
             }
         }
         .map_err(|_| StoreError::Unavailable)?;
-        let events = parse_event_rows(rows)?;
+        let events = parse_event_rows(&mut transaction, rows).await?;
         let current_cursor = current_cursor(&mut transaction).await?;
         transaction
             .commit()
@@ -1996,10 +1998,12 @@ impl TaskStore for SqliteStore {
     }
 }
 
-fn parse_event_rows(
+async fn parse_event_rows(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     rows: Vec<sqlx::sqlite::SqliteRow>,
 ) -> Result<Vec<StoredSessionEvent>, StoreError> {
     let mut events = Vec::with_capacity(rows.len());
+    let mut usage_cache = std::collections::HashMap::new();
     for row in rows {
         let event_id = EventId::parse(
             row.try_get::<String, _>("event_id")
@@ -2133,6 +2137,34 @@ fn parse_event_rows(
         .map_err(|_| StoreError::Unavailable)?;
 
         let event = match event_type.as_str() {
+            "usage.observed" => {
+                let observation_id = row
+                    .try_get::<String, _>("usage_observation_id")
+                    .map_err(|_| StoreError::Unavailable)?;
+                let invocation_id = row
+                    .try_get::<String, _>("model_invocation_id")
+                    .map_err(|_| StoreError::Unavailable)?;
+                let observation = usage::load_event_observation(
+                    transaction,
+                    &observation_id,
+                    &invocation_id,
+                    &mut usage_cache,
+                )
+                .await?;
+                if observation.session_id != stored_session_id
+                    || observation.workspace_id != workspace_id
+                    || run_id.as_deref() != Some(observation.run_id.as_str())
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::UsageObserved { observation },
+                )
+                .map_err(|_| StoreError::Unavailable)?
+            }
             "session.created" => {
                 if message_id.is_some() {
                     return Err(StoreError::Unavailable);
@@ -6360,6 +6392,7 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
         | SessionEventPayload::ContextManifestCreated { .. }
         | SessionEventPayload::ModelInvocationCreated { .. }
         | SessionEventPayload::ModelInvocationStateChanged { .. }
+        | SessionEventPayload::UsageObserved { .. }
         | SessionEventPayload::TaskCreated { .. }
         | SessionEventPayload::TaskUpdated { .. }
         | SessionEventPayload::TaskAssigned { .. }

@@ -278,10 +278,58 @@ in-flight record remains durable and blocks another claim; cancellation returns
 `cancellation_failed` until explicit internal reconciliation finishes it.
 Finishing an invocation does not itself complete its Run.
 
-Provider transport, streamed output, usage observations, automatic retries,
+Provider transport, streamed output, automatic retries,
 and native-loop scheduling remain pending. The usage contract in
-[EDL-268](https://linear.app/edlundin/issue/EDL-268) will record each physical
+[EDL-268](https://linear.app/edlundin/issue/EDL-268) records each physical
 attempt separately while retaining its logical work identity.
+
+### Native usage observations
+
+The internal usage boundary accepts normalized counted-unit updates for an
+invocation that has been dispatched. It does not call a provider or expose a
+public mutation endpoint. Each update carries the physical invocation ID, its
+logical work ID, and its immutable ProviderAccount ID. Storage checks these
+against the invocation and derives the Run, Session, Workspace, and requested
+model from durable ownership. The observation time is an explicit UTC Unix
+millisecond value supplied by the adapter, not a hidden clock read.
+
+An update has a stable per-attempt update ID, `delta` or `cumulative` accounting,
+`partial`, `final`, or `correction` finality, and explicit `complete`, `partial`,
+or `unknown` completeness. Exact duplicate updates return their original
+observation without another Event. Changed input with the same update ID
+conflicts. The store serializes deduplication, reduction, revision creation,
+and `usage.observed` Event insertion in one transaction.
+
+Deltas add each reported quantity once with checked integer arithmetic.
+Cumulative updates replace the entire effective quantity set. Missing
+quantities remain absent; an observed zero is stored as zero. A final update
+closes usage for the attempt. Only a cumulative correction can follow a final
+update, and it creates a new immutable revision linked to the previous revision.
+Consumers must use only the latest revision per physical attempt for totals.
+Retries have separate attempt histories even when they share a logical work ID.
+
+Quantities use namespaced dimensions, units, and additive, subset, or
+informational relations. `tokens.input` and `tokens.output` are additive token
+counts. `tokens.input.cached` is a subset of input, and
+`tokens.output.reasoning` is a subset of output. Subsets cannot exceed their
+known parent quantity and must not be added to totals. This first boundary
+supports unsigned integer counted units. Fractional units, monetary valuation,
+pricing catalogs, allowance snapshots, and aggregate query endpoints remain
+pending.
+
+Observations retain normalized update metadata, effective quantities, revision
+links, and ownership across restart. Reads validate the revision chain and
+recompute effective quantities. Events refer to the immutable revision that
+caused them, not the latest revision. Public Events contain metadata only.
+The update DTO has no fields for prompt text, output text, headers, cookies,
+or provider request and response bodies. Optional request, resolved-model, and
+service-tier references must be normalized identifiers.
+
+Usage finality is separate from invocation lifecycle state. The provider
+orchestrator must supply final, partial, or unknown usage and coordinate it
+with invocation completion. Automatic terminal observations and that
+orchestration remain pending. This boundary permits late usage for an already
+terminal invocation only if a durable dispatch transition exists.
 
 ### Tools, permissions, and approvals
 

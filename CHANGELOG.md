@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Added normalized counted-unit provider usage updates validated against the dispatched invocation, account, and logical work.
+- Added durable per-attempt immutable usage revisions with deduplicated delta and cumulative updates, final and correction handling, safe replay metadata, and canonical cached/reasoning subsets that preserve missing versus zero values.
+- Explicit provider orchestration, automatic terminal observations, aggregate endpoints, valuation, and allowance remain pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Defined protocol `0.16.0` metadata-only `usage.observed` events identifying the immutable observation revision, physical invocation attempt, logical work, account, completeness, and terminal status.
 - Updated the generated JSON Schema, TypeScript, and OpenAPI definitions.
 

@@ -4,6 +4,11 @@ use std::{collections::HashSet, fmt, future::Future, path::Path};
 
 use ulid::Ulid;
 
+mod usage;
+mod usage_store;
+pub use usage::*;
+pub use usage_store::*;
+
 pub const INLINE_TOOL_OUTPUT_LIMIT: usize = 4_096;
 pub const TOOL_OUTPUT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 
@@ -2833,6 +2838,9 @@ pub trait SubprocessExecutor: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEventPayload {
+    UsageObserved {
+        observation: UsageObservation,
+    },
     SessionCreated {
         workspace_id: WorkspaceId,
     },
@@ -3054,6 +3062,14 @@ impl SessionEvent {
                 entry_count: u64::try_from(manifest.entries.len())
                     .expect("context manifest entry count fits in u64"),
             },
+        }
+    }
+
+    pub fn usage_observed(event_id: EventId, observation: UsageObservation) -> Self {
+        Self {
+            event_id,
+            session_id: observation.session_id.clone(),
+            payload: SessionEventPayload::UsageObserved { observation },
         }
     }
 

@@ -297,10 +297,13 @@ the native runtime; it does not establish a provider account connection or
 validate its credentials. The storage adapter remains responsible for verifying
 the context content hash and source ownership on reads.
 
-The first port supports text deltas, partial usage updates, and a terminal
-outcome paired with final usage. Updates have a validation operation that checks
-the invocation, work, and account attribution and usage finality. Empty text
-deltas and tool-request completions without a tool payload are invalid.
+The first port supports assistant-text and exposed reasoning-summary chunks,
+partial usage updates, and a terminal outcome paired with final usage. Output
+updates carry the invocation ID, stable update ID, ordered position, stream,
+and exact content as a validated `RecordModelOutput` command. Updates have a
+validation operation that checks invocation attribution, usage work and account
+attribution, and usage finality. Empty chunks and tool-request completions
+without a tool payload are invalid.
 Provider errors use typed categories without raw provider diagnostics. Requests
 and output updates have no automatic debug representation that exposes text.
 
@@ -311,7 +314,7 @@ on the active provider operation. Successful cancellation must stop external
 work before the caller records a cancelled outcome. The port has no clock,
 network, secret store, tool executor, or retry policy.
 
-Daemon dispatch, durable streamed assistant output, tool-request payloads,
+Daemon dispatch, final assistant Message assembly, tool-request payloads,
 provider accounts, authentication, and live provider adapters remain pending.
 
 The `kiln-providers` crate supplies an explicit deterministic adapter for this
@@ -323,12 +326,39 @@ make network requests. The adapter rejects empty chunks and invalid normalized
 terminal usage before it emits output.
 
 The deterministic operation emits its text chunks, one terminal update, then
-end-of-stream. Cancellation before the terminal update discards pending text
-and replaces the configured result with a cancelled outcome and final unknown
+end-of-stream. Each chunk has a deterministic per-attempt update ID and ordered
+position suitable for the durable output boundary. Cancellation before the
+terminal update discards pending text and replaces the configured result with a cancelled outcome and final unknown
 usage with no quantities. It does not report configured success counts as
 observed cancellation usage. Repeated cancellation is safe, and cancellation
 after terminal delivery has no effect. The adapter is a library boundary and
 is not enabled in daemon Run execution.
+
+### Durable model output
+
+The internal output application records one immutable chunk and its
+`model_invocation.output` Event in the same transaction. The caller publishes
+only the returned committed Events. Each chunk belongs to one invocation, Run,
+and Session. The store derives ownership from the durable invocation and
+accepts new chunks only while it is `in_flight`.
+
+Positions start at one and are contiguous across both `assistant_text` and
+`reasoning_summary` streams for an attempt. A stable update ID identifies each
+chunk within that attempt. An exact retry returns the original chunk without
+another Event, even after invocation completion. Changed input with the same
+update ID conflicts. A new update with a duplicate or skipped position fails.
+Empty content is invalid; whitespace and content bytes are preserved.
+
+Reads validate the ownership and ordered history. Events replay the immutable
+stored chunk, including its original content and stream. Failure, interruption,
+and cancellation do not delete partial output. Hidden provider reasoning is
+not a supported stream. Output command and chunk debug representations omit
+content.
+
+Chunks are not Session Messages and cannot be included as Message references in
+a ContextManifest. Final assistant Message assembly, incomplete-message status,
+Run completion, and native daemon publication remain pending. Existing text
+chunks do not authorize an automatic retry.
 
 ### Native usage observations
 

@@ -4,8 +4,8 @@ use crate::{
     ContextManifest, ContextManifestStore, ContextManifestStoreError, ModelInvocation,
     ModelInvocationCompletionKind, ModelInvocationId, ModelInvocationIdGenerator,
     ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationState,
-    ModelInvocationStore, ModelInvocationStoreError, ProviderUsageUpdate, StoredSessionEvent,
-    UsageFinality,
+    ModelInvocationStore, ModelInvocationStoreError, ProviderUsageUpdate, RecordModelOutput,
+    StoredSessionEvent, UsageFinality,
 };
 
 pub struct ProviderRequest {
@@ -134,7 +134,7 @@ pub enum ProviderError {
 }
 
 pub enum ProviderUpdate {
-    TextDelta(String),
+    Output(RecordModelOutput),
     Usage(ProviderUsageUpdate),
     Finished {
         outcome: ModelInvocationOutcome,
@@ -145,11 +145,11 @@ pub enum ProviderUpdate {
 impl ProviderUpdate {
     pub fn validate_for(&self, invocation: &ModelInvocation) -> Result<(), ProviderError> {
         let (usage, finality) = match self {
-            Self::TextDelta(text) => {
-                return if text.is_empty() {
-                    Err(ProviderError::ProviderResponseInvalid)
-                } else {
+            Self::Output(output) => {
+                return if output.model_invocation_id() == invocation.invocation_id() {
                     Ok(())
+                } else {
+                    Err(ProviderError::ProviderResponseInvalid)
                 };
             }
             Self::Usage(usage) => (usage, UsageFinality::Partial),

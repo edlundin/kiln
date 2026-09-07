@@ -1342,6 +1342,25 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
                 entry_count: *entry_count,
             },
         ),
+        SessionEventPayload::ModelOutputRecorded { chunk } => {
+            SessionEventDataResponse::ModelOutputRecorded(
+                kiln_protocol::ModelOutputRecordedResponse {
+                    output_chunk_id: chunk.output_chunk_id.as_str().to_owned(),
+                    model_invocation_id: chunk.model_invocation_id.as_str().to_owned(),
+                    run_id: chunk.run_id.as_str().to_owned(),
+                    position: chunk.position,
+                    stream: match chunk.stream {
+                        kiln_core::ModelOutputStream::AssistantText => {
+                            kiln_protocol::ModelOutputStream::AssistantText
+                        }
+                        kiln_core::ModelOutputStream::ReasoningSummary => {
+                            kiln_protocol::ModelOutputStream::ReasoningSummary
+                        }
+                    },
+                    content: chunk.content.clone(),
+                },
+            )
+        }
         SessionEventPayload::UsageObserved { observation } => {
             SessionEventDataResponse::UsageObserved(kiln_protocol::UsageObservedResponse {
                 usage_observation_id: observation.observation_id.as_str().to_owned(),

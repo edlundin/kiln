@@ -85,6 +85,25 @@ entities:
       - metadata_events_commit_with_state_changes
       - dispatched_attempt_completion_requires_final_usage
     initial_slice: internal_durable_attempts_without_provider_dispatch
+  ModelOutputChunk:
+    required:
+      - id
+      - model_invocation_id
+      - run_id
+      - session_id
+      - update_id
+      - position
+      - stream
+      - content
+    streams: [assistant_text, reasoning_summary]
+    invariants:
+      - new_chunks_require_in_flight_invocation
+      - positions_are_contiguous_per_attempt
+      - exact_update_retries_create_no_new_event
+      - chunk_and_event_commit_atomically
+      - partial_output_survives_terminal_outcomes
+      - hidden_reasoning_is_not_a_supported_stream
+    initial_slice: durable_chunks_without_final_Message_assembly
   UsageObservation:
     required:
       - id

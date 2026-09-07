@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Added durable immutable assistant-text and exposed reasoning-summary chunks committed with their events, with contiguous per-attempt ordering and exact duplicate retries after terminal state.
+- Partial output is retained and replayed; provider updates carry storage command identity, and the deterministic adapter generates stable positions and IDs.
+- Final assistant Messages and daemon dispatch remain pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Defined protocol `0.17.0` metadata-only `model_invocation.output` events with immutable chunk IDs, per-attempt ordered positions, `assistant_text`/`reasoning_summary` streams, and visible content.
 - Updated the generated JSON Schema, TypeScript, and OpenAPI definitions.
 - Final assistant assembly and daemon dispatch remain pending.

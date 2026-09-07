@@ -1,5 +1,6 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
+mod model_output;
 mod usage;
 
 use std::{
@@ -1335,6 +1336,7 @@ impl SqliteStore {
                         e.model_capability_vision, e.model_capability_structured_output,
                         e.model_purpose, e.model_retry_of, e.model_invocation_state,
                         e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
+                        e.output_chunk_id,
                         cm.session_id AS manifest_session_id,
                         cm.run_id AS manifest_run_id,
                         cm.content_hash AS manifest_content_hash,
@@ -1385,6 +1387,7 @@ impl SqliteStore {
                         e.model_capability_vision, e.model_capability_structured_output,
                         e.model_purpose, e.model_retry_of, e.model_invocation_state,
                         e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
+                        e.output_chunk_id,
                         cm.session_id AS manifest_session_id,
                         cm.run_id AS manifest_run_id,
                         cm.content_hash AS manifest_content_hash,
@@ -2004,6 +2007,7 @@ async fn parse_event_rows(
 ) -> Result<Vec<StoredSessionEvent>, StoreError> {
     let mut events = Vec::with_capacity(rows.len());
     let mut usage_cache = std::collections::HashMap::new();
+    let mut output_cache = std::collections::HashMap::new();
     for row in rows {
         let event_id = EventId::parse(
             row.try_get::<String, _>("event_id")
@@ -2137,6 +2141,33 @@ async fn parse_event_rows(
         .map_err(|_| StoreError::Unavailable)?;
 
         let event = match event_type.as_str() {
+            "model_invocation.output" => {
+                let output_chunk_id = row
+                    .try_get::<String, _>("output_chunk_id")
+                    .map_err(|_| StoreError::Unavailable)?;
+                let invocation_id = row
+                    .try_get::<String, _>("model_invocation_id")
+                    .map_err(|_| StoreError::Unavailable)?;
+                let chunk = model_output::load_event_chunk(
+                    transaction,
+                    &output_chunk_id,
+                    &invocation_id,
+                    &mut output_cache,
+                )
+                .await?;
+                if chunk.session_id != stored_session_id
+                    || run_id.as_deref() != Some(chunk.run_id.as_str())
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::ModelOutputRecorded { chunk },
+                )
+                .map_err(|_| StoreError::Unavailable)?
+            }
             "usage.observed" => {
                 let observation_id = row
                     .try_get::<String, _>("usage_observation_id")
@@ -6411,6 +6442,7 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
         | SessionEventPayload::ModelInvocationCreated { .. }
         | SessionEventPayload::ModelInvocationStateChanged { .. }
         | SessionEventPayload::UsageObserved { .. }
+        | SessionEventPayload::ModelOutputRecorded { .. }
         | SessionEventPayload::TaskCreated { .. }
         | SessionEventPayload::TaskUpdated { .. }
         | SessionEventPayload::TaskAssigned { .. }

@@ -179,7 +179,7 @@ fn valid_dimension(value: &str) -> bool {
     value.contains('.') && value.split('.').all(valid_name)
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(crate) fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.is_ascii()
         && !value

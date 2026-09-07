@@ -4,9 +4,11 @@ use std::{collections::HashSet, fmt, future::Future, path::Path};
 
 use ulid::Ulid;
 
+mod model_output;
 mod provider;
 mod usage;
 mod usage_store;
+pub use model_output::*;
 pub use provider::*;
 pub use usage::*;
 pub use usage_store::*;
@@ -2840,6 +2842,9 @@ pub trait SubprocessExecutor: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEventPayload {
+    ModelOutputRecorded {
+        chunk: ModelOutputChunk,
+    },
     UsageObserved {
         observation: UsageObservation,
     },
@@ -3072,6 +3077,14 @@ impl SessionEvent {
             event_id,
             session_id: observation.session_id.clone(),
             payload: SessionEventPayload::UsageObserved { observation },
+        }
+    }
+
+    pub fn model_output_recorded(event_id: EventId, chunk: ModelOutputChunk) -> Self {
+        Self {
+            event_id,
+            session_id: chunk.session_id.clone(),
+            payload: SessionEventPayload::ModelOutputRecorded { chunk },
         }
     }
 

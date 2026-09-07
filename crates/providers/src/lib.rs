@@ -3,9 +3,10 @@
 use std::collections::VecDeque;
 
 use kiln_core::{
-    ModelInvocation, ModelInvocationOutcome, ModelProvider, ModelProviderOperation, ProviderError,
-    ProviderRequest, ProviderUpdate, ProviderUsageMetadata, ProviderUsageUpdate, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageQuantity, UsageSource,
+    ModelInvocation, ModelInvocationOutcome, ModelOutputStream, ModelProvider,
+    ModelProviderOperation, ProviderError, ProviderRequest, ProviderUpdate, ProviderUsageMetadata,
+    ProviderUsageUpdate, RecordModelOutput, UsageAccounting, UsageCompleteness, UsageFinality,
+    UsageQuantity, UsageSource,
 };
 
 pub const DETERMINISTIC_PROVIDER_TYPE: &str = "kiln_deterministic";
@@ -31,7 +32,7 @@ impl DeterministicModelProvider {
 
 pub struct DeterministicModelOperation {
     invocation: ModelInvocation,
-    text: VecDeque<String>,
+    output: VecDeque<RecordModelOutput>,
     completion: Option<ProviderUpdate>,
     observed_at_unix_ms: u64,
 }
@@ -46,9 +47,29 @@ impl ModelProvider for DeterministicModelProvider {
         {
             return Err(ProviderError::ModelUnavailable);
         }
-        if self.response.text.iter().any(String::is_empty) {
-            return Err(ProviderError::ProviderResponseInvalid);
-        }
+        let output = self
+            .response
+            .text
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let position = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(ProviderError::ProviderResponseInvalid)?;
+                RecordModelOutput::new(
+                    invocation.invocation_id().clone(),
+                    format!(
+                        "fixture:output:{}:{position}",
+                        invocation.invocation_id().as_str()
+                    ),
+                    position,
+                    ModelOutputStream::AssistantText,
+                    text.clone(),
+                )
+                .map_err(|_| ProviderError::ProviderResponseInvalid)
+            })
+            .collect::<Result<VecDeque<_>, _>>()?;
         let completion = ProviderUpdate::Finished {
             outcome: self.response.outcome,
             usage: final_usage(
@@ -61,7 +82,7 @@ impl ModelProvider for DeterministicModelProvider {
         completion.validate_for(invocation)?;
         Ok(DeterministicModelOperation {
             invocation: invocation.clone(),
-            text: self.response.text.iter().cloned().collect(),
+            output,
             completion: Some(completion),
             observed_at_unix_ms: self.response.observed_at_unix_ms,
         })
@@ -70,8 +91,8 @@ impl ModelProvider for DeterministicModelProvider {
 
 impl ModelProviderOperation for DeterministicModelOperation {
     async fn next_update(&mut self) -> Result<Option<ProviderUpdate>, ProviderError> {
-        if let Some(text) = self.text.pop_front() {
-            return Ok(Some(ProviderUpdate::TextDelta(text)));
+        if let Some(output) = self.output.pop_front() {
+            return Ok(Some(ProviderUpdate::Output(output)));
         }
         Ok(self.completion.take())
     }
@@ -86,7 +107,7 @@ impl ModelProviderOperation for DeterministicModelOperation {
             UsageCompleteness::Unknown,
             Vec::new(),
         )?;
-        self.text.clear();
+        self.output.clear();
         self.completion = Some(ProviderUpdate::Finished {
             outcome: ModelInvocationOutcome::cancelled(),
             usage,

@@ -168,7 +168,7 @@
       "path": "/v1/artifacts/{content_hash}"
     }
   ],
-  "protocol_version": "0.16.0",
+  "protocol_version": "0.17.0",
   "websocket": [
     {
       "method": "GET",

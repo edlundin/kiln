@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Defined protocol `0.17.0` metadata-only `model_invocation.output` events with immutable chunk IDs, per-attempt ordered positions, `assistant_text`/`reasoning_summary` streams, and visible content.
+- Updated the generated JSON Schema, TypeScript, and OpenAPI definitions.
+- Final assistant assembly and daemon dispatch remain pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Added the `kiln-providers` deterministic runtime adapter with exact `kiln_deterministic`/`deterministic_text` selection, configured text chunks and terminal outcome, and explicit synthetic counted usage and time.
 - Cancellation discards pending output and returns final unknown usage; the adapter adds no external dependency, login, network access, or daemon activation.
 - Native daemon orchestration and live adapters remain pending.

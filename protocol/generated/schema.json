@@ -719,6 +719,60 @@
       ],
       "title": "ModelInvocationStatus"
     },
+    "ModelOutputRecordedResponse": {
+      "$defs": {
+        "ModelOutputStream": {
+          "enum": [
+            "assistant_text",
+            "reasoning_summary"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "model_invocation_id": {
+          "type": "string"
+        },
+        "output_chunk_id": {
+          "type": "string"
+        },
+        "position": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/$defs/ModelOutputStream"
+        }
+      },
+      "required": [
+        "output_chunk_id",
+        "model_invocation_id",
+        "run_id",
+        "position",
+        "stream",
+        "content"
+      ],
+      "title": "ModelOutputRecordedResponse",
+      "type": "object"
+    },
+    "ModelOutputStream": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "assistant_text",
+        "reasoning_summary"
+      ],
+      "title": "ModelOutputStream",
+      "type": "string"
+    },
     "NegotiateRequest": {
       "$defs": {
         "ClientIdentity": {
@@ -1394,6 +1448,13 @@
             }
           ]
         },
+        "ModelOutputStream": {
+          "enum": [
+            "assistant_text",
+            "reasoning_summary"
+          ],
+          "type": "string"
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -1604,6 +1665,45 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "model_invocation_id": {
+              "type": "string"
+            },
+            "output_chunk_id": {
+              "type": "string"
+            },
+            "position": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "stream": {
+              "$ref": "#/$defs/ModelOutputStream"
+            },
+            "type": {
+              "const": "model_invocation.output",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "output_chunk_id",
+            "model_invocation_id",
+            "run_id",
+            "position",
+            "stream",
+            "content"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "properties": {
@@ -2488,6 +2588,13 @@
             }
           ]
         },
+        "ModelOutputStream": {
+          "enum": [
+            "assistant_text",
+            "reasoning_summary"
+          ],
+          "type": "string"
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -2509,6 +2616,45 @@
         },
         "SessionEventDataResponse": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "output_chunk_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "stream": {
+                  "$ref": "#/$defs/ModelOutputStream"
+                },
+                "type": {
+                  "const": "model_invocation.output",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "output_chunk_id",
+                "model_invocation_id",
+                "run_id",
+                "position",
+                "stream",
+                "content"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -3605,6 +3751,13 @@
             }
           ]
         },
+        "ModelOutputStream": {
+          "enum": [
+            "assistant_text",
+            "reasoning_summary"
+          ],
+          "type": "string"
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -3626,6 +3779,45 @@
         },
         "SessionEventDataResponse": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "output_chunk_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "stream": {
+                  "$ref": "#/$defs/ModelOutputStream"
+                },
+                "type": {
+                  "const": "model_invocation.output",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "output_chunk_id",
+                "model_invocation_id",
+                "run_id",
+                "position",
+                "stream",
+                "content"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -5503,6 +5695,13 @@
             }
           ]
         },
+        "ModelOutputStream": {
+          "enum": [
+            "assistant_text",
+            "reasoning_summary"
+          ],
+          "type": "string"
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -5524,6 +5723,45 @@
         },
         "SessionEventDataResponse": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "output_chunk_id": {
+                  "type": "string"
+                },
+                "position": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "stream": {
+                  "$ref": "#/$defs/ModelOutputStream"
+                },
+                "type": {
+                  "const": "model_invocation.output",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "output_chunk_id",
+                "model_invocation_id",
+                "run_id",
+                "position",
+                "stream",
+                "content"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -6613,7 +6851,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.16.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.17.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

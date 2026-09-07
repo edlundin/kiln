@@ -137,6 +137,66 @@ impl ContextManifestId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelInvocationId(String);
+
+impl ModelInvocationId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("miv_{value}"))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
+        parse_id(value.into(), "miv_").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelWorkId(String);
+
+impl ModelWorkId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("wrk_{value}"))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
+        parse_id(value.into(), "wrk_").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderAccountId(String);
+
+impl ProviderAccountId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("pac_{value}"))
+    }
+
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidProviderAccountId> {
+        parse_id(value.into(), "pac_")
+            .map(Self)
+            .map_err(|_| InvalidProviderAccountId)
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidProviderAccountId> {
+        Self::new(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidProviderAccountId;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventId(String);
 
 impl EventId {
@@ -774,6 +834,669 @@ pub fn canonical_context_manifest_request_bytes(command: &CreateContextManifest)
     }
     encoded
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderType(String);
+
+impl ProviderType {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidModelReference> {
+        parse_model_reference(value.into()).map(Self)
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidModelReference> {
+        Self::new(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelId(String);
+
+impl ModelId {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidModelReference> {
+        parse_model_reference(value.into()).map(Self)
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidModelReference> {
+        Self::new(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn parse_model_reference(value: String) -> Result<String, InvalidModelReference> {
+    if value.is_empty()
+        || value.trim() != value
+        || !value.is_ascii()
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(InvalidModelReference);
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidModelReference;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationSettings {
+    max_output_tokens: Option<u32>,
+}
+
+impl GenerationSettings {
+    pub fn new(max_output_tokens: Option<u32>) -> Result<Self, InvalidGenerationSettings> {
+        if max_output_tokens == Some(0) {
+            return Err(InvalidGenerationSettings);
+        }
+        Ok(Self { max_output_tokens })
+    }
+
+    pub fn max_output_tokens(&self) -> Option<u32> {
+        self.max_output_tokens
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidGenerationSettings;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningSettings {
+    effort: Option<String>,
+}
+
+impl ReasoningSettings {
+    pub fn new(effort: Option<String>) -> Result<Self, InvalidReasoningSettings> {
+        if effort.as_deref().is_some_and(|effort| {
+            effort.is_empty()
+                || effort.trim() != effort
+                || !effort.is_ascii()
+                || effort
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        }) {
+            return Err(InvalidReasoningSettings);
+        }
+        Ok(Self { effort })
+    }
+
+    pub fn effort(&self) -> Option<&str> {
+        self.effort.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidReasoningSettings;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitySupport {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+impl CapabilitySupport {
+    pub fn parse(value: &str) -> Result<Self, InvalidCapabilitySupport> {
+        match value {
+            "supported" => Ok(Self::Supported),
+            "unsupported" => Ok(Self::Unsupported),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(InvalidCapabilitySupport),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidCapabilitySupport;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCapabilitySnapshot {
+    version: String,
+    tool_calls: CapabilitySupport,
+    vision: CapabilitySupport,
+    structured_output: CapabilitySupport,
+}
+
+impl ModelCapabilitySnapshot {
+    pub fn new(
+        version: impl Into<String>,
+        tool_calls: CapabilitySupport,
+        vision: CapabilitySupport,
+        structured_output: CapabilitySupport,
+    ) -> Result<Self, InvalidCapabilitySnapshot> {
+        let version = version.into();
+        if version.is_empty()
+            || version.trim() != version
+            || !version.is_ascii()
+            || version
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        {
+            return Err(InvalidCapabilitySnapshot);
+        }
+        Ok(Self {
+            version,
+            tool_calls,
+            vision,
+            structured_output,
+        })
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn tool_calls(&self) -> CapabilitySupport {
+        self.tool_calls
+    }
+
+    pub fn vision(&self) -> CapabilitySupport {
+        self.vision
+    }
+
+    pub fn structured_output(&self) -> CapabilitySupport {
+        self.structured_output
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidCapabilitySnapshot;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocationSettings {
+    provider: ProviderType,
+    model: ModelId,
+    generation: GenerationSettings,
+    reasoning: ReasoningSettings,
+}
+
+impl ModelInvocationSettings {
+    pub fn new(
+        provider: ProviderType,
+        model: ModelId,
+        generation: GenerationSettings,
+        reasoning: ReasoningSettings,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            generation,
+            reasoning,
+        }
+    }
+
+    pub fn provider(&self) -> &ProviderType {
+        &self.provider
+    }
+
+    pub fn model(&self) -> &ModelId {
+        &self.model
+    }
+
+    pub fn generation(&self) -> &GenerationSettings {
+        &self.generation
+    }
+
+    pub fn reasoning(&self) -> &ReasoningSettings {
+        &self.reasoning
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationPurpose {
+    Generation,
+    Compaction,
+}
+
+impl ModelInvocationPurpose {
+    pub fn parse(value: &str) -> Result<Self, InvalidModelInvocationPurpose> {
+        match value {
+            "generation" => Ok(Self::Generation),
+            "compaction" => Ok(Self::Compaction),
+            _ => Err(InvalidModelInvocationPurpose),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generation => "generation",
+            Self::Compaction => "compaction",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidModelInvocationPurpose;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationState {
+    Pending,
+    InFlight,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl ModelInvocationState {
+    pub fn parse(value: &str) -> Result<Self, InvalidModelInvocationState> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "in_flight" => Ok(Self::InFlight),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
+            _ => Err(InvalidModelInvocationState),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InFlight => "in_flight",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Pending, Self::InFlight | Self::Cancelled)
+                | (
+                    Self::InFlight,
+                    Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+                )
+        )
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidModelInvocationState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationCompletionKind {
+    AssistantOutput,
+    ToolRequests,
+}
+
+impl ModelInvocationCompletionKind {
+    pub fn parse(value: &str) -> Result<Self, InvalidModelInvocationOutcome> {
+        match value {
+            "assistant_output" => Ok(Self::AssistantOutput),
+            "tool_requests" => Ok(Self::ToolRequests),
+            _ => Err(InvalidModelInvocationOutcome),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AssistantOutput => "assistant_output",
+            Self::ToolRequests => "tool_requests",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationTerminalReason {
+    Completed,
+    ProviderError,
+    InvalidRequest,
+    Cancelled,
+    Interrupted,
+    Unknown,
+}
+
+impl ModelInvocationTerminalReason {
+    pub fn parse(value: &str) -> Result<Self, InvalidModelInvocationOutcome> {
+        match value {
+            "completed" => Ok(Self::Completed),
+            "provider_error" => Ok(Self::ProviderError),
+            "invalid_request" => Ok(Self::InvalidRequest),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(InvalidModelInvocationOutcome),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::ProviderError => "provider_error",
+            Self::InvalidRequest => "invalid_request",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationFailureReason {
+    ProviderError,
+    InvalidRequest,
+    Unknown,
+}
+
+impl ModelInvocationFailureReason {
+    pub fn parse(value: &str) -> Result<Self, InvalidModelInvocationOutcome> {
+        match value {
+            "provider_error" => Ok(Self::ProviderError),
+            "invalid_request" => Ok(Self::InvalidRequest),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(InvalidModelInvocationOutcome),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderError => "provider_error",
+            Self::InvalidRequest => "invalid_request",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationOutcome {
+    Completed {
+        completion_kind: ModelInvocationCompletionKind,
+    },
+    Failed {
+        reason: ModelInvocationFailureReason,
+    },
+    Cancelled,
+    Interrupted,
+}
+
+impl ModelInvocationOutcome {
+    pub fn completed(completion_kind: ModelInvocationCompletionKind) -> Self {
+        Self::Completed { completion_kind }
+    }
+
+    pub fn failed(reason: ModelInvocationFailureReason) -> Self {
+        Self::Failed { reason }
+    }
+
+    pub fn cancelled() -> Self {
+        Self::Cancelled
+    }
+
+    pub fn interrupted() -> Self {
+        Self::Interrupted
+    }
+
+    pub fn state(self) -> ModelInvocationState {
+        match self {
+            Self::Completed { .. } => ModelInvocationState::Completed,
+            Self::Failed { .. } => ModelInvocationState::Failed,
+            Self::Cancelled => ModelInvocationState::Cancelled,
+            Self::Interrupted => ModelInvocationState::Interrupted,
+        }
+    }
+
+    pub fn completion_kind(self) -> Option<ModelInvocationCompletionKind> {
+        match self {
+            Self::Completed { completion_kind } => Some(completion_kind),
+            Self::Failed { .. } | Self::Cancelled | Self::Interrupted => None,
+        }
+    }
+
+    pub fn terminal_reason(self) -> ModelInvocationTerminalReason {
+        match self {
+            Self::Completed { .. } => ModelInvocationTerminalReason::Completed,
+            Self::Failed { reason } => match reason {
+                ModelInvocationFailureReason::ProviderError => {
+                    ModelInvocationTerminalReason::ProviderError
+                }
+                ModelInvocationFailureReason::InvalidRequest => {
+                    ModelInvocationTerminalReason::InvalidRequest
+                }
+                ModelInvocationFailureReason::Unknown => ModelInvocationTerminalReason::Unknown,
+            },
+            Self::Cancelled => ModelInvocationTerminalReason::Cancelled,
+            Self::Interrupted => ModelInvocationTerminalReason::Interrupted,
+        }
+    }
+
+    pub fn from_persisted(
+        state: ModelInvocationState,
+        completion_kind: Option<&str>,
+        terminal_reason: Option<&str>,
+    ) -> Result<Option<Self>, InvalidModelInvocationOutcome> {
+        let Some(terminal_reason) = terminal_reason else {
+            return if completion_kind.is_none() && !state.is_terminal() {
+                Ok(None)
+            } else {
+                Err(InvalidModelInvocationOutcome)
+            };
+        };
+        let reason = ModelInvocationTerminalReason::parse(terminal_reason)?;
+        let outcome = match state {
+            ModelInvocationState::Completed => {
+                if reason != ModelInvocationTerminalReason::Completed {
+                    return Err(InvalidModelInvocationOutcome);
+                }
+                let kind = ModelInvocationCompletionKind::parse(
+                    completion_kind.ok_or(InvalidModelInvocationOutcome)?,
+                )?;
+                Self::Completed {
+                    completion_kind: kind,
+                }
+            }
+            ModelInvocationState::Failed => {
+                if completion_kind.is_some() {
+                    return Err(InvalidModelInvocationOutcome);
+                }
+                Self::Failed {
+                    reason: ModelInvocationFailureReason::parse(terminal_reason)?,
+                }
+            }
+            ModelInvocationState::Cancelled => {
+                if completion_kind.is_some() || reason != ModelInvocationTerminalReason::Cancelled {
+                    return Err(InvalidModelInvocationOutcome);
+                }
+                Self::Cancelled
+            }
+            ModelInvocationState::Interrupted => {
+                if completion_kind.is_some() || reason != ModelInvocationTerminalReason::Interrupted
+                {
+                    return Err(InvalidModelInvocationOutcome);
+                }
+                Self::Interrupted
+            }
+            ModelInvocationState::Pending | ModelInvocationState::InFlight => {
+                return Err(InvalidModelInvocationOutcome);
+            }
+        };
+        Ok(Some(outcome))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidModelInvocationOutcome;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocationRequest {
+    pub invocation_id: ModelInvocationId,
+    pub work_id: ModelWorkId,
+    pub run_id: RunId,
+    pub context_manifest_id: ContextManifestId,
+    pub context_manifest_hash: ContentHash,
+    pub provider_account_id: ProviderAccountId,
+    pub settings: ModelInvocationSettings,
+    pub capabilities: ModelCapabilitySnapshot,
+    pub purpose: ModelInvocationPurpose,
+    pub retry_of: Option<ModelInvocationId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedModelInvocation {
+    pub request: ModelInvocationRequest,
+    pub state: ModelInvocationState,
+    pub outcome: Option<ModelInvocationOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocation {
+    invocation_id: ModelInvocationId,
+    work_id: ModelWorkId,
+    run_id: RunId,
+    context_manifest_id: ContextManifestId,
+    context_manifest_hash: ContentHash,
+    provider_account_id: ProviderAccountId,
+    settings: ModelInvocationSettings,
+    capabilities: ModelCapabilitySnapshot,
+    purpose: ModelInvocationPurpose,
+    retry_of: Option<ModelInvocationId>,
+    state: ModelInvocationState,
+    outcome: Option<ModelInvocationOutcome>,
+}
+
+impl ModelInvocation {
+    pub fn new(request: ModelInvocationRequest) -> Result<Self, InvalidModelInvocation> {
+        if request.retry_of.as_ref() == Some(&request.invocation_id) {
+            return Err(InvalidModelInvocation);
+        }
+        Ok(Self {
+            invocation_id: request.invocation_id,
+            work_id: request.work_id,
+            run_id: request.run_id,
+            context_manifest_id: request.context_manifest_id,
+            context_manifest_hash: request.context_manifest_hash,
+            provider_account_id: request.provider_account_id,
+            settings: request.settings,
+            capabilities: request.capabilities,
+            purpose: request.purpose,
+            retry_of: request.retry_of,
+            state: ModelInvocationState::Pending,
+            outcome: None,
+        })
+    }
+
+    pub fn from_persisted(
+        persisted: PersistedModelInvocation,
+    ) -> Result<Self, InvalidModelInvocation> {
+        let PersistedModelInvocation {
+            request,
+            state,
+            outcome,
+        } = persisted;
+        if outcome.is_some() != state.is_terminal()
+            || outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.state() != state)
+        {
+            return Err(InvalidModelInvocation);
+        }
+        let mut invocation = Self::new(request)?;
+        invocation.state = state;
+        invocation.outcome = outcome;
+        Ok(invocation)
+    }
+
+    pub fn invocation_id(&self) -> &ModelInvocationId {
+        &self.invocation_id
+    }
+
+    pub fn id(&self) -> &ModelInvocationId {
+        self.invocation_id()
+    }
+
+    pub fn work_id(&self) -> &ModelWorkId {
+        &self.work_id
+    }
+
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn context_manifest_id(&self) -> &ContextManifestId {
+        &self.context_manifest_id
+    }
+
+    pub fn context_manifest_hash(&self) -> &ContentHash {
+        &self.context_manifest_hash
+    }
+
+    pub fn provider_account_id(&self) -> &ProviderAccountId {
+        &self.provider_account_id
+    }
+
+    pub fn settings(&self) -> &ModelInvocationSettings {
+        &self.settings
+    }
+
+    pub fn capabilities(&self) -> &ModelCapabilitySnapshot {
+        &self.capabilities
+    }
+
+    pub fn purpose(&self) -> ModelInvocationPurpose {
+        self.purpose
+    }
+
+    pub fn retry_of(&self) -> Option<&ModelInvocationId> {
+        self.retry_of.as_ref()
+    }
+
+    pub fn state(&self) -> ModelInvocationState {
+        self.state
+    }
+
+    pub fn outcome(&self) -> Option<ModelInvocationOutcome> {
+        self.outcome
+    }
+
+    pub fn transition(
+        &self,
+        state: ModelInvocationState,
+        outcome: Option<ModelInvocationOutcome>,
+    ) -> Result<Self, ModelInvocationError> {
+        if !self.state.can_transition_to(state) {
+            return Err(ModelInvocationError::InvalidTransition);
+        }
+        if outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.state() != state)
+            || outcome.is_some() != state.is_terminal()
+        {
+            return Err(ModelInvocationError::InvalidTransition);
+        }
+        Ok(Self {
+            state,
+            outcome,
+            ..self.clone()
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidModelInvocation;
 
 fn usize_context_bytes(value: usize) -> [u8; 8] {
     u64::try_from(value)
@@ -1921,6 +2644,7 @@ pub struct RunSnapshot {
     run: Run,
     tool_calls: Vec<ToolCall>,
     approvals: Vec<Approval>,
+    model_invocations: Vec<ModelInvocation>,
 }
 
 impl RunSnapshot {
@@ -1929,6 +2653,7 @@ impl RunSnapshot {
             run,
             tool_calls,
             approvals: Vec::new(),
+            model_invocations: Vec::new(),
         }
     }
 
@@ -1937,6 +2662,21 @@ impl RunSnapshot {
             run,
             tool_calls,
             approvals,
+            model_invocations: Vec::new(),
+        }
+    }
+
+    pub fn with_model_invocations(
+        run: Run,
+        tool_calls: Vec<ToolCall>,
+        approvals: Vec<Approval>,
+        model_invocations: Vec<ModelInvocation>,
+    ) -> Self {
+        Self {
+            run,
+            tool_calls,
+            approvals,
+            model_invocations,
         }
     }
     pub fn run(&self) -> &Run {
@@ -1962,6 +2702,26 @@ impl RunSnapshot {
         self.approvals
             .iter()
             .find(|approval| approval.tool_call_id() == id)
+    }
+
+    pub fn model_invocations(&self) -> &[ModelInvocation] {
+        &self.model_invocations
+    }
+
+    pub fn model_invocation(&self, id: &ModelInvocationId) -> Option<&ModelInvocation> {
+        self.model_invocations
+            .iter()
+            .find(|invocation| invocation.invocation_id() == id)
+    }
+
+    pub fn active_model_invocation(&self) -> Option<&ModelInvocation> {
+        self.model_invocations
+            .iter()
+            .find(|invocation| !invocation.state().is_terminal())
+    }
+
+    pub fn has_active_invocation(&self) -> bool {
+        self.active_model_invocation().is_some()
     }
 }
 
@@ -2084,6 +2844,12 @@ pub enum SessionEventPayload {
         run_id: RunId,
         content_hash: ContentHash,
         entry_count: u64,
+    },
+    ModelInvocationCreated {
+        invocation: ModelInvocation,
+    },
+    ModelInvocationStateChanged {
+        invocation: ModelInvocation,
     },
     TaskCreated {
         task: Task,
@@ -2288,6 +3054,30 @@ impl SessionEvent {
                 entry_count: u64::try_from(manifest.entries.len())
                     .expect("context manifest entry count fits in u64"),
             },
+        }
+    }
+
+    pub fn model_invocation_created(
+        event_id: EventId,
+        session_id: SessionId,
+        invocation: ModelInvocation,
+    ) -> Self {
+        Self {
+            event_id,
+            session_id,
+            payload: SessionEventPayload::ModelInvocationCreated { invocation },
+        }
+    }
+
+    pub fn model_invocation_state_changed(
+        event_id: EventId,
+        session_id: SessionId,
+        invocation: ModelInvocation,
+    ) -> Self {
+        Self {
+            event_id,
+            session_id,
+            payload: SessionEventPayload::ModelInvocationStateChanged { invocation },
         }
     }
 
@@ -2592,6 +3382,77 @@ pub struct CreateContextManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateModelInvocation {
+    pub run_id: RunId,
+    pub context_manifest_id: ContextManifestId,
+    pub context_manifest_hash: ContentHash,
+    pub provider_account_id: ProviderAccountId,
+    pub settings: ModelInvocationSettings,
+    pub capabilities: ModelCapabilitySnapshot,
+    pub purpose: ModelInvocationPurpose,
+    pub retry_of: Option<ModelInvocationId>,
+    pub idempotency_key: String,
+}
+
+pub fn canonical_model_invocation_request_bytes(command: &CreateModelInvocation) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    push_context_field(&mut encoded, b"kiln.model-invocation.request");
+    push_context_field(&mut encoded, &[1]);
+    push_context_field(&mut encoded, command.run_id.as_str().as_bytes());
+    push_context_field(
+        &mut encoded,
+        command.context_manifest_id.as_str().as_bytes(),
+    );
+    push_context_field(
+        &mut encoded,
+        command.context_manifest_hash.as_str().as_bytes(),
+    );
+    push_context_field(
+        &mut encoded,
+        command.provider_account_id.as_str().as_bytes(),
+    );
+    push_context_field(
+        &mut encoded,
+        command.settings.provider().as_str().as_bytes(),
+    );
+    push_context_field(&mut encoded, command.settings.model().as_str().as_bytes());
+    push_context_field(
+        &mut encoded,
+        &command
+            .settings
+            .generation()
+            .max_output_tokens()
+            .map_or_else(Vec::new, |value| value.to_be_bytes().to_vec()),
+    );
+    push_context_field(
+        &mut encoded,
+        command
+            .settings
+            .reasoning()
+            .effort()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    push_context_field(&mut encoded, command.capabilities.version().as_bytes());
+    for capability in [
+        command.capabilities.tool_calls(),
+        command.capabilities.vision(),
+        command.capabilities.structured_output(),
+    ] {
+        push_context_field(&mut encoded, capability.as_str().as_bytes());
+    }
+    push_context_field(&mut encoded, command.purpose.as_str().as_bytes());
+    push_context_field(
+        &mut encoded,
+        command
+            .retry_of
+            .as_ref()
+            .map_or(b"".as_slice(), |id| id.as_str().as_bytes()),
+    );
+    encoded
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendRunInput {
     pub run_id: RunId,
     pub content: String,
@@ -2783,6 +3644,42 @@ pub enum ContextManifestStoreError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationError {
+    ModelInvocationNotFound,
+    RunNotFound,
+    RunNotRunning,
+    ContextManifestNotFound,
+    ContextManifestRunMismatch,
+    ContextManifestHashMismatch,
+    ActiveInvocationExists,
+    RetryNotAllowed,
+    RetryRequestMismatch,
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
+    InvalidTransition,
+    IntegrityViolation,
+    StoreUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationStoreError {
+    ModelInvocationNotFound,
+    RunNotFound,
+    RunNotRunning,
+    ContextManifestNotFound,
+    ContextManifestRunMismatch,
+    ContextManifestHashMismatch,
+    ActiveInvocationExists,
+    RetryNotAllowed,
+    RetryRequestMismatch,
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
+    InvalidTransition,
+    IntegrityViolation,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunError {
     SessionNotFound,
     WorkspaceRootNotFound,
@@ -2855,6 +3752,60 @@ pub enum RecordRunInputDisposition {
 pub enum CreateContextManifestDisposition {
     Created,
     Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateModelInvocationDisposition {
+    Created,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateModelInvocationMutation {
+    pub value: ModelInvocation,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: CreateModelInvocationDisposition,
+}
+
+impl CreateModelInvocationMutation {
+    pub fn new(
+        value: ModelInvocation,
+        events: Vec<StoredSessionEvent>,
+        disposition: CreateModelInvocationDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationMutationDisposition {
+    Applied,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocationMutation {
+    pub value: ModelInvocation,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: ModelInvocationMutationDisposition,
+}
+
+impl ModelInvocationMutation {
+    pub fn new(
+        value: ModelInvocation,
+        events: Vec<StoredSessionEvent>,
+        disposition: ModelInvocationMutationDisposition,
+    ) -> Self {
+        Self {
+            value,
+            events,
+            disposition,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3026,6 +3977,36 @@ pub trait ContextManifestStore: Send + Sync {
     ) -> impl Future<Output = Result<Vec<ContextManifest>, ContextManifestStoreError>> + Send;
 }
 
+pub trait ModelInvocationStore: Send + Sync {
+    fn create_model_invocation(
+        &self,
+        command: &CreateModelInvocation,
+        model_invocation_id: ModelInvocationId,
+        model_work_id: ModelWorkId,
+        event_id: EventId,
+    ) -> impl Future<Output = Result<CreateModelInvocationMutation, ModelInvocationStoreError>> + Send;
+    fn get_model_invocation(
+        &self,
+        model_invocation_id: &ModelInvocationId,
+    ) -> impl Future<Output = Result<Option<ModelInvocation>, ModelInvocationStoreError>> + Send;
+    fn list_model_invocations(
+        &self,
+        run_id: &RunId,
+    ) -> impl Future<Output = Result<Vec<ModelInvocation>, ModelInvocationStoreError>> + Send;
+    fn begin_model_invocation(
+        &self,
+        invocation: &ModelInvocation,
+        event_id: EventId,
+        run_event_id: EventId,
+    ) -> impl Future<Output = Result<ModelInvocationMutation, ModelInvocationStoreError>> + Send;
+    fn finish_model_invocation(
+        &self,
+        invocation: &ModelInvocation,
+        outcome: ModelInvocationOutcome,
+        event_id: EventId,
+    ) -> impl Future<Output = Result<ModelInvocationMutation, ModelInvocationStoreError>> + Send;
+}
+
 pub trait TaskStore: Send + Sync {
     fn create_task(
         &self,
@@ -3075,6 +4056,12 @@ pub trait RunIdGenerator: Send + Sync {
 
 pub trait ContextManifestIdGenerator: Send + Sync {
     fn context_manifest_id(&self) -> ContextManifestId;
+    fn event_id(&self) -> EventId;
+}
+
+pub trait ModelInvocationIdGenerator: Send + Sync {
+    fn model_invocation_id(&self) -> ModelInvocationId;
+    fn model_work_id(&self) -> ModelWorkId;
     fn event_id(&self) -> EventId;
 }
 
@@ -3266,6 +4253,116 @@ fn map_context_manifest_store_error(error: ContextManifestStoreError) -> Context
         ContextManifestStoreError::IdempotencyConflict => ContextManifestError::IdempotencyConflict,
         ContextManifestStoreError::IntegrityViolation => ContextManifestError::IntegrityViolation,
         ContextManifestStoreError::Unavailable => ContextManifestError::StoreUnavailable,
+    }
+}
+
+pub struct ModelInvocationApplication<S, I> {
+    store: S,
+    ids: I,
+}
+
+impl<S, I> ModelInvocationApplication<S, I> {
+    pub fn new(store: S, ids: I) -> Self {
+        Self { store, ids }
+    }
+}
+
+impl<S, I> ModelInvocationApplication<S, I>
+where
+    S: ModelInvocationStore,
+    I: ModelInvocationIdGenerator,
+{
+    pub async fn create_model_invocation(
+        &self,
+        command: CreateModelInvocation,
+    ) -> Result<CreateModelInvocationMutation, ModelInvocationError> {
+        if command.idempotency_key.is_empty() {
+            return Err(ModelInvocationError::IdempotencyKeyRequired);
+        }
+        self.store
+            .create_model_invocation(
+                &command,
+                self.ids.model_invocation_id(),
+                self.ids.model_work_id(),
+                self.ids.event_id(),
+            )
+            .await
+            .map_err(map_model_invocation_store_error)
+    }
+
+    pub async fn get_model_invocation(
+        &self,
+        model_invocation_id: ModelInvocationId,
+    ) -> Result<ModelInvocation, ModelInvocationError> {
+        self.store
+            .get_model_invocation(&model_invocation_id)
+            .await
+            .map_err(map_model_invocation_store_error)?
+            .ok_or(ModelInvocationError::ModelInvocationNotFound)
+    }
+
+    pub async fn list_model_invocations(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<ModelInvocation>, ModelInvocationError> {
+        self.store
+            .list_model_invocations(&run_id)
+            .await
+            .map_err(map_model_invocation_store_error)
+    }
+
+    pub async fn begin_model_invocation(
+        &self,
+        invocation: ModelInvocation,
+    ) -> Result<ModelInvocationMutation, ModelInvocationError> {
+        self.store
+            .begin_model_invocation(&invocation, self.ids.event_id(), self.ids.event_id())
+            .await
+            .map_err(map_model_invocation_store_error)
+    }
+
+    pub async fn finish_model_invocation(
+        &self,
+        invocation: ModelInvocation,
+        outcome: ModelInvocationOutcome,
+    ) -> Result<ModelInvocationMutation, ModelInvocationError> {
+        self.store
+            .finish_model_invocation(&invocation, outcome, self.ids.event_id())
+            .await
+            .map_err(map_model_invocation_store_error)
+    }
+}
+
+fn map_model_invocation_store_error(error: ModelInvocationStoreError) -> ModelInvocationError {
+    match error {
+        ModelInvocationStoreError::ModelInvocationNotFound => {
+            ModelInvocationError::ModelInvocationNotFound
+        }
+        ModelInvocationStoreError::RunNotFound => ModelInvocationError::RunNotFound,
+        ModelInvocationStoreError::RunNotRunning => ModelInvocationError::RunNotRunning,
+        ModelInvocationStoreError::ContextManifestNotFound => {
+            ModelInvocationError::ContextManifestNotFound
+        }
+        ModelInvocationStoreError::ContextManifestRunMismatch => {
+            ModelInvocationError::ContextManifestRunMismatch
+        }
+        ModelInvocationStoreError::ContextManifestHashMismatch => {
+            ModelInvocationError::ContextManifestHashMismatch
+        }
+        ModelInvocationStoreError::ActiveInvocationExists => {
+            ModelInvocationError::ActiveInvocationExists
+        }
+        ModelInvocationStoreError::RetryNotAllowed => ModelInvocationError::RetryNotAllowed,
+        ModelInvocationStoreError::RetryRequestMismatch => {
+            ModelInvocationError::RetryRequestMismatch
+        }
+        ModelInvocationStoreError::IdempotencyKeyRequired => {
+            ModelInvocationError::IdempotencyKeyRequired
+        }
+        ModelInvocationStoreError::IdempotencyConflict => ModelInvocationError::IdempotencyConflict,
+        ModelInvocationStoreError::InvalidTransition => ModelInvocationError::InvalidTransition,
+        ModelInvocationStoreError::IntegrityViolation => ModelInvocationError::IntegrityViolation,
+        ModelInvocationStoreError::Unavailable => ModelInvocationError::StoreUnavailable,
     }
 }
 
@@ -3496,10 +4593,11 @@ where
         let own_work_terminal = snapshot
             .tool_calls()
             .iter()
-            .all(|tool_call| tool_call.state().is_terminal());
+            .all(|tool_call| tool_call.state().is_terminal())
+            && !snapshot.has_active_invocation();
         let (run, tool_call, approval, mut events) = match snapshot.run.state() {
             RunState::Queued => {
-                let next = if descendants_terminal {
+                let next = if descendants_terminal && own_work_terminal {
                     RunState::Cancelled
                 } else {
                     RunState::Cancelling
@@ -3531,7 +4629,7 @@ where
                     .ok_or(RunError::RunNotFound)?
                     .transition(ToolCallState::Denied)?;
                 let cancelling = snapshot.run.transition(RunState::Cancelling)?;
-                let run = if descendants_terminal {
+                let run = if descendants_terminal && !snapshot.has_active_invocation() {
                     cancelling.transition(RunState::Cancelled)?
                 } else {
                     cancelling.clone()

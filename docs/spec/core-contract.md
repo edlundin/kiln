@@ -223,8 +223,65 @@ Queries retain committed snapshots after Run termination and list them in
 durable creation order.
 
 The first slice supports text instructions and Message snapshots only. Context
-assembly, attachment and tool representations, ModelInvocation records, provider
+assembly, attachment and tool representations, provider
 streaming, and safe-boundary input consumption remain pending native-loop work.
+
+### Model invocations
+
+The internal ModelInvocation boundary records one provider request attempt for
+one Run. It does not call a provider or expose public mutation endpoints.
+The contract follows [EDL-250](https://linear.app/edlundin/issue/EDL-250).
+
+Each attempt references an immutable ContextManifest for the same Run. Creation
+requires a queued or running Run and checks the manifest hash and source
+integrity. The selected provider account, model, capability snapshot, settings,
+and purpose are fixed for that attempt.
+Provider account references contain no credentials. Account connection and
+entitlement validation remain part of the later provider boundary.
+
+The initial settings snapshot stores provider and model identifiers, an optional
+output-token setting, optional reasoning effort, and versioned tool, vision,
+and structured-output support. Unknown capability support remains explicit.
+It does not claim to validate a provider's complete request contract.
+
+States are `pending`, `in_flight`, `completed`, `failed`, `cancelled`, and
+`interrupted`. A retry creates a new attempt linked to its predecessor; it does
+not rewrite the old result. Retry attempts retain the logical work identity.
+Only failed or interrupted attempts can be retried. A retry must retain the
+original manifest, account, settings, capabilities, and purpose. Changed context
+or settings require a new logical work item.
+This boundary does not decide whether a provider error is safe to retry.
+Completion distinguishes assistant output from tool requests. Terminal records
+carry a normalized outcome rather than raw provider error text.
+
+A fresh claim moves a queued Run to running in the same transaction as the
+invocation's `in_flight` transition. Active ToolCalls prevent the claim. A
+duplicate claim cannot authorize another provider request. The caller must
+dispatch only after an `Applied` claim result.
+
+Only one non-terminal invocation can exist for a Run. Run terminal transitions
+must check for active invocation work in the same storage transaction. Creating
+or changing an invocation and writing its metadata Event are atomic.
+Events retain the state and outcome at the time of the change; replay does not
+replace earlier states with the invocation's latest state.
+
+Exact creation retries return the stored attempt before checking current Run
+eligibility. Changed input with the same key conflicts. Matching claim and
+finish retries create no new Events; a changed terminal outcome conflicts.
+Reads validate manifest ownership and hashes, and the ordering and identity
+of the retry chain.
+
+Run cancellation preserves `cancelling` while invocation work is active. The
+daemon can cancel a pending invocation because dispatch has not begun. It does
+not claim ownership of an in-flight provider request. After restart, an
+in-flight record remains durable and blocks another claim; cancellation returns
+`cancellation_failed` until explicit internal reconciliation finishes it.
+Finishing an invocation does not itself complete its Run.
+
+Provider transport, streamed output, usage observations, automatic retries,
+and native-loop scheduling remain pending. The usage contract in
+[EDL-268](https://linear.app/edlundin/issue/EDL-268) will record each physical
+attempt separately while retaining its logical work identity.
 
 ### Tools, permissions, and approvals
 

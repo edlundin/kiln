@@ -61,6 +61,29 @@ entities:
       - targeted_messages_require_matching_run_and_delivered_state
       - creation_does_not_deliver_input_or_start_provider_work
     initial_slice: durable_text_instructions_and_message_snapshots
+  ModelInvocation:
+    required:
+      - id
+      - work_id
+      - run_id
+      - context_manifest_id
+      - context_manifest_hash
+      - provider_account_id
+      - model_settings
+      - purpose
+      - state
+    relationships:
+      run_id: one_Run
+      context_manifest_id: one_ContextManifest_for_same_Run
+      retry_of: optional_prior_ModelInvocation
+    states: [pending, in_flight, completed, failed, cancelled, interrupted]
+    invariants:
+      - request_settings_are_immutable
+      - one_non_terminal_invocation_per_Run
+      - retries_create_distinct_attempts_with_same_work_identity
+      - active_invocations_prevent_Run_terminal_transition
+      - metadata_events_commit_with_state_changes
+    initial_slice: internal_durable_attempts_without_provider_dispatch
   Run:
     required:
       - id

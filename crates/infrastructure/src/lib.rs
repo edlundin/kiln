@@ -12,24 +12,31 @@ use std::{
 
 use directories::ProjectDirs;
 use kiln_core::{
-    Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, AssignTask, ContentHash,
-    ContextInstructionProvenance, ContextManifest, ContextManifestEntry, ContextManifestEntryInput,
-    ContextManifestId, ContextManifestIdGenerator, ContextManifestStore, ContextManifestStoreError,
-    CreateContextManifest, CreateContextManifestDisposition, CreateContextManifestMutation,
-    CreateTaskDisposition, CreateTaskMutation, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    DiscoveredWorkspaceRoot, EventCursor, EventId, FilesystemIdentity, Message, MessageDelivery,
-    MessageDeliveryMode, MessageDeliveryState, MessageId, MessageRole, PersistedToolCall,
-    RecordRunInputDelivery, RecordRunInputDisposition, RecordRunInputMutation, RootDiscoveryError,
-    Run, RunId, RunIdGenerator, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore,
-    RunStoreError, SendRunInputDisposition, SendRunInputMutation, Session, SessionEvent,
-    SessionEventPage, SessionEventPayload, SessionId, SessionIdGenerator, SessionStore,
-    StartRunDisposition, StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution,
-    SubprocessExecutor, SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId,
-    TaskIdGenerator, TaskMutation, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError,
-    ToolCall, ToolCallId, ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace,
-    WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
+    Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, AssignTask, CapabilitySupport,
+    ContentHash, ContextInstructionProvenance, ContextManifest, ContextManifestEntry,
+    ContextManifestEntryInput, ContextManifestId, ContextManifestIdGenerator, ContextManifestStore,
+    ContextManifestStoreError, CreateContextManifest, CreateContextManifestDisposition,
+    CreateContextManifestMutation, CreateModelInvocation, CreateModelInvocationDisposition,
+    CreateModelInvocationMutation, CreateTaskDisposition, CreateTaskMutation,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor, EventId,
+    FilesystemIdentity, GenerationSettings, Message, MessageDelivery, MessageDeliveryMode,
+    MessageDeliveryState, MessageId, MessageRole, ModelCapabilitySnapshot, ModelId,
+    ModelInvocation, ModelInvocationId, ModelInvocationIdGenerator, ModelInvocationMutation,
+    ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationPurpose,
+    ModelInvocationRequest, ModelInvocationSettings, ModelInvocationState, ModelInvocationStore,
+    ModelInvocationStoreError, ModelWorkId, PersistedModelInvocation, PersistedToolCall,
+    ProviderAccountId, ProviderType, ReasoningSettings, RecordRunInputDelivery,
+    RecordRunInputDisposition, RecordRunInputMutation, RootDiscoveryError, Run, RunId,
+    RunIdGenerator, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, RunStoreError,
+    SendRunInputDisposition, SendRunInputMutation, Session, SessionEvent, SessionEventPage,
+    SessionEventPayload, SessionId, SessionIdGenerator, SessionStore, StartRunDisposition,
+    StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor,
+    SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId, TaskIdGenerator, TaskMutation,
+    TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
+    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceId,
+    WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
     WorkspaceRootId, WorkspaceRootState, WorkspaceStore, canonical_context_manifest_bytes,
-    canonical_context_manifest_request_bytes,
+    canonical_context_manifest_request_bytes, canonical_model_invocation_request_bytes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
@@ -1318,6 +1325,14 @@ impl SqliteStore {
                         e.output_stream, e.output_content, e.artifact_hash,
                         e.stdout_artifact_hash, e.stderr_artifact_hash,
                         e.context_manifest_id,
+                        e.model_invocation_id, e.model_work_id,
+                        e.model_context_manifest_hash, e.model_provider_account_id,
+                        e.model_provider, e.model_model,
+                        e.model_generation_max_output_tokens, e.model_reasoning_effort,
+                        e.model_capability_version, e.model_capability_tool_calls,
+                        e.model_capability_vision, e.model_capability_structured_output,
+                        e.model_purpose, e.model_retry_of, e.model_invocation_state,
+                        e.model_completion_kind, e.model_terminal_reason,
                         cm.session_id AS manifest_session_id,
                         cm.run_id AS manifest_run_id,
                         cm.content_hash AS manifest_content_hash,
@@ -1360,6 +1375,14 @@ impl SqliteStore {
                         e.output_stream, e.output_content, e.artifact_hash,
                         e.stdout_artifact_hash, e.stderr_artifact_hash,
                         e.context_manifest_id,
+                        e.model_invocation_id, e.model_work_id,
+                        e.model_context_manifest_hash, e.model_provider_account_id,
+                        e.model_provider, e.model_model,
+                        e.model_generation_max_output_tokens, e.model_reasoning_effort,
+                        e.model_capability_version, e.model_capability_tool_calls,
+                        e.model_capability_vision, e.model_capability_structured_output,
+                        e.model_purpose, e.model_retry_of, e.model_invocation_state,
+                        e.model_completion_kind, e.model_terminal_reason,
                         cm.session_id AS manifest_session_id,
                         cm.run_id AS manifest_run_id,
                         cm.content_hash AS manifest_content_hash,
@@ -2199,6 +2222,35 @@ fn parse_event_rows(
                 )
                 .map_err(|_| StoreError::Unavailable)?
             }
+            "model_invocation.created" | "model_invocation.state_changed" => {
+                let context_manifest_id = context_manifest_id.ok_or(StoreError::Unavailable)?;
+                let invocation =
+                    parse_model_invocation_event_row(&row, context_manifest_id.as_str())?;
+                if manifest_session_id.as_deref() != Some(stored_session_id.as_str())
+                    || manifest_run_id.as_deref() != Some(invocation.run_id().as_str())
+                    || manifest_content_hash.as_deref()
+                        != Some(invocation.context_manifest_hash().as_str())
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                if event_type == "model_invocation.created"
+                    && invocation.state() != ModelInvocationState::Pending
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                let run_id = RunId::parse(run_id.ok_or(StoreError::Unavailable)?)
+                    .map_err(|_| StoreError::Unavailable)?;
+                if invocation.run_id() != &run_id {
+                    return Err(StoreError::Unavailable);
+                }
+                let payload = if event_type == "model_invocation.created" {
+                    SessionEventPayload::ModelInvocationCreated { invocation }
+                } else {
+                    SessionEventPayload::ModelInvocationStateChanged { invocation }
+                };
+                StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
+                    .map_err(|_| StoreError::Unavailable)?
+            }
             "task.created" | "task.updated" | "task.assigned" | "task.state_changed" => {
                 let task_id = TaskId::parse(task_id.ok_or(StoreError::Unavailable)?)
                     .map_err(|_| StoreError::Unavailable)?;
@@ -2541,6 +2593,828 @@ fn parse_event_rows(
     }
 
     Ok(events)
+}
+
+fn parse_model_invocation_event_row(
+    row: &sqlx::sqlite::SqliteRow,
+    context_manifest_id: &str,
+) -> Result<ModelInvocation, StoreError> {
+    let invocation_id = ModelInvocationId::parse(
+        row.try_get::<String, _>("model_invocation_id")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let work_id = ModelWorkId::parse(
+        row.try_get::<String, _>("model_work_id")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let run_id = RunId::parse(
+        row.try_get::<String, _>("run_id")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let context_manifest_hash = ContentHash::parse(
+        row.try_get::<String, _>("model_context_manifest_hash")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let provider_account_id = ProviderAccountId::parse(
+        row.try_get::<String, _>("model_provider_account_id")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let provider = ProviderType::parse(
+        row.try_get::<String, _>("model_provider")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let model = ModelId::parse(
+        row.try_get::<String, _>("model_model")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let max_output_tokens = row
+        .try_get::<Option<i64>, _>("model_generation_max_output_tokens")
+        .map_err(|_| StoreError::Unavailable)?
+        .map(|value| u32::try_from(value).map_err(|_| StoreError::Unavailable))
+        .transpose()?;
+    let reasoning_effort = row
+        .try_get::<Option<String>, _>("model_reasoning_effort")
+        .map_err(|_| StoreError::Unavailable)?;
+    let generation =
+        GenerationSettings::new(max_output_tokens).map_err(|_| StoreError::Unavailable)?;
+    let reasoning =
+        ReasoningSettings::new(reasoning_effort).map_err(|_| StoreError::Unavailable)?;
+    let settings = ModelInvocationSettings::new(provider, model, generation, reasoning);
+    let capabilities = ModelCapabilitySnapshot::new(
+        row.try_get::<String, _>("model_capability_version")
+            .map_err(|_| StoreError::Unavailable)?,
+        CapabilitySupport::parse(
+            &row.try_get::<String, _>("model_capability_tool_calls")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?,
+        CapabilitySupport::parse(
+            &row.try_get::<String, _>("model_capability_vision")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?,
+        CapabilitySupport::parse(
+            &row.try_get::<String, _>("model_capability_structured_output")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let purpose = ModelInvocationPurpose::parse(
+        &row.try_get::<String, _>("model_purpose")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let retry_of = row
+        .try_get::<Option<String>, _>("model_retry_of")
+        .map_err(|_| StoreError::Unavailable)?
+        .map(ModelInvocationId::parse)
+        .transpose()
+        .map_err(|_| StoreError::Unavailable)?;
+    let state = ModelInvocationState::parse(
+        &row.try_get::<String, _>("model_invocation_state")
+            .map_err(|_| StoreError::Unavailable)?,
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    let outcome = ModelInvocationOutcome::from_persisted(
+        state,
+        row.try_get::<Option<String>, _>("model_completion_kind")
+            .map_err(|_| StoreError::Unavailable)?
+            .as_deref(),
+        row.try_get::<Option<String>, _>("model_terminal_reason")
+            .map_err(|_| StoreError::Unavailable)?
+            .as_deref(),
+    )
+    .map_err(|_| StoreError::Unavailable)?;
+    ModelInvocation::from_persisted(PersistedModelInvocation {
+        request: ModelInvocationRequest {
+            invocation_id,
+            work_id,
+            run_id,
+            context_manifest_id: ContextManifestId::parse(context_manifest_id.to_owned())
+                .map_err(|_| StoreError::Unavailable)?,
+            context_manifest_hash,
+            provider_account_id,
+            settings,
+            capabilities,
+            purpose,
+            retry_of,
+        },
+        state,
+        outcome,
+    })
+    .map_err(|_| StoreError::Unavailable)
+}
+
+fn map_run_store_error(error: RunStoreError) -> ModelInvocationStoreError {
+    match error {
+        RunStoreError::RunNotFound => ModelInvocationStoreError::RunNotFound,
+        _ => ModelInvocationStoreError::Unavailable,
+    }
+}
+
+fn map_context_manifest_store_error(error: ContextManifestStoreError) -> ModelInvocationStoreError {
+    match error {
+        ContextManifestStoreError::RunNotFound => ModelInvocationStoreError::RunNotFound,
+        ContextManifestStoreError::Unavailable => ModelInvocationStoreError::Unavailable,
+        _ => ModelInvocationStoreError::ContextManifestNotFound,
+    }
+}
+
+async fn load_model_invocation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &ModelInvocationId,
+) -> Result<Option<ModelInvocation>, ModelInvocationStoreError> {
+    let Some((sequence, invocation)) = load_model_invocation_unchecked(transaction, id).await?
+    else {
+        return Ok(None);
+    };
+    validate_model_invocation_integrity(transaction, sequence, &invocation).await?;
+    Ok(Some(invocation))
+}
+
+async fn load_model_invocation_unchecked(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: &ModelInvocationId,
+) -> Result<Option<(i64, ModelInvocation)>, ModelInvocationStoreError> {
+    let row = sqlx::query(
+        "SELECT sequence, model_invocation_id, work_id AS model_work_id, run_id,
+                context_manifest_id, context_manifest_hash AS model_context_manifest_hash,
+                provider_account_id AS model_provider_account_id,
+                provider AS model_provider, model AS model_model,
+                generation_max_output_tokens AS model_generation_max_output_tokens,
+                reasoning_effort AS model_reasoning_effort,
+                capability_version AS model_capability_version,
+                capability_tool_calls AS model_capability_tool_calls,
+                capability_vision AS model_capability_vision,
+                capability_structured_output AS model_capability_structured_output,
+                purpose AS model_purpose, retry_of AS model_retry_of,
+                state AS model_invocation_state,
+                completion_kind AS model_completion_kind,
+                terminal_reason AS model_terminal_reason
+         FROM model_invocations WHERE model_invocation_id = ?",
+    )
+    .bind(id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let sequence = row
+        .try_get::<i64, _>("sequence")
+        .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
+    let context_manifest_id = row
+        .try_get::<String, _>("context_manifest_id")
+        .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
+    let invocation = parse_model_invocation_event_row(&row, &context_manifest_id)
+        .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
+    Ok(Some((sequence, invocation)))
+}
+
+async fn validate_model_invocation_integrity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    sequence: i64,
+    invocation: &ModelInvocation,
+) -> Result<(), ModelInvocationStoreError> {
+    let run = load_run(transaction, invocation.run_id())
+        .await
+        .map_err(map_run_store_error)?
+        .ok_or(ModelInvocationStoreError::IntegrityViolation)?;
+    let manifest = load_context_manifest(transaction, invocation.context_manifest_id())
+        .await
+        .map_err(map_context_manifest_store_error)?
+        .ok_or(ModelInvocationStoreError::IntegrityViolation)?;
+    if manifest.run_id() != invocation.run_id()
+        || manifest.content_hash() != invocation.context_manifest_hash()
+    {
+        return Err(ModelInvocationStoreError::IntegrityViolation);
+    }
+    if run.session_id() != manifest.session_id() {
+        return Err(ModelInvocationStoreError::IntegrityViolation);
+    }
+
+    // ponytail: validating every retry chain can repeat O(n²) reads when listing
+    // a long history; batch validation by work ID if those histories require it.
+    let mut current_sequence = sequence;
+    let mut current = invocation.clone();
+    while let Some(retry_of) = current.retry_of() {
+        let Some((parent_sequence, parent)) =
+            load_model_invocation_unchecked(transaction, retry_of).await?
+        else {
+            return Err(ModelInvocationStoreError::IntegrityViolation);
+        };
+        if parent_sequence >= current_sequence
+            || parent.run_id() != invocation.run_id()
+            || parent.work_id() != invocation.work_id()
+            || !matches!(
+                parent.state(),
+                ModelInvocationState::Failed | ModelInvocationState::Interrupted
+            )
+            || !model_invocation_request_fields_match(&parent, &current)
+        {
+            return Err(ModelInvocationStoreError::IntegrityViolation);
+        }
+        let parent_manifest = load_context_manifest(transaction, parent.context_manifest_id())
+            .await
+            .map_err(map_context_manifest_store_error)?
+            .ok_or(ModelInvocationStoreError::IntegrityViolation)?;
+        if parent_manifest.run_id() != parent.run_id()
+            || parent_manifest.content_hash() != parent.context_manifest_hash()
+        {
+            return Err(ModelInvocationStoreError::IntegrityViolation);
+        }
+        current_sequence = parent_sequence;
+        current = parent;
+    }
+    Ok(())
+}
+
+fn model_invocation_request_matches(
+    command: &CreateModelInvocation,
+    invocation: &ModelInvocation,
+) -> bool {
+    command.run_id == *invocation.run_id()
+        && command.context_manifest_id == *invocation.context_manifest_id()
+        && command.context_manifest_hash == *invocation.context_manifest_hash()
+        && command.provider_account_id == *invocation.provider_account_id()
+        && command.settings == *invocation.settings()
+        && command.capabilities == *invocation.capabilities()
+        && command.purpose == invocation.purpose()
+}
+
+fn model_invocation_matches(left: &ModelInvocation, right: &ModelInvocation) -> bool {
+    left.invocation_id() == right.invocation_id()
+        && left.work_id() == right.work_id()
+        && left.run_id() == right.run_id()
+        && left.context_manifest_id() == right.context_manifest_id()
+        && left.context_manifest_hash() == right.context_manifest_hash()
+        && left.provider_account_id() == right.provider_account_id()
+        && left.settings() == right.settings()
+        && left.capabilities() == right.capabilities()
+        && left.purpose() == right.purpose()
+        && left.retry_of() == right.retry_of()
+}
+
+fn model_invocation_request_fields_match(left: &ModelInvocation, right: &ModelInvocation) -> bool {
+    left.run_id() == right.run_id()
+        && left.context_manifest_id() == right.context_manifest_id()
+        && left.context_manifest_hash() == right.context_manifest_hash()
+        && left.provider_account_id() == right.provider_account_id()
+        && left.settings() == right.settings()
+        && left.capabilities() == right.capabilities()
+        && left.purpose() == right.purpose()
+}
+
+async fn insert_model_invocation_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event: &SessionEvent,
+) -> Result<StoredSessionEvent, ModelInvocationStoreError> {
+    let (event_type, invocation) = match event.payload() {
+        SessionEventPayload::ModelInvocationCreated { invocation } => {
+            ("model_invocation.created", invocation)
+        }
+        SessionEventPayload::ModelInvocationStateChanged { invocation } => {
+            ("model_invocation.state_changed", invocation)
+        }
+        _ => return Err(ModelInvocationStoreError::IntegrityViolation),
+    };
+    let generation_max_output_tokens = invocation
+        .settings()
+        .generation()
+        .max_output_tokens()
+        .map(i64::from);
+    let (completion_kind, terminal_reason) = invocation
+        .outcome()
+        .map(|outcome| {
+            (
+                outcome.completion_kind().map(|kind| kind.as_str()),
+                Some(outcome.terminal_reason().as_str()),
+            )
+        })
+        .unwrap_or((None, None));
+    sqlx::query(
+        "INSERT INTO session_events (
+            event_id, session_id, event_type, run_id, context_manifest_id,
+            model_invocation_id, model_work_id, model_context_manifest_hash,
+            model_provider_account_id, model_provider, model_model,
+            model_generation_max_output_tokens, model_reasoning_effort,
+            model_capability_version, model_capability_tool_calls,
+            model_capability_vision, model_capability_structured_output,
+            model_purpose, model_retry_of, model_invocation_state,
+            model_completion_kind, model_terminal_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(event.event_id().as_str())
+    .bind(event.session_id().as_str())
+    .bind(event_type)
+    .bind(invocation.run_id().as_str())
+    .bind(invocation.context_manifest_id().as_str())
+    .bind(invocation.invocation_id().as_str())
+    .bind(invocation.work_id().as_str())
+    .bind(invocation.context_manifest_hash().as_str())
+    .bind(invocation.provider_account_id().as_str())
+    .bind(invocation.settings().provider().as_str())
+    .bind(invocation.settings().model().as_str())
+    .bind(generation_max_output_tokens)
+    .bind(invocation.settings().reasoning().effort())
+    .bind(invocation.capabilities().version())
+    .bind(invocation.capabilities().tool_calls().as_str())
+    .bind(invocation.capabilities().vision().as_str())
+    .bind(invocation.capabilities().structured_output().as_str())
+    .bind(invocation.purpose().as_str())
+    .bind(invocation.retry_of().map(ModelInvocationId::as_str))
+    .bind(invocation.state().as_str())
+    .bind(completion_kind)
+    .bind(terminal_reason)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+    let cursor: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+    StoredSessionEvent::from_event(
+        event,
+        committed_cursor(cursor).map_err(|_| ModelInvocationStoreError::Unavailable)?,
+    )
+    .map_err(|_| ModelInvocationStoreError::Unavailable)
+}
+
+async fn insert_model_invocation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    invocation: &ModelInvocation,
+) -> Result<(), ModelInvocationStoreError> {
+    sqlx::query(
+        "INSERT INTO model_invocations (
+            model_invocation_id, work_id, run_id, context_manifest_id,
+            context_manifest_hash, provider_account_id, provider, model,
+            generation_max_output_tokens, reasoning_effort, capability_version,
+            capability_tool_calls, capability_vision, capability_structured_output,
+            purpose, retry_of, state, completion_kind, terminal_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+    )
+    .bind(invocation.invocation_id().as_str())
+    .bind(invocation.work_id().as_str())
+    .bind(invocation.run_id().as_str())
+    .bind(invocation.context_manifest_id().as_str())
+    .bind(invocation.context_manifest_hash().as_str())
+    .bind(invocation.provider_account_id().as_str())
+    .bind(invocation.settings().provider().as_str())
+    .bind(invocation.settings().model().as_str())
+    .bind(
+        invocation
+            .settings()
+            .generation()
+            .max_output_tokens()
+            .map(i64::from),
+    )
+    .bind(invocation.settings().reasoning().effort())
+    .bind(invocation.capabilities().version())
+    .bind(invocation.capabilities().tool_calls().as_str())
+    .bind(invocation.capabilities().vision().as_str())
+    .bind(invocation.capabilities().structured_output().as_str())
+    .bind(invocation.purpose().as_str())
+    .bind(invocation.retry_of().map(ModelInvocationId::as_str))
+    .bind(invocation.state().as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+    Ok(())
+}
+
+impl ModelInvocationStore for SqliteStore {
+    async fn create_model_invocation(
+        &self,
+        command: &CreateModelInvocation,
+        model_invocation_id: ModelInvocationId,
+        model_work_id: ModelWorkId,
+        event_id: EventId,
+    ) -> Result<CreateModelInvocationMutation, ModelInvocationStoreError> {
+        if command.idempotency_key.is_empty() {
+            return Err(ModelInvocationStoreError::IdempotencyKeyRequired);
+        }
+        let request = canonical_model_invocation_request_bytes(command);
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        if let Some(row) = sqlx::query(
+            "SELECT request, model_invocation_id
+             FROM create_model_invocation_idempotencies
+             WHERE run_id = ? AND idempotency_key = ?",
+        )
+        .bind(command.run_id.as_str())
+        .bind(&command.idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?
+        {
+            if row
+                .try_get::<Vec<u8>, _>("request")
+                .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?
+                != request
+            {
+                return Err(ModelInvocationStoreError::IdempotencyConflict);
+            }
+            let stored_id = ModelInvocationId::parse(
+                row.try_get::<String, _>("model_invocation_id")
+                    .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
+            let value = load_model_invocation(&mut transaction, &stored_id)
+                .await?
+                .ok_or(ModelInvocationStoreError::IntegrityViolation)?;
+            if !model_invocation_request_matches(command, &value)
+                || command.retry_of.as_ref() != value.retry_of()
+            {
+                return Err(ModelInvocationStoreError::IdempotencyConflict);
+            }
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+            return Ok(CreateModelInvocationMutation::new(
+                value,
+                Vec::new(),
+                CreateModelInvocationDisposition::Duplicate,
+            ));
+        }
+
+        let run = load_run(&mut transaction, &command.run_id)
+            .await
+            .map_err(map_run_store_error)?
+            .ok_or(ModelInvocationStoreError::RunNotFound)?;
+        if !matches!(run.state(), RunState::Queued | RunState::Running) {
+            return Err(ModelInvocationStoreError::RunNotRunning);
+        }
+        let manifest = load_context_manifest(&mut transaction, &command.context_manifest_id)
+            .await
+            .map_err(map_context_manifest_store_error)?
+            .ok_or(ModelInvocationStoreError::ContextManifestNotFound)?;
+        if manifest.run_id() != run.run_id() {
+            return Err(ModelInvocationStoreError::ContextManifestRunMismatch);
+        }
+        if manifest.content_hash() != &command.context_manifest_hash {
+            return Err(ModelInvocationStoreError::ContextManifestHashMismatch);
+        }
+        if sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM tool_calls
+                WHERE run_id = ?
+                  AND state IN ('requested', 'awaiting_approval', 'ready', 'running')
+            )",
+        )
+        .bind(run.run_id().as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?
+        {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
+        if sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(
+                SELECT 1 FROM model_invocations
+                WHERE run_id = ? AND state IN ('pending', 'in_flight')
+            )",
+        )
+        .bind(run.run_id().as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?
+            != 0
+        {
+            return Err(ModelInvocationStoreError::ActiveInvocationExists);
+        }
+        let resolved_work_id = if let Some(retry_of) = &command.retry_of {
+            let prior = load_model_invocation(&mut transaction, retry_of)
+                .await?
+                .ok_or(ModelInvocationStoreError::RetryNotAllowed)?;
+            if prior.run_id() != run.run_id()
+                || !matches!(
+                    prior.state(),
+                    ModelInvocationState::Failed | ModelInvocationState::Interrupted
+                )
+            {
+                return Err(ModelInvocationStoreError::RetryNotAllowed);
+            }
+            if !model_invocation_request_matches(command, &prior) {
+                return Err(ModelInvocationStoreError::RetryRequestMismatch);
+            }
+            prior.work_id().clone()
+        } else {
+            model_work_id
+        };
+        let invocation = ModelInvocation::new(ModelInvocationRequest {
+            invocation_id: model_invocation_id,
+            work_id: resolved_work_id,
+            run_id: run.run_id().clone(),
+            context_manifest_id: command.context_manifest_id.clone(),
+            context_manifest_hash: command.context_manifest_hash.clone(),
+            provider_account_id: command.provider_account_id.clone(),
+            settings: command.settings.clone(),
+            capabilities: command.capabilities.clone(),
+            purpose: command.purpose,
+            retry_of: command.retry_of.clone(),
+        })
+        .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
+        insert_model_invocation(&mut transaction, &invocation).await?;
+        sqlx::query(
+            "INSERT INTO create_model_invocation_idempotencies
+                (run_id, idempotency_key, request, model_invocation_id)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(command.run_id.as_str())
+        .bind(&command.idempotency_key)
+        .bind(request)
+        .bind(invocation.invocation_id().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        let event = SessionEvent::model_invocation_created(
+            event_id,
+            run.session_id().clone(),
+            invocation.clone(),
+        );
+        let stored_event = insert_model_invocation_event(&mut transaction, &event).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        Ok(CreateModelInvocationMutation::new(
+            invocation,
+            vec![stored_event],
+            CreateModelInvocationDisposition::Created,
+        ))
+    }
+
+    async fn get_model_invocation(
+        &self,
+        model_invocation_id: &ModelInvocationId,
+    ) -> Result<Option<ModelInvocation>, ModelInvocationStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        let value = load_model_invocation(&mut transaction, model_invocation_id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        Ok(value)
+    }
+
+    async fn list_model_invocations(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<ModelInvocation>, ModelInvocationStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        if load_run(&mut transaction, run_id)
+            .await
+            .map_err(map_run_store_error)?
+            .is_none()
+        {
+            return Err(ModelInvocationStoreError::RunNotFound);
+        }
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT model_invocation_id FROM model_invocations
+             WHERE run_id = ? ORDER BY sequence ASC",
+        )
+        .bind(run_id.as_str())
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        let mut invocations = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id = ModelInvocationId::parse(id)
+                .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
+            invocations.push(
+                load_model_invocation(&mut transaction, &id)
+                    .await?
+                    .ok_or(ModelInvocationStoreError::IntegrityViolation)?,
+            );
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        Ok(invocations)
+    }
+
+    async fn begin_model_invocation(
+        &self,
+        invocation: &ModelInvocation,
+        event_id: EventId,
+        run_event_id: EventId,
+    ) -> Result<ModelInvocationMutation, ModelInvocationStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        let current = load_model_invocation(&mut transaction, invocation.invocation_id())
+            .await?
+            .ok_or(ModelInvocationStoreError::ModelInvocationNotFound)?;
+        if !model_invocation_matches(&current, invocation) {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
+        if invocation.state() == ModelInvocationState::Pending
+            && current.state() != ModelInvocationState::Pending
+            || invocation.state() == ModelInvocationState::InFlight
+                && current.state() != ModelInvocationState::Pending
+        {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+            return Ok(ModelInvocationMutation::new(
+                current,
+                Vec::new(),
+                ModelInvocationMutationDisposition::Duplicate,
+            ));
+        }
+        if current.state() != ModelInvocationState::Pending
+            || invocation.state() != ModelInvocationState::Pending
+        {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
+        let run = load_run(&mut transaction, current.run_id())
+            .await
+            .map_err(map_run_store_error)?
+            .ok_or(ModelInvocationStoreError::RunNotFound)?;
+        if !matches!(run.state(), RunState::Queued | RunState::Running) {
+            return Err(ModelInvocationStoreError::RunNotRunning);
+        }
+        let has_active_tool_call = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM tool_calls
+                WHERE run_id = ?
+                  AND state IN ('requested', 'awaiting_approval', 'ready', 'running')
+            )",
+        )
+        .bind(run.run_id().as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        if has_active_tool_call {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
+        let next = invocation
+            .transition(ModelInvocationState::InFlight, None)
+            .map_err(|_| ModelInvocationStoreError::InvalidTransition)?;
+        let running = if run.state() == RunState::Queued {
+            Some(
+                run.transition(RunState::Running)
+                    .map_err(|_| ModelInvocationStoreError::InvalidTransition)?,
+            )
+        } else {
+            None
+        };
+        let mut stored_events = Vec::with_capacity(2);
+        if let Some(running) = &running {
+            let updated = sqlx::query(
+                "UPDATE runs SET state = 'running'
+                 WHERE run_id = ? AND state = 'queued'",
+            )
+            .bind(run.run_id().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+            if updated.rows_affected() != 1 {
+                return Err(ModelInvocationStoreError::InvalidTransition);
+            }
+            let run_event = SessionEvent::run_state_changed(run_event_id, running);
+            stored_events.push(
+                insert_run_event(&mut transaction, &run_event)
+                    .await
+                    .map_err(|_| ModelInvocationStoreError::Unavailable)?,
+            );
+        }
+        let updated = sqlx::query(
+            "UPDATE model_invocations SET state = 'in_flight'
+             WHERE model_invocation_id = ? AND state = 'pending'",
+        )
+        .bind(invocation.invocation_id().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
+        let event = SessionEvent::model_invocation_state_changed(
+            event_id,
+            run.session_id().clone(),
+            next.clone(),
+        );
+        let stored_event = insert_model_invocation_event(&mut transaction, &event).await?;
+        stored_events.push(stored_event);
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        Ok(ModelInvocationMutation::new(
+            next,
+            stored_events,
+            ModelInvocationMutationDisposition::Applied,
+        ))
+    }
+
+    async fn finish_model_invocation(
+        &self,
+        invocation: &ModelInvocation,
+        outcome: ModelInvocationOutcome,
+        event_id: EventId,
+    ) -> Result<ModelInvocationMutation, ModelInvocationStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        let current = load_model_invocation(&mut transaction, invocation.invocation_id())
+            .await?
+            .ok_or(ModelInvocationStoreError::ModelInvocationNotFound)?;
+        if !model_invocation_matches(&current, invocation) {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
+        if current.state().is_terminal() {
+            if current.outcome() == Some(outcome) {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+                return Ok(ModelInvocationMutation::new(
+                    current,
+                    Vec::new(),
+                    ModelInvocationMutationDisposition::Duplicate,
+                ));
+            }
+            return Err(ModelInvocationStoreError::IdempotencyConflict);
+        }
+        let pending_cancellation = current.state() == ModelInvocationState::Pending
+            && invocation.state() == ModelInvocationState::Pending
+            && outcome.state() == ModelInvocationState::Cancelled;
+        if !pending_cancellation
+            && (current.state() != ModelInvocationState::InFlight
+                || invocation.state() != ModelInvocationState::InFlight)
+        {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
+        let run = load_run(&mut transaction, current.run_id())
+            .await
+            .map_err(map_run_store_error)?
+            .ok_or(ModelInvocationStoreError::RunNotFound)?;
+        let next = invocation
+            .transition(outcome.state(), Some(outcome))
+            .map_err(|_| ModelInvocationStoreError::InvalidTransition)?;
+        sqlx::query(
+            "UPDATE model_invocations
+             SET state = ?, completion_kind = ?, terminal_reason = ?
+             WHERE model_invocation_id = ? AND state = ?",
+        )
+        .bind(next.state().as_str())
+        .bind(
+            next.outcome()
+                .and_then(|outcome| outcome.completion_kind())
+                .map(|kind| kind.as_str()),
+        )
+        .bind(
+            next.outcome()
+                .map(|outcome| outcome.terminal_reason().as_str()),
+        )
+        .bind(next.invocation_id().as_str())
+        .bind(current.state().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        let event = SessionEvent::model_invocation_state_changed(
+            event_id,
+            run.session_id().clone(),
+            next.clone(),
+        );
+        let stored_event = insert_model_invocation_event(&mut transaction, &event).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+        Ok(ModelInvocationMutation::new(
+            next,
+            vec![stored_event],
+            ModelInvocationMutationDisposition::Applied,
+        ))
+    }
 }
 
 impl ContextManifestStore for SqliteStore {
@@ -3949,6 +4823,9 @@ impl RunStore for SqliteStore {
         if current.state() != RunState::Queued || current.session_id() != run.session_id() {
             return Err(RunStoreError::InvalidTransition);
         }
+        if has_active_model_invocation(&mut transaction, current.run_id()).await? {
+            return Err(RunStoreError::InvalidTransition);
+        }
         let approval_policy = current
             .approval_policy()
             .ok_or(RunStoreError::InvalidTransition)?;
@@ -4357,6 +5234,7 @@ impl RunStore for SqliteStore {
         if current.run().state() != RunState::Running
             || current_tool_call.run_id() != current.run().run_id()
             || current_tool_call.state() != ToolCallState::Denied
+            || current.has_active_invocation()
             || run != &expected_run
             || tool_call != current_tool_call
             || events[0]
@@ -4416,6 +5294,9 @@ impl RunStore for SqliteStore {
         let current_run = load_run(&mut transaction, current.run_id())
             .await?
             .ok_or(RunStoreError::Unavailable)?;
+        if has_active_model_invocation(&mut transaction, current_run.run_id()).await? {
+            return Err(RunStoreError::InvalidTransition);
+        }
         if !matches!(
             current.state(),
             ToolCallState::Requested | ToolCallState::Ready
@@ -4480,6 +5361,7 @@ impl RunStore for SqliteStore {
         .and_then(|row| parse_tool_call(&row))?;
         if current_run.state() != RunState::Running
             || current_tool.state() != ToolCallState::Running
+            || has_active_model_invocation(&mut transaction, current_run.run_id()).await?
             || current_run.session_id() != run.session_id()
             || current_tool.tool_call_id() != tool_call.tool_call_id()
             || current_tool.run_id() != run.run_id()
@@ -4548,12 +5430,13 @@ impl RunStore for SqliteStore {
         let own_work_terminal = current_snapshot
             .tool_calls()
             .iter()
-            .all(|tool| tool.state().is_terminal());
+            .all(|tool| tool.state().is_terminal())
+            && !current_snapshot.has_active_invocation();
         let (expected_run, expected_tool, expected_approval, expected_events) = match current
             .state()
         {
             RunState::Queued => {
-                let next = if has_active_descendants {
+                let next = if has_active_descendants || !own_work_terminal {
                     RunState::Cancelling
                 } else {
                     RunState::Cancelled
@@ -4631,13 +5514,14 @@ impl RunStore for SqliteStore {
                 let cancelling = current
                     .transition(RunState::Cancelling)
                     .map_err(|_| RunStoreError::InvalidTransition)?;
-                let expected_run = if has_active_descendants {
-                    cancelling.clone()
-                } else {
-                    cancelling
-                        .transition(RunState::Cancelled)
-                        .map_err(|_| RunStoreError::InvalidTransition)?
-                };
+                let expected_run =
+                    if has_active_descendants || current_snapshot.has_active_invocation() {
+                        cancelling.clone()
+                    } else {
+                        cancelling
+                            .transition(RunState::Cancelled)
+                            .map_err(|_| RunStoreError::InvalidTransition)?
+                    };
                 let mut expected_events = vec![
                     SessionEvent::run_cancellation_requested(
                         events
@@ -4722,6 +5606,9 @@ impl RunStore for SqliteStore {
             current.state() != RunState::Cancelled && expected_run.state() == RunState::Cancelled;
         if becomes_terminal {
             if has_active_descendants {
+                return Err(RunStoreError::InvalidTransition);
+            }
+            if current_snapshot.has_active_invocation() {
                 return Err(RunStoreError::InvalidTransition);
             }
             validate_cancelled_run_inputs(
@@ -4827,6 +5714,7 @@ impl RunStore for SqliteStore {
         if current_run.state() != RunState::Cancelling
             || run.state() != RunState::Cancelled
             || current_run.session_id() != run.session_id()
+            || has_active_model_invocation(&mut transaction, current_run.run_id()).await?
             || !matches!(
                 current_tool.state(),
                 ToolCallState::Requested | ToolCallState::Ready | ToolCallState::Running
@@ -5470,6 +6358,8 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
         SessionEventPayload::SessionCreated { .. }
         | SessionEventPayload::MessageAppended { .. }
         | SessionEventPayload::ContextManifestCreated { .. }
+        | SessionEventPayload::ModelInvocationCreated { .. }
+        | SessionEventPayload::ModelInvocationStateChanged { .. }
         | SessionEventPayload::TaskCreated { .. }
         | SessionEventPayload::TaskUpdated { .. }
         | SessionEventPayload::TaskAssigned { .. }
@@ -5675,6 +6565,22 @@ async fn has_non_terminal_descendants(
              SELECT 1 FROM descendants
              WHERE state NOT IN ('completed', 'failed', 'cancelled')
          )",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)
+}
+
+async fn has_active_model_invocation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &RunId,
+) -> Result<bool, RunStoreError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM model_invocations
+            WHERE run_id = ? AND state IN ('pending', 'in_flight')
+        )",
     )
     .bind(run_id.as_str())
     .fetch_one(&mut **transaction)
@@ -6086,8 +6992,30 @@ async fn load_snapshot(
                 .map_err(|_| RunStoreError::Unavailable)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(RunSnapshot::with_approvals(
-        run, tool_calls, approvals,
+    let invocation_ids = sqlx::query_scalar::<_, String>(
+        "SELECT model_invocation_id FROM model_invocations
+         WHERE run_id = ? ORDER BY sequence ASC",
+    )
+    .bind(id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let mut model_invocations = Vec::with_capacity(invocation_ids.len());
+    for invocation_id in invocation_ids {
+        let invocation_id =
+            ModelInvocationId::parse(invocation_id).map_err(|_| RunStoreError::Unavailable)?;
+        model_invocations.push(
+            load_model_invocation(transaction, &invocation_id)
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?
+                .ok_or(RunStoreError::Unavailable)?,
+        );
+    }
+    Ok(Some(RunSnapshot::with_model_invocations(
+        run,
+        tool_calls,
+        approvals,
+        model_invocations,
     )))
 }
 
@@ -6226,6 +7154,20 @@ impl TaskIdGenerator for UlidIdGenerator {
 impl ContextManifestIdGenerator for UlidIdGenerator {
     fn context_manifest_id(&self) -> ContextManifestId {
         ContextManifestId::from_ulid(Ulid::generate())
+    }
+
+    fn event_id(&self) -> EventId {
+        EventId::from_ulid(Ulid::generate())
+    }
+}
+
+impl ModelInvocationIdGenerator for UlidIdGenerator {
+    fn model_invocation_id(&self) -> ModelInvocationId {
+        ModelInvocationId::from_ulid(Ulid::generate())
+    }
+
+    fn model_work_id(&self) -> ModelWorkId {
+        ModelWorkId::from_ulid(Ulid::generate())
     }
 
     fn event_id(&self) -> EventId {

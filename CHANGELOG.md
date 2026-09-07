@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Added internal durable ModelInvocation attempt records with verified same-Run context manifests, immutable settings, guarded queued Run claims, distinct retry attempts with stable work identity, and replayed metadata events.
+- Added Run cancellation and terminal guards, including cancellation of undispatched pending attempts.
+- Provider transport, streaming, usage accounting, and automatic in-flight restart reconciliation remain pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Defined protocol `0.15.0` metadata-only `model_invocation.created` and `model_invocation.state_changed` events, including retry work identity and typed terminal status.
 - Updated the generated JSON Schema, TypeScript, and OpenAPI definitions.
 

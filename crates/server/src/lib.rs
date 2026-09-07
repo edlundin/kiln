@@ -1269,6 +1269,64 @@ fn tool_output_stream_response(stream: CoreToolOutputStream) -> ToolOutputStream
     }
 }
 
+fn model_invocation_event_response(
+    invocation: &kiln_core::ModelInvocation,
+) -> kiln_protocol::ModelInvocationEventResponse {
+    use kiln_core::{ModelInvocationOutcome as Outcome, ModelInvocationState as State};
+    use kiln_protocol::ModelInvocationStatus as Status;
+
+    let status = match (invocation.state(), invocation.outcome()) {
+        (State::Pending, None) => Status::Pending,
+        (State::InFlight, None) => Status::InFlight,
+        (State::Completed, Some(Outcome::Completed { completion_kind })) => Status::Completed {
+            completion_kind: match completion_kind {
+                kiln_core::ModelInvocationCompletionKind::AssistantOutput => {
+                    kiln_protocol::ModelInvocationCompletionKind::AssistantOutput
+                }
+                kiln_core::ModelInvocationCompletionKind::ToolRequests => {
+                    kiln_protocol::ModelInvocationCompletionKind::ToolRequests
+                }
+            },
+        },
+        (State::Failed, Some(Outcome::Failed { reason })) => Status::Failed {
+            reason: match reason {
+                kiln_core::ModelInvocationFailureReason::ProviderError => {
+                    kiln_protocol::ModelInvocationFailureReason::ProviderError
+                }
+                kiln_core::ModelInvocationFailureReason::InvalidRequest => {
+                    kiln_protocol::ModelInvocationFailureReason::InvalidRequest
+                }
+                kiln_core::ModelInvocationFailureReason::Unknown => {
+                    kiln_protocol::ModelInvocationFailureReason::Unknown
+                }
+            },
+        },
+        (State::Cancelled, Some(Outcome::Cancelled)) => Status::Cancelled,
+        (State::Interrupted, Some(Outcome::Interrupted)) => Status::Interrupted,
+        _ => unreachable!("ModelInvocation validates its state and outcome"),
+    };
+    kiln_protocol::ModelInvocationEventResponse {
+        model_invocation_id: invocation.invocation_id().as_str().to_owned(),
+        work_id: invocation.work_id().as_str().to_owned(),
+        run_id: invocation.run_id().as_str().to_owned(),
+        context_manifest_id: invocation.context_manifest_id().as_str().to_owned(),
+        context_manifest_hash: invocation.context_manifest_hash().as_str().to_owned(),
+        provider_account_id: invocation.provider_account_id().as_str().to_owned(),
+        provider: invocation.settings().provider().as_str().to_owned(),
+        model: invocation.settings().model().as_str().to_owned(),
+        purpose: match invocation.purpose() {
+            kiln_core::ModelInvocationPurpose::Generation => {
+                kiln_protocol::ModelInvocationPurpose::Generation
+            }
+            kiln_core::ModelInvocationPurpose::Compaction => {
+                kiln_protocol::ModelInvocationPurpose::Compaction
+            }
+        },
+        retry_of: invocation.retry_of().map(|id| id.as_str().to_owned()),
+        status,
+    }
+}
+
 fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
     let event_data = match event.payload() {
         SessionEventPayload::ContextManifestCreated {
@@ -1284,6 +1342,16 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
                 entry_count: *entry_count,
             },
         ),
+        SessionEventPayload::ModelInvocationCreated { invocation } => {
+            SessionEventDataResponse::ModelInvocationCreated(model_invocation_event_response(
+                invocation,
+            ))
+        }
+        SessionEventPayload::ModelInvocationStateChanged { invocation } => {
+            SessionEventDataResponse::ModelInvocationStateChanged(model_invocation_event_response(
+                invocation,
+            ))
+        }
         SessionEventPayload::SessionCreated { workspace_id } => {
             SessionEventDataResponse::SessionCreated {
                 workspace_id: workspace_id.as_str().to_owned(),

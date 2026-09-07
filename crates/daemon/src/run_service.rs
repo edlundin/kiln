@@ -1,9 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use kiln_core::{
-    ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, RunApplication, RunError,
-    RunId, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, SendRunInput, SessionId,
-    SessionStore, StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
+    ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, ModelInvocationApplication,
+    ModelInvocationOutcome, ModelInvocationState, RunApplication, RunError, RunId, RunInputMode,
+    RunMutation, RunSnapshot, RunState, RunStore, SendRunInput, SessionId, SessionStore,
+    StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
     SubprocessRequest, TOOL_OUTPUT_MEDIA_TYPE, TaskId, ToolCallId, WorkspacePathScope,
     WorkspaceStore,
 };
@@ -530,7 +531,16 @@ impl RunService {
             let changed = self.active.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+            let subtree = {
+                let _sequence = self.commit_sequence.lock().await;
+                let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+                if self.cancel_pending_invocations(&subtree).await? {
+                    self.active.changed.notify_waiters();
+                    self.runs.list_run_subtree(run_id.clone()).await?
+                } else {
+                    subtree
+                }
+            };
             if subtree
                 .iter()
                 .skip(1)
@@ -552,12 +562,46 @@ impl RunService {
         let entries = self.active.entries.lock().await;
         snapshots.iter().any(|snapshot| {
             !snapshot.run().state().is_terminal()
-                && snapshot
+                && (snapshot
                     .tool_calls()
                     .iter()
                     .any(|tool_call| !tool_call.state().is_terminal())
+                    || snapshot
+                        .model_invocations()
+                        .iter()
+                        .any(|invocation| invocation.state() == ModelInvocationState::InFlight))
                 && !entries.contains_key(snapshot.run().run_id())
         })
+    }
+
+    async fn cancel_pending_invocations(
+        &self,
+        snapshots: &[RunSnapshot],
+    ) -> Result<bool, RunError> {
+        let models = ModelInvocationApplication::new(self.store.clone(), UlidIdGenerator);
+        let mut changed = false;
+        for snapshot in snapshots {
+            if snapshot.run().state() != RunState::Cancelling {
+                continue;
+            }
+            for invocation in snapshot.model_invocations() {
+                if invocation.state() != ModelInvocationState::Pending {
+                    continue;
+                }
+                let mutation = models
+                    .finish_model_invocation(
+                        invocation.clone(),
+                        ModelInvocationOutcome::cancelled(),
+                    )
+                    .await
+                    .map_err(|_| RunError::RunStoreUnavailable)?;
+                if !mutation.events.is_empty() {
+                    self.events.publish(mutation.events);
+                    changed = true;
+                }
+            }
+        }
+        Ok(changed)
     }
 
     async fn wait_for_cancelled_run(&self, run_id: RunId) -> Result<RunSnapshot, RunError> {
@@ -565,7 +609,16 @@ impl RunService {
             let changed = self.active.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+            let subtree = {
+                let _sequence = self.commit_sequence.lock().await;
+                let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+                if self.cancel_pending_invocations(&subtree).await? {
+                    self.active.changed.notify_waiters();
+                    self.runs.list_run_subtree(run_id.clone()).await?
+                } else {
+                    subtree
+                }
+            };
             let snapshot = subtree.first().ok_or(RunError::RunNotFound)?;
             if snapshot.run().state().is_terminal() {
                 return Ok(snapshot.clone());
@@ -643,6 +696,9 @@ impl RunService {
                         published |= !mutation.events.is_empty();
                         self.events.publish(mutation.events);
                     }
+                }
+                if self.cancel_pending_invocations(&snapshots).await? {
+                    published = true;
                 }
                 if published {
                     self.active.changed.notify_waiters();

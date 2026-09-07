@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-08 — `feat`
+
+- Added `ProviderApplication` validation of provider updates against stored invocation identity before routing output, partial usage, and terminal outcome/final usage to the existing atomic stores.
+- Provider application now returns committed mutations and events while preserving existing duplicate handling.
+- Native daemon dispatch remains pending.
+
+[Commit](pending)
+
 ## 2026-09-07 — `feat`
 
 - Added assistant Message finalization from stored chunks, preserving immutable text with Run and ModelInvocation origin.

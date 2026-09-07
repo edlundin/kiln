@@ -1,11 +1,15 @@
 use std::future::Future;
 
 use crate::{
-    ContextManifest, ContextManifestStore, ContextManifestStoreError, ModelInvocation,
-    ModelInvocationCompletionKind, ModelInvocationId, ModelInvocationIdGenerator,
+    ContextManifest, ContextManifestStore, ContextManifestStoreError,
+    FinishModelInvocationWithUsage, ModelInvocation, ModelInvocationCompletionError,
+    ModelInvocationCompletionIds, ModelInvocationCompletionKind, ModelInvocationCompletionMutation,
+    ModelInvocationCompletionStore, ModelInvocationId, ModelInvocationIdGenerator,
     ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationState,
-    ModelInvocationStore, ModelInvocationStoreError, ProviderUsageUpdate, RecordModelOutput,
-    StoredSessionEvent, UsageFinality,
+    ModelInvocationStore, ModelInvocationStoreError, ModelOutputIdGenerator, ModelOutputMutation,
+    ModelOutputStore, ModelOutputStoreError, ProviderUsageUpdate, RecordModelOutput,
+    StoredSessionEvent, UsageFinality, UsageIdGenerator, UsageMutation, UsageStore,
+    UsageStoreError,
 };
 
 pub struct ProviderRequest {
@@ -169,6 +173,88 @@ impl ProviderUpdate {
             return Err(ProviderError::ProviderResponseInvalid);
         }
         Ok(())
+    }
+}
+
+pub enum ProviderUpdateMutation {
+    Output(ModelOutputMutation),
+    Usage(UsageMutation),
+    Finished(ModelInvocationCompletionMutation),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderUpdateError {
+    Invocation(ModelInvocationStoreError),
+    Provider(ProviderError),
+    Output(ModelOutputStoreError),
+    Usage(UsageStoreError),
+    Completion(ModelInvocationCompletionError),
+    IntegrityViolation,
+}
+
+impl<S, I> ProviderApplication<S, I>
+where
+    S: ModelInvocationStore + ModelOutputStore + UsageStore + ModelInvocationCompletionStore,
+    I: ModelOutputIdGenerator + UsageIdGenerator,
+{
+    pub async fn record_update(
+        &self,
+        invocation_id: ModelInvocationId,
+        update: ProviderUpdate,
+    ) -> Result<ProviderUpdateMutation, ProviderUpdateError> {
+        let invocation = self
+            .store
+            .get_model_invocation(&invocation_id)
+            .await
+            .map_err(ProviderUpdateError::Invocation)?
+            .ok_or(ProviderUpdateError::Invocation(
+                ModelInvocationStoreError::ModelInvocationNotFound,
+            ))?;
+        if invocation.invocation_id() != &invocation_id {
+            return Err(ProviderUpdateError::IntegrityViolation);
+        }
+        update
+            .validate_for(&invocation)
+            .map_err(ProviderUpdateError::Provider)?;
+        match update {
+            ProviderUpdate::Output(command) => self
+                .store
+                .record_model_output(
+                    &command,
+                    self.ids.output_chunk_id(),
+                    ModelOutputIdGenerator::event_id(&self.ids),
+                )
+                .await
+                .map(ProviderUpdateMutation::Output)
+                .map_err(ProviderUpdateError::Output),
+            ProviderUpdate::Usage(usage) => self
+                .store
+                .record_usage(
+                    &usage,
+                    self.ids.usage_observation_id(),
+                    UsageIdGenerator::event_id(&self.ids),
+                )
+                .await
+                .map(ProviderUpdateMutation::Usage)
+                .map_err(ProviderUpdateError::Usage),
+            ProviderUpdate::Finished { outcome, usage } => self
+                .store
+                .finish_model_invocation_with_usage(
+                    &FinishModelInvocationWithUsage {
+                        invocation,
+                        outcome,
+                        usage,
+                    },
+                    ModelInvocationCompletionIds {
+                        usage_observation_id: self.ids.usage_observation_id(),
+                        usage_event_id: UsageIdGenerator::event_id(&self.ids),
+                        invocation_event_id: UsageIdGenerator::event_id(&self.ids),
+                    },
+                )
+                .await
+                .map(ProviderUpdateMutation::Finished)
+                .map_err(ProviderUpdateError::Completion),
+        }
     }
 }
 

@@ -310,9 +310,15 @@ without a tool payload are invalid.
 Provider errors use typed categories without raw provider diagnostics. Requests
 and output updates have no automatic debug representation that exposes text.
 
-The caller must validate each update before persistence, consume the terminal
-update through `finish_model_invocation_with_usage`, and treat end-of-stream
-without a terminal update as interruption. Cancellation is an explicit operation
+`ProviderApplication::record_update` loads the durable invocation and validates
+each update before storage. It routes output to the chunk store, partial usage
+to the usage store, and terminal outcomes with final usage to the atomic
+invocation completion store. It returns the committed mutation and Events.
+The caller publishes only those Events. Exact retries retain the storage
+boundaries' duplicate behavior, including after invocation completion.
+
+The caller must treat end-of-stream without a terminal update as interruption.
+Cancellation is an explicit operation
 on the active provider operation. Successful cancellation must stop external
 work before the caller records a cancelled outcome. The port has no clock,
 network, secret store, tool executor, or retry policy.

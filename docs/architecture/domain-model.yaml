@@ -111,7 +111,7 @@ entities:
       - chunk_and_event_commit_atomically
       - partial_output_survives_terminal_outcomes
       - hidden_reasoning_is_not_a_supported_stream
-    initial_slice: durable_chunks_without_final_Message_assembly
+    initial_slice: durable_chunks_with_internal_assistant_Message_finalization
   UsageObservation:
     required:
       - id

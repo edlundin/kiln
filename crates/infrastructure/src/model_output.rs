@@ -85,7 +85,7 @@ fn parse_chunk(
     })
 }
 
-async fn load_chunks(
+pub(super) async fn load_chunks(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     invocation_id: &ModelInvocationId,
 ) -> Result<Vec<ModelOutputChunk>, ModelOutputStoreError> {

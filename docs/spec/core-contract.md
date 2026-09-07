@@ -116,8 +116,8 @@ paths.
 
 Messages are immutable after append. A correction is another message. An
 artifact display name MUST NOT become a trusted path. `AppendMessage` creates
-only an untargeted message. `SendRunInput` is the only command that creates a
-message targeted to one run in the same thread.
+only an untargeted, complete user message. `SendRunInput` is the only command
+that creates a message targeted to one run in the same thread.
 
 ### Tasks and subagents
 
@@ -200,7 +200,10 @@ Message IDs. Storage loads Message content from the immutable source records;
 callers cannot supply replacement Message content. Sources must share the Run's
 Session. A targeted Message must target that exact Run and already have a
 `delivered` MessageDelivery. Queued, failed, and cancelled deliveries cannot
-enter a new manifest. Duplicate Message references are rejected.
+enter a new manifest. Incomplete assistant Messages cannot enter a manifest.
+Complete assistant Messages can be selected within their originating Run or
+between root Runs in the same Session. Child transcripts do not cross Run
+boundaries through Message selection. Duplicate Message references are rejected.
 
 Instruction provenance is attribution supplied by the trusted internal caller,
 not proof of a file read or user authentication. Workspace and Run identities
@@ -314,7 +317,7 @@ on the active provider operation. Successful cancellation must stop external
 work before the caller records a cancelled outcome. The port has no clock,
 network, secret store, tool executor, or retry policy.
 
-Daemon dispatch, final assistant Message assembly, tool-request payloads,
+Daemon dispatch, tool-request payloads,
 provider accounts, authentication, and live provider adapters remain pending.
 
 The `kiln-providers` crate supplies an explicit deterministic adapter for this
@@ -356,9 +359,28 @@ not a supported stream. Output command and chunk debug representations omit
 content.
 
 Chunks are not Session Messages and cannot be included as Message references in
-a ContextManifest. Final assistant Message assembly, incomplete-message status,
-Run completion, and native daemon publication remain pending. Existing text
-chunks do not authorize an automatic retry.
+a ContextManifest. Existing text chunks do not authorize an automatic retry.
+
+### Assistant Message finalization
+
+The internal finalization application derives one immutable assistant Message
+from stored `assistant_text` chunks in position order. It preserves content bytes
+and excludes reasoning summaries. The Message records its originating Run and
+ModelInvocation. Empty assistant output does not create a Message.
+
+For a running Run, finalization requires its latest generation invocation to have
+completed with assistant output and final usage. Queued input, active ToolCalls,
+active invocations, and nonterminal descendants prevent completion. The complete
+Message, `message.appended`, completed Run, and Run state Event commit together.
+
+For an already failed or cancelled Run, a terminal generation invocation can
+produce an incomplete Message. Tool-request completions are excluded. This does
+not change the terminal Run state or choose a failure policy. Incomplete Messages
+remain visible but cannot be selected for context.
+
+An exact retry returns the existing Message without new Events, including after
+Run completion. Public append operations remain user-only. Native daemon
+dispatch and publication of these finalization Events remain pending.
 
 ### Native usage observations
 

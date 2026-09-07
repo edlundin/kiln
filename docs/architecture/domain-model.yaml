@@ -41,9 +41,16 @@ entities:
       - thread_id
       - role
       - content
+      - status
     relationships:
       run_id: optional_target_Run
+      origin_run_id: required_for_assistant_Run
+      model_invocation_id: unique_for_assistant_ModelInvocation
       artifact_ids: many_Artifact
+    invariants:
+      - user_messages_are_complete_without_origin
+      - assistant_messages_derive_from_stored_assistant_text
+      - incomplete_messages_are_excluded_from_context
   ContextManifest:
     required:
       - id
@@ -59,6 +66,7 @@ entities:
       - exact_content_order_and_provenance_are_hashed
       - message_sources_share_run_thread
       - targeted_messages_require_matching_run_and_delivered_state
+      - assistant_sources_are_complete_and_same_run_or_between_roots
       - creation_does_not_deliver_input_or_start_provider_work
     initial_slice: durable_text_instructions_and_message_snapshots
   ModelInvocation:

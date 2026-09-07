@@ -4,10 +4,12 @@ use std::{collections::HashSet, fmt, future::Future, path::Path};
 
 use ulid::Ulid;
 
+mod assistant_message;
 mod model_output;
 mod provider;
 mod usage;
 mod usage_store;
+pub use assistant_message::*;
 pub use model_output::*;
 pub use provider::*;
 pub use usage::*;
@@ -479,12 +481,14 @@ pub struct InvalidMessageRole;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageRole {
     User,
+    Assistant,
 }
 
 impl MessageRole {
     pub fn parse(value: &str) -> Result<Self, InvalidMessageRole> {
         match value {
             "user" => Ok(Self::User),
+            "assistant" => Ok(Self::Assistant),
             _ => Err(InvalidMessageRole),
         }
     }
@@ -492,8 +496,41 @@ impl MessageRole {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
+            Self::Assistant => "assistant",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidMessageStatus;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageStatus {
+    Complete,
+    Incomplete,
+}
+
+impl MessageStatus {
+    pub fn parse(value: &str) -> Result<Self, InvalidMessageStatus> {
+        match value {
+            "complete" => Ok(Self::Complete),
+            "incomplete" => Ok(Self::Incomplete),
+            _ => Err(InvalidMessageStatus),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantMessageOrigin {
+    pub run_id: RunId,
+    pub model_invocation_id: ModelInvocationId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,6 +560,18 @@ pub struct Message {
     role: MessageRole,
     content: String,
     target_run_id: Option<RunId>,
+    status: MessageStatus,
+    origin: Option<AssistantMessageOrigin>,
+}
+
+pub struct PersistedMessage {
+    pub id: MessageId,
+    pub session_id: SessionId,
+    pub role: MessageRole,
+    pub content: String,
+    pub target_run_id: Option<RunId>,
+    pub status: MessageStatus,
+    pub origin: Option<AssistantMessageOrigin>,
 }
 
 impl Message {
@@ -552,6 +601,9 @@ impl Message {
         content: String,
         target_run_id: Option<RunId>,
     ) -> Result<Self, SessionError> {
+        if role != MessageRole::User {
+            return Err(SessionError::InvalidMessageOrigin);
+        }
         if content.trim().is_empty() {
             return Err(SessionError::MessageContentRequired);
         }
@@ -561,7 +613,48 @@ impl Message {
             role,
             content,
             target_run_id,
+            status: MessageStatus::Complete,
+            origin: None,
         })
+    }
+
+    pub fn new_assistant(
+        id: MessageId,
+        session_id: SessionId,
+        origin: AssistantMessageOrigin,
+        status: MessageStatus,
+        content: String,
+    ) -> Result<Self, SessionError> {
+        if content.is_empty() {
+            return Err(SessionError::MessageContentRequired);
+        }
+        Ok(Self {
+            id,
+            session_id,
+            role: MessageRole::Assistant,
+            content,
+            target_run_id: None,
+            status,
+            origin: Some(origin),
+        })
+    }
+
+    pub fn from_persisted(value: PersistedMessage) -> Result<Self, SessionError> {
+        match (value.role, value.status, value.origin, value.target_run_id) {
+            (MessageRole::User, MessageStatus::Complete, None, target_run_id) => {
+                Self::new_with_target(
+                    value.id,
+                    value.session_id,
+                    value.role,
+                    value.content,
+                    target_run_id,
+                )
+            }
+            (MessageRole::Assistant, status, Some(origin), None) => {
+                Self::new_assistant(value.id, value.session_id, origin, status, value.content)
+            }
+            _ => Err(SessionError::InvalidMessageOrigin),
+        }
     }
 
     pub fn id(&self) -> &MessageId {
@@ -582,6 +675,14 @@ impl Message {
 
     pub fn target_run_id(&self) -> Option<&RunId> {
         self.target_run_id.as_ref()
+    }
+
+    pub fn status(&self) -> MessageStatus {
+        self.status
+    }
+
+    pub fn origin(&self) -> Option<&AssistantMessageOrigin> {
+        self.origin.as_ref()
     }
 }
 
@@ -661,7 +762,7 @@ impl ContextManifestEntry {
         role: MessageRole,
         content: String,
     ) -> Result<Self, InvalidContextManifest> {
-        if content.trim().is_empty() {
+        if content.is_empty() || role == MessageRole::User && content.trim().is_empty() {
             return Err(InvalidContextManifest::MessageContentRequired);
         }
         Ok(Self::MessageSnapshot {
@@ -697,7 +798,15 @@ impl ContextManifest {
     ) -> Result<Self, InvalidContextManifest> {
         let mut message_ids = HashSet::new();
         for entry in &entries {
-            if entry.content().trim().is_empty() {
+            if entry.content().is_empty()
+                || !matches!(
+                    entry,
+                    ContextManifestEntry::MessageSnapshot {
+                        role: MessageRole::Assistant,
+                        ..
+                    }
+                ) && entry.content().trim().is_empty()
+            {
                 return Err(match entry {
                     ContextManifestEntry::Instruction { .. } => {
                         InvalidContextManifest::InstructionContentRequired
@@ -3633,6 +3742,7 @@ pub enum SessionError {
     WorkspaceNotFound,
     SessionNotFound,
     MessageContentRequired,
+    InvalidMessageOrigin,
     WorkspaceStoreUnavailable,
     SessionStoreUnavailable,
 }
@@ -3649,6 +3759,8 @@ pub enum ContextManifestError {
     MessageOutsideSession,
     MessageTargetMismatch,
     MessageDeliveryNotDelivered,
+    MessageIncomplete,
+    MessageOriginMismatch,
     DuplicateMessage,
     IdempotencyKeyRequired,
     IdempotencyConflict,
@@ -3667,6 +3779,8 @@ pub enum ContextManifestStoreError {
     MessageOutsideSession,
     MessageTargetMismatch,
     MessageDeliveryNotDelivered,
+    MessageIncomplete,
+    MessageOriginMismatch,
     DuplicateMessage,
     IdempotencyKeyRequired,
     IdempotencyConflict,
@@ -4278,6 +4392,10 @@ fn map_context_manifest_store_error(error: ContextManifestStoreError) -> Context
         }
         ContextManifestStoreError::MessageDeliveryNotDelivered => {
             ContextManifestError::MessageDeliveryNotDelivered
+        }
+        ContextManifestStoreError::MessageIncomplete => ContextManifestError::MessageIncomplete,
+        ContextManifestStoreError::MessageOriginMismatch => {
+            ContextManifestError::MessageOriginMismatch
         }
         ContextManifestStoreError::DuplicateMessage => ContextManifestError::DuplicateMessage,
         ContextManifestStoreError::IdempotencyKeyRequired => {

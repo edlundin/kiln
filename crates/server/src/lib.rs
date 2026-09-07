@@ -1092,8 +1092,19 @@ fn message_response(message: &Message) -> MessageResponse {
         session_id: message.session_id().as_str().to_owned(),
         role: match message.role() {
             CoreMessageRole::User => MessageRole::User,
+            CoreMessageRole::Assistant => MessageRole::Assistant,
         },
         content: message.content().to_owned(),
+        status: match message.status() {
+            kiln_core::MessageStatus::Complete => kiln_protocol::MessageStatus::Complete,
+            kiln_core::MessageStatus::Incomplete => kiln_protocol::MessageStatus::Incomplete,
+        },
+        origin_run_id: message
+            .origin()
+            .map(|origin| origin.run_id.as_str().to_owned()),
+        model_invocation_id: message
+            .origin()
+            .map(|origin| origin.model_invocation_id.as_str().to_owned()),
         target_run_id: message
             .target_run_id()
             .map(|run_id| run_id.as_str().to_owned()),
@@ -2051,6 +2062,11 @@ impl PublicError {
                     StatusCode::BAD_REQUEST,
                     error_code::MESSAGE_CONTENT_REQUIRED,
                     "Invalid Message",
+                ),
+                SessionError::InvalidMessageOrigin => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::SESSION_STORE_UNAVAILABLE,
+                    "Invalid Message origin",
                 ),
                 SessionError::WorkspaceStoreUnavailable => (
                     StatusCode::INTERNAL_SERVER_ERROR,

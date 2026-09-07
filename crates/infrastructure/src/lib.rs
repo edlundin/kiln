@@ -1,5 +1,6 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
+mod assistant_message;
 mod model_output;
 mod usage;
 
@@ -1235,6 +1236,9 @@ impl SessionStore for SqliteStore {
         if event.session_id() != message.session_id()
             || event_message != message
             || message.target_run_id().is_some()
+            || message.role() != MessageRole::User
+            || message.status() != kiln_core::MessageStatus::Complete
+            || message.origin().is_some()
         {
             return Err(StoreError::Unavailable);
         }
@@ -2211,44 +2215,13 @@ async fn parse_event_rows(
             "message.appended" => {
                 let message_id = MessageId::parse(message_id.ok_or(StoreError::Unavailable)?)
                     .map_err(|_| StoreError::Unavailable)?;
-                let loaded_message_id = MessageId::parse(
-                    row.try_get::<String, _>("loaded_message_id")
-                        .map_err(|_| StoreError::Unavailable)?,
-                )
-                .map_err(|_| StoreError::Unavailable)?;
-                if loaded_message_id != message_id {
-                    return Err(StoreError::Unavailable);
-                }
-                let message_session_id = SessionId::parse(
-                    row.try_get::<String, _>("message_session_id")
-                        .map_err(|_| StoreError::Unavailable)?,
-                )
-                .map_err(|_| StoreError::Unavailable)?;
-                if message_session_id != stored_session_id {
-                    return Err(StoreError::Unavailable);
-                }
-                let role = MessageRole::parse(
-                    row.try_get::<String, _>("role")
-                        .map_err(|_| StoreError::Unavailable)?
-                        .as_str(),
-                )
-                .map_err(|_| StoreError::Unavailable)?;
-                let content = row
-                    .try_get::<String, _>("content")
-                    .map_err(|_| StoreError::Unavailable)?;
-                let target_run_id = row
-                    .try_get::<Option<String>, _>("message_target_run_id")
+                let message = assistant_message::load_message(transaction, &message_id)
+                    .await
                     .map_err(|_| StoreError::Unavailable)?
-                    .map(RunId::parse)
-                    .transpose()
-                    .map_err(|_| StoreError::Unavailable)?;
-                let message = match target_run_id {
-                    Some(run_id) => {
-                        Message::new_targeted(message_id, message_session_id, role, content, run_id)
-                    }
-                    None => Message::new(message_id, message_session_id, role, content),
+                    .ok_or(StoreError::Unavailable)?;
+                if message.session_id() != &stored_session_id {
+                    return Err(StoreError::Unavailable);
                 }
-                .map_err(|_| StoreError::Unavailable)?;
                 StoredSessionEvent::message_appended(event_id, stored_session_id, cursor, message)
                     .map_err(|_| StoreError::Unavailable)?
             }
@@ -3702,7 +3675,7 @@ async fn resolve_context_manifest_entries(
                     load_context_source_message(transaction, message_id)
                         .await?
                         .ok_or(ContextManifestStoreError::MessageNotFound)?;
-                validate_context_source_message(run, &message, delivery_state)?;
+                validate_context_source_message(transaction, run, &message, delivery_state).await?;
                 ContextManifestEntry::message_snapshot(
                     message.id().clone(),
                     message.role(),
@@ -3737,13 +3710,28 @@ fn validate_instruction_provenance(
     Ok(())
 }
 
-fn validate_context_source_message(
+async fn validate_context_source_message(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     run: &Run,
     message: &Message,
     delivery_state: Option<MessageDeliveryState>,
 ) -> Result<(), ContextManifestStoreError> {
     if message.session_id() != run.session_id() {
         return Err(ContextManifestStoreError::MessageOutsideSession);
+    }
+    if message.status() == kiln_core::MessageStatus::Incomplete {
+        return Err(ContextManifestStoreError::MessageIncomplete);
+    }
+    if let Some(origin) = message.origin()
+        && &origin.run_id != run.run_id()
+    {
+        let source_run = load_run(transaction, &origin.run_id)
+            .await
+            .map_err(|_| ContextManifestStoreError::Unavailable)?
+            .ok_or(ContextManifestStoreError::IntegrityViolation)?;
+        if run.parent_run_id().is_some() || source_run.parent_run_id().is_some() {
+            return Err(ContextManifestStoreError::MessageOriginMismatch);
+        }
     }
     if let Some(target_run_id) = message.target_run_id() {
         if target_run_id != run.run_id() {
@@ -3762,74 +3750,40 @@ async fn load_context_source_message(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     message_id: &MessageId,
 ) -> Result<Option<(Message, Option<MessageDeliveryState>)>, ContextManifestStoreError> {
-    let row = sqlx::query(
-        "SELECT m.message_id, m.session_id, m.role, m.content, m.target_run_id,
-                d.run_id AS delivery_run_id, d.state AS delivery_state
-         FROM messages m
-         LEFT JOIN message_deliveries d ON d.message_id = m.message_id
-         WHERE m.message_id = ?",
-    )
-    .bind(message_id.as_str())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(|_| ContextManifestStoreError::Unavailable)?;
-    row.map(|row| {
-        let loaded_message_id = MessageId::parse(
-            row.try_get::<String, _>("message_id")
-                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
-        )
-        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        if &loaded_message_id != message_id {
-            return Err(ContextManifestStoreError::IntegrityViolation);
-        }
-        let session_id = SessionId::parse(
-            row.try_get::<String, _>("session_id")
-                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
-        )
-        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        let role = MessageRole::parse(
-            &row.try_get::<String, _>("role")
-                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
-        )
-        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        let content = row
-            .try_get::<String, _>("content")
-            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        let target_run_id = row
-            .try_get::<Option<String>, _>("target_run_id")
-            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
-            .map(RunId::parse)
-            .transpose()
-            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        let delivery_run_id = row
-            .try_get::<Option<String>, _>("delivery_run_id")
-            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
-            .map(RunId::parse)
-            .transpose()
-            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        if delivery_run_id
-            .as_ref()
-            .is_some_and(|delivery_run_id| Some(delivery_run_id) != target_run_id.as_ref())
-        {
-            return Err(ContextManifestStoreError::IntegrityViolation);
-        }
-        let delivery_state = row
-            .try_get::<Option<String>, _>("delivery_state")
-            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
-            .as_deref()
-            .map(MessageDeliveryState::parse)
-            .transpose()
-            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        let message = match target_run_id {
-            Some(target_run_id) => {
-                Message::new_targeted(loaded_message_id, session_id, role, content, target_run_id)
+    let Some(message) = assistant_message::load_message(transaction, message_id)
+        .await
+        .map_err(|error| match error {
+            kiln_core::AssistantMessageStoreError::Unavailable => {
+                ContextManifestStoreError::Unavailable
             }
-            None => Message::new(loaded_message_id, session_id, role, content),
+            _ => ContextManifestStoreError::IntegrityViolation,
+        })?
+    else {
+        return Ok(None);
+    };
+    let row = sqlx::query("SELECT run_id, state FROM message_deliveries WHERE message_id = ?")
+        .bind(message_id.as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|_| ContextManifestStoreError::Unavailable)?;
+    let delivery_state = if let Some(row) = row {
+        let run_id = row
+            .try_get::<String, _>("run_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        if message.target_run_id().map(RunId::as_str) != Some(run_id.as_str()) {
+            return Err(ContextManifestStoreError::IntegrityViolation);
         }
-        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-        Ok((message, delivery_state))
-    })
-    .transpose()
+        Some(
+            MessageDeliveryState::parse(
+                &row.try_get::<String, _>("state")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+    } else {
+        None
+    };
+    Ok(Some((message, delivery_state)))
 }
 
 async fn persist_context_manifest_entries(
@@ -4040,7 +3994,8 @@ async fn load_context_manifest(
             let (source, delivery_state) = load_context_source_message(transaction, &message_id)
                 .await?
                 .ok_or(ContextManifestStoreError::IntegrityViolation)?;
-            validate_context_source_message(&run, &source, delivery_state)
+            validate_context_source_message(transaction, &run, &source, delivery_state)
+                .await
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
             if source.role() != role || source.content() != content {
                 return Err(ContextManifestStoreError::IntegrityViolation);
@@ -6538,73 +6493,42 @@ async fn load_message_delivery(
     message_id: &MessageId,
 ) -> Result<Option<MessageDelivery>, RunStoreError> {
     let row = sqlx::query(
-        "SELECT m.message_id, m.session_id, m.role, m.content, m.target_run_id,
-                d.run_id, d.delivery_mode, d.state
-         FROM message_deliveries d
-         JOIN messages m ON m.message_id = d.message_id
-         WHERE d.message_id = ?",
+        "SELECT run_id, delivery_mode, state FROM message_deliveries WHERE message_id = ?",
     )
     .bind(message_id.as_str())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| RunStoreError::Unavailable)?;
-    row.map(|row| {
-        let loaded_message_id = MessageId::parse(
-            row.try_get::<String, _>("message_id")
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let message = assistant_message::load_message(transaction, message_id)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?
+        .ok_or(RunStoreError::Unavailable)?;
+    let run_id = row
+        .try_get::<String, _>("run_id")
+        .map_err(|_| RunStoreError::Unavailable)?;
+    if message.role() != MessageRole::User
+        || message.target_run_id().map(RunId::as_str) != Some(run_id.as_str())
+    {
+        return Err(RunStoreError::Unavailable);
+    }
+    MessageDelivery::from_persisted(
+        message,
+        MessageDeliveryMode::parse(
+            &row.try_get::<String, _>("delivery_mode")
                 .map_err(|_| RunStoreError::Unavailable)?,
         )
-        .map_err(|_| RunStoreError::Unavailable)?;
-        if &loaded_message_id != message_id {
-            return Err(RunStoreError::Unavailable);
-        }
-        let session_id = SessionId::parse(
-            row.try_get::<String, _>("session_id")
+        .map_err(|_| RunStoreError::Unavailable)?,
+        MessageDeliveryState::parse(
+            &row.try_get::<String, _>("state")
                 .map_err(|_| RunStoreError::Unavailable)?,
         )
-        .map_err(|_| RunStoreError::Unavailable)?;
-        let role = MessageRole::parse(
-            &row.try_get::<String, _>("role")
-                .map_err(|_| RunStoreError::Unavailable)?,
-        )
-        .map_err(|_| RunStoreError::Unavailable)?;
-        let target_run_id = RunId::parse(
-            row.try_get::<String, _>("target_run_id")
-                .map_err(|_| RunStoreError::Unavailable)?,
-        )
-        .map_err(|_| RunStoreError::Unavailable)?;
-        let delivery_run_id = RunId::parse(
-            row.try_get::<String, _>("run_id")
-                .map_err(|_| RunStoreError::Unavailable)?,
-        )
-        .map_err(|_| RunStoreError::Unavailable)?;
-        if delivery_run_id != target_run_id {
-            return Err(RunStoreError::Unavailable);
-        }
-        let message = Message::new_targeted(
-            loaded_message_id,
-            session_id,
-            role,
-            row.try_get::<String, _>("content")
-                .map_err(|_| RunStoreError::Unavailable)?,
-            target_run_id,
-        )
-        .map_err(|_| RunStoreError::Unavailable)?;
-        MessageDelivery::from_persisted(
-            message,
-            MessageDeliveryMode::parse(
-                &row.try_get::<String, _>("delivery_mode")
-                    .map_err(|_| RunStoreError::Unavailable)?,
-            )
-            .map_err(|_| RunStoreError::Unavailable)?,
-            MessageDeliveryState::parse(
-                &row.try_get::<String, _>("state")
-                    .map_err(|_| RunStoreError::Unavailable)?,
-            )
-            .map_err(|_| RunStoreError::Unavailable)?,
-        )
-        .map_err(|_| RunStoreError::Unavailable)
-    })
-    .transpose()
+        .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map(Some)
+    .map_err(|_| RunStoreError::Unavailable)
 }
 
 async fn load_queued_run_inputs(

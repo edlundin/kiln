@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Added assistant Message finalization from stored chunks, preserving immutable text with Run and ModelInvocation origin.
+- Eligible successful Runs now complete atomically with the assistant Message and its events; incomplete output remains for failed or cancelled Runs and is excluded from context.
+- Complete assistant context is scoped to the same Run or the root-to-root scope; native daemon dispatch remains pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Defined protocol `0.18.0` assistant Messages with an exposed `assistant` role, complete/incomplete status, and originating Run and ModelInvocation identifiers.
 - Kept public Message append operations user-only.
 

@@ -19,19 +19,20 @@ use crate::{
     GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
     IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID,
     MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
-    MessageRole, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
-    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
-    RunInputMode, RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
-    START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID, SendRunInputRequest,
-    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
-    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
-    TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
-    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UpdateTaskRequest,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
-    WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
-    error_code,
+    MessageRole, ModelInvocationCompletionKind, ModelInvocationEventResponse,
+    ModelInvocationFailureReason, ModelInvocationPurpose, ModelInvocationStatus,
+    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode,
+    RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
+    START_RUN_OPERATION_ID, SendRunInputRequest, SessionEventDataResponse, SessionEventResponse,
+    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
+    StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
+    TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState,
+    ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
+    UPDATE_TASK_OPERATION_ID, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WorkspaceResponse, WorkspaceRootRequest,
+    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -225,6 +226,23 @@ fn schema() -> String {
             schema_for!(ContextManifestCreatedResponse),
         ),
         (
+            "ModelInvocationPurpose",
+            schema_for!(ModelInvocationPurpose),
+        ),
+        (
+            "ModelInvocationCompletionKind",
+            schema_for!(ModelInvocationCompletionKind),
+        ),
+        (
+            "ModelInvocationFailureReason",
+            schema_for!(ModelInvocationFailureReason),
+        ),
+        ("ModelInvocationStatus", schema_for!(ModelInvocationStatus)),
+        (
+            "ModelInvocationEventResponse",
+            schema_for!(ModelInvocationEventResponse),
+        ),
+        (
             "SessionEventDataResponse",
             schema_for!(SessionEventDataResponse),
         ),
@@ -291,6 +309,11 @@ fn typescript() -> String {
         RunResponse::decl(&config),
         SessionRunsResponse::decl(&config),
         ContextManifestCreatedResponse::decl(&config),
+        ModelInvocationPurpose::decl(&config),
+        ModelInvocationCompletionKind::decl(&config),
+        ModelInvocationFailureReason::decl(&config),
+        ModelInvocationStatus::decl(&config),
+        ModelInvocationEventResponse::decl(&config),
         SessionEventDataResponse::decl(&config),
         SessionEventResponse::decl(&config),
         SessionEventsResponse::decl(&config),
@@ -1395,6 +1418,26 @@ components:
         (
             "ContextManifestCreatedResponse",
             openapi_schema::<ContextManifestCreatedResponse>(),
+        ),
+        (
+            "ModelInvocationPurpose",
+            openapi_schema::<ModelInvocationPurpose>(),
+        ),
+        (
+            "ModelInvocationCompletionKind",
+            openapi_schema::<ModelInvocationCompletionKind>(),
+        ),
+        (
+            "ModelInvocationFailureReason",
+            openapi_schema::<ModelInvocationFailureReason>(),
+        ),
+        (
+            "ModelInvocationStatus",
+            openapi_schema::<ModelInvocationStatus>(),
+        ),
+        (
+            "ModelInvocationEventResponse",
+            openapi_schema::<ModelInvocationEventResponse>(),
         ),
         (
             "SessionEventResponse",

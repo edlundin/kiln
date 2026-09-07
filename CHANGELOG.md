@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-07 — `feat`
+
+- Defined protocol `0.15.0` metadata-only `model_invocation.created` and `model_invocation.state_changed` events, including retry work identity and typed terminal status.
+- Updated the generated JSON Schema, TypeScript, and OpenAPI definitions.
+
+[Commit](pending)
+
 ## 2026-09-05 — `feat`
 
 - Added durable immutable ContextManifest snapshots with exact instruction/Message ordering, provenance and hashes, same-Session and delivered-targeted Message validation, and retry-safe storage/replay metadata.

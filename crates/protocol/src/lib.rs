@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.14.0";
+pub const PROTOCOL_VERSION: &str = "0.15.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -565,11 +565,69 @@ pub struct ContextManifestCreatedResponse {
     pub entry_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInvocationPurpose {
+    Generation,
+    Compaction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInvocationCompletionKind {
+    AssistantOutput,
+    ToolRequests,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelInvocationFailureReason {
+    ProviderError,
+    InvalidRequest,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelInvocationStatus {
+    Pending,
+    InFlight,
+    Completed {
+        completion_kind: ModelInvocationCompletionKind,
+    },
+    Failed {
+        reason: ModelInvocationFailureReason,
+    },
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInvocationEventResponse {
+    pub model_invocation_id: String,
+    pub work_id: String,
+    pub run_id: String,
+    pub context_manifest_id: String,
+    pub context_manifest_hash: String,
+    pub provider_account_id: String,
+    pub provider: String,
+    pub model: String,
+    pub purpose: ModelInvocationPurpose,
+    #[schemars(with = "RequiredNullableString")]
+    pub retry_of: Option<String>,
+    pub status: ModelInvocationStatus,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum SessionEventDataResponse {
     #[serde(rename = "context.manifest_created")]
     ContextManifestCreated(ContextManifestCreatedResponse),
+    #[serde(rename = "model_invocation.created")]
+    ModelInvocationCreated(ModelInvocationEventResponse),
+    #[serde(rename = "model_invocation.state_changed")]
+    ModelInvocationStateChanged(ModelInvocationEventResponse),
     #[serde(rename = "session.created")]
     SessionCreated { workspace_id: String },
     #[serde(rename = "message.appended")]

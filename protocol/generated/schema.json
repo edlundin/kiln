@@ -411,6 +411,314 @@
       "title": "MessageRole",
       "type": "string"
     },
+    "ModelInvocationCompletionKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "assistant_output",
+        "tool_requests"
+      ],
+      "title": "ModelInvocationCompletionKind",
+      "type": "string"
+    },
+    "ModelInvocationEventResponse": {
+      "$defs": {
+        "ModelInvocationCompletionKind": {
+          "enum": [
+            "assistant_output",
+            "tool_requests"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationFailureReason": {
+          "enum": [
+            "provider_error",
+            "invalid_request",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationPurpose": {
+          "enum": [
+            "generation",
+            "compaction"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationStatus": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "pending",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "in_flight",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "completion_kind": {
+                  "$ref": "#/$defs/ModelInvocationCompletionKind"
+                },
+                "state": {
+                  "const": "completed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "completion_kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ModelInvocationFailureReason"
+                },
+                "state": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "interrupted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "context_manifest_hash": {
+          "type": "string"
+        },
+        "context_manifest_id": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_invocation_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "provider_account_id": {
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/ModelInvocationPurpose"
+        },
+        "retry_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ModelInvocationStatus"
+        },
+        "work_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_invocation_id",
+        "work_id",
+        "run_id",
+        "context_manifest_id",
+        "context_manifest_hash",
+        "provider_account_id",
+        "provider",
+        "model",
+        "purpose",
+        "retry_of",
+        "status"
+      ],
+      "title": "ModelInvocationEventResponse",
+      "type": "object"
+    },
+    "ModelInvocationFailureReason": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "provider_error",
+        "invalid_request",
+        "unknown"
+      ],
+      "title": "ModelInvocationFailureReason",
+      "type": "string"
+    },
+    "ModelInvocationPurpose": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "generation",
+        "compaction"
+      ],
+      "title": "ModelInvocationPurpose",
+      "type": "string"
+    },
+    "ModelInvocationStatus": {
+      "$defs": {
+        "ModelInvocationCompletionKind": {
+          "enum": [
+            "assistant_output",
+            "tool_requests"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationFailureReason": {
+          "enum": [
+            "provider_error",
+            "invalid_request",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "in_flight",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "completion_kind": {
+              "$ref": "#/$defs/ModelInvocationCompletionKind"
+            },
+            "state": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "completion_kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/ModelInvocationFailureReason"
+            },
+            "state": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "interrupted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "ModelInvocationStatus"
+    },
     "NegotiateRequest": {
       "$defs": {
         "ClientIdentity": {
@@ -974,6 +1282,118 @@
           ],
           "type": "string"
         },
+        "ModelInvocationCompletionKind": {
+          "enum": [
+            "assistant_output",
+            "tool_requests"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationFailureReason": {
+          "enum": [
+            "provider_error",
+            "invalid_request",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationPurpose": {
+          "enum": [
+            "generation",
+            "compaction"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationStatus": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "pending",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "in_flight",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "completion_kind": {
+                  "$ref": "#/$defs/ModelInvocationCompletionKind"
+                },
+                "state": {
+                  "const": "completed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "completion_kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ModelInvocationFailureReason"
+                },
+                "state": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "interrupted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -1204,6 +1624,126 @@
             "run_id",
             "content_hash",
             "entry_count"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "context_manifest_hash": {
+              "type": "string"
+            },
+            "context_manifest_id": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "model_invocation_id": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "provider_account_id": {
+              "type": "string"
+            },
+            "purpose": {
+              "$ref": "#/$defs/ModelInvocationPurpose"
+            },
+            "retry_of": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/ModelInvocationStatus"
+            },
+            "type": {
+              "const": "model_invocation.created",
+              "type": "string"
+            },
+            "work_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model_invocation_id",
+            "work_id",
+            "run_id",
+            "context_manifest_id",
+            "context_manifest_hash",
+            "provider_account_id",
+            "provider",
+            "model",
+            "purpose",
+            "retry_of",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "context_manifest_hash": {
+              "type": "string"
+            },
+            "context_manifest_id": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "model_invocation_id": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "provider_account_id": {
+              "type": "string"
+            },
+            "purpose": {
+              "$ref": "#/$defs/ModelInvocationPurpose"
+            },
+            "retry_of": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/ModelInvocationStatus"
+            },
+            "type": {
+              "const": "model_invocation.state_changed",
+              "type": "string"
+            },
+            "work_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "model_invocation_id",
+            "work_id",
+            "run_id",
+            "context_manifest_id",
+            "context_manifest_hash",
+            "provider_account_id",
+            "provider",
+            "model",
+            "purpose",
+            "retry_of",
+            "status"
           ],
           "type": "object"
         },
@@ -1774,6 +2314,118 @@
           ],
           "type": "string"
         },
+        "ModelInvocationCompletionKind": {
+          "enum": [
+            "assistant_output",
+            "tool_requests"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationFailureReason": {
+          "enum": [
+            "provider_error",
+            "invalid_request",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationPurpose": {
+          "enum": [
+            "generation",
+            "compaction"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationStatus": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "pending",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "in_flight",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "completion_kind": {
+                  "$ref": "#/$defs/ModelInvocationCompletionKind"
+                },
+                "state": {
+                  "const": "completed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "completion_kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ModelInvocationFailureReason"
+                },
+                "state": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "interrupted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -1823,6 +2475,126 @@
                 "run_id",
                 "content_hash",
                 "entry_count"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "context_manifest_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "$ref": "#/$defs/ModelInvocationPurpose"
+                },
+                "retry_of": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/ModelInvocationStatus"
+                },
+                "type": {
+                  "const": "model_invocation.created",
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "context_manifest_id",
+                "context_manifest_hash",
+                "provider_account_id",
+                "provider",
+                "model",
+                "purpose",
+                "retry_of",
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "context_manifest_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "$ref": "#/$defs/ModelInvocationPurpose"
+                },
+                "retry_of": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/ModelInvocationStatus"
+                },
+                "type": {
+                  "const": "model_invocation.state_changed",
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "context_manifest_id",
+                "context_manifest_hash",
+                "provider_account_id",
+                "provider",
+                "model",
+                "purpose",
+                "retry_of",
+                "status"
               ],
               "type": "object"
             },
@@ -2597,6 +3369,118 @@
           ],
           "type": "string"
         },
+        "ModelInvocationCompletionKind": {
+          "enum": [
+            "assistant_output",
+            "tool_requests"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationFailureReason": {
+          "enum": [
+            "provider_error",
+            "invalid_request",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationPurpose": {
+          "enum": [
+            "generation",
+            "compaction"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationStatus": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "pending",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "in_flight",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "completion_kind": {
+                  "$ref": "#/$defs/ModelInvocationCompletionKind"
+                },
+                "state": {
+                  "const": "completed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "completion_kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ModelInvocationFailureReason"
+                },
+                "state": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "interrupted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -2646,6 +3530,126 @@
                 "run_id",
                 "content_hash",
                 "entry_count"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "context_manifest_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "$ref": "#/$defs/ModelInvocationPurpose"
+                },
+                "retry_of": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/ModelInvocationStatus"
+                },
+                "type": {
+                  "const": "model_invocation.created",
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "context_manifest_id",
+                "context_manifest_hash",
+                "provider_account_id",
+                "provider",
+                "model",
+                "purpose",
+                "retry_of",
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "context_manifest_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "$ref": "#/$defs/ModelInvocationPurpose"
+                },
+                "retry_of": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/ModelInvocationStatus"
+                },
+                "type": {
+                  "const": "model_invocation.state_changed",
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "context_manifest_id",
+                "context_manifest_hash",
+                "provider_account_id",
+                "provider",
+                "model",
+                "purpose",
+                "retry_of",
+                "status"
               ],
               "type": "object"
             },
@@ -4130,6 +5134,118 @@
           ],
           "type": "string"
         },
+        "ModelInvocationCompletionKind": {
+          "enum": [
+            "assistant_output",
+            "tool_requests"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationFailureReason": {
+          "enum": [
+            "provider_error",
+            "invalid_request",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationPurpose": {
+          "enum": [
+            "generation",
+            "compaction"
+          ],
+          "type": "string"
+        },
+        "ModelInvocationStatus": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "pending",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "in_flight",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "completion_kind": {
+                  "$ref": "#/$defs/ModelInvocationCompletionKind"
+                },
+                "state": {
+                  "const": "completed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "completion_kind"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/ModelInvocationFailureReason"
+                },
+                "state": {
+                  "const": "failed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "cancelled",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "const": "interrupted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "RunInputMode": {
           "enum": [
             "interactive",
@@ -4179,6 +5295,126 @@
                 "run_id",
                 "content_hash",
                 "entry_count"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "context_manifest_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "$ref": "#/$defs/ModelInvocationPurpose"
+                },
+                "retry_of": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/ModelInvocationStatus"
+                },
+                "type": {
+                  "const": "model_invocation.created",
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "context_manifest_id",
+                "context_manifest_hash",
+                "provider_account_id",
+                "provider",
+                "model",
+                "purpose",
+                "retry_of",
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "context_manifest_hash": {
+                  "type": "string"
+                },
+                "context_manifest_id": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "$ref": "#/$defs/ModelInvocationPurpose"
+                },
+                "retry_of": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/ModelInvocationStatus"
+                },
+                "type": {
+                  "const": "model_invocation.state_changed",
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "context_manifest_id",
+                "context_manifest_hash",
+                "provider_account_id",
+                "provider",
+                "model",
+                "purpose",
+                "retry_of",
+                "status"
               ],
               "type": "object"
             },
@@ -5058,7 +6294,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.14.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.15.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

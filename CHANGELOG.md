@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Added the core native provider port, issuing non-clone requests only after a fresh durable claim with verified stored context.
+- Added text, usage, and terminal update validation with typed errors; repeated and terminal claims do not dispatch.
+- Native daemon orchestration, persisted streamed assistant output, tool payloads, and live authentication/transport remain pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Added atomic final usage and invocation outcome recording, with the usage event emitted before the terminal event; errors roll both back together and retries remain idempotent.
 - Separate completion now requires final usage for dispatched attempts, while pending cancellation and existing terminal retries retain their behavior.
 - Provider orchestration and automatic unknown terminal observations remain pending.

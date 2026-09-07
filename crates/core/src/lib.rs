@@ -4,8 +4,10 @@ use std::{collections::HashSet, fmt, future::Future, path::Path};
 
 use ulid::Ulid;
 
+mod provider;
 mod usage;
 mod usage_store;
+pub use provider::*;
 pub use usage::*;
 pub use usage_store::*;
 

@@ -283,6 +283,37 @@ and native-loop scheduling remain pending. The usage contract in
 [EDL-268](https://linear.app/edlundin/issue/EDL-268) records each physical
 attempt separately while retaining its logical work identity.
 
+### Native provider port
+
+The internal `ProviderApplication::claim` operation creates a provider request
+only after a fresh durable invocation claim. It loads the invocation and its
+validated ContextManifest, checks their identity and hash links, and preserves
+the exact stored context order. An already claimed or terminal invocation
+returns no request. This includes an invocation cancelled before dispatch.
+
+`ProviderRequest` has no public constructor and cannot be cloned. A provider's
+`start` operation consumes it. This prevents accidental reuse of a claim within
+the native runtime; it does not establish a provider account connection or
+validate its credentials. The storage adapter remains responsible for verifying
+the context content hash and source ownership on reads.
+
+The first port supports text deltas, partial usage updates, and a terminal
+outcome paired with final usage. Updates have a validation operation that checks
+the invocation, work, and account attribution and usage finality. Empty text
+deltas and tool-request completions without a tool payload are invalid.
+Provider errors use typed categories without raw provider diagnostics. Requests
+and output updates have no automatic debug representation that exposes text.
+
+The caller must validate each update before persistence, consume the terminal
+update through `finish_model_invocation_with_usage`, and treat end-of-stream
+without a terminal update as interruption. Cancellation is an explicit operation
+on the active provider operation. Successful cancellation must stop external
+work before the caller records a cancelled outcome. The port has no clock,
+network, secret store, tool executor, or retry policy.
+
+Daemon dispatch, durable streamed assistant output, tool-request payloads,
+provider accounts, authentication, and live provider adapters remain pending.
+
 ### Native usage observations
 
 The internal usage boundary accepts normalized counted-unit updates for an

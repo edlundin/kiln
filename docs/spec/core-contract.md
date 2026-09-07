@@ -165,9 +165,9 @@ is invalid after Run termination. A `cancelled` outcome requires a terminal
 Run. The durable query for pending runtime work returns the oldest queued
 delivery per Run.
 
-Provider delivery, safe-boundary consumption, queued-input handling on successful
-or failed completion, and the terminal eligibility guard for accepted guidance
-remain pending runtime and scheduler work.
+The deterministic native mode consumes input at generation boundaries. Accepted
+guidance prevents successful finalization until it is consumed. Live-provider
+delivery and broader scheduler policy remain pending.
 
 Cancelling a child does not cancel its parent or siblings. Cancelling a run
 requests cancellation for its descendants. A completion already committed
@@ -226,8 +226,9 @@ Queries retain committed snapshots after Run termination and list them in
 durable creation order.
 
 The first slice supports text instructions and Message snapshots only. Context
-assembly, attachment and tool representations, provider
-streaming, and safe-boundary input consumption remain pending native-loop work.
+assembly for live providers and attachment and tool representations remain
+pending. The deterministic native mode stores explicit fixture instructions and
+consumed Run input.
 
 ### Model invocations
 
@@ -281,8 +282,8 @@ in-flight record remains durable and blocks another claim; cancellation returns
 `cancellation_failed` until explicit internal reconciliation finishes it.
 Finishing an invocation does not itself complete its Run.
 
-Provider transport, streamed output, automatic retries,
-and native-loop scheduling remain pending. The usage contract in
+Live provider transport, automatic retries, and broader native-loop scheduling
+remain pending. The usage contract in
 [EDL-268](https://linear.app/edlundin/issue/EDL-268) records each physical
 attempt separately while retaining its logical work identity.
 
@@ -323,8 +324,8 @@ on the active provider operation. Successful cancellation must stop external
 work before the caller records a cancelled outcome. The port has no clock,
 network, secret store, tool executor, or retry policy.
 
-Daemon dispatch, tool-request payloads,
-provider accounts, authentication, and live provider adapters remain pending.
+Tool-request payloads, provider accounts, authentication, and live provider
+adapters remain pending.
 
 The `kiln-providers` crate supplies an explicit deterministic adapter for this
 port. It accepts only provider `kiln_deterministic` and model
@@ -340,8 +341,29 @@ position suitable for the durable output boundary. Cancellation before the
 terminal update discards pending text and replaces the configured result with a cancelled outcome and final unknown
 usage with no quantities. It does not report configured success counts as
 observed cancellation usage. Repeated cancellation is safe, and cancellation
-after terminal delivery has no effect. The adapter is a library boundary and
-is not enabled in daemon Run execution.
+after terminal delivery has no effect.
+
+Set `KILN_RUN_EXECUTOR=deterministic-model` before starting `kilnd` to run new
+root and child Runs through this adapter. The default is
+`deterministic-subprocess`. Existing approval resumes still use the subprocess
+path. This explicit fixture mode uses the synthetic account
+`pac_00000000000000000000000000`, fixed assistant text, and unknown usage with
+no estimated quantities. It does not connect to a provider account.
+
+The daemon creates a manifest with one runtime fixture instruction. It does not
+automatically copy Session or parent transcripts. Queued Run input is delivered
+in FIFO order and included in the next manifest before generation. New guidance
+prevents finalization until another generation consumes it. Interrupt input
+stops the active operation before the next generation. Partial chunks remain
+stored.
+
+The daemon claims the invocation before dispatch, publishes only committed
+Events, and consumes final usage before completing the Run. Cancellation stops
+the operation before recording terminal invocation state, waits for descendants,
+and retains incomplete assistant text. Provider errors and streams without a
+terminal update record unknown final usage and fail the native Run after all
+work is terminal. Storage failure stops execution and leaves the failure visible
+to shutdown handling.
 
 ### Durable model output
 
@@ -390,8 +412,8 @@ least one generation attempt exists. The failed Run and its state Event commit
 together. An already failed Run returns without another Event.
 
 An exact retry returns the existing Message without new Events, including after
-Run completion. Public append operations remain user-only. Native daemon
-dispatch and publication of these finalization Events remain pending.
+Run completion. Public append operations remain user-only. The deterministic
+native daemon mode publishes the committed finalization Events.
 
 ### Native usage observations
 

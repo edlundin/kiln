@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 kiln-core = { path = "../core" }
+kiln-providers = { path = "../providers" }
 kiln-infrastructure = { path = "../infrastructure" }
 kiln-server = { path = "../server" }
 kiln-protocol = { path = "../protocol" }

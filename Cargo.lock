@@ -826,6 +826,7 @@ dependencies = [
  "kiln-core",
  "kiln-infrastructure",
  "kiln-protocol",
+ "kiln-providers",
  "kiln-server",
  "reqwest",
  "rustix",

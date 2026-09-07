@@ -17,6 +17,8 @@ use kiln_server::{
 };
 use tokio::sync::{Mutex, Notify, oneshot, watch};
 
+mod native;
+
 struct ActiveRun {
     cancellation: Option<oneshot::Sender<()>>,
 }
@@ -32,6 +34,7 @@ struct ActiveRuns {
 pub(crate) struct RunService {
     runs: Arc<RunApplication<SqliteStore, UlidIdGenerator>>,
     executor: DeterministicSubprocessExecutor,
+    deterministic_model: bool,
     events: EventBroadcaster,
     commit_sequence: Arc<Mutex<()>>,
     active: Arc<ActiveRuns>,
@@ -51,6 +54,7 @@ impl RunService {
         Self {
             runs: Arc::new(runs),
             executor,
+            deterministic_model: false,
             events,
             commit_sequence: Arc::new(Mutex::new(())),
             active: Arc::new(ActiveRuns::default()),
@@ -58,6 +62,11 @@ impl RunService {
             artifacts,
             approval_changed: watch::channel(0).0,
         }
+    }
+
+    pub(crate) fn with_deterministic_model(mut self, enabled: bool) -> Self {
+        self.deterministic_model = enabled;
+        self
     }
 
     async fn validate_start(
@@ -181,6 +190,7 @@ impl RunService {
         let value = mutation.value.clone();
         let disposition = mutation.disposition;
         self.events.publish(mutation.events);
+        self.active.changed.notify_waiters();
         Ok(kiln_core::SendRunInputMutation::new(
             value,
             Vec::new(),
@@ -225,6 +235,9 @@ impl RunService {
         mut approval_revision: watch::Receiver<u64>,
         initialize: bool,
     ) -> Result<RunSnapshot, RunError> {
+        if self.deterministic_model && initialize {
+            return self.execute_native(run_id, cancellation).await;
+        }
         if cancellation.try_recv().is_ok() {
             return self.wait_for_cancelled_run(run_id).await;
         }

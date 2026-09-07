@@ -2,6 +2,14 @@
 
 ## 2026-09-08 — `feat`
 
+- Added deterministic native daemon execution selected explicitly with `KILN_RUN_EXECUTOR=deterministic-model`, using stored context and claims with durable output and usage persistence.
+- Wired assistant finalization, FIFO guidance, interrupt handling, and cancellation/failed output retention into the execution path.
+- The default subprocess executor remains unchanged.
+
+[Commit](pending)
+
+## 2026-09-08 — `feat`
+
 - Added the native Run failure boundary, atomically failing Running Runs without ToolCalls after generation attempts complete and descendants are terminal.
 - Duplicate failed requests now return the existing Run without creating new events.
 

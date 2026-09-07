@@ -29,6 +29,17 @@ async fn main() -> ExitCode {
         return status;
     }
 
+    let deterministic_model = match env::var("KILN_RUN_EXECUTOR") {
+        Ok(value) if value == "deterministic-model" => true,
+        Ok(value) if value == "deterministic-subprocess" => false,
+        Err(env::VarError::NotPresent) => false,
+        _ => {
+            eprintln!(
+                "kilnd: KILN_RUN_EXECUTOR must be deterministic-subprocess or deterministic-model"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let subprocess_outcome = match configured_subprocess_outcome() {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -91,7 +102,8 @@ async fn main() -> ExitCode {
         events.clone(),
         store,
         artifacts,
-    );
+    )
+    .with_deterministic_model(deterministic_model);
 
     let readiness = serde_json::json!({
         "event": "ready",

@@ -862,6 +862,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-providers"
+version = "0.1.0"
+dependencies = [
+ "kiln-core",
+]
+
+[[package]]
 name = "kiln-server"
 version = "0.1.0"
 dependencies = [

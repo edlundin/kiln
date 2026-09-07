@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Added the `kiln-providers` deterministic runtime adapter with exact `kiln_deterministic`/`deterministic_text` selection, configured text chunks and terminal outcome, and explicit synthetic counted usage and time.
+- Cancellation discards pending output and returns final unknown usage; the adapter adds no external dependency, login, network access, or daemon activation.
+- Native daemon orchestration and live adapters remain pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Added the core native provider port, issuing non-clone requests only after a fresh durable claim with verified stored context.
 - Added text, usage, and terminal update validation with typed errors; repeated and terminal claims do not dispatch.
 - Native daemon orchestration, persisted streamed assistant output, tool payloads, and live authentication/transport remain pending.

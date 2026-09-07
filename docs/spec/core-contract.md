@@ -314,6 +314,22 @@ network, secret store, tool executor, or retry policy.
 Daemon dispatch, durable streamed assistant output, tool-request payloads,
 provider accounts, authentication, and live provider adapters remain pending.
 
+The `kiln-providers` crate supplies an explicit deterministic adapter for this
+port. It accepts only provider `kiln_deterministic` and model
+`deterministic_text`. Its configuration supplies ordered text chunks, a terminal
+outcome, synthetic counted usage, completeness, and the observation time. It
+does not infer token counts from text, read a clock, resolve credentials, or
+make network requests. The adapter rejects empty chunks and invalid normalized
+terminal usage before it emits output.
+
+The deterministic operation emits its text chunks, one terminal update, then
+end-of-stream. Cancellation before the terminal update discards pending text
+and replaces the configured result with a cancelled outcome and final unknown
+usage with no quantities. It does not report configured success counts as
+observed cancellation usage. Repeated cancellation is safe, and cancellation
+after terminal delivery has no effect. The adapter is a library boundary and
+is not enabled in daemon Run execution.
+
 ### Native usage observations
 
 The internal usage boundary accepts normalized counted-unit updates for an

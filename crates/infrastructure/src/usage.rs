@@ -1,7 +1,9 @@
 use kiln_core::{
-    ProviderUsageMetadata, ProviderUsageUpdate, QuantityRelation, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageIdGenerator, UsageMutation, UsageMutationDisposition,
-    UsageObservation, UsageObservationId, UsageQuantity, UsageSource, UsageStore, UsageStoreError,
+    FinishModelInvocationWithUsage, ModelInvocationCompletionError, ModelInvocationCompletionIds,
+    ModelInvocationCompletionMutation, ModelInvocationCompletionStore, ProviderUsageMetadata,
+    ProviderUsageUpdate, QuantityRelation, UsageAccounting, UsageCompleteness, UsageFinality,
+    UsageIdGenerator, UsageMutation, UsageMutationDisposition, UsageObservation,
+    UsageObservationId, UsageQuantity, UsageSource, UsageStore, UsageStoreError,
     apply_usage_update,
 };
 use serde_json::{Value, json};
@@ -292,6 +294,16 @@ async fn load_observations(
     Ok(observations)
 }
 
+pub(super) async fn has_final_usage(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    invocation: &ModelInvocation,
+) -> Result<bool, UsageStoreError> {
+    Ok(load_observations(transaction, invocation)
+        .await?
+        .last()
+        .is_some_and(|observation| observation.is_terminal))
+}
+
 pub(super) async fn load_event_observation(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     observation_id: &str,
@@ -332,133 +344,18 @@ impl UsageStore for SqliteStore {
         observation_id: UsageObservationId,
         event_id: EventId,
     ) -> Result<UsageMutation, UsageStoreError> {
-        let metadata = update.metadata();
-        let observed_at = i64::try_from(metadata.observed_at_unix_ms)
-            .map_err(|_| UsageStoreError::InvalidUpdate)?;
         let mut connection = self.connection.lock().await;
         let mut transaction = connection
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|_| UsageStoreError::Unavailable)?;
-        let invocation =
-            dispatched_invocation(&mut transaction, &metadata.model_invocation_id).await?;
-        let previous = load_observations(&mut transaction, &invocation).await?;
-        if let Some(stored) = previous
-            .iter()
-            .find(|stored| stored.update.metadata().update_id == metadata.update_id)
-        {
-            if stored.update != *update {
-                return Err(UsageStoreError::IdempotencyConflict);
-            }
-            let value = stored.clone();
-            transaction
-                .commit()
-                .await
-                .map_err(|_| UsageStoreError::Unavailable)?;
-            return Ok(UsageMutation {
-                value,
-                events: Vec::new(),
-                disposition: UsageMutationDisposition::Duplicate,
-            });
-        }
-        if metadata.provider_account_id != *invocation.provider_account_id()
-            || metadata.work_id != *invocation.work_id()
-        {
-            return Err(UsageStoreError::AttributionMismatch);
-        }
-        let latest = previous.last();
-        let effective = apply_usage_update(
-            latest.map_or(&[], |latest| latest.quantities.as_slice()),
-            latest.is_some_and(|latest| latest.is_terminal),
-            update,
-        )
-        .map_err(|_| UsageStoreError::InvalidUpdate)?;
-        let revision = latest
-            .map_or(Some(1), |latest| latest.revision.checked_add(1))
-            .ok_or(UsageStoreError::InvalidUpdate)?;
-        let stored_revision =
-            i64::try_from(revision).map_err(|_| UsageStoreError::InvalidUpdate)?;
-        let (session_id, workspace_id) = attribution(&mut transaction, &invocation).await?;
-        let observation = UsageObservation {
-            observation_id,
-            model_invocation_id: invocation.invocation_id().clone(),
-            work_id: invocation.work_id().clone(),
-            provider_account_id: invocation.provider_account_id().clone(),
-            run_id: invocation.run_id().clone(),
-            session_id,
-            workspace_id,
-            requested_model: invocation.settings().model().clone(),
-            update: update.clone(),
-            revision,
-            supersedes: latest.map(|latest| latest.observation_id.clone()),
-            quantities: effective.quantities().to_vec(),
-            completeness: metadata.completeness,
-            is_terminal: effective.is_final(),
-        };
-        sqlx::query(
-            "INSERT INTO usage_observations (
-                observation_id, model_invocation_id, work_id, provider_account_id,
-                run_id, session_id, workspace_id, requested_model, update_id, update_json,
-                revision, supersedes, quantities_json, completeness, is_terminal,
-                observed_at_unix_ms
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(observation.observation_id.as_str())
-        .bind(observation.model_invocation_id.as_str())
-        .bind(observation.work_id.as_str())
-        .bind(observation.provider_account_id.as_str())
-        .bind(observation.run_id.as_str())
-        .bind(observation.session_id.as_str())
-        .bind(observation.workspace_id.as_str())
-        .bind(observation.requested_model.as_str())
-        .bind(&metadata.update_id)
-        .bind(update_json(update).to_string())
-        .bind(stored_revision)
-        .bind(
-            observation
-                .supersedes
-                .as_ref()
-                .map(UsageObservationId::as_str),
-        )
-        .bind(quantities_json(&observation.quantities).to_string())
-        .bind(observation.completeness.as_str())
-        .bind(observation.is_terminal)
-        .bind(observed_at)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| UsageStoreError::Unavailable)?;
-        let result = sqlx::query(
-            "INSERT INTO session_events (
-                event_id, session_id, event_type, run_id, model_invocation_id, usage_observation_id
-             ) VALUES (?, ?, 'usage.observed', ?, ?, ?)",
-        )
-        .bind(event_id.as_str())
-        .bind(observation.session_id.as_str())
-        .bind(observation.run_id.as_str())
-        .bind(observation.model_invocation_id.as_str())
-        .bind(observation.observation_id.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| UsageStoreError::Unavailable)?;
-        let cursor = committed_cursor(result.last_insert_rowid())
-            .map_err(|_| UsageStoreError::IntegrityViolation)?;
-        let event = SessionEvent::usage_observed(event_id, observation.clone());
-        let stored = StoredSessionEvent::from_parts(
-            event.event_id().clone(),
-            event.session_id().clone(),
-            cursor,
-            event.payload().clone(),
-        )
-        .map_err(|_| UsageStoreError::IntegrityViolation)?;
+        let mutation =
+            record_usage_in_transaction(&mut transaction, update, observation_id, event_id).await?;
         transaction
             .commit()
             .await
             .map_err(|_| UsageStoreError::Unavailable)?;
-        Ok(UsageMutation {
-            value: observation,
-            events: vec![stored],
-            disposition: UsageMutationDisposition::Applied,
-        })
+        Ok(mutation)
     }
 
     async fn list_usage_observations(
@@ -484,4 +381,182 @@ impl UsageStore for SqliteStore {
             .map_err(|_| UsageStoreError::Unavailable)?;
         Ok(observations)
     }
+}
+
+impl ModelInvocationCompletionStore for SqliteStore {
+    async fn finish_model_invocation_with_usage(
+        &self,
+        command: &FinishModelInvocationWithUsage,
+        ids: ModelInvocationCompletionIds,
+    ) -> Result<ModelInvocationCompletionMutation, ModelInvocationCompletionError> {
+        if command.usage.metadata().model_invocation_id != *command.invocation.invocation_id() {
+            return Err(ModelInvocationCompletionError::Usage(
+                UsageStoreError::AttributionMismatch,
+            ));
+        }
+        if command.usage.metadata().finality != UsageFinality::Final {
+            return Err(ModelInvocationCompletionError::Usage(
+                UsageStoreError::InvalidUpdate,
+            ));
+        }
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| {
+                ModelInvocationCompletionError::Invocation(ModelInvocationStoreError::Unavailable)
+            })?;
+        let usage = record_usage_in_transaction(
+            &mut transaction,
+            &command.usage,
+            ids.usage_observation_id,
+            ids.usage_event_id,
+        )
+        .await
+        .map_err(ModelInvocationCompletionError::Usage)?;
+        let invocation = finish_model_invocation_in_transaction(
+            &mut transaction,
+            &command.invocation,
+            command.outcome,
+            ids.invocation_event_id,
+        )
+        .await
+        .map_err(ModelInvocationCompletionError::Invocation)?;
+        let mut events = usage.events;
+        events.extend(invocation.events);
+        let disposition = if events.is_empty() {
+            ModelInvocationMutationDisposition::Duplicate
+        } else {
+            ModelInvocationMutationDisposition::Applied
+        };
+        transaction.commit().await.map_err(|_| {
+            ModelInvocationCompletionError::Invocation(ModelInvocationStoreError::Unavailable)
+        })?;
+        Ok(ModelInvocationCompletionMutation {
+            invocation: invocation.value,
+            usage: usage.value,
+            events,
+            disposition,
+        })
+    }
+}
+
+async fn record_usage_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    update: &ProviderUsageUpdate,
+    observation_id: UsageObservationId,
+    event_id: EventId,
+) -> Result<UsageMutation, UsageStoreError> {
+    let metadata = update.metadata();
+    let observed_at =
+        i64::try_from(metadata.observed_at_unix_ms).map_err(|_| UsageStoreError::InvalidUpdate)?;
+    let invocation = dispatched_invocation(transaction, &metadata.model_invocation_id).await?;
+    let previous = load_observations(transaction, &invocation).await?;
+    if let Some(stored) = previous
+        .iter()
+        .find(|stored| stored.update.metadata().update_id == metadata.update_id)
+    {
+        if stored.update != *update {
+            return Err(UsageStoreError::IdempotencyConflict);
+        }
+        let value = stored.clone();
+        return Ok(UsageMutation {
+            value,
+            events: Vec::new(),
+            disposition: UsageMutationDisposition::Duplicate,
+        });
+    }
+    if metadata.provider_account_id != *invocation.provider_account_id()
+        || metadata.work_id != *invocation.work_id()
+    {
+        return Err(UsageStoreError::AttributionMismatch);
+    }
+    let latest = previous.last();
+    let effective = apply_usage_update(
+        latest.map_or(&[], |latest| latest.quantities.as_slice()),
+        latest.is_some_and(|latest| latest.is_terminal),
+        update,
+    )
+    .map_err(|_| UsageStoreError::InvalidUpdate)?;
+    let revision = latest
+        .map_or(Some(1), |latest| latest.revision.checked_add(1))
+        .ok_or(UsageStoreError::InvalidUpdate)?;
+    let stored_revision = i64::try_from(revision).map_err(|_| UsageStoreError::InvalidUpdate)?;
+    let (session_id, workspace_id) = attribution(transaction, &invocation).await?;
+    let observation = UsageObservation {
+        observation_id,
+        model_invocation_id: invocation.invocation_id().clone(),
+        work_id: invocation.work_id().clone(),
+        provider_account_id: invocation.provider_account_id().clone(),
+        run_id: invocation.run_id().clone(),
+        session_id,
+        workspace_id,
+        requested_model: invocation.settings().model().clone(),
+        update: update.clone(),
+        revision,
+        supersedes: latest.map(|latest| latest.observation_id.clone()),
+        quantities: effective.quantities().to_vec(),
+        completeness: metadata.completeness,
+        is_terminal: effective.is_final(),
+    };
+    sqlx::query(
+        "INSERT INTO usage_observations (
+            observation_id, model_invocation_id, work_id, provider_account_id,
+            run_id, session_id, workspace_id, requested_model, update_id, update_json,
+            revision, supersedes, quantities_json, completeness, is_terminal,
+            observed_at_unix_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(observation.observation_id.as_str())
+    .bind(observation.model_invocation_id.as_str())
+    .bind(observation.work_id.as_str())
+    .bind(observation.provider_account_id.as_str())
+    .bind(observation.run_id.as_str())
+    .bind(observation.session_id.as_str())
+    .bind(observation.workspace_id.as_str())
+    .bind(observation.requested_model.as_str())
+    .bind(&metadata.update_id)
+    .bind(update_json(update).to_string())
+    .bind(stored_revision)
+    .bind(
+        observation
+            .supersedes
+            .as_ref()
+            .map(UsageObservationId::as_str),
+    )
+    .bind(quantities_json(&observation.quantities).to_string())
+    .bind(observation.completeness.as_str())
+    .bind(observation.is_terminal)
+    .bind(observed_at)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| UsageStoreError::Unavailable)?;
+    let result = sqlx::query(
+        "INSERT INTO session_events (
+            event_id, session_id, event_type, run_id, model_invocation_id, usage_observation_id
+         ) VALUES (?, ?, 'usage.observed', ?, ?, ?)",
+    )
+    .bind(event_id.as_str())
+    .bind(observation.session_id.as_str())
+    .bind(observation.run_id.as_str())
+    .bind(observation.model_invocation_id.as_str())
+    .bind(observation.observation_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| UsageStoreError::Unavailable)?;
+    let cursor = committed_cursor(result.last_insert_rowid())
+        .map_err(|_| UsageStoreError::IntegrityViolation)?;
+    let event = SessionEvent::usage_observed(event_id, observation.clone());
+    let stored = StoredSessionEvent::from_parts(
+        event.event_id().clone(),
+        event.session_id().clone(),
+        cursor,
+        event.payload().clone(),
+    )
+    .map_err(|_| UsageStoreError::IntegrityViolation)?;
+    Ok(UsageMutation {
+        value: observation,
+        events: vec![stored],
+        disposition: UsageMutationDisposition::Applied,
+    })
 }

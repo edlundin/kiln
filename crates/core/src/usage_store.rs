@@ -3,8 +3,10 @@ use std::future::Future;
 use ulid::Ulid;
 
 use crate::{
-    EventId, InvalidKilnId, ModelInvocationId, ModelWorkId, ProviderAccountId, ProviderUsageUpdate,
-    RunId, SessionId, StoredSessionEvent, UsageCompleteness, UsageQuantity, WorkspaceId,
+    EventId, InvalidKilnId, ModelInvocation, ModelInvocationId, ModelInvocationMutationDisposition,
+    ModelInvocationOutcome, ModelInvocationStoreError, ModelWorkId, ProviderAccountId,
+    ProviderUsageUpdate, RunId, SessionId, StoredSessionEvent, UsageCompleteness, UsageQuantity,
+    WorkspaceId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,6 +68,44 @@ pub struct UsageMutation {
     pub disposition: UsageMutationDisposition,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinishModelInvocationWithUsage {
+    pub invocation: ModelInvocation,
+    pub outcome: ModelInvocationOutcome,
+    pub usage: ProviderUsageUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocationCompletionIds {
+    pub usage_observation_id: UsageObservationId,
+    pub usage_event_id: EventId,
+    pub invocation_event_id: EventId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInvocationCompletionError {
+    Invocation(ModelInvocationStoreError),
+    Usage(UsageStoreError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInvocationCompletionMutation {
+    pub invocation: ModelInvocation,
+    pub usage: UsageObservation,
+    pub events: Vec<StoredSessionEvent>,
+    pub disposition: ModelInvocationMutationDisposition,
+}
+
+pub trait ModelInvocationCompletionStore: Send + Sync {
+    fn finish_model_invocation_with_usage(
+        &self,
+        command: &FinishModelInvocationWithUsage,
+        ids: ModelInvocationCompletionIds,
+    ) -> impl Future<
+        Output = Result<ModelInvocationCompletionMutation, ModelInvocationCompletionError>,
+    > + Send;
+}
+
 pub trait UsageIdGenerator: Send + Sync {
     fn usage_observation_id(&self) -> UsageObservationId;
     fn event_id(&self) -> EventId;
@@ -116,6 +156,24 @@ impl<S: UsageStore, I: UsageIdGenerator> UsageApplication<S, I> {
     ) -> Result<Vec<UsageObservation>, UsageStoreError> {
         self.store
             .list_usage_observations(&model_invocation_id)
+            .await
+    }
+}
+
+impl<S: ModelInvocationCompletionStore, I: UsageIdGenerator> UsageApplication<S, I> {
+    pub async fn finish_model_invocation_with_usage(
+        &self,
+        command: FinishModelInvocationWithUsage,
+    ) -> Result<ModelInvocationCompletionMutation, ModelInvocationCompletionError> {
+        self.store
+            .finish_model_invocation_with_usage(
+                &command,
+                ModelInvocationCompletionIds {
+                    usage_observation_id: self.ids.usage_observation_id(),
+                    usage_event_id: self.ids.event_id(),
+                    invocation_event_id: self.ids.event_id(),
+                },
+            )
             .await
     }
 }

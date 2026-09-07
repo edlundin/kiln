@@ -2,6 +2,14 @@
 
 ## 2026-09-07 — `feat`
 
+- Added atomic final usage and invocation outcome recording, with the usage event emitted before the terminal event; errors roll both back together and retries remain idempotent.
+- Separate completion now requires final usage for dispatched attempts, while pending cancellation and existing terminal retries retain their behavior.
+- Provider orchestration and automatic unknown terminal observations remain pending.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Added normalized counted-unit provider usage updates validated against the dispatched invocation, account, and logical work.
 - Added durable per-attempt immutable usage revisions with deduplicated delta and cumulative updates, final and correction handling, safe replay metadata, and canonical cached/reasoning subsets that preserve missing versus zero values.
 - Explicit provider orchestration, automatic terminal observations, aggregate endpoints, valuation, and allowance remain pending.

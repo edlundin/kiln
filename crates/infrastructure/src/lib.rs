@@ -3372,81 +3372,99 @@ impl ModelInvocationStore for SqliteStore {
     ) -> Result<ModelInvocationMutation, ModelInvocationStoreError> {
         let mut connection = self.connection.lock().await;
         let mut transaction = connection
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|_| ModelInvocationStoreError::Unavailable)?;
-        let current = load_model_invocation(&mut transaction, invocation.invocation_id())
-            .await?
-            .ok_or(ModelInvocationStoreError::ModelInvocationNotFound)?;
-        if !model_invocation_matches(&current, invocation) {
-            return Err(ModelInvocationStoreError::InvalidTransition);
-        }
-        if current.state().is_terminal() {
-            if current.outcome() == Some(outcome) {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| ModelInvocationStoreError::Unavailable)?;
-                return Ok(ModelInvocationMutation::new(
-                    current,
-                    Vec::new(),
-                    ModelInvocationMutationDisposition::Duplicate,
-                ));
-            }
-            return Err(ModelInvocationStoreError::IdempotencyConflict);
-        }
-        let pending_cancellation = current.state() == ModelInvocationState::Pending
-            && invocation.state() == ModelInvocationState::Pending
-            && outcome.state() == ModelInvocationState::Cancelled;
-        if !pending_cancellation
-            && (current.state() != ModelInvocationState::InFlight
-                || invocation.state() != ModelInvocationState::InFlight)
-        {
-            return Err(ModelInvocationStoreError::InvalidTransition);
-        }
-        let run = load_run(&mut transaction, current.run_id())
-            .await
-            .map_err(map_run_store_error)?
-            .ok_or(ModelInvocationStoreError::RunNotFound)?;
-        let next = invocation
-            .transition(outcome.state(), Some(outcome))
-            .map_err(|_| ModelInvocationStoreError::InvalidTransition)?;
-        sqlx::query(
-            "UPDATE model_invocations
-             SET state = ?, completion_kind = ?, terminal_reason = ?
-             WHERE model_invocation_id = ? AND state = ?",
-        )
-        .bind(next.state().as_str())
-        .bind(
-            next.outcome()
-                .and_then(|outcome| outcome.completion_kind())
-                .map(|kind| kind.as_str()),
-        )
-        .bind(
-            next.outcome()
-                .map(|outcome| outcome.terminal_reason().as_str()),
-        )
-        .bind(next.invocation_id().as_str())
-        .bind(current.state().as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| ModelInvocationStoreError::Unavailable)?;
-        let event = SessionEvent::model_invocation_state_changed(
-            event_id,
-            run.session_id().clone(),
-            next.clone(),
-        );
-        let stored_event = insert_model_invocation_event(&mut transaction, &event).await?;
+        let mutation =
+            finish_model_invocation_in_transaction(&mut transaction, invocation, outcome, event_id)
+                .await?;
         transaction
             .commit()
             .await
             .map_err(|_| ModelInvocationStoreError::Unavailable)?;
-        Ok(ModelInvocationMutation::new(
-            next,
-            vec![stored_event],
-            ModelInvocationMutationDisposition::Applied,
-        ))
+        Ok(mutation)
     }
+}
+
+async fn finish_model_invocation_in_transaction(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    invocation: &ModelInvocation,
+    outcome: ModelInvocationOutcome,
+    event_id: EventId,
+) -> Result<ModelInvocationMutation, ModelInvocationStoreError> {
+    let current = load_model_invocation(transaction, invocation.invocation_id())
+        .await?
+        .ok_or(ModelInvocationStoreError::ModelInvocationNotFound)?;
+    if !model_invocation_matches(&current, invocation) {
+        return Err(ModelInvocationStoreError::InvalidTransition);
+    }
+    if current.state().is_terminal() {
+        if current.outcome() == Some(outcome) {
+            return Ok(ModelInvocationMutation::new(
+                current,
+                Vec::new(),
+                ModelInvocationMutationDisposition::Duplicate,
+            ));
+        }
+        return Err(ModelInvocationStoreError::IdempotencyConflict);
+    }
+    let pending_cancellation = current.state() == ModelInvocationState::Pending
+        && invocation.state() == ModelInvocationState::Pending
+        && outcome.state() == ModelInvocationState::Cancelled;
+    if !pending_cancellation
+        && (current.state() != ModelInvocationState::InFlight
+            || invocation.state() != ModelInvocationState::InFlight)
+    {
+        return Err(ModelInvocationStoreError::InvalidTransition);
+    }
+    if !pending_cancellation
+        && !usage::has_final_usage(transaction, &current)
+            .await
+            .map_err(|error| match error {
+                kiln_core::UsageStoreError::Unavailable => ModelInvocationStoreError::Unavailable,
+                _ => ModelInvocationStoreError::IntegrityViolation,
+            })?
+    {
+        return Err(ModelInvocationStoreError::FinalUsageRequired);
+    }
+    let run = load_run(transaction, current.run_id())
+        .await
+        .map_err(map_run_store_error)?
+        .ok_or(ModelInvocationStoreError::RunNotFound)?;
+    let next = invocation
+        .transition(outcome.state(), Some(outcome))
+        .map_err(|_| ModelInvocationStoreError::InvalidTransition)?;
+    sqlx::query(
+        "UPDATE model_invocations
+         SET state = ?, completion_kind = ?, terminal_reason = ?
+         WHERE model_invocation_id = ? AND state = ?",
+    )
+    .bind(next.state().as_str())
+    .bind(
+        next.outcome()
+            .and_then(|outcome| outcome.completion_kind())
+            .map(|kind| kind.as_str()),
+    )
+    .bind(
+        next.outcome()
+            .map(|outcome| outcome.terminal_reason().as_str()),
+    )
+    .bind(next.invocation_id().as_str())
+    .bind(current.state().as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| ModelInvocationStoreError::Unavailable)?;
+    let event = SessionEvent::model_invocation_state_changed(
+        event_id,
+        run.session_id().clone(),
+        next.clone(),
+    );
+    let stored_event = insert_model_invocation_event(transaction, &event).await?;
+    Ok(ModelInvocationMutation::new(
+        next,
+        vec![stored_event],
+        ModelInvocationMutationDisposition::Applied,
+    ))
 }
 
 impl ContextManifestStore for SqliteStore {

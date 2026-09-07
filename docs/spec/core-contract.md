@@ -325,11 +325,23 @@ The update DTO has no fields for prompt text, output text, headers, cookies,
 or provider request and response bodies. Optional request, resolved-model, and
 service-tier references must be normalized identifiers.
 
-Usage finality is separate from invocation lifecycle state. The provider
-orchestrator must supply final, partial, or unknown usage and coordinate it
-with invocation completion. Automatic terminal observations and that
-orchestration remain pending. This boundary permits late usage for an already
-terminal invocation only if a durable dispatch transition exists.
+Usage finality is separate from invocation lifecycle state. The internal
+`finish_model_invocation_with_usage` operation commits a final usage update and
+the invocation outcome in one transaction. It accepts `final` usage with
+explicit completeness, including partial or unknown quantities. It does not
+accept a partial update or correction as the completion command. When both Events are new, the usage
+Event precedes the invocation terminal Event. If either update fails, neither
+is committed. Matching retries return the original usage revision and terminal
+invocation without new Events, including after a later usage correction.
+
+A dispatched invocation cannot enter a terminal state through the separate
+finish operation unless its latest usage observation is final. Pending
+cancellation requires no usage because dispatch has not occurred. Existing
+terminal records remain readable, and exact terminal retries remain valid.
+This boundary permits late usage for an already terminal invocation only if a
+durable dispatch transition exists. Automatic terminal observations and
+provider orchestration remain pending; the caller supplies the normalized
+final update and its observation time explicitly.
 
 ### Tools, permissions, and approvals
 

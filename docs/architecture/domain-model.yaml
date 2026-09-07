@@ -83,6 +83,7 @@ entities:
       - retries_create_distinct_attempts_with_same_work_identity
       - active_invocations_prevent_Run_terminal_transition
       - metadata_events_commit_with_state_changes
+      - dispatched_attempt_completion_requires_final_usage
     initial_slice: internal_durable_attempts_without_provider_dispatch
   UsageObservation:
     required:
@@ -109,6 +110,7 @@ entities:
       - subsets_do_not_inflate_additive_totals
       - missing_quantities_differ_from_observed_zero
       - metadata_event_commits_with_observation
+      - final_usage_and_invocation_outcome_can_commit_atomically
     initial_slice: internal_durable_counted_units_without_valuation_or_query_API
   Run:
     required:

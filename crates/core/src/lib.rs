@@ -3673,6 +3673,7 @@ pub enum ModelInvocationError {
     IdempotencyKeyRequired,
     IdempotencyConflict,
     InvalidTransition,
+    FinalUsageRequired,
     IntegrityViolation,
     StoreUnavailable,
 }
@@ -3691,6 +3692,7 @@ pub enum ModelInvocationStoreError {
     IdempotencyKeyRequired,
     IdempotencyConflict,
     InvalidTransition,
+    FinalUsageRequired,
     IntegrityViolation,
     Unavailable,
 }
@@ -4377,6 +4379,7 @@ fn map_model_invocation_store_error(error: ModelInvocationStoreError) -> ModelIn
         }
         ModelInvocationStoreError::IdempotencyConflict => ModelInvocationError::IdempotencyConflict,
         ModelInvocationStoreError::InvalidTransition => ModelInvocationError::InvalidTransition,
+        ModelInvocationStoreError::FinalUsageRequired => ModelInvocationError::FinalUsageRequired,
         ModelInvocationStoreError::IntegrityViolation => ModelInvocationError::IntegrityViolation,
         ModelInvocationStoreError::Unavailable => ModelInvocationError::StoreUnavailable,
     }

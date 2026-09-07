@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.15.0";
+pub const PROTOCOL_VERSION: &str = "0.16.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -619,9 +619,34 @@ pub struct ModelInvocationEventResponse {
     pub status: ModelInvocationStatus,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCompleteness {
+    Complete,
+    Partial,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UsageObservedResponse {
+    pub usage_observation_id: String,
+    pub model_invocation_id: String,
+    pub work_id: String,
+    pub run_id: String,
+    pub provider_account_id: String,
+    pub revision: u64,
+    #[schemars(with = "RequiredNullableString")]
+    pub supersedes_usage_observation_id: Option<String>,
+    pub completeness: UsageCompleteness,
+    pub is_terminal: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum SessionEventDataResponse {
+    #[serde(rename = "usage.observed")]
+    UsageObserved(UsageObservedResponse),
     #[serde(rename = "context.manifest_created")]
     ContextManifestCreated(ContextManifestCreatedResponse),
     #[serde(rename = "model_invocation.created")]

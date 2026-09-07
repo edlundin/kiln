@@ -1578,6 +1578,14 @@
           ],
           "type": "string"
         },
+        "UsageCompleteness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "WorkspaceScopeResponse": {
           "properties": {
             "relative_directory": {
@@ -1596,6 +1604,60 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "completeness": {
+              "$ref": "#/$defs/UsageCompleteness"
+            },
+            "is_terminal": {
+              "type": "boolean"
+            },
+            "model_invocation_id": {
+              "type": "string"
+            },
+            "provider_account_id": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "supersedes_usage_observation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "usage.observed",
+              "type": "string"
+            },
+            "usage_observation_id": {
+              "type": "string"
+            },
+            "work_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "usage_observation_id",
+            "model_invocation_id",
+            "work_id",
+            "run_id",
+            "provider_account_id",
+            "revision",
+            "supersedes_usage_observation_id",
+            "completeness",
+            "is_terminal"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "properties": {
@@ -2450,6 +2512,60 @@
             {
               "additionalProperties": false,
               "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/UsageCompleteness"
+                },
+                "is_terminal": {
+                  "type": "boolean"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "supersedes_usage_observation_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "usage.observed",
+                  "type": "string"
+                },
+                "usage_observation_id": {
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "usage_observation_id",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "provider_account_id",
+                "revision",
+                "supersedes_usage_observation_id",
+                "completeness",
+                "is_terminal"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
                 "content_hash": {
                   "type": "string"
                 },
@@ -3229,6 +3345,14 @@
           ],
           "type": "string"
         },
+        "UsageCompleteness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "WorkspaceScopeResponse": {
           "properties": {
             "relative_directory": {
@@ -3502,6 +3626,60 @@
         },
         "SessionEventDataResponse": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/UsageCompleteness"
+                },
+                "is_terminal": {
+                  "type": "boolean"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "supersedes_usage_observation_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "usage.observed",
+                  "type": "string"
+                },
+                "usage_observation_id": {
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "usage_observation_id",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "provider_account_id",
+                "revision",
+                "supersedes_usage_observation_id",
+                "completeness",
+                "is_terminal"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -4304,6 +4482,14 @@
           "enum": [
             "stdout",
             "stderr"
+          ],
+          "type": "string"
+        },
+        "UsageCompleteness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
           ],
           "type": "string"
         },
@@ -5034,6 +5220,77 @@
       "title": "UpdateTaskRequest",
       "type": "object"
     },
+    "UsageCompleteness": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "complete",
+        "partial",
+        "unknown"
+      ],
+      "title": "UsageCompleteness",
+      "type": "string"
+    },
+    "UsageObservedResponse": {
+      "$defs": {
+        "UsageCompleteness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/UsageCompleteness"
+        },
+        "is_terminal": {
+          "type": "boolean"
+        },
+        "model_invocation_id": {
+          "type": "string"
+        },
+        "provider_account_id": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "supersedes_usage_observation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage_observation_id": {
+          "type": "string"
+        },
+        "work_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "usage_observation_id",
+        "model_invocation_id",
+        "work_id",
+        "run_id",
+        "provider_account_id",
+        "revision",
+        "supersedes_usage_observation_id",
+        "completeness",
+        "is_terminal"
+      ],
+      "title": "UsageObservedResponse",
+      "type": "object"
+    },
     "WebSocketFrame": {
       "$defs": {
         "ApprovalPolicy": {
@@ -5267,6 +5524,60 @@
         },
         "SessionEventDataResponse": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "completeness": {
+                  "$ref": "#/$defs/UsageCompleteness"
+                },
+                "is_terminal": {
+                  "type": "boolean"
+                },
+                "model_invocation_id": {
+                  "type": "string"
+                },
+                "provider_account_id": {
+                  "type": "string"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "run_id": {
+                  "type": "string"
+                },
+                "supersedes_usage_observation_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "usage.observed",
+                  "type": "string"
+                },
+                "usage_observation_id": {
+                  "type": "string"
+                },
+                "work_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "usage_observation_id",
+                "model_invocation_id",
+                "work_id",
+                "run_id",
+                "provider_account_id",
+                "revision",
+                "supersedes_usage_observation_id",
+                "completeness",
+                "is_terminal"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -6072,6 +6383,14 @@
           ],
           "type": "string"
         },
+        "UsageCompleteness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "type": "string"
+        },
         "WorkspaceScopeResponse": {
           "properties": {
             "relative_directory": {
@@ -6294,7 +6613,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.15.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.16.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

@@ -2,6 +2,13 @@
 
 ## 2026-09-07 — `feat`
 
+- Defined protocol `0.16.0` metadata-only `usage.observed` events identifying the immutable observation revision, physical invocation attempt, logical work, account, completeness, and terminal status.
+- Updated the generated JSON Schema, TypeScript, and OpenAPI definitions.
+
+[Commit](pending)
+
+## 2026-09-07 — `feat`
+
 - Added internal durable ModelInvocation attempt records with verified same-Run context manifests, immutable settings, guarded queued Run claims, distinct retry attempts with stable work identity, and replayed metadata events.
 - Added Run cancellation and terminal guards, including cancellation of undispatched pending attempts.
 - Provider transport, streaming, usage accounting, and automatic in-flight restart reconciliation remain pending.

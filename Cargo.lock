@@ -811,6 +811,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "kiln-protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
 name = "kiln-core"
 version = "0.1.0"
 dependencies = [

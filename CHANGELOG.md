@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-12 — `feat`
+
+- Added shared kiln-client HTTP and WebSocket transport for EDL-249, with loopback bearer authentication, protocol negotiation, session and Run operations, and artifact downloads.
+- Child creation is idempotent; retries, replay, and client operations guidance are included.
+- HTTP redirects and proxies are disabled to keep the local credential on the loopback endpoint.
+
+[Commit](pending)
+
 ## 2026-09-08 — `feat`
 
 - Added an exclusive data-directory lock before store open; startup reconciles known deterministic fixture attempts without redispatch, preserving final usage and counts.

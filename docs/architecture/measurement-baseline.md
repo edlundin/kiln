@@ -62,3 +62,7 @@ These values make the first slice repeatable. They are test-fixture limits, not 
 | 100 polling attempts at 20 ms in API tests | Bound asynchronous fixture waits at two seconds while keeping tests responsive. |
 | 5 seconds | Bound the EDL-216 fixture PID, WebSocket, and polled shutdown waits above the measured 0.65-second scenario; synchronous daemon startup is not preemptible. |
 | 16,777,216-byte API test response cap | Bounds test-body allocation above the deterministic large artifact while allowing full artifact retrieval. |
+
+## EDL-216 current verification
+
+The EDL-216 values dated 2026-09-04 in this baseline are historical and remain unchanged. The current EDL-216 evidence dated 2026-09-12 is recorded in [docs/learning/edl-216.md](../learning/edl-216.md#current-verification--2026-09-12).

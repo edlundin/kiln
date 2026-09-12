@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-12 — `test`
+
+- Completed EDL-216's repeatable real-daemon vertical-slice proof across path rejection, approval, reconnect/replay, restart, artifacts, cancellation, and recovery.
+- Recorded current build and runtime measurements, and documented the existing child-tree stall for EDL-287 follow-up.
+
+EDL-216: https://linear.app/edlundin/issue/EDL-216
+
+[Commit](pending)
+
 ## 2026-09-12 — `fix`
 
 - Fixed EDL-249 subprocess completion, failure, preflight failure, and approval denial so they wait for non-terminal descendants outside the commit lock.

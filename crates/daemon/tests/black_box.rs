@@ -279,7 +279,13 @@ impl RunSession {
 
 fn event_kind(event: &SessionEventResponse) -> &'static str {
     match &event.event {
+        SessionEventDataResponse::ModelOutputRecorded(_) => "model_invocation.output",
+        SessionEventDataResponse::UsageObserved(_) => "usage.observed",
         SessionEventDataResponse::ContextManifestCreated(_) => "context.manifest_created",
+        SessionEventDataResponse::ModelInvocationCreated(_) => "model_invocation.created",
+        SessionEventDataResponse::ModelInvocationStateChanged(_) => {
+            "model_invocation.state_changed"
+        }
         SessionEventDataResponse::SessionCreated { .. } => "session.created",
         SessionEventDataResponse::MessageAppended { .. } => "message.appended",
         SessionEventDataResponse::TaskCreated { .. } => "task.created",
@@ -308,6 +314,12 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
 
 fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> bool {
     match &event.event {
+        SessionEventDataResponse::ModelOutputRecorded(output) => output.run_id == expected_run_id,
+        SessionEventDataResponse::UsageObserved(usage) => usage.run_id == expected_run_id,
+        SessionEventDataResponse::ModelInvocationCreated(invocation)
+        | SessionEventDataResponse::ModelInvocationStateChanged(invocation) => {
+            invocation.run_id == expected_run_id
+        }
         SessionEventDataResponse::ContextManifestCreated(manifest) => {
             manifest.run_id == expected_run_id
         }
@@ -3887,6 +3899,19 @@ async fn complete_first_vertical_slice() {
         workspace_root_id: workspace.roots[0].workspace_root_id.clone(),
         relative_directory: ".".to_owned(),
     };
+    let mut out_of_scope_request = run_request.clone();
+    out_of_scope_request.relative_directory = "../outside".to_owned();
+    assert_problem(
+        http.post(format!("http://{}{}", daemon.address, start_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-out-of-scope")
+            .json(&out_of_scope_request)
+            .send()
+            .await
+            .expect("vertical-slice out-of-scope response"),
+        StatusCode::BAD_REQUEST,
+        error_code::PATH_OUTSIDE_WORKSPACE_ROOT,
+    )
+    .await;
     let response = http
         .post(format!("http://{}{}", daemon.address, start_path))
         .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-artifact")
@@ -3916,6 +3941,86 @@ async fn complete_first_vertical_slice() {
     assert!(
         !approval_pid_file.exists(),
         "Ask policy must not execute before approval"
+    );
+    let child_path = RUN_CHILDREN_PATH.replace("{parent_run_id}", &queued.run_id);
+    let child_request = StartChildRunRequest {
+        approval_policy: ApprovalPolicy::Ask,
+        workspace_root_id: workspace.roots[0].workspace_root_id.clone(),
+        relative_directory: ".".to_owned(),
+        user_input_mode: RunInputMode::ReadOnly,
+        task_id: None,
+    };
+    let response = http
+        .post(format!("http://{}{}", daemon.address, child_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-reject")
+        .json(&child_request)
+        .send()
+        .await
+        .expect("vertical-slice rejected child response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let rejected_child: RunResponse = response
+        .json()
+        .await
+        .expect("vertical-slice rejected child JSON");
+    assert_eq!(
+        rejected_child.parent_run_id.as_deref(),
+        Some(queued.run_id.as_str())
+    );
+    receive_run_events(&mut socket, &rejected_child.run_id, RunState::WaitingForApproval).await;
+    let child_waiting = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            RUN_PATH.replace("{run_id}", &rejected_child.run_id)
+        ))
+        .send()
+        .await
+        .expect("vertical-slice rejected child state response")
+        .json::<RunResponse>()
+        .await
+        .expect("vertical-slice rejected child state JSON");
+    assert_eq!(child_waiting.state, RunState::WaitingForApproval);
+    let child_approval_path = TOOL_CALL_APPROVAL_PATH.replace(
+        "{tool_call_id}",
+        &child_waiting.tool_calls[0].tool_call_id,
+    );
+    let response = http
+        .post(format!("http://{}{}", daemon.address, child_approval_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-reject-decision")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Rejected,
+        })
+        .send()
+        .await
+        .expect("vertical-slice rejection response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let rejected_child: RunResponse = response
+        .json()
+        .await
+        .expect("vertical-slice rejection JSON");
+    assert_eq!(rejected_child.state, RunState::Running);
+    assert_eq!(rejected_child.approvals[0].state, ApprovalState::Rejected);
+    assert_eq!(rejected_child.tool_calls[0].state, ToolCallState::Denied);
+    let rejection_events =
+        receive_run_events(&mut socket, &rejected_child.run_id, RunState::Failed).await;
+    assert!(rejection_events.iter().any(|event| {
+        matches!(
+            &event.event,
+            SessionEventDataResponse::ApprovalDecided { approval }
+                if approval.run_id == rejected_child.run_id
+                    && approval.state == ApprovalState::Rejected
+        )
+    }));
+    assert!(rejection_events.iter().any(|event| {
+        matches!(
+            &event.event,
+            SessionEventDataResponse::ToolCallDenied { tool_call }
+                if tool_call.run_id == rejected_child.run_id
+        )
+    }));
+    assert!(
+        !approval_pid_file.exists(),
+        "rejected child must not execute before approval"
     );
     let replay_after = waiting_events[0].cursor.clone();
     let waiting: RunResponse = http

@@ -2,11 +2,19 @@
 
 ## 2026-09-12 — `feat`
 
+- Added native GPUI connection and Session restore for EDL-249, with root conversation and approvals.
+- Added a temporary hierarchical Run drawer, separate child guidance drafts with exact retries, durable status and activity attribution, and Task progress.
+- Escape returns to the root composer.
+
+[Commit](pending)
+
+## 2026-09-12 — `feat`
+
 - Added shared kiln-client HTTP and WebSocket transport for EDL-249, with loopback bearer authentication, protocol negotiation, session and Run operations, and artifact downloads.
 - Child creation is idempotent; retries, replay, and client operations guidance are included.
 - HTTP redirects and proxies are disabled to keep the local credential on the loopback endpoint.
 
-[Commit](pending)
+[Commit](../../commit/adc86368a7dd0be2022660f74190f16520bf06d1)
 
 ## 2026-09-08 — `feat`
 

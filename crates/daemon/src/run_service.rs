@@ -2,9 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use kiln_core::{
     ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, ModelInvocationApplication,
-    ModelInvocationOutcome, ModelInvocationState, RunApplication, RunError, RunId, RunInputMode,
-    RunMutation, RunSnapshot, RunState, RunStore, SendRunInput, SessionId, SessionStore,
-    StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
+    ModelInvocationOutcome, ModelInvocationState, ReactToRunActivity, RunApplication, RunError,
+    RunId, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, SendRunInput, SessionId,
+    SessionStore, StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
     SubprocessRequest, TOOL_OUTPUT_MEDIA_TYPE, TaskId, ToolCallId, WorkspacePathScope,
     WorkspaceStore,
 };
@@ -187,15 +187,27 @@ impl RunService {
     ) -> Result<kiln_core::SendRunInputMutation, RunError> {
         let _sequence = self.commit_sequence.lock().await;
         let mutation = self.runs.send_run_input(command).await?;
+        Ok(self.publish_run_input_mutation(mutation))
+    }
+
+    async fn react_to_activity(
+        &self,
+        command: ReactToRunActivity,
+    ) -> Result<kiln_core::SendRunInputMutation, RunError> {
+        let _sequence = self.commit_sequence.lock().await;
+        let mutation = self.runs.react_to_run_activity(command).await?;
+        Ok(self.publish_run_input_mutation(mutation))
+    }
+
+    fn publish_run_input_mutation(
+        &self,
+        mutation: kiln_core::SendRunInputMutation,
+    ) -> kiln_core::SendRunInputMutation {
         let value = mutation.value.clone();
         let disposition = mutation.disposition;
         self.events.publish(mutation.events);
         self.active.changed.notify_waiters();
-        Ok(kiln_core::SendRunInputMutation::new(
-            value,
-            Vec::new(),
-            disposition,
-        ))
+        kiln_core::SendRunInputMutation::new(value, Vec::new(), disposition)
     }
 
     async fn execute(
@@ -859,6 +871,13 @@ impl RunOperations for RunService {
         command: SendRunInput,
     ) -> impl Future<Output = Result<kiln_core::SendRunInputMutation, RunError>> + Send {
         self.send_input(command)
+    }
+
+    fn react_to_run_activity(
+        &self,
+        command: ReactToRunActivity,
+    ) -> impl Future<Output = Result<kiln_core::SendRunInputMutation, RunError>> + Send {
+        self.react_to_activity(command)
     }
 
     fn cancel_run(

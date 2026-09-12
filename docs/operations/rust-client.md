@@ -59,6 +59,14 @@ Run topology before live events arrive. `start_child_run` uses the same explicit
 idempotency rule as `start_run`; keep its key stable when retrying an uncertain
 response.
 
+Use `react_to_run_activity` to queue a root Message about a selected child
+Event. Supply the root Run ID, the text, and `child_activity` with the child
+Run ID and durable Event ID. Keep all fields and the idempotency key unchanged
+on retry. Reactions use queued delivery, not interruption. The daemon rejects
+references outside the target root's descendants or with mismatched ownership.
+The returned Message and its replayed `message.appended` Event retain the
+optional `child_activity` field. Plain `send_run_input` remains unchanged.
+
 Use the stable public problem code to handle a rejected HTTP request. Do not
 infer permission or Run state from a transport failure. Retrieve the Run or retry
 the same idempotent command when its result is uncertain.

@@ -12,7 +12,8 @@ use kiln_protocol::{
     GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
     LIST_SESSION_RUNS_OPERATION_ID, MessageDeliveryResponse, MessageResponse,
     NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunResponse,
+    ProblemDetails, REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH,
+    RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunResponse,
     SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
     SESSION_RUNS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID, SessionEventsResponse,
     SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest,
@@ -283,6 +284,21 @@ impl Client {
         let path = path_with_segment(RUN_INPUT_PATH, "{run_id}", "run_id", run_id)?;
         self.send_json(
             SEND_RUN_INPUT_OPERATION_ID,
+            with_idempotency_key(self.http.post(self.http_url(&path)), idempotency_key)?
+                .json(request),
+        )
+        .await
+    }
+
+    pub async fn react_to_run_activity(
+        &self,
+        run_id: &str,
+        idempotency_key: &str,
+        request: &ReactToRunActivityRequest,
+    ) -> Result<MessageDeliveryResponse, Error> {
+        let path = path_with_segment(RUN_REACTIONS_PATH, "{run_id}", "run_id", run_id)?;
+        self.send_json(
+            REACT_TO_RUN_ACTIVITY_OPERATION_ID,
             with_idempotency_key(self.http.post(self.http_url(&path)), idempotency_key)?
                 .json(request),
         )

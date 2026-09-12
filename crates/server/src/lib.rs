@@ -22,24 +22,26 @@ use axum::{
     routing::{get, post},
 };
 use kiln_core::{
-    AppendMessage, Artifact, AssignTask, ContentHash, CreateTask, CreateWorkspace, EventCursor,
-    Message, MessageDelivery, MessageDeliveryMode as CoreMessageDeliveryMode,
-    MessageDeliveryState as CoreMessageDeliveryState, MessageRole as CoreMessageRole, RunError,
-    RunId, RunInputMode as CoreRunInputMode, RunSnapshot, RunState as CoreRunState, SendRunInput,
-    Session, SessionError, SessionEventPage, SessionEventPayload, SessionId, SessionOperations,
-    StoreMetadata, StoredSessionEvent, Task, TaskError, TaskId, TaskOperations,
-    TaskState as CoreTaskState, ToolCall, ToolCallState as CoreToolCallState,
-    ToolOutputStream as CoreToolOutputStream, TransitionTask, UpdateTask, WorkspaceError,
-    WorkspaceId, WorkspaceOperations,
+    AppendMessage, Artifact, AssignTask, ChildActivityReference as CoreChildActivityReference,
+    ContentHash, CreateTask, CreateWorkspace, EventCursor, Message, MessageDelivery,
+    MessageDeliveryMode as CoreMessageDeliveryMode,
+    MessageDeliveryState as CoreMessageDeliveryState, MessageRole as CoreMessageRole,
+    ReactToRunActivity, RunError, RunId, RunInputMode as CoreRunInputMode, RunSnapshot,
+    RunState as CoreRunState, SendRunInput, Session, SessionError, SessionEventPage,
+    SessionEventPayload, SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task,
+    TaskError, TaskId, TaskOperations, TaskState as CoreTaskState, ToolCall,
+    ToolCallState as CoreToolCallState, ToolOutputStream as CoreToolOutputStream, TransitionTask,
+    UpdateTask, WorkspaceError, WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
     ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
-    ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest, CreateTaskRequest,
-    CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, MessageDeliveryMode,
-    MessageDeliveryResponse, MessageDeliveryState, MessageResponse, MessageRole, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
-    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode, RunResponse, RunState,
+    ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest,
+    ChildActivityReference, CreateTaskRequest, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH,
+    IDEMPOTENCY_KEY_HEADER, MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState,
+    MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
+    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
+    RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
     SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
     SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse, SessionEventResponse,
     SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
@@ -83,6 +85,10 @@ pub trait RunOperations: Send + Sync {
     fn send_run_input(
         &self,
         command: SendRunInput,
+    ) -> impl Future<Output = Result<kiln_core::SendRunInputMutation, RunError>> + Send;
+    fn react_to_run_activity(
+        &self,
+        command: ReactToRunActivity,
     ) -> impl Future<Output = Result<kiln_core::SendRunInputMutation, RunError>> + Send;
 
     fn cancel_run(
@@ -393,6 +399,7 @@ where
         .route(RUN_CHILDREN_PATH, post(start_child_run))
         .route(RUN_PATH, get(get_run))
         .route(RUN_INPUT_PATH, post(send_run_input))
+        .route(RUN_REACTIONS_PATH, post(react_to_run_activity))
         .route(RUN_CANCEL_PATH, post(cancel_run))
         .route(TOOL_CALL_APPROVAL_PATH, post(decide_approval))
         .route(ARTIFACT_PATH, get(get_artifact))
@@ -906,6 +913,39 @@ where
     ))
 }
 
+async fn react_to_run_activity<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(run_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<ReactToRunActivityRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let delivery = state
+        .run_operations
+        .react_to_run_activity(ReactToRunActivity {
+            run_id: RunId::parse(run_id).map_err(|_| PublicError::InvalidRequest)?,
+            content: request.content,
+            child_activity: CoreChildActivityReference {
+                run_id: RunId::parse(request.child_activity.run_id)
+                    .map_err(|_| PublicError::InvalidRequest)?,
+                event_id: kiln_core::EventId::parse(request.child_activity.event_id)
+                    .map_err(|_| PublicError::InvalidRequest)?,
+            },
+            idempotency_key: required_idempotency_key(&headers)?,
+        })
+        .await
+        .map_err(PublicError::from)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(message_delivery_response(&delivery.value)),
+    ))
+}
+
 async fn list_session_runs<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(session_id): Path<String>,
@@ -1108,6 +1148,12 @@ fn message_response(message: &Message) -> MessageResponse {
         target_run_id: message
             .target_run_id()
             .map(|run_id| run_id.as_str().to_owned()),
+        child_activity: message
+            .child_activity()
+            .map(|reference| ChildActivityReference {
+                run_id: reference.run_id.as_str().to_owned(),
+                event_id: reference.event_id.as_str().to_owned(),
+            }),
     }
 }
 
@@ -2226,6 +2272,11 @@ impl PublicError {
                     StatusCode::CONFLICT,
                     error_code::RUN_NOT_ACCEPTING_INPUT,
                     "Run is not accepting input",
+                ),
+                RunError::InvalidChildActivity => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::INVALID_CHILD_ACTIVITY,
+                    "Invalid child activity",
                 ),
                 RunError::MessageDeliveryNotFound => (
                     StatusCode::NOT_FOUND,

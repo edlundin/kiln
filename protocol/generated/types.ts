@@ -34,7 +34,7 @@ export type MessageRole = "user" | "assistant";
 
 export type MessageStatus = "complete" | "incomplete";
 
-export type MessageResponse = { message_id: string, session_id: string, role: MessageRole, content: string, status: MessageStatus, origin_run_id: string | null, model_invocation_id: string | null, target_run_id: string | null, };
+export type MessageResponse = { message_id: string, session_id: string, role: MessageRole, content: string, status: MessageStatus, origin_run_id: string | null, model_invocation_id: string | null, target_run_id: string | null, child_activity?: ChildActivityReference | null, };
 
 export type MessageDeliveryMode = "queued" | "interrupt";
 
@@ -51,6 +51,10 @@ export type StartRunRequest = { approval_policy: ApprovalPolicy, workspace_root_
 export type StartChildRunRequest = { approval_policy: ApprovalPolicy, workspace_root_id: string, relative_directory: string, user_input_mode: RunInputMode, task_id: string | null, };
 
 export type SendRunInputRequest = { content: string, delivery_mode: MessageDeliveryMode, };
+
+export type ChildActivityReference = { run_id: string, event_id: string, };
+
+export type ReactToRunActivityRequest = { content: string, child_activity: ChildActivityReference, };
 
 export type ApprovalPolicy = "ask" | "read_only" | "full_access";
 

@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Kiln daemon protocol
-  version: 0.18.0
+  version: 0.19.0
   description: Kiln loopback protocol contract.
 security:
   - bearerAuth: []
@@ -544,6 +544,43 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  /v1/runs/{run_id}/reactions:
+    post:
+      operationId: react_to_run_activity
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 1}
+          description: Opaque non-empty key scoped to the target Run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReactToRunActivityRequest'
+      responses:
+        '201':
+          description: Durable queued reaction to child Run activity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
   /v1/runs/{run_id}/cancel:
     post:
       operationId: cancel_run
@@ -625,7 +662,7 @@ components:
     SessionResponse: {"properties":{"session_id":{"type":"string"},"workspace_id":{"type":"string"}},"required":["session_id","workspace_id"],"type":"object"}
     MessageRole: {"enum":["user","assistant"],"type":"string"}
     MessageStatus: {"enum":["complete","incomplete"],"type":"string"}
-    MessageResponse: {"properties":{"content":{"type":"string"},"message_id":{"type":"string"},"model_invocation_id":{"type":["string","null"]},"origin_run_id":{"type":["string","null"]},"role":{"$ref":"#/components/schemas/MessageRole"},"session_id":{"type":"string"},"status":{"$ref":"#/components/schemas/MessageStatus"},"target_run_id":{"type":["string","null"]}},"required":["message_id","session_id","role","content","status","origin_run_id","model_invocation_id","target_run_id"],"type":"object"}
+    MessageResponse: {"properties":{"child_activity":{"anyOf":[{"$ref":"#/components/schemas/ChildActivityReference"},{"type":"null"}]},"content":{"type":"string"},"message_id":{"type":"string"},"model_invocation_id":{"type":["string","null"]},"origin_run_id":{"type":["string","null"]},"role":{"$ref":"#/components/schemas/MessageRole"},"session_id":{"type":"string"},"status":{"$ref":"#/components/schemas/MessageStatus"},"target_run_id":{"type":["string","null"]}},"required":["message_id","session_id","role","content","status","origin_run_id","model_invocation_id","target_run_id"],"type":"object"}
     MessageDeliveryMode: {"enum":["queued","interrupt"],"type":"string"}
     MessageDeliveryState: {"enum":["queued","delivered","failed","cancelled"],"type":"string"}
     MessageDeliveryResponse: {"properties":{"delivery_mode":{"$ref":"#/components/schemas/MessageDeliveryMode"},"message":{"$ref":"#/components/schemas/MessageResponse"},"state":{"$ref":"#/components/schemas/MessageDeliveryState"}},"required":["message","delivery_mode","state"],"type":"object"}
@@ -634,6 +671,8 @@ components:
     StartRunRequest: {"additionalProperties":false,"properties":{"approval_policy":{"$ref":"#/components/schemas/ApprovalPolicy"},"relative_directory":{"type":"string"},"workspace_root_id":{"type":"string"}},"required":["approval_policy","workspace_root_id","relative_directory"],"type":"object"}
     StartChildRunRequest: {"additionalProperties":false,"properties":{"approval_policy":{"$ref":"#/components/schemas/ApprovalPolicy"},"relative_directory":{"type":"string"},"task_id":{"type":["string","null"]},"user_input_mode":{"$ref":"#/components/schemas/RunInputMode"},"workspace_root_id":{"type":"string"}},"required":["approval_policy","workspace_root_id","relative_directory","user_input_mode","task_id"],"type":"object"}
     SendRunInputRequest: {"additionalProperties":false,"properties":{"content":{"type":"string"},"delivery_mode":{"$ref":"#/components/schemas/MessageDeliveryMode"}},"required":["content","delivery_mode"],"type":"object"}
+    ChildActivityReference: {"additionalProperties":false,"properties":{"event_id":{"type":"string"},"run_id":{"type":"string"}},"required":["run_id","event_id"],"type":"object"}
+    ReactToRunActivityRequest: {"additionalProperties":false,"properties":{"child_activity":{"$ref":"#/components/schemas/ChildActivityReference"},"content":{"type":"string"}},"required":["content","child_activity"],"type":"object"}
     ApprovalPolicy: {"enum":["ask","read_only","full_access"],"type":"string"}
     ApprovalDecisionRequest: {"additionalProperties":false,"properties":{"decision":{"$ref":"#/components/schemas/ApprovalDecision"}},"required":["decision"],"type":"object"}
     ApprovalDecision: {"enum":["approved","rejected"],"type":"string"}

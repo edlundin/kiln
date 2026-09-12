@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.18.0";
+pub const PROTOCOL_VERSION: &str = "0.19.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -27,6 +27,7 @@ pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_CHILDREN_PATH: &str = "/v1/runs/{parent_run_id}/children";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
 pub const RUN_INPUT_PATH: &str = "/v1/runs/{run_id}/input";
+pub const RUN_REACTIONS_PATH: &str = "/v1/runs/{run_id}/reactions";
 pub const TASK_PATH: &str = "/v1/tasks/{task_id}";
 pub const TASK_ASSIGNMENT_PATH: &str = "/v1/tasks/{task_id}/assignment";
 pub const TASK_TRANSITION_PATH: &str = "/v1/tasks/{task_id}/transition";
@@ -51,6 +52,7 @@ pub const START_CHILD_RUN_OPERATION_ID: &str = "start_child_run";
 pub const LIST_SESSION_RUNS_OPERATION_ID: &str = "list_session_runs";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
 pub const SEND_RUN_INPUT_OPERATION_ID: &str = "send_run_input";
+pub const REACT_TO_RUN_ACTIVITY_OPERATION_ID: &str = "react_to_run_activity";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
 pub const GET_ARTIFACT_OPERATION_ID: &str = "get_artifact";
@@ -104,6 +106,7 @@ pub mod error_code {
     pub const INVALID_RUN_STATE: &str = "invalid_run_state";
     pub const RUN_INPUT_READ_ONLY: &str = "run_input_read_only";
     pub const RUN_NOT_ACCEPTING_INPUT: &str = "run_not_accepting_input";
+    pub const INVALID_CHILD_ACTIVITY: &str = "invalid_child_activity";
     pub const MESSAGE_DELIVERY_NOT_FOUND: &str = "message_delivery_not_found";
     pub const INVALID_MESSAGE_DELIVERY: &str = "invalid_message_delivery";
     pub const MESSAGE_DELIVERY_OUT_OF_ORDER: &str = "message_delivery_out_of_order";
@@ -168,6 +171,7 @@ pub mod error_code {
         INVALID_RUN_STATE,
         RUN_INPUT_READ_ONLY,
         RUN_NOT_ACCEPTING_INPUT,
+        INVALID_CHILD_ACTIVITY,
         MESSAGE_DELIVERY_NOT_FOUND,
         INVALID_MESSAGE_DELIVERY,
         MESSAGE_DELIVERY_OUT_OF_ORDER,
@@ -340,6 +344,22 @@ pub struct SendRunInputRequest {
     pub delivery_mode: MessageDeliveryMode,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct ChildActivityReference {
+    pub run_id: String,
+    pub event_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct ReactToRunActivityRequest {
+    pub content: String,
+    pub child_activity: ChildActivityReference,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicy {
@@ -397,6 +417,8 @@ pub struct MessageResponse {
     pub model_invocation_id: Option<String>,
     #[schemars(with = "RequiredNullableString")]
     pub target_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_activity: Option<ChildActivityReference>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

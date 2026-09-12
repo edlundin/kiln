@@ -155,6 +155,24 @@
       "title": "AssignTaskRequest",
       "type": "object"
     },
+    "ChildActivityReference": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "event_id"
+      ],
+      "title": "ChildActivityReference",
+      "type": "object"
+    },
     "ClientIdentity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -279,6 +297,22 @@
     },
     "MessageDeliveryResponse": {
       "$defs": {
+        "ChildActivityReference": {
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "event_id"
+          ],
+          "type": "object"
+        },
         "MessageDeliveryMode": {
           "enum": [
             "queued",
@@ -297,6 +331,16 @@
         },
         "MessageResponse": {
           "properties": {
+            "child_activity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChildActivityReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "content": {
               "type": "string"
             },
@@ -391,6 +435,22 @@
     },
     "MessageResponse": {
       "$defs": {
+        "ChildActivityReference": {
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "event_id"
+          ],
+          "type": "object"
+        },
         "MessageRole": {
           "enum": [
             "user",
@@ -408,6 +468,16 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "child_activity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ChildActivityReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "content": {
           "type": "string"
         },
@@ -973,6 +1043,42 @@
       "title": "ProblemDetails",
       "type": "object"
     },
+    "ReactToRunActivityRequest": {
+      "$defs": {
+        "ChildActivityReference": {
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "event_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "child_activity": {
+          "$ref": "#/$defs/ChildActivityReference"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
+        "child_activity"
+      ],
+      "title": "ReactToRunActivityRequest",
+      "type": "object"
+    },
     "RunInputMode": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [
@@ -1362,8 +1468,34 @@
           ],
           "type": "object"
         },
+        "ChildActivityReference": {
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "event_id"
+          ],
+          "type": "object"
+        },
         "MessageResponse": {
           "properties": {
+            "child_activity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChildActivityReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "content": {
               "type": "string"
             },
@@ -2528,8 +2660,34 @@
           ],
           "type": "object"
         },
+        "ChildActivityReference": {
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "event_id"
+          ],
+          "type": "object"
+        },
         "MessageResponse": {
           "properties": {
+            "child_activity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChildActivityReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "content": {
               "type": "string"
             },
@@ -3717,8 +3875,34 @@
           ],
           "type": "object"
         },
+        "ChildActivityReference": {
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "event_id"
+          ],
+          "type": "object"
+        },
         "MessageResponse": {
           "properties": {
+            "child_activity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChildActivityReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "content": {
               "type": "string"
             },
@@ -5687,8 +5871,34 @@
           ],
           "type": "object"
         },
+        "ChildActivityReference": {
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "run_id",
+            "event_id"
+          ],
+          "type": "object"
+        },
         "MessageResponse": {
           "properties": {
+            "child_activity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ChildActivityReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "content": {
               "type": "string"
             },
@@ -7017,7 +7227,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.18.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.19.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

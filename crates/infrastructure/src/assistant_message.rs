@@ -1,6 +1,6 @@
 use kiln_core::{
     AssistantMessageIdGenerator, AssistantMessageMutation, AssistantMessageOrigin,
-    AssistantMessageStore, AssistantMessageStoreError, MessageStatus,
+    AssistantMessageStore, AssistantMessageStoreError, ChildActivityReference, MessageStatus,
     ModelInvocationCompletionKind, ModelOutputStream, PersistedMessage,
 };
 
@@ -37,7 +37,7 @@ pub(super) fn parse_message_row(
         }),
         _ => return Err(AssistantMessageStoreError::IntegrityViolation),
     };
-    Message::from_persisted(PersistedMessage {
+    let message = Message::from_persisted(PersistedMessage {
         id: MessageId::parse(field("message_id")?)
             .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
         session_id: SessionId::parse(field("session_id")?)
@@ -53,7 +53,22 @@ pub(super) fn parse_message_row(
             .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
         origin,
     })
-    .map_err(|_| AssistantMessageStoreError::IntegrityViolation)
+    .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
+    match (
+        optional("child_activity_run_id")?,
+        optional("child_activity_event_id")?,
+    ) {
+        (None, None) => Ok(message),
+        (Some(run_id), Some(event_id)) => message
+            .with_child_activity(ChildActivityReference {
+                run_id: RunId::parse(run_id)
+                    .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
+                event_id: EventId::parse(event_id)
+                    .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
+            })
+            .map_err(|_| AssistantMessageStoreError::IntegrityViolation),
+        _ => Err(AssistantMessageStoreError::IntegrityViolation),
+    }
 }
 
 pub(super) async fn load_message(
@@ -62,7 +77,8 @@ pub(super) async fn load_message(
 ) -> Result<Option<Message>, AssistantMessageStoreError> {
     let row = sqlx::query(
         "SELECT message_id, session_id, role, content, target_run_id,
-                status, origin_run_id, model_invocation_id
+                status, origin_run_id, model_invocation_id,
+                child_activity_run_id, child_activity_event_id
          FROM messages WHERE message_id = ?",
     )
     .bind(message_id.as_str())

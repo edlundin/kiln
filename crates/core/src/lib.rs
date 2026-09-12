@@ -556,6 +556,12 @@ impl Session {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildActivityReference {
+    pub run_id: RunId,
+    pub event_id: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     id: MessageId,
     session_id: SessionId,
@@ -564,6 +570,7 @@ pub struct Message {
     target_run_id: Option<RunId>,
     status: MessageStatus,
     origin: Option<AssistantMessageOrigin>,
+    child_activity: Option<ChildActivityReference>,
 }
 
 pub struct PersistedMessage {
@@ -617,6 +624,7 @@ impl Message {
             target_run_id,
             status: MessageStatus::Complete,
             origin: None,
+            child_activity: None,
         })
     }
 
@@ -638,6 +646,7 @@ impl Message {
             target_run_id: None,
             status,
             origin: Some(origin),
+            child_activity: None,
         })
     }
 
@@ -685,6 +694,21 @@ impl Message {
 
     pub fn origin(&self) -> Option<&AssistantMessageOrigin> {
         self.origin.as_ref()
+    }
+
+    pub fn child_activity(&self) -> Option<&ChildActivityReference> {
+        self.child_activity.as_ref()
+    }
+
+    pub fn with_child_activity(
+        mut self,
+        reference: ChildActivityReference,
+    ) -> Result<Self, SessionError> {
+        if self.role != MessageRole::User || self.target_run_id.is_none() {
+            return Err(SessionError::InvalidMessageOrigin);
+        }
+        self.child_activity = Some(reference);
+        Ok(self)
     }
 }
 
@@ -3482,6 +3506,43 @@ impl StoredSessionEvent {
         self.cursor
     }
 
+    pub fn activity_run_id(&self) -> Option<&RunId> {
+        match &self.payload {
+            SessionEventPayload::SessionCreated { .. } => None,
+            SessionEventPayload::MessageAppended { message } => message
+                .target_run_id()
+                .or_else(|| message.origin().map(|origin| &origin.run_id)),
+            SessionEventPayload::ModelOutputRecorded { chunk } => Some(&chunk.run_id),
+            SessionEventPayload::UsageObserved { observation } => Some(&observation.run_id),
+            SessionEventPayload::ModelInvocationCreated { invocation }
+            | SessionEventPayload::ModelInvocationStateChanged { invocation } => {
+                Some(invocation.run_id())
+            }
+            SessionEventPayload::TaskCreated { task }
+            | SessionEventPayload::TaskUpdated { task }
+            | SessionEventPayload::TaskStateChanged { task }
+            | SessionEventPayload::TaskAssigned { task } => task.assigned_run_id(),
+            SessionEventPayload::RunChildAdded { child_run_id, .. } => Some(child_run_id),
+            SessionEventPayload::ToolCallRequested { tool_call }
+            | SessionEventPayload::ToolCallDenied { tool_call }
+            | SessionEventPayload::ToolCallStateChanged { tool_call } => Some(tool_call.run_id()),
+            SessionEventPayload::ApprovalRequested { approval }
+            | SessionEventPayload::ApprovalDecided { approval } => Some(approval.run_id()),
+            SessionEventPayload::ContextManifestCreated { run_id, .. }
+            | SessionEventPayload::RunCreated { run_id, .. }
+            | SessionEventPayload::RunQueued { run_id }
+            | SessionEventPayload::RunStateChanged { run_id, .. }
+            | SessionEventPayload::RunCancellationRequested { run_id }
+            | SessionEventPayload::RunInputQueued { run_id, .. }
+            | SessionEventPayload::RunInterruptRequested { run_id, .. }
+            | SessionEventPayload::RunInputDelivered { run_id, .. }
+            | SessionEventPayload::RunInputFailed { run_id, .. }
+            | SessionEventPayload::RunInputCancelled { run_id, .. }
+            | SessionEventPayload::ToolCallOutput { run_id, .. }
+            | SessionEventPayload::ArtifactRegistered { run_id, .. } => Some(run_id),
+        }
+    }
+
     pub fn payload(&self) -> &SessionEventPayload {
         &self.payload
     }
@@ -3599,6 +3660,14 @@ pub struct SendRunInput {
     pub run_id: RunId,
     pub content: String,
     pub delivery_mode: MessageDeliveryMode,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactToRunActivity {
+    pub run_id: RunId,
+    pub content: String,
+    pub child_activity: ChildActivityReference,
     pub idempotency_key: String,
 }
 
@@ -3830,6 +3899,7 @@ pub enum ModelInvocationStoreError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunError {
+    InvalidChildActivity,
     SessionNotFound,
     WorkspaceRootNotFound,
     PathOutsideWorkspaceRoot,
@@ -3857,6 +3927,7 @@ pub enum RunError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStoreError {
+    InvalidChildActivity,
     ActiveRootRunExists,
     RunNotFound,
     ParentRunNotFound,
@@ -4680,6 +4751,30 @@ where
         &self,
         command: SendRunInput,
     ) -> Result<SendRunInputMutation, RunError> {
+        self.send_input(command, None).await
+    }
+
+    pub async fn react_to_run_activity(
+        &self,
+        command: ReactToRunActivity,
+    ) -> Result<SendRunInputMutation, RunError> {
+        self.send_input(
+            SendRunInput {
+                run_id: command.run_id,
+                content: command.content,
+                delivery_mode: MessageDeliveryMode::Queued,
+                idempotency_key: command.idempotency_key,
+            },
+            Some(command.child_activity),
+        )
+        .await
+    }
+
+    async fn send_input(
+        &self,
+        command: SendRunInput,
+        reference: Option<ChildActivityReference>,
+    ) -> Result<SendRunInputMutation, RunError> {
         if command.idempotency_key.is_empty() {
             return Err(RunError::IdempotencyKeyRequired);
         }
@@ -4692,6 +4787,12 @@ where
             command.run_id,
         )
         .map_err(|_| RunError::InputContentRequired)?;
+        let message = match reference {
+            Some(reference) => message
+                .with_child_activity(reference)
+                .map_err(|_| RunError::InvalidChildActivity)?,
+            None => message,
+        };
         let delivery = MessageDelivery::queued(message.clone(), command.delivery_mode)
             .map_err(|_| RunError::InvalidMessageDelivery)?;
         let events = [
@@ -5325,6 +5426,7 @@ fn run_subtree(runs: Vec<RunSnapshot>, root_run_id: &RunId) -> Vec<RunSnapshot> 
 
 fn map_run_store_error(error: RunStoreError) -> RunError {
     match error {
+        RunStoreError::InvalidChildActivity => RunError::InvalidChildActivity,
         RunStoreError::ActiveRootRunExists => RunError::ActiveRootRunExists,
         RunStoreError::RunNotFound => RunError::RunNotFound,
         RunStoreError::ParentRunNotFound => RunError::ParentRunNotFound,

@@ -1,10 +1,18 @@
 # Changelog
 
+## 2026-09-12 — `feat`
+
+- Added durable root references to child Run activity for EDL-249, with typed Message links and queued reaction commands.
+- SQLite references use paired nullable foreign keys with transactional idempotency and validation of same-session event ownership and ancestry.
+- Message replay and queued input hydration preserve the references while plain SendRunInput remains compatible.
+
+[Commit](pending)
+
 ## 2026-09-12 — `build`
 
 - Packaged the native desktop as a debug macOS Kiln.app for EDL-249, with application metadata and documented launch steps; the daemon remains separate.
 
-[Commit](pending)
+[Commit](../../commit/d176eba2f5aedb2825855734d0b79e62cc33f1f1)
 
 ## 2026-09-12 — `feat`
 

@@ -116,8 +116,8 @@ paths.
 
 Messages are immutable after append. A correction is another message. An
 artifact display name MUST NOT become a trusted path. `AppendMessage` creates
-only an untargeted, complete user message. `SendRunInput` is the only command
-that creates a message targeted to one run in the same thread.
+only an untargeted, complete user message. `SendRunInput` and
+`ReactToRunActivity` create messages targeted to one run in the same thread.
 
 ### Tasks and subagents
 
@@ -157,6 +157,18 @@ queued MessageDelivery, idempotency result, `message.appended`, and the matching
 `run.input_queued` or `run.interrupt_requested` Event commit atomically. An exact
 retry returns the first MessageDelivery without new Events, including after the
 Run becomes terminal. A mismatched key reuse conflicts.
+
+`ReactToRunActivity` queues a root-targeted user Message with a typed
+`child_activity` reference containing the source Run ID and Event ID. It uses
+the same idempotency and delivery transaction as `SendRunInput`. The source
+Event must belong to the declared child Run in the same Session, and that Run
+must descend from the target root. The daemon validates these relations before
+storing the Message. Missing, mismatched, root-self, and unrelated references
+are rejected. Reusing a key with another reference conflicts.
+
+References survive Message replay, delivery, cancellation, and exact retries.
+The selected Event identifies the child Message, ToolCall, artifact, or other
+durable activity; the client cannot supply replacement source content.
 
 `RecordRunInputDelivery` applies only to the oldest queued delivery for that
 Run when it records `delivered` or `failed`. An already recorded exact outcome

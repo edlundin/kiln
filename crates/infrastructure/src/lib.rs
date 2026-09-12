@@ -1308,6 +1308,54 @@ impl SessionStore for SqliteStore {
     }
 }
 
+macro_rules! event_select {
+    ($suffix:literal) => {
+        concat!(
+            "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
+       e.task_id, e.task_objective, e.task_state, e.parent_task_id,
+       e.dependency_task_ids, e.assigned_run_id,
+       e.run_id, e.parent_run_id, e.child_run_id, e.user_input_mode,
+       e.tool_call_id, e.run_state, e.tool_call_state,
+       e.approval_id, e.approval_state, e.approval_policy,
+       e.requested_workspace_root_id, e.requested_relative_directory,
+       e.effective_workspace_root_id, e.effective_relative_directory,
+       e.capability, e.stdout, e.stderr, e.exit_code,
+       e.output_stream, e.output_content, e.artifact_hash,
+       e.stdout_artifact_hash, e.stderr_artifact_hash,
+       e.context_manifest_id,
+       e.model_invocation_id, e.model_work_id,
+       e.model_context_manifest_hash, e.model_provider_account_id,
+       e.model_provider, e.model_model,
+       e.model_generation_max_output_tokens, e.model_reasoning_effort,
+       e.model_capability_version, e.model_capability_tool_calls,
+       e.model_capability_vision, e.model_capability_structured_output,
+       e.model_purpose, e.model_retry_of, e.model_invocation_state,
+       e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
+       e.output_chunk_id,
+       cm.session_id AS manifest_session_id,
+       cm.run_id AS manifest_run_id,
+       cm.content_hash AS manifest_content_hash,
+       cm.entry_count AS manifest_entry_count,
+       a.media_type AS artifact_media_type, a.size AS artifact_size,
+       osa.media_type AS stdout_artifact_media_type,
+       osa.size AS stdout_artifact_size,
+       esa.media_type AS stderr_artifact_media_type,
+       esa.size AS stderr_artifact_size,
+       m.message_id AS loaded_message_id, m.session_id AS message_session_id,
+       m.role, m.content, m.target_run_id AS message_target_run_id,
+       s.workspace_id
+FROM session_events e
+JOIN sessions s ON s.session_id = e.session_id
+LEFT JOIN messages m ON m.message_id = e.message_id
+LEFT JOIN artifacts a ON a.content_hash = e.artifact_hash
+LEFT JOIN artifacts osa ON osa.content_hash = e.stdout_artifact_hash
+LEFT JOIN artifacts esa ON esa.content_hash = e.stderr_artifact_hash
+LEFT JOIN context_manifests cm ON cm.context_manifest_id = e.context_manifest_id",
+            $suffix
+        )
+    };
+}
+
 impl SqliteStore {
     async fn list_events(
         &self,
@@ -1322,105 +1370,19 @@ impl SqliteStore {
             .map_err(|_| StoreError::Unavailable)?;
         let rows = match session_id {
             Some(session_id) => {
-                sqlx::query(
-                    "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
-                        e.task_id, e.task_objective, e.task_state, e.parent_task_id,
-                        e.dependency_task_ids, e.assigned_run_id,
-                        e.run_id, e.parent_run_id, e.child_run_id, e.user_input_mode,
-                        e.tool_call_id, e.run_state, e.tool_call_state,
-                        e.approval_id, e.approval_state, e.approval_policy,
-                        e.requested_workspace_root_id, e.requested_relative_directory,
-                        e.effective_workspace_root_id, e.effective_relative_directory,
-                        e.capability, e.stdout, e.stderr, e.exit_code,
-                        e.output_stream, e.output_content, e.artifact_hash,
-                        e.stdout_artifact_hash, e.stderr_artifact_hash,
-                        e.context_manifest_id,
-                        e.model_invocation_id, e.model_work_id,
-                        e.model_context_manifest_hash, e.model_provider_account_id,
-                        e.model_provider, e.model_model,
-                        e.model_generation_max_output_tokens, e.model_reasoning_effort,
-                        e.model_capability_version, e.model_capability_tool_calls,
-                        e.model_capability_vision, e.model_capability_structured_output,
-                        e.model_purpose, e.model_retry_of, e.model_invocation_state,
-                        e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
-                        e.output_chunk_id,
-                        cm.session_id AS manifest_session_id,
-                        cm.run_id AS manifest_run_id,
-                        cm.content_hash AS manifest_content_hash,
-                        cm.entry_count AS manifest_entry_count,
-                        a.media_type AS artifact_media_type, a.size AS artifact_size,
-                        osa.media_type AS stdout_artifact_media_type,
-                        osa.size AS stdout_artifact_size,
-                        esa.media_type AS stderr_artifact_media_type,
-                        esa.size AS stderr_artifact_size,
-                        m.message_id AS loaded_message_id, m.session_id AS message_session_id,
-                        m.role, m.content, m.target_run_id AS message_target_run_id,
-                        s.workspace_id
-                 FROM session_events e
-                 JOIN sessions s ON s.session_id = e.session_id
-                 LEFT JOIN messages m ON m.message_id = e.message_id
-                 LEFT JOIN artifacts a ON a.content_hash = e.artifact_hash
-                 LEFT JOIN artifacts osa ON osa.content_hash = e.stdout_artifact_hash
-                 LEFT JOIN artifacts esa ON esa.content_hash = e.stderr_artifact_hash
-                 LEFT JOIN context_manifests cm
-                    ON cm.context_manifest_id = e.context_manifest_id
-                 WHERE e.session_id = ? AND e.cursor > ?
-                 ORDER BY e.cursor ASC",
-                )
+                sqlx::query(event_select!(
+                    " WHERE e.session_id = ? AND e.cursor > ? ORDER BY e.cursor ASC"
+                ))
                 .bind(session_id.as_str())
                 .bind(after)
                 .fetch_all(&mut *transaction)
                 .await
             }
             None => {
-                sqlx::query(
-                    "SELECT e.event_id, e.session_id, e.cursor, e.event_type, e.message_id,
-                        e.task_id, e.task_objective, e.task_state, e.parent_task_id,
-                        e.dependency_task_ids, e.assigned_run_id,
-                        e.run_id, e.parent_run_id, e.child_run_id, e.user_input_mode,
-                        e.tool_call_id, e.run_state, e.tool_call_state,
-                        e.approval_id, e.approval_state, e.approval_policy,
-                        e.requested_workspace_root_id, e.requested_relative_directory,
-                        e.effective_workspace_root_id, e.effective_relative_directory,
-                        e.capability, e.stdout, e.stderr, e.exit_code,
-                        e.output_stream, e.output_content, e.artifact_hash,
-                        e.stdout_artifact_hash, e.stderr_artifact_hash,
-                        e.context_manifest_id,
-                        e.model_invocation_id, e.model_work_id,
-                        e.model_context_manifest_hash, e.model_provider_account_id,
-                        e.model_provider, e.model_model,
-                        e.model_generation_max_output_tokens, e.model_reasoning_effort,
-                        e.model_capability_version, e.model_capability_tool_calls,
-                        e.model_capability_vision, e.model_capability_structured_output,
-                        e.model_purpose, e.model_retry_of, e.model_invocation_state,
-                        e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
-                        e.output_chunk_id,
-                        cm.session_id AS manifest_session_id,
-                        cm.run_id AS manifest_run_id,
-                        cm.content_hash AS manifest_content_hash,
-                        cm.entry_count AS manifest_entry_count,
-                        a.media_type AS artifact_media_type, a.size AS artifact_size,
-                        osa.media_type AS stdout_artifact_media_type,
-                        osa.size AS stdout_artifact_size,
-                        esa.media_type AS stderr_artifact_media_type,
-                        esa.size AS stderr_artifact_size,
-                        m.message_id AS loaded_message_id, m.session_id AS message_session_id,
-                        m.role, m.content, m.target_run_id AS message_target_run_id,
-                        s.workspace_id
-                 FROM session_events e
-                 JOIN sessions s ON s.session_id = e.session_id
-                 LEFT JOIN messages m ON m.message_id = e.message_id
-                 LEFT JOIN artifacts a ON a.content_hash = e.artifact_hash
-                 LEFT JOIN artifacts osa ON osa.content_hash = e.stdout_artifact_hash
-                 LEFT JOIN artifacts esa ON esa.content_hash = e.stderr_artifact_hash
-                 LEFT JOIN context_manifests cm
-                    ON cm.context_manifest_id = e.context_manifest_id
-                 WHERE e.cursor > ?
-                 ORDER BY e.cursor ASC",
-                )
-                .bind(after)
-                .fetch_all(&mut *transaction)
-                .await
+                sqlx::query(event_select!(" WHERE e.cursor > ? ORDER BY e.cursor ASC"))
+                    .bind(after)
+                    .fetch_all(&mut *transaction)
+                    .await
             }
         }
         .map_err(|_| StoreError::Unavailable)?;
@@ -2005,6 +1967,22 @@ impl TaskStore for SqliteStore {
             vec![stored_event],
             TaskMutationDisposition::Applied,
         ))
+    }
+}
+
+async fn load_session_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event_id: &EventId,
+) -> Result<Option<StoredSessionEvent>, StoreError> {
+    let rows = sqlx::query(event_select!(" WHERE e.event_id = ?"))
+        .bind(event_id.as_str())
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?;
+    let mut events = parse_event_rows(transaction, rows).await?;
+    match events.len() {
+        0 | 1 => Ok(events.pop()),
+        _ => Err(StoreError::Unavailable),
     }
 }
 
@@ -4029,6 +4007,53 @@ async fn load_context_manifest(
     .map_err(|_| ContextManifestStoreError::IntegrityViolation)
 }
 
+async fn validate_child_activity(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    target_run: &kiln_core::Run,
+    message: &Message,
+) -> Result<(), RunStoreError> {
+    let Some(reference) = message.child_activity() else {
+        return Ok(());
+    };
+    if target_run.parent_run_id().is_some() || &reference.run_id == target_run.run_id() {
+        return Err(RunStoreError::InvalidChildActivity);
+    }
+    let source_run = load_run(transaction, &reference.run_id)
+        .await?
+        .ok_or(RunStoreError::InvalidChildActivity)?;
+    if source_run.session_id() != target_run.session_id() {
+        return Err(RunStoreError::InvalidChildActivity);
+    }
+    let source_event = load_session_event(transaction, &reference.event_id)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?
+        .ok_or(RunStoreError::InvalidChildActivity)?;
+    if source_event.session_id() != source_run.session_id()
+        || source_event.activity_run_id() != Some(&reference.run_id)
+    {
+        return Err(RunStoreError::InvalidChildActivity);
+    }
+    let descends_from_target = sqlx::query_scalar::<_, bool>(
+        "WITH RECURSIVE ancestors(run_id, parent_run_id) AS (
+             SELECT run_id, parent_run_id FROM runs WHERE run_id = ?
+             UNION
+             SELECT parent.run_id, parent.parent_run_id
+             FROM runs parent
+             JOIN ancestors child ON parent.run_id = child.parent_run_id
+         )
+         SELECT EXISTS(SELECT 1 FROM ancestors WHERE run_id = ?)",
+    )
+    .bind(reference.run_id.as_str())
+    .bind(target_run.run_id().as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
+    if !descends_from_target {
+        return Err(RunStoreError::InvalidChildActivity);
+    }
+    Ok(())
+}
+
 impl RunStore for SqliteStore {
     async fn start_root_run(
         &self,
@@ -4490,6 +4515,9 @@ impl RunStore for SqliteStore {
             let existing = load_message_delivery(&mut transaction, &message_id)
                 .await?
                 .ok_or(RunStoreError::Unavailable)?;
+            if existing.message().child_activity() != message.child_activity() {
+                return Err(RunStoreError::IdempotencyConflict);
+            }
             transaction
                 .commit()
                 .await
@@ -4514,15 +4542,28 @@ impl RunStore for SqliteStore {
             return Err(RunStoreError::RunNotAcceptingInput);
         }
 
+        validate_child_activity(&mut transaction, &run, message).await?;
         sqlx::query(
-            "INSERT INTO messages (message_id, session_id, role, content, target_run_id)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO messages (
+                 message_id, session_id, role, content, target_run_id,
+                 child_activity_run_id, child_activity_event_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(message.id().as_str())
         .bind(message.session_id().as_str())
         .bind(message.role().as_str())
         .bind(message.content())
         .bind(run_id.as_str())
+        .bind(
+            message
+                .child_activity()
+                .map(|reference| reference.run_id.as_str()),
+        )
+        .bind(
+            message
+                .child_activity()
+                .map(|reference| reference.event_id.as_str()),
+        )
         .execute(&mut *transaction)
         .await
         .map_err(|_| RunStoreError::Unavailable)?;

@@ -12,8 +12,8 @@ use crate::{
     APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ASSIGN_TASK_OPERATION_ID, AppendMessageRequest,
     ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy, ApprovalResponse, ApprovalState,
     ArtifactResponse, AssignTaskRequest, CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID,
-    CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
-    ContextManifestCreatedResponse, CreateTaskRequest, CreateWorkspaceRequest,
+    CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ChildActivityReference,
+    ClientIdentity, ContextManifestCreatedResponse, CreateTaskRequest, CreateWorkspaceRequest,
     DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
     EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
     GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
@@ -22,8 +22,9 @@ use crate::{
     MessageRole, MessageStatus, ModelInvocationCompletionKind, ModelInvocationEventResponse,
     ModelInvocationFailureReason, ModelInvocationPurpose, ModelInvocationStatus,
     ModelOutputRecordedResponse, ModelOutputStream, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
-    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode, RunResponse, RunState,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
+    REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
+    RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
     SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
     SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID,
     SendRunInputRequest, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
@@ -203,6 +204,14 @@ fn schema() -> String {
         ("StartRunRequest", schema_for!(StartRunRequest)),
         ("StartChildRunRequest", schema_for!(StartChildRunRequest)),
         ("SendRunInputRequest", schema_for!(SendRunInputRequest)),
+        (
+            "ChildActivityReference",
+            schema_for!(ChildActivityReference),
+        ),
+        (
+            "ReactToRunActivityRequest",
+            schema_for!(ReactToRunActivityRequest),
+        ),
         ("ApprovalPolicy", schema_for!(ApprovalPolicy)),
         (
             "ApprovalDecisionRequest",
@@ -304,6 +313,8 @@ fn typescript() -> String {
         StartRunRequest::decl(&config),
         StartChildRunRequest::decl(&config),
         SendRunInputRequest::decl(&config),
+        ChildActivityReference::decl(&config),
+        ReactToRunActivityRequest::decl(&config),
         ApprovalPolicy::decl(&config),
         ApprovalDecisionRequest::decl(&config),
         ApprovalDecision::decl(&config),
@@ -412,6 +423,10 @@ fn catalogue() -> String {
             "method": "POST",
             "path": RUN_INPUT_PATH,
             "operation": SEND_RUN_INPUT_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": RUN_REACTIONS_PATH,
+            "operation": REACT_TO_RUN_ACTIVITY_OPERATION_ID
         }, {
             "method": "POST",
             "path": TOOL_CALL_APPROVAL_PATH,
@@ -595,6 +610,7 @@ fn fixture_message() -> MessageResponse {
         model_invocation_id: None,
         content: "Inspect the Workspace event model.".to_owned(),
         target_run_id: None,
+        child_activity: None,
     }
 }
 
@@ -1283,6 +1299,43 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  {RUN_REACTIONS_PATH}:
+    post:
+      operationId: {REACT_TO_RUN_ACTIVITY_OPERATION_ID}
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+          description: Opaque non-empty key scoped to the target Run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReactToRunActivityRequest'
+      responses:
+        '201':
+          description: Durable queued reaction to child Run activity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
   {RUN_CANCEL_PATH}:
     post:
       operationId: {CANCEL_RUN_OPERATION_ID}
@@ -1405,6 +1458,14 @@ components:
         (
             "SendRunInputRequest",
             openapi_schema::<SendRunInputRequest>(),
+        ),
+        (
+            "ChildActivityReference",
+            openapi_schema::<ChildActivityReference>(),
+        ),
+        (
+            "ReactToRunActivityRequest",
+            openapi_schema::<ReactToRunActivityRequest>(),
         ),
         ("ApprovalPolicy", openapi_schema::<ApprovalPolicy>()),
         (

@@ -181,6 +181,12 @@ The deterministic native mode consumes input at generation boundaries. Accepted
 guidance prevents successful finalization until it is consumed. Live-provider
 delivery and broader scheduler policy remain pending.
 
+Subprocess completion, failure, and approval denial wait for non-terminal
+descendants before committing a terminal Run state. The daemon waits without
+holding the commit lock and rechecks state after each wake. Storage checks the
+same descendant condition inside the terminal transaction, including native
+Run failure, so a concurrent child start cannot bypass it.
+
 Cancelling a child does not cancel its parent or siblings. Cancelling a run
 requests cancellation for its descendants. A completion already committed
 before cancellation wins; the cancellation command returns the terminal run.

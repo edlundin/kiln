@@ -322,12 +322,10 @@ impl RunService {
                         .tool_call(&tool_call_id)
                         .is_some_and(|tool| tool.state() == kiln_core::ToolCallState::Denied) =>
                 {
-                    let RunMutation { value, events } = self
-                        .runs
-                        .finish_denied_execution(run_id, tool_call_id)
-                        .await?;
-                    self.events.publish(events);
-                    return Ok(value);
+                    drop(sequence);
+                    return self
+                        .finish_owned_execution(run_id, tool_call_id, empty_output())
+                        .await;
                 }
                 RunState::Cancelling => {
                     drop(sequence);
@@ -375,24 +373,16 @@ impl RunService {
             SubprocessExecution::CancellationFailed => SubprocessExecution::CancellationFailed,
         };
 
+        if let SubprocessExecution::Finished(output) = execution {
+            return self
+                .finish_owned_execution(run_id, tool_call_id, output)
+                .await;
+        }
+
         let sequence = self.commit_sequence.lock().await;
         let snapshot = self.runs.get_run(run_id.clone()).await?;
         match (snapshot.run().state(), execution) {
-            (RunState::Running, SubprocessExecution::Finished(output)) => {
-                let RunMutation {
-                    value: terminal,
-                    events,
-                } = self
-                    .runs
-                    .finish_execution(run_id, tool_call_id, output)
-                    .await?;
-                self.events.publish(events);
-                Ok(terminal)
-            }
-            (
-                RunState::Cancelling,
-                SubprocessExecution::Finished(output) | SubprocessExecution::Cancelled(output),
-            ) => {
+            (RunState::Cancelling, SubprocessExecution::Cancelled(output)) => {
                 drop(sequence);
                 self.finish_owned_cancellation(run_id, tool_call_id, output)
                     .await
@@ -470,29 +460,77 @@ impl RunService {
         tool_call_id: ToolCallId,
         message: &'static str,
     ) -> Result<RunSnapshot, RunError> {
-        let output = SubprocessOutput::spawn_failure(message);
-        let sequence = self.commit_sequence.lock().await;
-        let snapshot = self.runs.get_run(run_id.clone()).await?;
-        match snapshot.run().state() {
-            RunState::Running => {
-                let RunMutation {
-                    value: terminal,
-                    events,
-                } = self
-                    .runs
-                    .finish_execution(run_id, tool_call_id, output)
-                    .await?;
-                self.events.publish(events);
-                Ok(terminal)
+        self.finish_owned_execution(
+            run_id,
+            tool_call_id,
+            SubprocessOutput::spawn_failure(message),
+        )
+        .await
+    }
+
+    async fn finish_owned_execution(
+        &self,
+        run_id: RunId,
+        tool_call_id: ToolCallId,
+        output: SubprocessOutput,
+    ) -> Result<RunSnapshot, RunError> {
+        loop {
+            self.wait_for_descendants_terminal(&run_id).await?;
+            let sequence = self.commit_sequence.lock().await;
+            let snapshot = self.runs.get_run(run_id.clone()).await?;
+            match snapshot.run().state() {
+                RunState::Running => {
+                    let result = if snapshot
+                        .tool_call(&tool_call_id)
+                        .is_some_and(|tool| tool.state() == kiln_core::ToolCallState::Denied)
+                    {
+                        self.runs
+                            .finish_denied_execution(run_id.clone(), tool_call_id.clone())
+                            .await
+                    } else {
+                        self.runs
+                            .finish_execution(run_id.clone(), tool_call_id.clone(), output.clone())
+                            .await
+                    };
+                    match result {
+                        Ok(RunMutation {
+                            value: terminal,
+                            events,
+                        }) => {
+                            self.events.publish(events);
+                            return Ok(terminal);
+                        }
+                        Err(RunError::InvalidTransition)
+                            if self.terminal_commit_raced(&run_id).await? =>
+                        {
+                            drop(sequence);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                RunState::Cancelling => {
+                    drop(sequence);
+                    return self
+                        .finish_owned_cancellation(run_id, tool_call_id, output)
+                        .await;
+                }
+                RunState::Cancelled | RunState::Completed | RunState::Failed => {
+                    return Ok(snapshot);
+                }
+                _ => return Err(RunError::InvalidTransition),
             }
-            RunState::Cancelling => {
-                drop(sequence);
-                self.finish_owned_cancellation(run_id, tool_call_id, output)
-                    .await
-            }
-            RunState::Cancelled | RunState::Completed | RunState::Failed => Ok(snapshot),
-            _ => Err(RunError::InvalidTransition),
         }
+    }
+
+    async fn terminal_commit_raced(&self, run_id: &RunId) -> Result<bool, RunError> {
+        let subtree = self.runs.list_run_subtree(run_id.clone()).await?;
+        Ok(subtree
+            .first()
+            .is_some_and(|snapshot| snapshot.run().state() != RunState::Running)
+            || subtree
+                .iter()
+                .skip(1)
+                .any(|snapshot| !snapshot.run().state().is_terminal()))
     }
 
     async fn spawn_active(&self, run_id: RunId, initialize: bool) {

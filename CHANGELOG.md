@@ -1,10 +1,17 @@
 # Changelog
 
+## 2026-09-12 — `fix`
+
+- Fixed EDL-249 subprocess completion, failure, preflight failure, and approval denial so they wait for non-terminal descendants outside the commit lock.
+- Atomic store guards now prevent parent termination while descendants run; cancellation remains handled.
+
+[Commit](pending)
+
 ## 2026-09-12 — `feat`
 
 - Added desktop child-activity reactions for EDL-249: select a child transcript update without sending, show and clear durable Run/Event references in the root composer, and preserve the original root and reference through submission, retry, and replay.
 
-[Commit](pending)
+[Commit](../../commit/5280dace1babee8e0097b19e6a15026440d1921d)
 
 ## 2026-09-12 — `feat`
 

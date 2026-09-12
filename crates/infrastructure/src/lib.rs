@@ -5458,6 +5458,7 @@ impl RunStore for SqliteStore {
             || current_tool_call.run_id() != current.run().run_id()
             || current_tool_call.state() != ToolCallState::Denied
             || current.has_active_invocation()
+            || has_non_terminal_descendants(&mut transaction, current.run().run_id()).await?
             || run != &expected_run
             || tool_call != current_tool_call
             || events[0]
@@ -5585,6 +5586,7 @@ impl RunStore for SqliteStore {
         if current_run.state() != RunState::Running
             || current_tool.state() != ToolCallState::Running
             || has_active_model_invocation(&mut transaction, current_run.run_id()).await?
+            || has_non_terminal_descendants(&mut transaction, current_run.run_id()).await?
             || current_run.session_id() != run.session_id()
             || current_tool.tool_call_id() != tool_call.tool_call_id()
             || current_tool.run_id() != run.run_id()

@@ -1,12 +1,18 @@
 # Changelog
 
+## 2026-09-12 — `build`
+
+- Packaged the native desktop as a debug macOS Kiln.app for EDL-249, with application metadata and documented launch steps; the daemon remains separate.
+
+[Commit](pending)
+
 ## 2026-09-12 — `feat`
 
 - Added native GPUI connection and Session restore for EDL-249, with root conversation and approvals.
 - Added a temporary hierarchical Run drawer, separate child guidance drafts with exact retries, durable status and activity attribution, and Task progress.
 - Escape returns to the root composer.
 
-[Commit](pending)
+[Commit](../../commit/cda9753a1e0a44d8071acbad273dbc30e32fc5e8)
 
 ## 2026-09-12 — `feat`
 

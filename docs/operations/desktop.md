@@ -50,6 +50,16 @@ when the address and token-file path are set and either a repository or session
 ID is set. You can also start it without these variables and enter the values
 in the form.
 
+To make a debug macOS application bundle, run:
+
+```nu
+sh apps/desktop/package-macos.sh
+open target/debug/Kiln.app
+```
+
+The script builds the desktop binary and creates `target/debug/Kiln.app` with
+the binary and `Info.plist`. Start `kilnd` separately before you connect.
+
 The desktop dependencies are pinned exactly to `gpui-pre` 0.3.2,
 `gpui-pre-platform` 0.3.2, and `gpui-component` 0.6.1. Update these pins
 together only after checking compatibility.

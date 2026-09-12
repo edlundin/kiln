@@ -2,11 +2,18 @@
 
 ## 2026-09-12 — `feat`
 
+- Added immutable child-activity ContextManifest snapshots for EDL-249, capturing only the selected event while retaining root reaction provenance.
+- Snapshots exclude full child transcript and artifact bytes, and preserve older hashes.
+
+[Commit](pending)
+
+## 2026-09-12 — `feat`
+
 - Added durable root references to child Run activity for EDL-249, with typed Message links and queued reaction commands.
 - SQLite references use paired nullable foreign keys with transactional idempotency and validation of same-session event ownership and ancestry.
 - Message replay and queued input hydration preserve the references while plain SendRunInput remains compatible.
 
-[Commit](pending)
+[Commit](../../commit/e47650cf5d9dee4c0e6175f854900132a89826da)
 
 ## 2026-09-12 — `build`
 

@@ -217,6 +217,14 @@ Complete assistant Messages can be selected within their originating Run or
 between root Runs in the same Session. Child transcripts do not cross Run
 boundaries through Message selection. Duplicate Message references are rejected.
 
+Selecting a delivered root reaction also adds one `ChildActivitySnapshot`
+immediately after its user Message snapshot. Kiln loads the referenced durable
+Event and checks its Session, owning child Run, and ancestry. The snapshot
+retains the reaction Message ID and source Run and Event IDs. It contains only
+the selected Event's exposed text or metadata, not the full child transcript,
+child context, or artifact bytes. This entry is untrusted context data, not an
+instruction. Provider adapters must preserve this distinction.
+
 Instruction provenance is attribution supplied by the trusted internal caller,
 not proof of a file read or user authentication. Workspace and Run identities
 are checked against the owning Run. Attribution never grants permission or
@@ -228,6 +236,9 @@ blank text is invalid. A versioned, domain-separated, length-prefixed encoding
 covers Session and Run identity, entry order, kind, provenance, and exact content.
 The manifest hash is computed from this encoding and verified when read. Reads
 also check Message snapshots against their immutable sources and delivery state.
+Child activity reads validate the reference and use the stored projection; they
+do not regenerate it. The new entry kind keeps encoding version 1 and leaves
+existing manifest bytes and hashes unchanged.
 
 A new manifest requires a Run that accepts work. The manifest, ordered entries,
 idempotency result, and `context.manifest_created` Event commit together. The
@@ -237,10 +248,10 @@ delivery integrity are still verified. Changed input with the same key conflicts
 Queries retain committed snapshots after Run termination and list them in
 durable creation order.
 
-The first slice supports text instructions and Message snapshots only. Context
-assembly for live providers and attachment and tool representations remain
-pending. The deterministic native mode stores explicit fixture instructions and
-consumed Run input.
+Context supports text instructions, Message snapshots, and selected child
+activity snapshots. Context assembly for live providers and general attachment
+and tool representations remain pending. The deterministic native mode stores
+explicit fixture instructions and consumed Run input.
 
 ### Model invocations
 

@@ -3636,7 +3636,7 @@ async fn resolve_context_manifest_entries(
     let mut entries = Vec::with_capacity(inputs.len());
     let mut message_ids = std::collections::HashSet::new();
     for input in inputs {
-        let entry = match input {
+        match input {
             ContextManifestEntryInput::Instruction {
                 provenance,
                 content,
@@ -3645,8 +3645,10 @@ async fn resolve_context_manifest_entries(
                     return Err(ContextManifestStoreError::InstructionContentRequired);
                 }
                 validate_instruction_provenance(run, provenance)?;
-                ContextManifestEntry::instruction(provenance.clone(), content.clone())
-                    .map_err(|_| ContextManifestStoreError::InstructionContentRequired)?
+                entries.push(
+                    ContextManifestEntry::instruction(provenance.clone(), content.clone())
+                        .map_err(|_| ContextManifestStoreError::InstructionContentRequired)?,
+                );
             }
             ContextManifestEntryInput::Message { message_id } => {
                 if !message_ids.insert(message_id) {
@@ -3657,15 +3659,34 @@ async fn resolve_context_manifest_entries(
                         .await?
                         .ok_or(ContextManifestStoreError::MessageNotFound)?;
                 validate_context_source_message(transaction, run, &message, delivery_state).await?;
-                ContextManifestEntry::message_snapshot(
-                    message.id().clone(),
-                    message.role(),
-                    message.content().to_owned(),
-                )
-                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                entries.push(
+                    ContextManifestEntry::message_snapshot(
+                        message.id().clone(),
+                        message.role(),
+                        message.content().to_owned(),
+                    )
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+                );
+                if let Some(reference) = message.child_activity() {
+                    validate_child_activity(transaction, run, &message)
+                        .await
+                        .map_err(|error| match error {
+                            RunStoreError::InvalidChildActivity => {
+                                ContextManifestStoreError::MessageOriginMismatch
+                            }
+                            _ => ContextManifestStoreError::Unavailable,
+                        })?;
+                    let event = load_session_event(transaction, &reference.event_id)
+                        .await
+                        .map_err(|_| ContextManifestStoreError::Unavailable)?
+                        .ok_or(ContextManifestStoreError::MessageOriginMismatch)?;
+                    entries.push(
+                        kiln_core::project_child_activity(&event, message.id().clone())
+                            .ok_or(ContextManifestStoreError::MessageOriginMismatch)?,
+                    );
+                }
             }
-        };
-        entries.push(entry);
+        }
     }
     Ok(entries)
 }
@@ -3774,39 +3795,64 @@ async fn persist_context_manifest_entries(
     for (position, entry) in manifest.entries().iter().enumerate() {
         let position =
             i64::try_from(position).map_err(|_| ContextManifestStoreError::Unavailable)?;
-        let (entry_kind, provenance, workspace_root_id, source_run_id, message_id, role, content) =
-            match entry {
-                ContextManifestEntry::Instruction {
-                    provenance,
-                    content,
-                } => (
-                    "instruction",
-                    provenance.as_str(),
-                    provenance.workspace_root_id().map(WorkspaceRootId::as_str),
-                    provenance.run_id().map(RunId::as_str),
-                    None,
-                    None,
-                    content.as_str(),
-                ),
-                ContextManifestEntry::MessageSnapshot {
-                    message_id,
-                    role,
-                    content,
-                } => (
-                    "message",
-                    "session_message",
-                    None,
-                    None,
-                    Some(message_id.as_str()),
-                    Some(role.as_str()),
-                    content.as_str(),
-                ),
-            };
+        let (
+            entry_kind,
+            provenance,
+            workspace_root_id,
+            source_run_id,
+            source_event_id,
+            message_id,
+            role,
+            content,
+        ) = match entry {
+            ContextManifestEntry::Instruction {
+                provenance,
+                content,
+            } => (
+                "instruction",
+                provenance.as_str(),
+                provenance.workspace_root_id().map(WorkspaceRootId::as_str),
+                provenance.run_id().map(RunId::as_str),
+                None,
+                None,
+                None,
+                content.as_str(),
+            ),
+            ContextManifestEntry::MessageSnapshot {
+                message_id,
+                role,
+                content,
+            } => (
+                "message",
+                "session_message",
+                None,
+                None,
+                None,
+                Some(message_id.as_str()),
+                Some(role.as_str()),
+                content.as_str(),
+            ),
+            ContextManifestEntry::ChildActivitySnapshot {
+                reaction_message_id,
+                reference,
+                content,
+            } => (
+                "child_activity",
+                "child_activity",
+                None,
+                Some(reference.run_id.as_str()),
+                Some(reference.event_id.as_str()),
+                Some(reaction_message_id.as_str()),
+                None,
+                content.as_str(),
+            ),
+        };
         sqlx::query(
-            "INSERT INTO context_manifest_entries
-                (context_manifest_id, position, entry_kind, provenance, workspace_root_id,
-                 source_run_id, message_id, message_role, content)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO context_manifest_entries (
+                 context_manifest_id, position, entry_kind, provenance,
+                 workspace_root_id, source_run_id, source_event_id,
+                 message_id, message_role, content
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(manifest.context_manifest_id().as_str())
         .bind(position)
@@ -3814,6 +3860,7 @@ async fn persist_context_manifest_entries(
         .bind(provenance)
         .bind(workspace_root_id)
         .bind(source_run_id)
+        .bind(source_event_id)
         .bind(message_id)
         .bind(role)
         .bind(content)
@@ -3899,7 +3946,7 @@ async fn load_context_manifest(
         return Err(ContextManifestStoreError::IntegrityViolation);
     }
     let rows = sqlx::query(
-        "SELECT position, entry_kind, provenance, workspace_root_id, source_run_id,
+        "SELECT position, entry_kind, provenance, workspace_root_id, source_run_id, source_event_id,
                 message_id, message_role, content
          FROM context_manifest_entries WHERE context_manifest_id = ? ORDER BY position ASC",
     )
@@ -3929,7 +3976,13 @@ async fn load_context_manifest(
         let content = row
             .try_get::<String, _>("content")
             .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let source_event_id = row
+            .try_get::<Option<String>, _>("source_event_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
         let entry = if entry_kind == "instruction" {
+            if source_event_id.is_some() {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
             let workspace_root_id = row
                 .try_get::<Option<String>, _>("workspace_root_id")
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
@@ -3962,6 +4015,9 @@ async fn load_context_manifest(
             ContextManifestEntry::instruction(provenance, content)
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
         } else if entry_kind == "message" && provenance == "session_message" {
+            if source_event_id.is_some() {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
             let message_id = MessageId::parse(
                 row.try_get::<String, _>("message_id")
                     .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
@@ -3982,6 +4038,53 @@ async fn load_context_manifest(
                 return Err(ContextManifestStoreError::IntegrityViolation);
             }
             ContextManifestEntry::message_snapshot(message_id, role, content)
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+        } else if entry_kind == "child_activity" && provenance == "child_activity" {
+            let workspace_root_id = row
+                .try_get::<Option<String>, _>("workspace_root_id")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let source_run_id = RunId::parse(
+                row.try_get::<String, _>("source_run_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let source_event_id = EventId::parse(
+                row.try_get::<String, _>("source_event_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let reaction_message_id = MessageId::parse(
+                row.try_get::<String, _>("message_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let message_role = row
+                .try_get::<Option<String>, _>("message_role")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            if workspace_root_id.is_some() || message_role.is_some() {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
+            let reference = kiln_core::ChildActivityReference {
+                run_id: source_run_id,
+                event_id: source_event_id,
+            };
+            let reaction_message =
+                assistant_message::load_message(transaction, &reaction_message_id)
+                    .await
+                    .map_err(|_| ContextManifestStoreError::Unavailable)?
+                    .ok_or(ContextManifestStoreError::IntegrityViolation)?;
+            if reaction_message.child_activity() != Some(&reference) {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
+            validate_child_activity(transaction, &run, &reaction_message)
+                .await
+                .map_err(|error| match error {
+                    RunStoreError::InvalidChildActivity => {
+                        ContextManifestStoreError::IntegrityViolation
+                    }
+                    _ => ContextManifestStoreError::Unavailable,
+                })?;
+            ContextManifestEntry::child_activity_snapshot(reaction_message_id, reference, content)
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
         } else {
             return Err(ContextManifestStoreError::IntegrityViolation);
@@ -4015,7 +4118,10 @@ async fn validate_child_activity(
     let Some(reference) = message.child_activity() else {
         return Ok(());
     };
-    if target_run.parent_run_id().is_some() || &reference.run_id == target_run.run_id() {
+    if target_run.parent_run_id().is_some()
+        || message.target_run_id() != Some(target_run.run_id())
+        || &reference.run_id == target_run.run_id()
+    {
         return Err(RunStoreError::InvalidChildActivity);
     }
     let source_run = load_run(transaction, &reference.run_id)
@@ -4024,13 +4130,50 @@ async fn validate_child_activity(
     if source_run.session_id() != target_run.session_id() {
         return Err(RunStoreError::InvalidChildActivity);
     }
-    let source_event = load_session_event(transaction, &reference.event_id)
-        .await
-        .map_err(|_| RunStoreError::Unavailable)?
-        .ok_or(RunStoreError::InvalidChildActivity)?;
-    if source_event.session_id() != source_run.session_id()
-        || source_event.activity_run_id() != Some(&reference.run_id)
-    {
+    let source_event = sqlx::query(
+        "SELECT e.session_id,
+                CASE
+                    WHEN e.event_type = 'message.appended'
+                        THEN COALESCE(m.target_run_id, m.origin_run_id)
+                    WHEN e.event_type IN (
+                        'task.created', 'task.updated', 'task.state_changed', 'task.assigned'
+                    ) THEN e.assigned_run_id
+                    WHEN e.event_type = 'run.child_added' THEN e.child_run_id
+                    WHEN e.event_type IN (
+                        'model_invocation.output', 'usage.observed',
+                        'model_invocation.created', 'model_invocation.state_changed',
+                        'context.manifest_created', 'run.created', 'run.queued',
+                        'run.state_changed', 'run.cancellation_requested',
+                        'run.input_queued', 'run.interrupt_requested',
+                        'run.input_delivered', 'run.input_failed', 'run.input_cancelled',
+                        'tool_call.requested', 'tool_call.state_changed', 'tool_call.denied',
+                        'approval.requested', 'approval.decided',
+                        'tool_call.output', 'artifact.registered'
+                    ) THEN e.run_id
+                END AS activity_run_id
+         FROM session_events e
+         LEFT JOIN messages m ON m.message_id = e.message_id
+         WHERE e.event_id = ?",
+    )
+    .bind(reference.event_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?
+    .ok_or(RunStoreError::InvalidChildActivity)?;
+    let event_session_id = SessionId::parse(
+        source_event
+            .try_get::<String, _>("session_id")
+            .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let activity_run_id = RunId::parse(
+        source_event
+            .try_get::<Option<String>, _>("activity_run_id")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .ok_or(RunStoreError::InvalidChildActivity)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    if &event_session_id != source_run.session_id() || &activity_run_id != &reference.run_id {
         return Err(RunStoreError::InvalidChildActivity);
     }
     let descends_from_target = sqlx::query_scalar::<_, bool>(

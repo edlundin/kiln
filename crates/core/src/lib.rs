@@ -5,12 +5,14 @@ use std::{collections::HashSet, fmt, future::Future, path::Path};
 use ulid::Ulid;
 
 mod assistant_message;
+mod child_activity;
 mod model_output;
 mod native_run;
 mod provider;
 mod usage;
 mod usage_store;
 pub use assistant_message::*;
+pub use child_activity::*;
 pub use model_output::*;
 pub use native_run::*;
 pub use provider::*;
@@ -767,6 +769,11 @@ pub enum ContextManifestEntry {
         role: MessageRole,
         content: String,
     },
+    ChildActivitySnapshot {
+        reaction_message_id: MessageId,
+        reference: ChildActivityReference,
+        content: String,
+    },
 }
 
 impl ContextManifestEntry {
@@ -800,8 +807,25 @@ impl ContextManifestEntry {
 
     pub fn content(&self) -> &str {
         match self {
-            Self::Instruction { content, .. } | Self::MessageSnapshot { content, .. } => content,
+            Self::Instruction { content, .. }
+            | Self::MessageSnapshot { content, .. }
+            | Self::ChildActivitySnapshot { content, .. } => content,
         }
+    }
+
+    pub fn child_activity_snapshot(
+        reaction_message_id: MessageId,
+        reference: ChildActivityReference,
+        content: String,
+    ) -> Result<Self, InvalidContextManifest> {
+        if content.trim().is_empty() {
+            return Err(InvalidContextManifest::InvalidChildActivity);
+        }
+        Ok(Self::ChildActivitySnapshot {
+            reaction_message_id,
+            reference,
+            content,
+        })
     }
 }
 
@@ -823,6 +847,8 @@ impl ContextManifest {
         entries: Vec<ContextManifestEntry>,
     ) -> Result<Self, InvalidContextManifest> {
         let mut message_ids = HashSet::new();
+        let mut user_message_ids = HashSet::new();
+        let mut reaction_ids = HashSet::new();
         for entry in &entries {
             if entry.content().is_empty()
                 || !matches!(
@@ -840,6 +866,9 @@ impl ContextManifest {
                     ContextManifestEntry::MessageSnapshot { .. } => {
                         InvalidContextManifest::MessageContentRequired
                     }
+                    ContextManifestEntry::ChildActivitySnapshot { .. } => {
+                        InvalidContextManifest::InvalidChildActivity
+                    }
                 });
             }
             match entry {
@@ -856,6 +885,23 @@ impl ContextManifest {
                     if !message_ids.insert(message_id) =>
                 {
                     return Err(InvalidContextManifest::DuplicateMessage);
+                }
+                ContextManifestEntry::MessageSnapshot {
+                    message_id,
+                    role: MessageRole::User,
+                    ..
+                } => {
+                    user_message_ids.insert(message_id);
+                }
+                ContextManifestEntry::ChildActivitySnapshot {
+                    reaction_message_id,
+                    reference,
+                    ..
+                } if reference.run_id == run_id
+                    || !user_message_ids.contains(reaction_message_id)
+                    || !reaction_ids.insert(reaction_message_id) =>
+                {
+                    return Err(InvalidContextManifest::InvalidChildActivity);
                 }
                 _ => {}
             }
@@ -892,6 +938,7 @@ impl ContextManifest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidContextManifest {
+    InvalidChildActivity,
     InstructionContentRequired,
     MessageContentRequired,
     DuplicateMessage,
@@ -938,6 +985,17 @@ pub fn canonical_context_manifest_bytes(
                 push_context_field(&mut encoded, b"session_message");
                 push_context_field(&mut encoded, message_id.as_str().as_bytes());
                 push_context_field(&mut encoded, role.as_str().as_bytes());
+                push_context_field(&mut encoded, content.as_bytes());
+            }
+            ContextManifestEntry::ChildActivitySnapshot {
+                reaction_message_id,
+                reference,
+                content,
+            } => {
+                push_context_field(&mut encoded, b"child_activity");
+                push_context_field(&mut encoded, reaction_message_id.as_str().as_bytes());
+                push_context_field(&mut encoded, reference.run_id.as_str().as_bytes());
+                push_context_field(&mut encoded, reference.event_id.as_str().as_bytes());
                 push_context_field(&mut encoded, content.as_bytes());
             }
         }

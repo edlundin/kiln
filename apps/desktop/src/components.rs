@@ -20,6 +20,8 @@ pub struct TranscriptRow {
     actor: SharedString,
     text: SharedString,
     detail: Option<SharedString>,
+    reaction: Option<ClickHandler>,
+    reaction_disabled: bool,
 }
 
 impl TranscriptRow {
@@ -28,6 +30,8 @@ impl TranscriptRow {
             actor: actor.into(),
             text: text.into(),
             detail: None,
+            reaction: None,
+            reaction_disabled: false,
         }
     }
 
@@ -35,10 +39,25 @@ impl TranscriptRow {
         self.detail = Some(detail.into());
         self
     }
+
+    pub fn reaction(
+        mut self,
+        disabled: bool,
+        on_react: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.reaction = Some(Rc::new(on_react));
+        self.reaction_disabled = disabled;
+        self
+    }
 }
 
 impl RenderOnce for TranscriptRow {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let role = if self.reaction.is_some() {
+            Role::Group
+        } else {
+            Role::Label
+        };
         let label = format!(
             "{}: {}{}",
             self.actor,
@@ -64,11 +83,21 @@ impl RenderOnce for TranscriptRow {
                         .text_color(theme::FAINT)
                         .child(detail),
                 )
+            })
+            .when_some(self.reaction, |content, on_react| {
+                content.child(
+                    Button::new("react-to-activity")
+                        .label("Discuss latest update with root")
+                        .small()
+                        .ghost()
+                        .disabled(self.reaction_disabled)
+                        .on_click(move |event, window, cx| on_react(event, window, cx)),
+                )
             });
 
         div()
             .id("transcript-row")
-            .role(Role::Label)
+            .role(role)
             .aria_label(label)
             .w_full()
             .flex()
@@ -455,6 +484,7 @@ pub struct Composer {
     on_submit: ClickHandler,
     on_stop: ClickHandler,
     disabled: bool,
+    reference: Option<(SharedString, ClickHandler)>,
 }
 
 impl Composer {
@@ -472,11 +502,21 @@ impl Composer {
             on_submit: Rc::new(on_submit),
             on_stop: Rc::new(on_stop),
             disabled: false,
+            reference: None,
         }
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub fn reference(
+        mut self,
+        label: impl Into<SharedString>,
+        on_clear: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.reference = Some((label.into(), Rc::new(on_clear)));
         self
     }
 }
@@ -505,7 +545,7 @@ impl RenderOnce for Composer {
                 })
         };
 
-        div()
+        let composer = div()
             .w_full()
             .max_w(theme::TRANSCRIPT_WIDTH)
             .h(px(164.0))
@@ -544,6 +584,38 @@ impl RenderOnce for Composer {
                             .child(format!("Root Run · Scope: {}", self.scope)),
                     )
                     .child(action),
-            )
+            );
+        div()
+            .w_full()
+            .max_w(theme::TRANSCRIPT_WIDTH)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when_some(self.reference, |view, (label, on_clear)| {
+                view.child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("reaction-reference")
+                                .role(Role::Label)
+                                .aria_label(label.clone())
+                                .flex_1()
+                                .min_w_0()
+                                .text_xs()
+                                .child(label),
+                        )
+                        .child(
+                            Button::new("clear-reaction")
+                                .label("Clear reference")
+                                .small()
+                                .disabled(self.disabled)
+                                .on_click(move |event, window, cx| on_clear(event, window, cx)),
+                        ),
+                )
+            })
+            .child(composer)
     }
 }

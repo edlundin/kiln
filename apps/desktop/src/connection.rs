@@ -35,6 +35,7 @@ pub struct Submission {
     pub content: String,
     pub idempotency_key: String,
     pub active_run_id: Option<String>,
+    pub child_activity: Option<kiln_protocol::ChildActivityReference>,
     pub message_appended: bool,
     pub append_uncertain: bool,
 }
@@ -126,6 +127,20 @@ pub async fn submit(
     submission: &mut Submission,
 ) -> Result<(), String> {
     if let Some(run_id) = submission.active_run_id.as_deref() {
+        if let Some(reference) = &submission.child_activity {
+            client
+                .react_to_run_activity(
+                    run_id,
+                    &submission.idempotency_key,
+                    &kiln_protocol::ReactToRunActivityRequest {
+                        content: submission.content.clone(),
+                        child_activity: reference.clone(),
+                    },
+                )
+                .await
+                .map_err(|error| error_message("child activity reaction", &error))?;
+            return Ok(());
+        }
         client
             .send_run_input(
                 run_id,
@@ -140,6 +155,9 @@ pub async fn submit(
         return Ok(());
     }
 
+    if submission.child_activity.is_some() {
+        return Err("a child reaction requires its original root Run".to_owned());
+    }
     if !submission.message_appended {
         let append_result = client
             .append_message(

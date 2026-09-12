@@ -8,6 +8,7 @@ use kiln_protocol::{
 
 pub struct TranscriptItem {
     pub id: String,
+    pub source_event_id: String,
     pub actor: String,
     pub content: String,
     pub detail: Option<String>,
@@ -97,6 +98,18 @@ impl Conversation {
         self.runs.get(run_id)
     }
 
+    pub fn root_for_run(&self, run_id: &str) -> Option<&str> {
+        let mut run = self.run(run_id)?;
+        let mut seen = HashSet::new();
+        while let Some(parent) = &run.parent_run_id {
+            if !seen.insert(run.run_id.as_str()) {
+                return None;
+            }
+            run = self.run(parent)?;
+        }
+        Some(&run.run_id)
+    }
+
     pub fn task_for_run(&self, run: &RunItem) -> Option<&TaskResponse> {
         run.task_id
             .as_ref()
@@ -158,9 +171,10 @@ impl Conversation {
     }
 
     pub fn apply(&mut self, event: SessionEventResponse) {
-        if !self.seen_events.insert(event.event_id) {
+        if !self.seen_events.insert(event.event_id.clone()) {
             return;
         }
+        let source_event_id = event.event_id;
         match event.event {
             Event::MessageAppended { message } => {
                 let key = message.model_invocation_id.as_ref().map_or_else(
@@ -173,12 +187,18 @@ impl Conversation {
                 };
                 self.replace_entry(TranscriptItem {
                     id: key,
+                    source_event_id,
                     actor: actor.to_owned(),
                     content: message.content,
                     run_id: message.target_run_id.or(message.origin_run_id),
                     delivery: None,
                     detail: match message.status {
-                        MessageStatus::Complete => None,
+                        MessageStatus::Complete => message.child_activity.map(|reference| {
+                            format!(
+                                "Regarding child {} · Event {}",
+                                reference.run_id, reference.event_id
+                            )
+                        }),
                         MessageStatus::Incomplete => Some("Incomplete response".to_owned()),
                     },
                 });
@@ -190,6 +210,7 @@ impl Conversation {
                 };
                 self.append_entry(TranscriptItem {
                     id: format!("{prefix}:{}", output.model_invocation_id),
+                    source_event_id,
                     actor: actor.to_owned(),
                     content: output.content,
                     run_id: Some(output.run_id),
@@ -271,6 +292,7 @@ impl Conversation {
                 };
                 self.append_entry(TranscriptItem {
                     id: format!("tool:{tool_call_id}:{actor}"),
+                    source_event_id,
                     actor: actor.to_owned(),
                     content,
                     run_id: Some(run_id),
@@ -285,6 +307,7 @@ impl Conversation {
                 stream,
             } => {
                 self.replace_entry(TranscriptItem {
+                    source_event_id,
                     id: format!(
                         "artifact:{run_id}:{tool_call_id}:{stream:?}:{}",
                         artifact.content_hash
@@ -309,6 +332,7 @@ impl Conversation {
     fn append_entry(&mut self, item: TranscriptItem) {
         if let Some(index) = self.entries.get(&item.id) {
             self.transcript[*index].content.push_str(&item.content);
+            self.transcript[*index].source_event_id = item.source_event_id;
         } else {
             self.replace_entry(item);
         }

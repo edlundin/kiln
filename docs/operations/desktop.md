@@ -28,7 +28,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.18.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.19.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.
@@ -110,6 +110,21 @@ composer. The main composer always targets the root, including in child focus.
 Messages and tool output show their owning Run. Guidance shows its durable
 queued, delivered, failed, or cancelled state.
 
+Discuss latest update with root selects a child transcript entry as a durable
+reference. It returns to the conversation and focuses the root composer. It
+does not send a message. The composer shows the source child Run and Event IDs;
+Clear reference removes the selection without removing the draft text. For
+merged streaming output, the reference selects the latest update, not all
+output in the row. A completed assistant Message selects its final Event.
+
+Enter sends the reaction to the original root with the selected reference.
+It queues while root work is active. The next root context that includes this
+delivered reaction also includes a stored projection of the selected Event.
+The projection does not copy the full child transcript or artifact bytes. The
+replayed reaction shows its source Run and Event. A failed submission keeps its
+original root, text, reference, and idempotency key for Retry; it never silently
+targets a new root. Reconnect clears the pending root submission and selection.
+
 New child starts an unlinked interactive child under the active root. It
 inherits the root's requested repository scope and uses `ask` approval policy.
 If that scope is unavailable, reconnect before creating a child. Stop child
@@ -140,17 +155,18 @@ send another message.
 
 If the event stream closes or reports an error, the daemon and Run continue.
 Use Reconnect. Reconnection reloads the Session history, clears any pending
-root submission, and opens a new event subscription. It retains a pending child
+root submission and child-activity reference, and opens a new event subscription.
+It retains a pending child
 start only for the same Session and daemon store identity. Child guidance
 drafts and retry requests remain in memory when reconnecting to that same
 Session and store. Switching to a different Session or store clears them.
 
 ## Current boundaries
 
-The public Run-input request accepts text and delivery mode only. The desktop
-cannot attach a durable reference to a child Message, Event, ToolCall, artifact,
-or change. Root reactions with those references and their ContextManifest
-projection require a protocol and daemon change; plain text is not a substitute.
+Child reactions use durable Events for the displayed child Messages, output,
+and artifact metadata. General change review and artifact-content inspection
+remain pending. Reactions require the selected child's original root to accept
+input. The current executor is not yet a persistent interactive supervisor.
 
 The desktop does not yet provide Workspace or Session browsing, the secondary
 Run graph, or the global Usage ledger. The Run drawer supervises the current

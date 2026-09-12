@@ -50,6 +50,12 @@ struct GuidanceDraft {
     error: Option<String>,
 }
 
+#[derive(Clone)]
+struct ReactionDraft {
+    root_run_id: String,
+    reference: kiln_protocol::ChildActivityReference,
+}
+
 pub struct Desktop {
     address: Entity<InputState>,
     token_file: Entity<InputState>,
@@ -63,6 +69,7 @@ pub struct Desktop {
     stream: Option<JoinHandle<()>>,
     pending: Option<Submission>,
     pending_child_start: Option<ChildStart>,
+    reaction: Option<ReactionDraft>,
     guidance: BTreeMap<String, GuidanceDraft>,
     online: bool,
     busy: bool,
@@ -139,6 +146,7 @@ impl Desktop {
             stream: None,
             pending: None,
             pending_child_start: None,
+            reaction: None,
             guidance: BTreeMap::new(),
             online: false,
             busy: false,
@@ -252,7 +260,12 @@ impl Desktop {
         let mut submission = self.pending.take().unwrap_or_else(|| Submission {
             content,
             idempotency_key: ulid::Ulid::generate().to_string(),
-            active_run_id: self.conversation.active_root().map(str::to_owned),
+            active_run_id: self
+                .reaction
+                .as_ref()
+                .map(|draft| draft.root_run_id.clone())
+                .or_else(|| self.conversation.active_root().map(str::to_owned)),
+            child_activity: self.reaction.as_ref().map(|draft| draft.reference.clone()),
             message_appended: false,
             append_uncertain: false,
         });
@@ -274,6 +287,33 @@ impl Desktop {
             return;
         };
         self.cancel_run(run, "Stop Run", cx);
+    }
+
+    fn select_reaction(
+        &mut self,
+        run_id: String,
+        event_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy || !self.online || self.pending.is_some() {
+            return;
+        }
+        let Some(root) = self
+            .conversation
+            .root_for_run(&run_id)
+            .filter(|root| *root != run_id && self.conversation.active_root() == Some(*root))
+        else {
+            return;
+        };
+        self.reaction = Some(ReactionDraft {
+            root_run_id: root.to_owned(),
+            reference: kiln_protocol::ChildActivityReference { run_id, event_id },
+        });
+        self.show_runs = false;
+        self.focused_run = None;
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     fn cancel_run(&mut self, run: String, operation: &'static str, cx: &mut Context<Self>) {
@@ -490,6 +530,7 @@ impl Desktop {
                 });
                 self.connection = Some(connected);
                 self.pending = None;
+                self.reaction = None;
                 if !same_session {
                     self.pending_child_start = None;
                     self.guidance.clear();
@@ -519,6 +560,7 @@ impl Desktop {
                         self.composer
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         self.pending = None;
+                        self.reaction = None;
                         self.error = None;
                     }
                     Err(error) => {
@@ -897,6 +939,20 @@ impl Render for Desktop {
             if let Some(detail) = self.conversation.transcript_detail(item) {
                 row = row.detail(detail);
             }
+            if let Some(run_id) = item.run_id.as_deref().filter(|run_id| {
+                self.conversation.root_for_run(run_id).is_some_and(|root| {
+                    root != *run_id && self.conversation.active_root() == Some(root)
+                })
+            }) {
+                let run_id = run_id.to_owned();
+                let event_id = item.source_event_id.clone();
+                row = row.reaction(
+                    disabled,
+                    cx.listener(move |this, _, window, cx| {
+                        this.select_reaction(run_id.clone(), event_id.clone(), window, cx);
+                    }),
+                );
+            }
             transcript = transcript.child(div().id(SharedString::from(item.id.clone())).child(row));
         }
         for approval in self
@@ -1109,7 +1165,15 @@ impl Render for Desktop {
                                                 }),
                                                 cx.listener(|this, _, _, cx| this.cancel(cx)),
                                             )
-                                            .disabled(disabled),
+                                            .disabled(disabled)
+                                            .when_some(self.reaction.as_ref(), |composer, draft| composer.reference(
+                                                format!("Reply to root about child {} · Event {}", draft.reference.run_id, draft.reference.event_id),
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.reaction = None;
+                                                    this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                                                    cx.notify();
+                                                }),
+                                            )),
                                         ),
                                     )
                                     .child(

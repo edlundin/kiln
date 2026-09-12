@@ -2,10 +2,16 @@
 
 ## 2026-09-12 — `feat`
 
+- Added desktop child-activity reactions for EDL-249: select a child transcript update without sending, show and clear durable Run/Event references in the root composer, and preserve the original root and reference through submission, retry, and replay.
+
+[Commit](pending)
+
+## 2026-09-12 — `feat`
+
 - Added immutable child-activity ContextManifest snapshots for EDL-249, capturing only the selected event while retaining root reaction provenance.
 - Snapshots exclude full child transcript and artifact bytes, and preserve older hashes.
 
-[Commit](pending)
+[Commit](../../commit/a5e77a8193594a1f90abab922d27bd44ca65ea53)
 
 ## 2026-09-12 — `feat`
 

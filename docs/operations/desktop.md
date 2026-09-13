@@ -28,7 +28,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.19.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.20.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.
@@ -46,9 +46,10 @@ cargo run -p kiln-desktop --bin kiln-desktop
 ```
 
 These variables fill the connection form. The desktop connects automatically
-when the address and token-file path are set and either a repository or session
-ID is set. You can also start it without these variables and enter the values
-in the form.
+when the address and token-file path are set. With only those two values, it
+opens the saved Workspace and Session browser. Set a repository or session ID
+to open a specific Session after connecting. You can also start it without
+these variables and enter the values in the form.
 
 To make a debug macOS application bundle, run:
 
@@ -83,6 +84,31 @@ cargo run -p kiln-desktop --bin kiln-desktop
 The desktop retrieves the Session and its Workspace, restores the Session's Run
 tree, loads stored Session events from the start, and then subscribes after the
 returned event cursor. The connection view shows the resulting Session ID.
+
+## Browse saved Workspaces and Sessions
+
+After the daemon connection succeeds, the Workspace navigator lists saved
+Workspaces. Search matches the Workspace name, ID, and repository root. Select a
+Workspace to load its Sessions in the Session drawer. Session search matches the
+Session ID. The drawer shows loading, empty, no-match, and query-error states.
+
+Select **New** in the Session drawer to create and open a Session in the
+selected Workspace. Select **Add** in the Workspace navigator to open the
+connection form and create a Workspace from the repository field. **Browse**
+and **Hide browser** toggle both panels while leaving the current Session open.
+
+Selecting a saved Session stops the previous event subscription, restores the
+selected Session's Run snapshot and event history, and starts a new subscription
+from that snapshot's cursor. Responses and events from an older Workspace or
+Session request are ignored. The active Session remains bound to its Workspace
+root for the composer and Run controls.
+
+The desktop keeps unsent composer text, child guidance drafts, reactions, and
+retryable commands under their original Session ID while browsing. Returning to
+that Session restores them. A draft is never sent to a different Session, and
+the composer is disabled while no Session is selected or while a Session is
+opening. Escape clears the focused browser search first, then closes the Run
+drawer or child focus and returns focus to the root composer.
 
 ## Conversation controls
 
@@ -159,7 +185,9 @@ root submission and child-activity reference, and opens a new event subscription
 It retains a pending child
 start only for the same Session and daemon store identity. Child guidance
 drafts and retry requests remain in memory when reconnecting to that same
-Session and store. Switching to a different Session or store clears them.
+Session and store. Switching Sessions keeps them under their original Session
+ID while the daemon store is unchanged. Switching to a different daemon store
+clears them.
 
 ## Current boundaries
 
@@ -168,7 +196,6 @@ and artifact metadata. General change review and artifact-content inspection
 remain pending. Reactions require the selected child's original root to accept
 input. The current executor is not yet a persistent interactive supervisor.
 
-The desktop does not yet provide Workspace or Session browsing, the secondary
-Run graph, or the global Usage ledger. The Run drawer supervises the current
-root's descendants. EDL-249 remains in Backlog until the Pencil design is
-accepted.
+The desktop does not yet provide the secondary Run graph or the global Usage
+ledger. The Run drawer supervises the current root's descendants. EDL-249
+remains in Backlog until the Pencil design is accepted.

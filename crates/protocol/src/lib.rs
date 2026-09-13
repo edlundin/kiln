@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.19.0";
+pub const PROTOCOL_VERSION: &str = "0.20.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -37,8 +37,10 @@ pub const ARTIFACT_PATH: &str = "/v1/artifacts/{content_hash}";
 pub const NEGOTIATE_OPERATION_ID: &str = "negotiate_protocol";
 pub const EVENT_STREAM_OPERATION_ID: &str = "event_stream";
 pub const CREATE_WORKSPACE_OPERATION_ID: &str = "create_workspace";
+pub const LIST_WORKSPACES_OPERATION_ID: &str = "list_workspaces";
 pub const GET_WORKSPACE_OPERATION_ID: &str = "get_workspace";
 pub const CREATE_SESSION_OPERATION_ID: &str = "create_session";
+pub const LIST_SESSIONS_OPERATION_ID: &str = "list_sessions";
 pub const GET_SESSION_OPERATION_ID: &str = "get_session";
 pub const APPEND_MESSAGE_OPERATION_ID: &str = "append_message";
 pub const CREATE_TASK_OPERATION_ID: &str = "create_task";
@@ -274,6 +276,12 @@ pub struct WorkspaceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ListWorkspacesResponse {
+    pub workspaces: Vec<WorkspaceResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "snake_case")]
 pub struct AppendMessageRequest {
@@ -387,6 +395,12 @@ pub struct ApprovalDecisionRequest {
 pub struct SessionResponse {
     pub session_id: String,
     pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ListSessionsResponse {
+    pub sessions: Vec<SessionResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

@@ -10,13 +10,13 @@ use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
     ApprovalState, AssignTaskRequest, ClientIdentity, CreateTaskRequest, CreateWorkspaceRequest,
     DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
-    MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
-    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
-    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode, RunResponse,
-    RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse, SessionEventResponse,
-    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
-    StartRunRequest, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
+    ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode, MessageDeliveryResponse,
+    MessageDeliveryState, MessageResponse, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
+    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
+    RunInputMode, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
+    StartChildRunRequest, StartRunRequest, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
     TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallState, ToolOutputStream,
     TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
     WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
@@ -976,6 +976,208 @@ async fn real_daemon_creates_and_recovers_a_multi_repository_workspace() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let problem: ProblemDetails = response.json().await.expect("missing Workspace problem");
     assert_eq!(problem.code, error_code::WORKSPACE_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn real_daemon_lists_workspaces_and_sessions_deterministically_and_recovers() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary browsing test directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("repository parent");
+    let first_repository = git_repository(&repositories, "first");
+    let second_repository = git_repository(&repositories, "second");
+    let data_directory = sandbox.path().join("data");
+
+    let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
+    let empty: ListWorkspacesResponse = http
+        .get(format!("http://{}{WORKSPACES_PATH}", daemon.address))
+        .send()
+        .await
+        .expect("empty Workspace list response")
+        .json()
+        .await
+        .expect("empty Workspace list JSON");
+    assert!(empty.workspaces.is_empty());
+
+    let first_workspace: WorkspaceResponse = http
+        .post(format!("http://{}{WORKSPACES_PATH}", daemon.address))
+        .json(&CreateWorkspaceRequest {
+            name: "First browsing Workspace".to_owned(),
+            roots: vec![WorkspaceRootRequest {
+                name: "first".to_owned(),
+                path: first_repository
+                    .to_str()
+                    .expect("first path is UTF-8")
+                    .to_owned(),
+            }],
+        })
+        .send()
+        .await
+        .expect("first Workspace response")
+        .json()
+        .await
+        .expect("first Workspace JSON");
+    let second_workspace: WorkspaceResponse = http
+        .post(format!("http://{}{WORKSPACES_PATH}", daemon.address))
+        .json(&CreateWorkspaceRequest {
+            name: "Second browsing Workspace".to_owned(),
+            roots: vec![WorkspaceRootRequest {
+                name: "second".to_owned(),
+                path: second_repository
+                    .to_str()
+                    .expect("second path is UTF-8")
+                    .to_owned(),
+            }],
+        })
+        .send()
+        .await
+        .expect("second Workspace response")
+        .json()
+        .await
+        .expect("second Workspace JSON");
+
+    let listed: ListWorkspacesResponse = http
+        .get(format!("http://{}{WORKSPACES_PATH}", daemon.address))
+        .send()
+        .await
+        .expect("Workspace list response")
+        .json()
+        .await
+        .expect("Workspace list JSON");
+    assert_eq!(
+        listed
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.workspace_id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            first_workspace.workspace_id.as_str(),
+            second_workspace.workspace_id.as_str()
+        ]
+    );
+
+    let first_session: SessionResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", &first_workspace.workspace_id)
+        ))
+        .send()
+        .await
+        .expect("first Session response")
+        .json()
+        .await
+        .expect("first Session JSON");
+    let second_session: SessionResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", &first_workspace.workspace_id)
+        ))
+        .send()
+        .await
+        .expect("second Session response")
+        .json()
+        .await
+        .expect("second Session JSON");
+    let other_session: SessionResponse = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", &second_workspace.workspace_id)
+        ))
+        .send()
+        .await
+        .expect("other Session response")
+        .json()
+        .await
+        .expect("other Session JSON");
+
+    let first_sessions: ListSessionsResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", &first_workspace.workspace_id)
+        ))
+        .send()
+        .await
+        .expect("first Session list response")
+        .json()
+        .await
+        .expect("first Session list JSON");
+    assert_eq!(
+        first_sessions
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            first_session.session_id.as_str(),
+            second_session.session_id.as_str()
+        ]
+    );
+    let other_sessions: ListSessionsResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", &second_workspace.workspace_id)
+        ))
+        .send()
+        .await
+        .expect("other Session list response")
+        .json()
+        .await
+        .expect("other Session list JSON");
+    assert_eq!(other_sessions.sessions, vec![other_session.clone()]);
+
+    let unknown_workspace =
+        WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", "wsp_01ARZ3NDEKTSV4RRFFQ69G5FB0");
+    assert_problem(
+        http.get(format!("http://{}{}", daemon.address, unknown_workspace))
+            .send()
+            .await
+            .expect("unknown Workspace Session list response"),
+        StatusCode::NOT_FOUND,
+        error_code::WORKSPACE_NOT_FOUND,
+    )
+    .await;
+    assert_problem(
+        reqwest::Client::new()
+            .get(format!("http://{}{WORKSPACES_PATH}", daemon.address))
+            .send()
+            .await
+            .expect("unauthenticated Workspace list response"),
+        StatusCode::UNAUTHORIZED,
+        error_code::AUTHENTICATION_REQUIRED,
+    )
+    .await;
+
+    drop(daemon);
+    let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
+    let recovered_workspaces: ListWorkspacesResponse = http
+        .get(format!("http://{}{WORKSPACES_PATH}", daemon.address))
+        .send()
+        .await
+        .expect("recovered Workspace list response")
+        .json()
+        .await
+        .expect("recovered Workspace list JSON");
+    assert_eq!(recovered_workspaces, listed);
+    let recovered_sessions: ListSessionsResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            WORKSPACE_SESSIONS_PATH.replace("{workspace_id}", &first_workspace.workspace_id)
+        ))
+        .send()
+        .await
+        .expect("recovered Session list response")
+        .json()
+        .await
+        .expect("recovered Session list JSON");
+    assert_eq!(recovered_sessions, first_sessions);
 }
 
 #[tokio::test]

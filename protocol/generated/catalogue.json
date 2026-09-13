@@ -80,12 +80,22 @@
     },
     {
       "method": "GET",
+      "operation": "list_workspaces",
+      "path": "/v1/workspaces"
+    },
+    {
+      "method": "GET",
       "operation": "get_workspace",
       "path": "/v1/workspaces/{workspace_id}"
     },
     {
       "method": "POST",
       "operation": "create_session",
+      "path": "/v1/workspaces/{workspace_id}/sessions"
+    },
+    {
+      "method": "GET",
+      "operation": "list_sessions",
       "path": "/v1/workspaces/{workspace_id}/sessions"
     },
     {
@@ -174,7 +184,7 @@
       "path": "/v1/artifacts/{content_hash}"
     }
   ],
-  "protocol_version": "0.19.0",
+  "protocol_version": "0.20.0",
   "websocket": [
     {
       "method": "GET",

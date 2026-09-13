@@ -1,6 +1,6 @@
 # Kiln protocol reference
 
-Protocol version: `0.19.0`.
+Protocol version: `0.20.0`.
 
 All loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.
 
@@ -12,9 +12,9 @@ Message responses distinguish `user` and `assistant` roles and `complete` or `in
 
 The client sends `POST /v1/protocol/negotiate` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.
 
-The client creates a durable Workspace with `POST /v1/workspaces`, providing a name and one or more named local Git repository roots. `GET /v1/workspaces/{workspace_id}` returns the stored snapshot.
+The client creates a durable Workspace with `POST /v1/workspaces`, providing a name and one or more named local Git repository roots. `GET /v1/workspaces` returns all stored Workspaces ordered by `workspace_id`; an empty store returns an empty `workspaces` array. `GET /v1/workspaces/{workspace_id}` returns the stored snapshot.
 
-`POST /v1/workspaces/{workspace_id}/sessions` creates a Session attached to one Workspace. `GET /v1/sessions/{session_id}` returns it. A Session does not own or depend on a worktree.
+`POST /v1/workspaces/{workspace_id}/sessions` creates a Session attached to one Workspace. `GET /v1/workspaces/{workspace_id}/sessions` returns only that Workspace's Sessions ordered by `session_id`; an empty selection returns an empty `sessions` array. An unknown Workspace returns `workspace_not_found`. `GET /v1/sessions/{session_id}` returns it. A Session does not own or depend on a worktree.
 
 `POST /v1/sessions/{session_id}/messages` accepts immutable user message content. Kiln creates the untargeted Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.
 
@@ -34,6 +34,6 @@ SIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands
 
 `GET /v1/sessions/{session_id}/events?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.
 
-The client connects to `GET /v1/events?version=0.19.0&capability=kiln.events.websocket&after={cursor}` and offers `kiln.events.websocket` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `kiln.events.websocket`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.
+The client connects to `GET /v1/events?version=0.20.0&capability=kiln.events.websocket&after={cursor}` and offers `kiln.events.websocket` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `kiln.events.websocket`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.
 
 HTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.

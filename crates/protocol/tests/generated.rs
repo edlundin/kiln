@@ -6,10 +6,11 @@ use kiln_protocol::{
     EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
     GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
     IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID,
-    MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
-    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode,
-    RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    LIST_SESSIONS_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, MessageDeliveryMode,
+    MessageDeliveryResponse, MessageDeliveryState, MessageResponse, NEGOTIATE_OPERATION_ID,
+    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
+    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RunInputMode, RunResponse,
+    RunState, SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
     SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
     START_RUN_OPERATION_ID, SendRunInputRequest, SessionEventDataResponse, SessionEventsResponse,
     SessionResponse, StartChildRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH,
@@ -316,55 +317,65 @@ fn catalogue_and_error_fixture_use_protocol_metadata() {
         catalogue["http"][1]["operation"],
         CREATE_WORKSPACE_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][2]["path"], WORKSPACE_PATH);
+    assert_eq!(catalogue["http"][2]["path"], WORKSPACES_PATH);
     assert_eq!(
         catalogue["http"][2]["operation"],
-        GET_WORKSPACE_OPERATION_ID
+        LIST_WORKSPACES_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][3]["path"], WORKSPACE_SESSIONS_PATH);
+    assert_eq!(catalogue["http"][3]["path"], WORKSPACE_PATH);
     assert_eq!(
         catalogue["http"][3]["operation"],
+        GET_WORKSPACE_OPERATION_ID
+    );
+    assert_eq!(catalogue["http"][4]["path"], WORKSPACE_SESSIONS_PATH);
+    assert_eq!(
+        catalogue["http"][4]["operation"],
         CREATE_SESSION_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][4]["path"], SESSION_PATH);
-    assert_eq!(catalogue["http"][4]["operation"], GET_SESSION_OPERATION_ID);
-    assert_eq!(catalogue["http"][5]["path"], SESSION_MESSAGES_PATH);
+    assert_eq!(catalogue["http"][5]["path"], WORKSPACE_SESSIONS_PATH);
     assert_eq!(
         catalogue["http"][5]["operation"],
+        LIST_SESSIONS_OPERATION_ID
+    );
+    assert_eq!(catalogue["http"][6]["path"], SESSION_PATH);
+    assert_eq!(catalogue["http"][6]["operation"], GET_SESSION_OPERATION_ID);
+    assert_eq!(catalogue["http"][7]["path"], SESSION_MESSAGES_PATH);
+    assert_eq!(
+        catalogue["http"][7]["operation"],
         APPEND_MESSAGE_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][6]["path"], SESSION_EVENTS_PATH);
+    assert_eq!(catalogue["http"][8]["path"], SESSION_EVENTS_PATH);
     assert_eq!(
-        catalogue["http"][6]["operation"],
+        catalogue["http"][8]["operation"],
         LIST_SESSION_EVENTS_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][7]["path"], SESSION_TASKS_PATH);
-    assert_eq!(catalogue["http"][7]["operation"], CREATE_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][8]["path"], TASK_PATH);
-    assert_eq!(catalogue["http"][8]["operation"], GET_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][9]["path"], TASK_PATH);
-    assert_eq!(catalogue["http"][9]["operation"], UPDATE_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][10]["path"], TASK_ASSIGNMENT_PATH);
-    assert_eq!(catalogue["http"][10]["operation"], ASSIGN_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][11]["path"], TASK_TRANSITION_PATH);
-    assert_eq!(
-        catalogue["http"][11]["operation"],
-        TRANSITION_TASK_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][12]["path"], SESSION_RUNS_PATH);
-    assert_eq!(catalogue["http"][12]["operation"], START_RUN_OPERATION_ID);
-    assert_eq!(catalogue["http"][13]["path"], SESSION_RUNS_PATH);
+    assert_eq!(catalogue["http"][9]["path"], SESSION_TASKS_PATH);
+    assert_eq!(catalogue["http"][9]["operation"], CREATE_TASK_OPERATION_ID);
+    assert_eq!(catalogue["http"][10]["path"], TASK_PATH);
+    assert_eq!(catalogue["http"][10]["operation"], GET_TASK_OPERATION_ID);
+    assert_eq!(catalogue["http"][11]["path"], TASK_PATH);
+    assert_eq!(catalogue["http"][11]["operation"], UPDATE_TASK_OPERATION_ID);
+    assert_eq!(catalogue["http"][12]["path"], TASK_ASSIGNMENT_PATH);
+    assert_eq!(catalogue["http"][12]["operation"], ASSIGN_TASK_OPERATION_ID);
+    assert_eq!(catalogue["http"][13]["path"], TASK_TRANSITION_PATH);
     assert_eq!(
         catalogue["http"][13]["operation"],
+        TRANSITION_TASK_OPERATION_ID
+    );
+    assert_eq!(catalogue["http"][14]["path"], SESSION_RUNS_PATH);
+    assert_eq!(catalogue["http"][14]["operation"], START_RUN_OPERATION_ID);
+    assert_eq!(catalogue["http"][15]["path"], SESSION_RUNS_PATH);
+    assert_eq!(
+        catalogue["http"][15]["operation"],
         LIST_SESSION_RUNS_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][14]["path"], RUN_CHILDREN_PATH);
+    assert_eq!(catalogue["http"][16]["path"], RUN_CHILDREN_PATH);
     assert_eq!(
-        catalogue["http"][14]["operation"],
+        catalogue["http"][16]["operation"],
         START_CHILD_RUN_OPERATION_ID
     );
-    assert_eq!(catalogue["http"][15]["path"], RUN_PATH);
-    assert_eq!(catalogue["http"][15]["operation"], GET_RUN_OPERATION_ID);
+    assert_eq!(catalogue["http"][17]["path"], RUN_PATH);
+    assert_eq!(catalogue["http"][17]["operation"], GET_RUN_OPERATION_ID);
     let artifact = catalogue["http"]
         .as_array()
         .expect("HTTP operations")

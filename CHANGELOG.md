@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-13 — `feat`
+
+- Added deterministic workspace and session browsing through protocol `0.20.0`, authenticated server routes, Rust client methods, and the native desktop. Saved session replay and reconnect restoration preserve session-scoped drafts, reactions, pending submissions, child starts, and guidance drafts.
+
+EDL-288: https://linear.app/edlundin/issue/EDL-288
+
+
+[Commit](pending)
+
+
 ## 2026-09-13 — `fix`
 
 - Repaired the EDL-287 child-tree black-box sequence so the root remains pending until descendants are terminal, then verifies replay, restart, approval, and cancellation states.

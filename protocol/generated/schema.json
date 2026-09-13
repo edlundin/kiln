@@ -286,6 +286,116 @@
       "title": "CreateWorkspaceRequest",
       "type": "object"
     },
+    "ListSessionsResponse": {
+      "$defs": {
+        "SessionResponse": {
+          "properties": {
+            "session_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_id",
+            "workspace_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionResponse"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "title": "ListSessionsResponse",
+      "type": "object"
+    },
+    "ListWorkspacesResponse": {
+      "$defs": {
+        "WorkspaceResponse": {
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "roots": {
+              "items": {
+                "$ref": "#/$defs/WorkspaceRootResponse"
+              },
+              "type": "array"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "name",
+            "roots"
+          ],
+          "type": "object"
+        },
+        "WorkspaceRootResponse": {
+          "properties": {
+            "canonical_path": {
+              "type": "string"
+            },
+            "display_path": {
+              "type": "string"
+            },
+            "git_common_directory_path": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "position": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "workspace_root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_root_id",
+            "name",
+            "display_path",
+            "canonical_path",
+            "git_common_directory_path",
+            "position",
+            "state"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "workspaces": {
+          "items": {
+            "$ref": "#/$defs/WorkspaceResponse"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "workspaces"
+      ],
+      "title": "ListWorkspacesResponse",
+      "type": "object"
+    },
     "MessageDeliveryMode": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [
@@ -7227,7 +7337,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.19.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.20.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

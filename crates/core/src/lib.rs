@@ -4219,6 +4219,10 @@ pub trait SessionStore: Send + Sync {
         &self,
         id: &SessionId,
     ) -> impl Future<Output = Result<Option<Session>, StoreError>> + Send;
+    fn list_sessions(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> impl Future<Output = Result<Vec<Session>, StoreError>> + Send;
     fn append_message(
         &self,
         message: &Message,
@@ -5517,6 +5521,10 @@ pub trait SessionOperations: Send + Sync {
         &self,
         session_id: SessionId,
     ) -> impl Future<Output = Result<Session, SessionError>> + Send;
+    fn list_sessions(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> impl Future<Output = Result<Vec<Session>, SessionError>> + Send;
     fn append_message(
         &self,
         command: AppendMessage,
@@ -5604,6 +5612,24 @@ where
             .ok_or(SessionError::SessionNotFound)
     }
 
+    pub async fn list_sessions(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<Session>, SessionError> {
+        let workspace = self
+            .workspace_store
+            .get_workspace(&workspace_id)
+            .await
+            .map_err(|_| SessionError::WorkspaceStoreUnavailable)?;
+        if workspace.is_none() {
+            return Err(SessionError::WorkspaceNotFound);
+        }
+        self.session_store
+            .list_sessions(&workspace_id)
+            .await
+            .map_err(|_| SessionError::SessionStoreUnavailable)
+    }
+
     pub async fn append_message(&self, command: AppendMessage) -> Result<Message, SessionError> {
         self.get_session(command.session_id.clone()).await?;
         let message = Message::new(
@@ -5662,6 +5688,10 @@ where
 
     async fn get_session(&self, session_id: SessionId) -> Result<Session, SessionError> {
         SessionApplication::get_session(self, session_id).await
+    }
+
+    async fn list_sessions(&self, workspace_id: WorkspaceId) -> Result<Vec<Session>, SessionError> {
+        SessionApplication::list_sessions(self, workspace_id).await
     }
 
     async fn append_message(&self, command: AppendMessage) -> Result<Message, SessionError> {
@@ -6041,6 +6071,7 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         id: &WorkspaceId,
     ) -> impl Future<Output = Result<Option<Workspace>, StoreError>> + Send;
+    fn list_workspaces(&self) -> impl Future<Output = Result<Vec<Workspace>, StoreError>> + Send;
 }
 
 pub trait WorkspaceIdGenerator: Send + Sync {
@@ -6057,6 +6088,9 @@ pub trait WorkspaceOperations: Send + Sync {
         &self,
         id: WorkspaceId,
     ) -> impl Future<Output = Result<Workspace, WorkspaceError>> + Send;
+    fn list_workspaces(
+        &self,
+    ) -> impl Future<Output = Result<Vec<Workspace>, WorkspaceError>> + Send;
 }
 
 pub struct WorkspaceApplication<D, S, I> {
@@ -6132,6 +6166,13 @@ where
             .map_err(|_| WorkspaceError::WorkspaceStoreUnavailable)?
             .ok_or(WorkspaceError::WorkspaceNotFound)
     }
+
+    pub async fn list_workspaces(&self) -> Result<Vec<Workspace>, WorkspaceError> {
+        self.store
+            .list_workspaces()
+            .await
+            .map_err(|_| WorkspaceError::WorkspaceStoreUnavailable)
+    }
 }
 
 impl<D, S, I> WorkspaceOperations for WorkspaceApplication<D, S, I>
@@ -6149,6 +6190,10 @@ where
 
     async fn get_workspace(&self, id: WorkspaceId) -> Result<Workspace, WorkspaceError> {
         WorkspaceApplication::get_workspace(self, id).await
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<Workspace>, WorkspaceError> {
+        WorkspaceApplication::list_workspaces(self).await
     }
 }
 
@@ -6201,6 +6246,9 @@ mod tests {
         }
         async fn get_workspace(&self, _id: &WorkspaceId) -> Result<Option<Workspace>, StoreError> {
             Ok(None)
+        }
+        async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError> {
+            Ok(self.created.lock().unwrap().clone())
         }
     }
 
@@ -6655,6 +6703,10 @@ mod tests {
                 .unwrap()
             }))
         }
+
+        async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError> {
+            Ok(Vec::new())
+        }
     }
 
     #[derive(Default)]
@@ -6676,6 +6728,13 @@ mod tests {
 
         async fn get_session(&self, _id: &SessionId) -> Result<Option<Session>, StoreError> {
             Ok(self.session.lock().unwrap().clone())
+        }
+
+        async fn list_sessions(
+            &self,
+            _workspace_id: &WorkspaceId,
+        ) -> Result<Vec<Session>, StoreError> {
+            Ok(self.session.lock().unwrap().clone().into_iter().collect())
         }
 
         async fn append_message(
@@ -7199,6 +7258,13 @@ mod run_tests {
             )))
         }
 
+        async fn list_sessions(
+            &self,
+            _workspace_id: &WorkspaceId,
+        ) -> Result<Vec<Session>, StoreError> {
+            Ok(Vec::new())
+        }
+
         async fn append_message(
             &self,
             _message: &Message,
@@ -7256,6 +7322,10 @@ mod run_tests {
                 )
                 .unwrap(),
             ))
+        }
+
+        async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError> {
+            Ok(Vec::new())
         }
     }
 

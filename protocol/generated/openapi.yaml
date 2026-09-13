@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Kiln daemon protocol
-  version: 0.19.0
+  version: 0.20.0
   description: Kiln loopback protocol contract.
 security:
   - bearerAuth: []
@@ -76,6 +76,17 @@ paths:
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'
+    get:
+      operationId: list_workspaces
+      responses:
+        '200':
+          description: Stored workspace snapshots ordered by workspace ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListWorkspacesResponse'
+        '500':
+          $ref: '#/components/responses/Problem'
   /v1/workspaces/{workspace_id}:
     get:
       operationId: get_workspace
@@ -117,6 +128,26 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
         '503':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+    get:
+      operationId: list_sessions
+      parameters:
+        - name: workspace_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Sessions for the workspace ordered by session ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListSessionsResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'

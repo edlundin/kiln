@@ -18,6 +18,8 @@ export type WorkspaceRootResponse = { workspace_root_id: string, name: string, d
 
 export type WorkspaceResponse = { workspace_id: string, name: string, roots: Array<WorkspaceRootResponse>, };
 
+export type ListWorkspacesResponse = { workspaces: Array<WorkspaceResponse>, };
+
 export type AppendMessageRequest = { content: string, };
 
 export type CreateTaskRequest = { objective: string, parent_task_id: string | null, dependency_task_ids: Array<string>, };
@@ -29,6 +31,8 @@ export type TransitionTaskRequest = { state: TaskState, };
 export type AssignTaskRequest = { run_id: string, };
 
 export type SessionResponse = { session_id: string, workspace_id: string, };
+
+export type ListSessionsResponse = { sessions: Array<SessionResponse>, };
 
 export type MessageRole = "user" | "assistant";
 

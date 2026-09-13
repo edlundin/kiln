@@ -10,7 +10,8 @@ use kiln_protocol::{
     ClientIdentity, CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
     GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID,
     GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
-    LIST_SESSION_RUNS_OPERATION_ID, MessageDeliveryResponse, MessageResponse,
+    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID,
+    ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse,
     NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
     ProblemDetails, REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH,
     RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunResponse,
@@ -170,6 +171,14 @@ impl Client {
         .await
     }
 
+    pub async fn list_workspaces(&self) -> Result<ListWorkspacesResponse, Error> {
+        self.send_json(
+            LIST_WORKSPACES_OPERATION_ID,
+            self.http.get(self.http_url(WORKSPACES_PATH)),
+        )
+        .await
+    }
+
     pub async fn get_workspace(&self, workspace_id: &str) -> Result<WorkspaceResponse, Error> {
         let path = path_with_segment(
             WORKSPACE_PATH,
@@ -194,6 +203,20 @@ impl Client {
         self.send_json(
             CREATE_SESSION_OPERATION_ID,
             self.http.post(self.http_url(&path)),
+        )
+        .await
+    }
+
+    pub async fn list_sessions(&self, workspace_id: &str) -> Result<ListSessionsResponse, Error> {
+        let path = path_with_segment(
+            WORKSPACE_SESSIONS_PATH,
+            "{workspace_id}",
+            "workspace_id",
+            workspace_id,
+        )?;
+        self.send_json(
+            LIST_SESSIONS_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
         )
         .await
     }

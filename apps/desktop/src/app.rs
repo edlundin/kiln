@@ -5,13 +5,14 @@ use gpui::{
     prelude::*, px,
 };
 use gpui_component::{
-    Disableable, Sizable,
+    Disableable, Selectable, Sizable,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, TextareaState},
 };
 use kiln_protocol::{
     ApprovalDecision, ApprovalDecisionRequest, ApprovalState, MessageDeliveryMode, RunInputMode,
-    RunState, SendRunInputRequest, SessionEventResponse, StartChildRunRequest, WebSocketFrame,
+    RunState, SendRunInputRequest, SessionEventResponse, SessionResponse, StartChildRunRequest,
+    WebSocketFrame, WorkspaceResponse,
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
@@ -25,20 +26,58 @@ use crate::{
 };
 
 enum Update {
-    Connected(Result<Connected, String>),
-    Event(SessionEventResponse),
-    Disconnected(String),
-    Submitted(Submission, Result<(), String>),
-    ChildStarted(Result<(), String>),
+    Connected {
+        generation: u64,
+        result: Result<connection::ConnectionResult, String>,
+    },
+    Event {
+        generation: u64,
+        session_id: String,
+        event: SessionEventResponse,
+    },
+    Disconnected {
+        generation: u64,
+        error: String,
+    },
+    Submitted {
+        session_id: String,
+        submission: Submission,
+        result: Result<(), String>,
+    },
+    ChildStarted {
+        session_id: String,
+        result: Result<(), String>,
+    },
     Guided {
+        session_id: String,
         run_id: String,
         result: Result<(), String>,
     },
-    Command(Result<(), String>),
+    Command {
+        session_id: String,
+        result: Result<(), String>,
+    },
+    SessionsLoaded {
+        request_id: u64,
+        workspace_id: String,
+        result: Result<Vec<SessionResponse>, String>,
+    },
+    SessionOpened {
+        request_id: u64,
+        workspace_id: String,
+        session_id: String,
+        result: Result<Connected, String>,
+    },
+    SessionCreated {
+        request_id: u64,
+        workspace_id: String,
+        result: Result<Connected, String>,
+    },
 }
 
 #[derive(Clone)]
 struct ChildStart {
+    session_id: String,
     parent_run_id: String,
     idempotency_key: String,
     request: StartChildRunRequest,
@@ -56,12 +95,20 @@ struct ReactionDraft {
     reference: kiln_protocol::ChildActivityReference,
 }
 
+struct DraftState {
+    content: String,
+    reaction: Option<ReactionDraft>,
+}
+
 pub struct Desktop {
     address: Entity<InputState>,
     token_file: Entity<InputState>,
     repository: Entity<InputState>,
     session: Entity<InputState>,
+    workspace_query: Entity<InputState>,
+    session_query: Entity<InputState>,
     composer: Entity<TextareaState>,
+    daemon: Option<connection::DaemonConnection>,
     connection: Option<Connected>,
     conversation: Conversation,
     runtime: Arc<Runtime>,
@@ -69,8 +116,23 @@ pub struct Desktop {
     stream: Option<JoinHandle<()>>,
     pending: Option<Submission>,
     pending_child_start: Option<ChildStart>,
+    pending_by_session: BTreeMap<String, Submission>,
+    pending_child_by_session: BTreeMap<String, ChildStart>,
     reaction: Option<ReactionDraft>,
     guidance: BTreeMap<String, GuidanceDraft>,
+    guidance_by_session: BTreeMap<String, BTreeMap<String, GuidanceDraft>>,
+    drafts: BTreeMap<String, DraftState>,
+    workspaces: Vec<WorkspaceResponse>,
+    sessions: Vec<SessionResponse>,
+    selected_workspace_id: Option<String>,
+    selected_session_id: Option<String>,
+    sessions_loading: bool,
+    sessions_error: Option<String>,
+    browser_open: bool,
+    request_id: u64,
+    connection_generation: u64,
+    event_generation: u64,
+    switching_session: Option<u64>,
     online: bool,
     busy: bool,
     show_connection: bool,
@@ -88,9 +150,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let autoconnect = !config.address.is_empty()
-            && !config.token_file.is_empty()
-            && (!config.repository_path.is_empty() || !config.session_id.is_empty());
+        let autoconnect = !config.address.is_empty() && !config.token_file.is_empty();
         let address = text_input(config.address, "Loopback address from kilnd", window, cx);
         let token_file = text_input(
             config.token_file,
@@ -110,6 +170,8 @@ impl Desktop {
             window,
             cx,
         );
+        let workspace_query = text_input(String::new(), "Search workspaces", window, cx);
+        let session_query = text_input(String::new(), "Search sessions", window, cx);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Message Kiln…")
@@ -121,6 +183,18 @@ impl Desktop {
                 this.submit(window, cx);
             }
         });
+        let workspace_query_subscription =
+            cx.subscribe_in(&workspace_query, window, |_this, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
+        let session_query_subscription =
+            cx.subscribe_in(&session_query, window, |_this, _, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
         let (updates, mut receiver) = mpsc::unbounded_channel();
         cx.spawn_in(window, async move |this, cx| {
             while let Some(update) = receiver.recv().await {
@@ -138,7 +212,10 @@ impl Desktop {
             token_file,
             repository,
             session,
+            workspace_query,
+            session_query,
             composer,
+            daemon: None,
             connection: None,
             conversation: Conversation::default(),
             runtime,
@@ -146,8 +223,23 @@ impl Desktop {
             stream: None,
             pending: None,
             pending_child_start: None,
+            pending_by_session: BTreeMap::new(),
+            pending_child_by_session: BTreeMap::new(),
             reaction: None,
             guidance: BTreeMap::new(),
+            guidance_by_session: BTreeMap::new(),
+            drafts: BTreeMap::new(),
+            workspaces: Vec::new(),
+            sessions: Vec::new(),
+            selected_workspace_id: None,
+            selected_session_id: None,
+            sessions_loading: false,
+            sessions_error: None,
+            browser_open: true,
+            request_id: 0,
+            connection_generation: 0,
+            event_generation: 0,
+            switching_session: None,
             online: false,
             busy: false,
             show_connection: true,
@@ -155,7 +247,11 @@ impl Desktop {
             focused_run: None,
             show_runs: false,
             error: None,
-            _subscriptions: vec![subscription],
+            _subscriptions: vec![
+                subscription,
+                workspace_query_subscription,
+                session_query_subscription,
+            ],
         };
         if autoconnect {
             desktop.connect(cx);
@@ -164,12 +260,16 @@ impl Desktop {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy || self.switching_session.is_some() {
             return;
         }
+        self.stash_session_state(cx);
         if let Some(stream) = self.stream.take() {
             stream.abort();
         }
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        self.event_generation = self.event_generation.wrapping_add(1);
+        let generation = self.connection_generation;
         self.online = false;
         self.busy = true;
         self.error = None;
@@ -181,12 +281,15 @@ impl Desktop {
         };
         let updates = self.updates.clone();
         self.runtime.spawn(async move {
-            let _ = updates.send(Update::Connected(connection::connect(config).await));
+            let _ = updates.send(Update::Connected {
+                generation,
+                result: connection::connect(config).await,
+            });
         });
         cx.notify();
     }
 
-    fn subscribe(&mut self) {
+    fn subscribe(&mut self, generation: u64) {
         let Some(connected) = &self.connection else {
             return;
         };
@@ -199,38 +302,47 @@ impl Desktop {
             let mut stream = match client.subscribe_events(&negotiated, Some(&after)).await {
                 Ok(stream) => stream,
                 Err(error) => {
-                    let _ = updates.send(Update::Disconnected(connection::error_message(
-                        "Connect event stream",
-                        &error,
-                    )));
+                    let _ = updates.send(Update::Disconnected {
+                        generation,
+                        error: connection::error_message("Connect event stream", &error),
+                    });
                     return;
                 }
             };
             loop {
                 match stream.next_frame().await {
                     Ok(Some(WebSocketFrame::Event { event })) if event.session_id == session_id => {
-                        if updates.send(Update::Event(event)).is_err() {
+                        if updates
+                            .send(Update::Event {
+                                generation,
+                                session_id: session_id.clone(),
+                                event,
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                     }
                     Ok(Some(WebSocketFrame::Error { code, .. })) => {
-                        let _ = updates.send(Update::Disconnected(format!(
-                            "Event stream: {code}. Reconnect to resume."
-                        )));
+                        let _ = updates.send(Update::Disconnected {
+                            generation,
+                            error: format!("Event stream: {code}. Reconnect to resume."),
+                        });
                         break;
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        let _ = updates.send(Update::Disconnected(
-                            "Connection closed. Reconnect to resume.".to_owned(),
-                        ));
+                        let _ = updates.send(Update::Disconnected {
+                            generation,
+                            error: "Connection closed. Reconnect to resume.".to_owned(),
+                        });
                         break;
                     }
                     Err(error) => {
-                        let _ = updates.send(Update::Disconnected(connection::error_message(
-                            "Read event stream",
-                            &error,
-                        )));
+                        let _ = updates.send(Update::Disconnected {
+                            generation,
+                            error: connection::error_message("Read event stream", &error),
+                        });
                         break;
                     }
                 }
@@ -239,7 +351,10 @@ impl Desktop {
     }
 
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy || !self.online || self.conversation.root_state() == Some(RunState::Cancelling)
+        if self.busy
+            || !self.online
+            || self.switching_session.is_some()
+            || self.conversation.root_state() == Some(RunState::Cancelling)
         {
             return;
         }
@@ -253,11 +368,13 @@ impl Desktop {
         let Some(connected) = &self.connection else {
             return;
         };
+        let session_id = connected.session.session_id.clone();
         let content = self.composer.read(cx).value().to_string();
         if content.trim().is_empty() && self.pending.is_none() {
             return;
         }
         let mut submission = self.pending.take().unwrap_or_else(|| Submission {
+            session_id: session_id.clone(),
             content,
             idempotency_key: ulid::Ulid::generate().to_string(),
             active_run_id: self
@@ -270,14 +387,18 @@ impl Desktop {
             append_uncertain: false,
         });
         let client = connected.client.clone();
-        let session = connected.session.session_id.clone();
+        let session = session_id.clone();
         let root = connected.workspace.roots[0].workspace_root_id.clone();
         let updates = self.updates.clone();
         self.busy = true;
         self.error = None;
         self.runtime.spawn(async move {
             let result = connection::submit(&client, &session, &root, &mut submission).await;
-            let _ = updates.send(Update::Submitted(submission, result));
+            let _ = updates.send(Update::Submitted {
+                session_id: session,
+                submission,
+                result,
+            });
         });
         cx.notify();
     }
@@ -296,7 +417,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy || !self.online || self.pending.is_some() {
+        if self.busy || !self.online || self.switching_session.is_some() || self.pending.is_some() {
             return;
         }
         let Some(root) = self
@@ -319,6 +440,7 @@ impl Desktop {
     fn cancel_run(&mut self, run: String, operation: &'static str, cx: &mut Context<Self>) {
         if self.busy
             || !self.online
+            || self.switching_session.is_some()
             || !self
                 .conversation
                 .run(&run)
@@ -329,6 +451,7 @@ impl Desktop {
         let Some(connected) = &self.connection else {
             return;
         };
+        let session_id = connected.session.session_id.clone();
         let client = connected.client.clone();
         let updates = self.updates.clone();
         self.busy = true;
@@ -338,18 +461,19 @@ impl Desktop {
                 .await
                 .map(|_| ())
                 .map_err(|error| connection::error_message(operation, &error));
-            let _ = updates.send(Update::Command(result));
+            let _ = updates.send(Update::Command { session_id, result });
         });
         cx.notify();
     }
 
     fn start_child(&mut self, cx: &mut Context<Self>) {
-        if self.busy || !self.online {
+        if self.busy || !self.online || self.switching_session.is_some() {
             return;
         }
         let Some(connected) = &self.connection else {
             return;
         };
+        let session_id = connected.session.session_id.clone();
         let command = if let Some(command) = self.pending_child_start.clone() {
             command
         } else {
@@ -376,6 +500,7 @@ impl Desktop {
                 return;
             };
             ChildStart {
+                session_id,
                 parent_run_id,
                 idempotency_key: ulid::Ulid::generate().to_string(),
                 request: StartChildRunRequest {
@@ -387,6 +512,7 @@ impl Desktop {
                 },
             }
         };
+        let session_id = command.session_id.clone();
         let client = connected.client.clone();
         let updates = self.updates.clone();
         self.pending_child_start = Some(command.clone());
@@ -402,7 +528,7 @@ impl Desktop {
                 .await
                 .map(|_| ())
                 .map_err(|error| connection::error_message("Start child Run", &error));
-            let _ = updates.send(Update::ChildStarted(result));
+            let _ = updates.send(Update::ChildStarted { session_id, result });
         });
         cx.notify();
     }
@@ -421,12 +547,13 @@ impl Desktop {
         delivery_mode: MessageDeliveryMode,
         cx: &mut Context<Self>,
     ) {
-        if self.busy || !self.online {
+        if self.busy || !self.online || self.switching_session.is_some() {
             return;
         }
         let Some(connected) = &self.connection else {
             return;
         };
+        let session_id = connected.session.session_id.clone();
         let Some(draft) = self.guidance.get_mut(&run_id) else {
             return;
         };
@@ -463,18 +590,23 @@ impl Desktop {
                 .await
                 .map(|_| ())
                 .map_err(|error| connection::error_message("Child guidance", &error));
-            let _ = updates.send(Update::Guided { run_id, result });
+            let _ = updates.send(Update::Guided {
+                session_id,
+                run_id,
+                result,
+            });
         });
         cx.notify();
     }
 
     fn decide(&mut self, tool_call: String, decision: ApprovalDecision, cx: &mut Context<Self>) {
-        if self.busy || !self.online {
+        if self.busy || !self.online || self.switching_session.is_some() {
             return;
         }
         let Some(connected) = &self.connection else {
             return;
         };
+        let session_id = connected.session.session_id.clone();
         let client = connected.client.clone();
         let updates = self.updates.clone();
         let key = ulid::Ulid::generate().to_string();
@@ -485,12 +617,15 @@ impl Desktop {
                 .await
                 .map(|_| ())
                 .map_err(|error| connection::error_message("Decide approval", &error));
-            let _ = updates.send(Update::Command(result));
+            let _ = updates.send(Update::Command { session_id, result });
         });
         cx.notify();
     }
 
     fn toggle_run_details(&mut self, run_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.switching_session.is_some() {
+            return;
+        }
         if self.selected_run.as_deref() == Some(&run_id) {
             self.selected_run = None;
         } else {
@@ -510,50 +645,671 @@ impl Desktop {
         cx.notify();
     }
 
+    fn active_session_id(&self) -> Option<&str> {
+        self.connection
+            .as_ref()
+            .map(|connected| connected.session.session_id.as_str())
+    }
+
+    fn request_sessions(&mut self, workspace_id: String) {
+        let Some(daemon) = &self.daemon else {
+            return;
+        };
+        self.request_id = self.request_id.wrapping_add(1);
+        let request_id = self.request_id;
+        let updates = self.updates.clone();
+        let daemon = daemon.clone();
+        self.sessions.clear();
+        self.sessions_loading = true;
+        self.sessions_error = None;
+        self.runtime.spawn(async move {
+            let result = connection::list_sessions(&daemon, &workspace_id).await;
+            let _ = updates.send(Update::SessionsLoaded {
+                request_id,
+                workspace_id,
+                result,
+            });
+        });
+    }
+
+    fn select_workspace(&mut self, workspace_id: String, cx: &mut Context<Self>) {
+        if self.busy || self.switching_session.is_some() {
+            return;
+        }
+        if !self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.workspace_id == workspace_id)
+        {
+            return;
+        }
+        self.selected_workspace_id = Some(workspace_id.clone());
+        self.selected_session_id = self
+            .active_session_id()
+            .filter(|session_id| {
+                self.connection.as_ref().is_some_and(|connected| {
+                    connected.workspace.workspace_id == workspace_id
+                        && *session_id == connected.session.session_id
+                })
+            })
+            .map(str::to_owned);
+        self.request_sessions(workspace_id);
+        cx.notify();
+    }
+
+    fn stash_session_state(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.active_session_id().map(str::to_owned) else {
+            return;
+        };
+        let content = self.composer.read(cx).value().to_string();
+        let reaction = self.reaction.take();
+        if !content.is_empty() || reaction.is_some() {
+            self.drafts
+                .insert(session_id.clone(), DraftState { content, reaction });
+        } else {
+            self.drafts.remove(&session_id);
+        }
+        if let Some(pending) = self.pending.take() {
+            self.pending_by_session.insert(session_id.clone(), pending);
+        }
+        if let Some(pending) = self.pending_child_start.take() {
+            self.pending_child_by_session
+                .insert(session_id.clone(), pending);
+        }
+        if !self.guidance.is_empty() {
+            self.guidance_by_session
+                .insert(session_id, std::mem::take(&mut self.guidance));
+        }
+    }
+
+    fn restore_session_state(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(draft) = self.drafts.remove(session_id) {
+            self.composer
+                .update(cx, |input, cx| input.set_value(draft.content, window, cx));
+            self.reaction = draft.reaction;
+        } else {
+            self.composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.reaction = None;
+        }
+        self.pending = self.pending_by_session.remove(session_id);
+        self.pending_child_start = self.pending_child_by_session.remove(session_id);
+        self.guidance = self
+            .guidance_by_session
+            .remove(session_id)
+            .unwrap_or_default();
+    }
+
+    fn clear_saved_session_state(&mut self) {
+        self.pending = None;
+        self.pending_child_start = None;
+        self.pending_by_session.clear();
+        self.pending_child_by_session.clear();
+        self.reaction = None;
+        self.guidance.clear();
+        self.guidance_by_session.clear();
+        self.drafts.clear();
+    }
+
+    fn select_session(&mut self, session_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || self.switching_session.is_some() {
+            return;
+        }
+        let Some(workspace_id) = self.selected_workspace_id.clone() else {
+            return;
+        };
+        if !self
+            .sessions
+            .iter()
+            .any(|session| session.session_id == session_id)
+        {
+            return;
+        }
+        if self.active_session_id() == Some(session_id.as_str()) {
+            self.composer.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        let Some(daemon) = self.daemon.clone() else {
+            return;
+        };
+        self.stash_session_state(cx);
+        if let Some(stream) = self.stream.take() {
+            stream.abort();
+        }
+        self.event_generation = self.event_generation.wrapping_add(1);
+        self.request_id = self.request_id.wrapping_add(1);
+        let request_id = self.request_id;
+        self.switching_session = Some(request_id);
+        self.selected_session_id = Some(session_id.clone());
+        self.sessions_loading = true;
+        self.sessions_error = None;
+        let updates = self.updates.clone();
+        let target_session_id = session_id.clone();
+        self.runtime.spawn(async move {
+            let result = connection::open_session(&daemon, &target_session_id).await;
+            let _ = updates.send(Update::SessionOpened {
+                request_id,
+                workspace_id,
+                session_id: target_session_id,
+                result,
+            });
+        });
+        cx.notify();
+    }
+
+    fn create_session(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.switching_session.is_some() {
+            return;
+        }
+        let Some(workspace_id) = self.selected_workspace_id.clone() else {
+            return;
+        };
+        let Some(daemon) = self.daemon.clone() else {
+            return;
+        };
+        self.stash_session_state(cx);
+        if let Some(stream) = self.stream.take() {
+            stream.abort();
+        }
+        self.event_generation = self.event_generation.wrapping_add(1);
+        self.request_id = self.request_id.wrapping_add(1);
+        let request_id = self.request_id;
+        self.switching_session = Some(request_id);
+        self.selected_session_id = None;
+        self.sessions_loading = true;
+        self.sessions_error = None;
+        let updates = self.updates.clone();
+        self.runtime.spawn(async move {
+            let result = connection::create_session(&daemon, &workspace_id).await;
+            let _ = updates.send(Update::SessionCreated {
+                request_id,
+                workspace_id,
+                result,
+            });
+        });
+        cx.notify();
+    }
+
+    fn install_connected(
+        &mut self,
+        connected: Connected,
+        restore_saved_state: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session_id = connected.session.session_id.clone();
+        let workspace_id = connected.workspace.workspace_id.clone();
+        self.daemon = Some(connected.daemon.clone());
+        self.workspaces = connected.daemon.workspaces.clone();
+        if !self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.workspace_id == connected.workspace.workspace_id)
+        {
+            self.workspaces.push(connected.workspace.clone());
+        }
+        self.selected_workspace_id = Some(connected.workspace.workspace_id.clone());
+        self.selected_session_id = Some(session_id.clone());
+        self.conversation = Conversation::default();
+        for run in connected.initial_runs.runs.iter().cloned() {
+            self.conversation.apply_run(run);
+        }
+        for event in connected.initial_events.events.iter().cloned() {
+            self.conversation.apply(event);
+        }
+        self.session.update(cx, |input, cx| {
+            input.set_value(session_id.clone(), window, cx)
+        });
+        self.connection = Some(connected);
+        if restore_saved_state {
+            self.restore_session_state(&session_id, window, cx);
+            self.composer.read(cx).focus_handle(cx).focus(window, cx);
+        } else {
+            self.pending = None;
+            self.reaction = None;
+        }
+        self.online = true;
+        self.busy = false;
+        self.switching_session = None;
+        self.show_connection = false;
+        self.selected_run = None;
+        self.focused_run = None;
+        self.show_runs = false;
+        self.error = None;
+        self.event_generation = self.event_generation.wrapping_add(1);
+        self.request_sessions(workspace_id);
+        self.subscribe(self.event_generation);
+    }
+
+    fn workspace_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self
+            .workspace_query
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_ascii_lowercase();
+        let selected = self.selected_workspace_id.as_deref();
+        let disabled = self.busy || self.switching_session.is_some();
+        let mut panel = div()
+            .id("workspace-navigator")
+            .w(px(280.0))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .bg(theme::CHROME)
+            .border_r_1()
+            .border_color(theme::BORDER)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(12.0))
+                            .text_color(theme::TEXT)
+                            .child("WORKSPACES"),
+                    )
+                    .child(
+                        Button::new("add-workspace")
+                            .label("Add")
+                            .small()
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_connection = true;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(Input::new(&self.workspace_query).aria_label("Search workspaces"));
+
+        if self.workspaces.is_empty() {
+            panel = panel.child(
+                div()
+                    .id("workspace-empty")
+                    .role(gpui::Role::Status)
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child("No saved workspaces. Add a repository to create one."),
+            );
+            return panel;
+        }
+
+        let mut list = div()
+            .id("workspace-list")
+            .min_h_0()
+            .flex_1()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_2();
+        let mut matching = 0usize;
+        for workspace in &self.workspaces {
+            let root_text = workspace.roots.first().map_or_else(
+                || "No repository root".to_owned(),
+                |root| root.display_path.clone(),
+            );
+            let searchable = format!(
+                "{} {} {}",
+                workspace.name, workspace.workspace_id, root_text
+            )
+            .to_ascii_lowercase();
+            if !query.is_empty() && !searchable.contains(&query) {
+                continue;
+            }
+            matching += 1;
+            let workspace_id = workspace.workspace_id.clone();
+            let workspace_name = workspace.name.clone();
+            let root_count = workspace.roots.len();
+            list = list.child(
+                Button::new(SharedString::from(format!("workspace-{workspace_id}")))
+                    .ghost()
+                    .selected(selected == Some(workspace_id.as_str()))
+                    .disabled(disabled)
+                    .accessibility_label(format!(
+                        "Open workspace {}. {} repository roots.",
+                        workspace_name, root_count
+                    ))
+                    .w_full()
+                    .h_auto()
+                    .flex_col()
+                    .items_start()
+                    .gap_1()
+                    .px_2()
+                    .py_2()
+                    .child(div().w_full().text_sm().child(workspace_name))
+                    .child(
+                        div()
+                            .w_full()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(theme::MUTED)
+                            .child(format!("{root_count} roots · {root_text}")),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_workspace(workspace_id.clone(), cx);
+                    })),
+            );
+        }
+        if matching == 0 {
+            list = list.child(
+                div()
+                    .id("workspace-no-results")
+                    .role(gpui::Role::Status)
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child("No workspace matches this search."),
+            );
+        }
+        panel.child(list)
+    }
+
+    fn session_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self
+            .session_query
+            .read(cx)
+            .value()
+            .to_string()
+            .trim()
+            .to_ascii_lowercase();
+        let selected = self.selected_session_id.as_deref();
+        let disabled = self.busy || self.switching_session.is_some();
+        let workspace_name = self
+            .selected_workspace_id
+            .as_deref()
+            .and_then(|id| {
+                self.workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == id)
+            })
+            .map_or("No workspace selected".to_owned(), |workspace| {
+                workspace.name.clone()
+            });
+        let workspace_context = self.connection.as_ref().map_or_else(
+            || workspace_name.clone(),
+            |connected| {
+                let current = compact_session_id(&connected.session.session_id);
+                if connected.workspace.workspace_id
+                    == self.selected_workspace_id.as_deref().unwrap_or_default()
+                {
+                    format!("{workspace_name} · Current {current}")
+                } else {
+                    format!("Browsing {workspace_name} · Current {current}")
+                }
+            },
+        );
+        let mut panel = div()
+            .id("session-drawer")
+            .w(px(260.0))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .bg(theme::CHROME)
+            .border_r_1()
+            .border_color(theme::BORDER)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(12.0))
+                            .text_color(theme::TEXT)
+                            .child("SESSIONS"),
+                    )
+                    .child(
+                        Button::new("new-session")
+                            .label("New")
+                            .small()
+                            .disabled(disabled || self.selected_workspace_id.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| this.create_session(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::MUTED)
+                    .child(workspace_context),
+            )
+            .child(Input::new(&self.session_query).aria_label("Search sessions"));
+
+        if self.sessions_loading {
+            panel = panel.child(
+                div()
+                    .id("session-loading")
+                    .role(gpui::Role::Status)
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child(if self.switching_session.is_some() {
+                        "Opening session…"
+                    } else {
+                        "Loading sessions…"
+                    }),
+            );
+        }
+        if let Some(error) = self.sessions_error.clone() {
+            panel = panel.child(
+                div()
+                    .id("session-query-error")
+                    .role(gpui::Role::Alert)
+                    .aria_label(error.clone())
+                    .text_sm()
+                    .text_color(theme::DANGER)
+                    .child(error),
+            );
+        }
+        if !self.sessions_loading && self.sessions_error.is_none() && self.sessions.is_empty() {
+            panel = panel.child(
+                div()
+                    .id("session-empty")
+                    .role(gpui::Role::Status)
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child(if self.selected_workspace_id.is_some() {
+                        "No saved sessions in this workspace."
+                    } else {
+                        "Select a workspace to browse sessions."
+                    }),
+            );
+        }
+
+        let mut list = div()
+            .id("session-list")
+            .min_h_0()
+            .flex_1()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_2();
+        let mut matching = 0usize;
+        for session in &self.sessions {
+            let session_id = session.session_id.clone();
+            if !query.is_empty() && !session_id.to_ascii_lowercase().contains(&query) {
+                continue;
+            }
+            matching += 1;
+            let is_active = self.active_session_id() == Some(session_id.as_str());
+            let state = if is_active {
+                self.conversation
+                    .root_state()
+                    .map(run_state_label)
+                    .unwrap_or("Open")
+            } else {
+                "Saved"
+            };
+            let label = if is_active {
+                format!("Current · {}", compact_session_id(&session_id))
+            } else {
+                format!("Session · {}", compact_session_id(&session_id))
+            };
+            let session_id_for_click = session_id.clone();
+            list = list.child(
+                Button::new(SharedString::from(format!("session-{session_id}")))
+                    .ghost()
+                    .selected(selected == Some(session_id.as_str()))
+                    .disabled(disabled)
+                    .accessibility_label(format!("Open Session {session_id}. Status: {state}."))
+                    .w_full()
+                    .h_auto()
+                    .flex_col()
+                    .items_start()
+                    .gap_1()
+                    .px_2()
+                    .py_2()
+                    .child(div().w_full().text_sm().child(label))
+                    .child(
+                        div()
+                            .w_full()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
+                            .text_color(if is_active {
+                                theme::ACCENT
+                            } else {
+                                theme::MUTED
+                            })
+                            .child(state),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_session(session_id_for_click.clone(), window, cx);
+                    })),
+            );
+        }
+        if matching == 0 && !self.sessions.is_empty() && !self.sessions_loading {
+            list = list.child(
+                div()
+                    .id("session-no-results")
+                    .role(gpui::Role::Status)
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child("No session matches this search."),
+            );
+        }
+        panel.child(list)
+    }
+
     fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
-            Update::Connected(Ok(connected)) => {
-                let same_session = self.connection.as_ref().is_some_and(|previous| {
-                    previous.session.session_id == connected.session.session_id
-                        && previous.negotiated.store_identity.id
-                            == connected.negotiated.store_identity.id
-                });
-                self.conversation = Conversation::default();
-                for run in connected.initial_runs.runs.iter().cloned() {
-                    self.conversation.apply_run(run);
+            Update::Connected { generation, result } => {
+                if generation != self.connection_generation {
+                    return;
                 }
-                for event in connected.initial_events.events.iter().cloned() {
-                    self.conversation.apply(event);
-                }
-                self.session.update(cx, |input, cx| {
-                    input.set_value(connected.session.session_id.clone(), window, cx)
-                });
-                self.connection = Some(connected);
-                self.pending = None;
-                self.reaction = None;
-                if !same_session {
-                    self.pending_child_start = None;
-                    self.guidance.clear();
-                }
-                self.online = true;
                 self.busy = false;
-                self.show_connection = false;
-                self.selected_run = None;
-                self.focused_run = None;
-                self.error = None;
-                self.subscribe();
+                match result {
+                    Ok(connection::ConnectionResult::Browse(daemon)) => {
+                        let same_store = self.daemon.as_ref().is_some_and(|previous| {
+                            previous.negotiated.store_identity.id
+                                == daemon.negotiated.store_identity.id
+                        });
+                        if !same_store {
+                            self.clear_saved_session_state();
+                        }
+                        self.daemon = Some(daemon.clone());
+                        self.workspaces = daemon.workspaces;
+                        self.connection = None;
+                        self.conversation = Conversation::default();
+                        self.online = true;
+                        self.show_connection = false;
+                        self.selected_run = None;
+                        self.focused_run = None;
+                        self.selected_session_id = None;
+                        self.sessions.clear();
+                        self.sessions_loading = false;
+                        self.sessions_error = None;
+                        let workspace_id = self
+                            .selected_workspace_id
+                            .clone()
+                            .filter(|id| {
+                                self.workspaces
+                                    .iter()
+                                    .any(|workspace| &workspace.workspace_id == id)
+                            })
+                            .or_else(|| {
+                                self.workspaces
+                                    .first()
+                                    .map(|workspace| workspace.workspace_id.clone())
+                            });
+                        self.selected_workspace_id = workspace_id.clone();
+                        if let Some(workspace_id) = workspace_id {
+                            self.request_sessions(workspace_id);
+                        }
+                        self.error = None;
+                    }
+                    Ok(connection::ConnectionResult::Session(connected)) => {
+                        let same_session = self.connection.as_ref().is_some_and(|previous| {
+                            previous.session.session_id == connected.session.session_id
+                                && previous.negotiated.store_identity.id
+                                    == connected.negotiated.store_identity.id
+                        });
+                        let same_store = self.daemon.as_ref().is_some_and(|previous| {
+                            previous.negotiated.store_identity.id
+                                == connected.negotiated.store_identity.id
+                        });
+                        if !same_store {
+                            self.clear_saved_session_state();
+                        }
+                        if !same_session {
+                            self.pending_child_start = None;
+                            self.guidance.clear();
+                        }
+                self.install_connected(connected, true, window, cx);
             }
-            Update::Connected(Err(error)) => {
-                self.busy = false;
+            Err(error) => {
+                if let Some(session_id) = self.active_session_id().map(str::to_owned) {
+                    self.restore_session_state(&session_id, window, cx);
+                }
                 self.show_connection = true;
                 self.error = Some(error);
             }
-            Update::Event(event) => self.conversation.apply(event),
-            Update::Disconnected(error) => {
-                self.online = false;
-                self.error = Some(error);
+                }
             }
-            Update::Submitted(submission, result) => {
+            Update::Event {
+                generation,
+                session_id,
+                event,
+            } => {
+                if generation == self.event_generation
+                    && self.online
+                    && self.active_session_id() == Some(session_id.as_str())
+                {
+                    self.conversation.apply(event);
+                }
+            }
+            Update::Disconnected { generation, error } => {
+                if generation == self.event_generation {
+                    self.online = false;
+                    self.error = Some(error);
+                }
+            }
+            Update::Submitted {
+                session_id,
+                submission,
+                result,
+            } => {
+                if submission.session_id != session_id
+                    || self.active_session_id() != Some(session_id.as_str())
+                {
+                    if result.is_err() {
+                        self.pending_by_session.insert(session_id, submission);
+                    }
+                    return;
+                }
                 self.busy = false;
                 match result {
                     Ok(()) => {
@@ -569,7 +1325,10 @@ impl Desktop {
                     }
                 }
             }
-            Update::ChildStarted(result) => {
+            Update::ChildStarted { session_id, result } => {
+                if self.active_session_id() != Some(session_id.as_str()) {
+                    return;
+                }
                 self.busy = false;
                 match result {
                     Ok(()) => {
@@ -579,7 +1338,14 @@ impl Desktop {
                     Err(error) => self.error = Some(error),
                 }
             }
-            Update::Guided { run_id, result } => {
+            Update::Guided {
+                session_id,
+                run_id,
+                result,
+            } => {
+                if self.active_session_id() != Some(session_id.as_str()) {
+                    return;
+                }
                 self.busy = false;
                 if let Some(draft) = self.guidance.get_mut(&run_id) {
                     match result {
@@ -594,9 +1360,102 @@ impl Desktop {
                     }
                 }
             }
-            Update::Command(result) => {
+            Update::Command { session_id, result } => {
+                if self.active_session_id() != Some(session_id.as_str()) {
+                    return;
+                }
                 self.busy = false;
                 self.error = result.err();
+            }
+            Update::SessionsLoaded {
+                request_id,
+                workspace_id,
+                result,
+            } => {
+                if request_id != self.request_id
+                    || self.selected_workspace_id.as_deref() != Some(workspace_id.as_str())
+                {
+                    return;
+                }
+                self.sessions_loading = false;
+                match result {
+                    Ok(sessions) => {
+                        self.sessions = sessions;
+                        self.sessions_error = None;
+                    }
+                    Err(error) => {
+                        self.sessions.clear();
+                        self.sessions_error = Some(error);
+                    }
+                }
+            }
+            Update::SessionOpened {
+                request_id,
+                workspace_id,
+                session_id,
+                result,
+            } => {
+                if self.switching_session != Some(request_id)
+                    || self.selected_workspace_id.as_deref() != Some(workspace_id.as_str())
+                    || self.selected_session_id.as_deref() != Some(session_id.as_str())
+                {
+                    return;
+                }
+                self.sessions_loading = false;
+                let result = match result {
+                    Ok(connected) if connected.workspace.workspace_id == workspace_id => {
+                        Ok(connected)
+                    }
+                    Ok(_) => Err("session belongs to a different Workspace".to_owned()),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(connected) => self.install_connected(connected, true, window, cx),
+                    Err(error) => {
+                        self.switching_session = None;
+                        self.online = self.connection.is_some();
+                        self.selected_session_id = self.active_session_id().map(str::to_owned);
+                        if let Some(session_id) = self.active_session_id().map(str::to_owned) {
+                            self.restore_session_state(&session_id, window, cx);
+                            self.event_generation = self.event_generation.wrapping_add(1);
+                            self.subscribe(self.event_generation);
+                        }
+                        self.error = Some(error);
+                    }
+                }
+            }
+            Update::SessionCreated {
+                request_id,
+                workspace_id,
+                result,
+            } => {
+                if self.switching_session != Some(request_id)
+                    || self.selected_workspace_id.as_deref() != Some(workspace_id.as_str())
+                {
+                    return;
+                }
+                self.sessions_loading = false;
+                let result = match result {
+                    Ok(connected) if connected.workspace.workspace_id == workspace_id => {
+                        Ok(connected)
+                    }
+                    Ok(_) => Err("new Session belongs to a different Workspace".to_owned()),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(connected) => self.install_connected(connected, true, window, cx),
+                    Err(error) => {
+                        self.switching_session = None;
+                        self.online = self.connection.is_some();
+                        self.selected_session_id = self.active_session_id().map(str::to_owned);
+                        if let Some(session_id) = self.active_session_id().map(str::to_owned) {
+                            self.restore_session_state(&session_id, window, cx);
+                            self.event_generation = self.event_generation.wrapping_add(1);
+                            self.subscribe(self.event_generation);
+                        }
+                        self.error = Some(error);
+                    }
+                }
             }
         }
         cx.notify();
@@ -606,6 +1465,7 @@ impl Desktop {
         let child_runs = self.conversation.child_runs();
         let can_start_child = self.online
             && !self.busy
+            && self.switching_session.is_none()
             && (self.pending_child_start.is_some()
                 || self
                     .conversation
@@ -885,21 +1745,36 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let title = self
-            .connection
-            .as_ref()
-            .map_or("Kiln".to_owned(), |connected| {
-                connected.workspace.name.clone()
-            });
-        let scope = self
-            .connection
-            .as_ref()
-            .map_or("No workspace selected".to_owned(), |connected| {
-                connected.workspace.roots[0].display_path.clone()
-            });
+        let title = self.connection.as_ref().map_or_else(
+            || {
+                self.selected_workspace_id
+                    .as_deref()
+                    .and_then(|id| {
+                        self.workspaces
+                            .iter()
+                            .find(|workspace| workspace.workspace_id == id)
+                    })
+                    .map_or("Kiln".to_owned(), |workspace| workspace.name.clone())
+            },
+            |connected| connected.workspace.name.clone(),
+        );
+        let scope =
+            self.connection
+                .as_ref()
+                .map_or("No workspace selected".to_owned(), |connected| {
+                    connected
+                        .workspace
+                        .roots
+                        .first()
+                        .map_or("No repository root".to_owned(), |root| {
+                            root.display_path.clone()
+                        })
+                });
         let active = self.conversation.active_root().is_some();
         let disabled = self.busy
             || !self.online
+            || self.connection.is_none()
+            || self.switching_session.is_some()
             || self.pending.is_some()
             || self.conversation.root_state() == Some(RunState::Cancelling);
         let mut transcript = div()
@@ -1005,14 +1880,23 @@ impl Render for Desktop {
         }
         let mut content = div()
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape"
-                    && !this.show_connection
-                    && (this.show_runs || this.focused_run.is_some())
-                {
-                    this.show_runs = false;
-                    this.selected_run = None;
-                    this.focused_run = None;
-                    this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                if event.keystroke.key == "escape" && !this.show_connection {
+                    let workspace_query = this.workspace_query.read(cx).value().to_string();
+                    let session_query = this.session_query.read(cx).value().to_string();
+                    if !workspace_query.is_empty() {
+                        this.workspace_query
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                    } else if !session_query.is_empty() {
+                        this.session_query
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                    } else if this.show_runs || this.focused_run.is_some() {
+                        this.show_runs = false;
+                        this.selected_run = None;
+                        this.focused_run = None;
+                        this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                    } else {
+                        return;
+                    }
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -1041,13 +1925,29 @@ impl Render for Desktop {
                                 view.child(RunStatus::new(state))
                             })
                             .child(
+                                Button::new("toggle-browser")
+                                    .label(if self.browser_open {
+                                        "Hide browser"
+                                    } else {
+                                        "Browse"
+                                    })
+                                    .disabled(self.daemon.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.browser_open = !this.browser_open;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
                                 Button::new("toggle-runs")
                                     .label(if self.show_runs {
                                         "Close Runs".to_owned()
                                     } else {
                                         format!("Runs · {}", self.conversation.runs.len())
                                     })
-                                    .disabled(self.connection.is_none())
+                                    .disabled(
+                                        self.connection.is_none()
+                                            || self.switching_session.is_some(),
+                                    )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.show_runs = !this.show_runs;
                                         cx.notify();
@@ -1101,7 +2001,7 @@ impl Render for Desktop {
                         ),
                 )
             });
-        if self.show_connection || self.connection.is_none() {
+        if self.show_connection || self.daemon.is_none() {
             content = content.child(
                 div()
                     .id("connection-scroll")
@@ -1189,12 +2089,25 @@ impl Render for Desktop {
                     ),
             );
         }
-        content
+        if !self.show_connection && self.browser_open && self.daemon.is_some() {
+            div()
+                .flex()
+                .size_full()
+                .child(self.workspace_navigator(cx))
+                .child(self.session_drawer(cx))
+                .child(content)
+        } else {
+            content
+        }
     }
 }
 
 fn compact_run_id(run_id: &str) -> String {
     run_id.chars().take(14).collect()
+}
+
+fn compact_session_id(session_id: &str) -> String {
+    session_id.chars().take(18).collect()
 }
 
 fn run_input_mode_label(mode: RunInputMode) -> &'static str {
@@ -1209,6 +2122,18 @@ fn run_accepts_commands(state: &RunState) -> bool {
         state,
         RunState::Queued | RunState::Running | RunState::WaitingForApproval
     )
+}
+
+fn run_state_label(state: RunState) -> &'static str {
+    match state {
+        RunState::Queued => "Queued",
+        RunState::Running => "Working",
+        RunState::WaitingForApproval => "Needs approval",
+        RunState::Cancelling => "Stopping",
+        RunState::Completed => "Completed",
+        RunState::Failed => "Failed",
+        RunState::Cancelled => "Cancelled",
+    }
 }
 
 fn text_input(

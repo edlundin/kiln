@@ -21,7 +21,15 @@ pub struct ConnectionConfig {
     pub session_id: String,
 }
 
+#[derive(Clone)]
+pub struct DaemonConnection {
+    pub client: Client,
+    pub negotiated: NegotiateResponse,
+    pub workspaces: Vec<WorkspaceResponse>,
+}
+
 pub struct Connected {
+    pub daemon: DaemonConnection,
     pub client: Client,
     pub negotiated: NegotiateResponse,
     pub session: SessionResponse,
@@ -30,8 +38,14 @@ pub struct Connected {
     pub initial_events: SessionEventsResponse,
 }
 
+pub enum ConnectionResult {
+    Browse(DaemonConnection),
+    Session(Connected),
+}
+
 #[derive(Clone)]
 pub struct Submission {
+    pub session_id: String,
     pub content: String,
     pub idempotency_key: String,
     pub active_run_id: Option<String>,
@@ -40,7 +54,30 @@ pub struct Submission {
     pub append_uncertain: bool,
 }
 
-pub async fn connect(config: ConnectionConfig) -> Result<Connected, String> {
+pub async fn connect(config: ConnectionConfig) -> Result<ConnectionResult, String> {
+    let mut daemon = connect_daemon(&config).await?;
+    if config.session_id.is_empty() && config.repository_path.is_empty() {
+        return Ok(ConnectionResult::Browse(daemon));
+    }
+
+    let session_id = if config.session_id.is_empty() {
+        let (_, session) =
+            create_workspace_session(&daemon.client, &config.repository_path).await?;
+        daemon.workspaces = daemon
+            .client
+            .list_workspaces()
+            .await
+            .map_err(|error| error_message("workspace list", &error))?
+            .workspaces;
+        session.session_id
+    } else {
+        config.session_id
+    };
+    let connected = open_session(&daemon, &session_id).await?;
+    Ok(ConnectionResult::Session(connected))
+}
+
+pub async fn connect_daemon(config: &ConnectionConfig) -> Result<DaemonConnection, String> {
     let address = config
         .address
         .parse::<SocketAddr>()
@@ -57,41 +94,81 @@ pub async fn connect(config: ConnectionConfig) -> Result<Connected, String> {
         .await
         .map_err(|error| error_message("protocol negotiation", &error))?;
 
-    let (workspace, session) = if config.session_id.is_empty() {
-        create_workspace_session(&client, &config.repository_path).await?
-    } else {
-        let session = client
-            .get_session(&config.session_id)
-            .await
-            .map_err(|error| error_message("session lookup", &error))?;
-        let workspace = client
-            .get_workspace(&session.workspace_id)
-            .await
-            .map_err(|error| error_message("workspace lookup", &error))?;
-        (workspace, session)
-    };
+    let workspaces = client
+        .list_workspaces()
+        .await
+        .map_err(|error| error_message("workspace list", &error))?
+        .workspaces;
+    Ok(DaemonConnection {
+        client,
+        negotiated,
+        workspaces,
+    })
+}
+
+pub async fn open_session(
+    daemon: &DaemonConnection,
+    session_id: &str,
+) -> Result<Connected, String> {
+    let session = daemon
+        .client
+        .get_session(session_id)
+        .await
+        .map_err(|error| error_message("session lookup", &error))?;
+    let workspace = daemon
+        .client
+        .get_workspace(&session.workspace_id)
+        .await
+        .map_err(|error| error_message("workspace lookup", &error))?;
 
     if workspace.roots.first().is_none() {
         return Err("workspace has no repository root".to_owned());
     }
 
-    let initial_runs = client
+    let initial_runs = daemon
+        .client
         .list_session_runs(&session.session_id)
         .await
         .map_err(|error| error_message("initial Run load", &error))?;
-    let initial_events = client
+    let initial_events = daemon
+        .client
         .list_session_events(&session.session_id, Some("0"))
         .await
         .map_err(|error| error_message("initial event load", &error))?;
 
     Ok(Connected {
-        client,
-        negotiated,
+        daemon: daemon.clone(),
+        client: daemon.client.clone(),
+        negotiated: daemon.negotiated.clone(),
         session,
         workspace,
         initial_runs,
         initial_events,
     })
+}
+
+pub async fn list_sessions(
+    daemon: &DaemonConnection,
+    workspace_id: &str,
+) -> Result<Vec<SessionResponse>, String> {
+    daemon
+        .client
+        .list_sessions(workspace_id)
+        .await
+        .map(|response| response.sessions)
+        .map_err(|error| error_message("session list", &error))
+}
+
+pub async fn create_session(
+    daemon: &DaemonConnection,
+    workspace_id: &str,
+) -> Result<Connected, String> {
+    let session = daemon
+        .client
+        .create_session(workspace_id)
+        .await
+        .map_err(|error| error_message("session creation", &error))?;
+    open_session(daemon, &session.session_id).await
 }
 
 async fn create_workspace_session(

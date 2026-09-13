@@ -38,18 +38,18 @@ use kiln_protocol::{
     ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
     ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest,
     ChildActivityReference, CreateTaskRequest, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH,
-    IDEMPOTENCY_KEY_HEADER, MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState,
-    MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
-    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
-    RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
-    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse, SessionEventResponse,
-    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
-    StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
-    TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
-    ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest, WEBSOCKET_CAPABILITY,
-    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
-    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
+    IDEMPOTENCY_KEY_HEADER, ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode,
+    MessageDeliveryResponse, MessageDeliveryState, MessageResponse, MessageRole, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
+    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest,
+    RunInputMode, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
+    StartChildRunRequest, StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH,
+    TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallResponse,
+    ToolCallState, ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
+    WorkspaceResponse, WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -385,9 +385,12 @@ where
 {
     Router::new()
         .route(NEGOTIATE_PATH, post(negotiate))
-        .route(WORKSPACES_PATH, post(create_workspace))
+        .route(WORKSPACES_PATH, get(list_workspaces).post(create_workspace))
         .route(WORKSPACE_PATH, get(get_workspace))
-        .route(WORKSPACE_SESSIONS_PATH, post(create_session))
+        .route(
+            WORKSPACE_SESSIONS_PATH,
+            get(list_sessions).post(create_session),
+        )
         .route(SESSION_PATH, get(get_session))
         .route(SESSION_MESSAGES_PATH, post(append_message))
         .route(SESSION_TASKS_PATH, post(create_task))
@@ -550,6 +553,24 @@ where
     Ok((StatusCode::CREATED, Json(workspace_response(&workspace))))
 }
 
+async fn list_workspaces<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+) -> Result<Json<ListWorkspacesResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let workspaces = state
+        .workspace_operations
+        .list_workspaces()
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(ListWorkspacesResponse {
+        workspaces: workspaces.iter().map(workspace_response).collect(),
+    }))
+}
+
 async fn get_workspace<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(workspace_id): Path<String>,
@@ -605,6 +626,26 @@ where
         .map_err(PublicError::from)?;
     state.event_broadcaster.wake();
     Ok((StatusCode::CREATED, Json(session_response(&session))))
+}
+
+async fn list_sessions<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<ListSessionsResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let workspace_id = WorkspaceId::parse(workspace_id).map_err(|_| PublicError::InvalidRequest)?;
+    let sessions = state
+        .session_operations
+        .list_sessions(workspace_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(ListSessionsResponse {
+        sessions: sessions.iter().map(session_response).collect(),
+    }))
 }
 
 async fn get_session<W, S, R>(

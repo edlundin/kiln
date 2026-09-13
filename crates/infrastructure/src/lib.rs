@@ -995,6 +995,35 @@ impl WorkspaceStore for SqliteStore {
         .map(Some)
         .map_err(|_| StoreError::Unavailable)
     }
+
+    async fn list_workspaces(&self) -> Result<Vec<Workspace>, StoreError> {
+        let mut connection = self.connection.lock().await;
+        let rows = sqlx::query("SELECT workspace_id FROM workspaces ORDER BY workspace_id")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|_| StoreError::Unavailable)?;
+        let workspace_ids = rows
+            .into_iter()
+            .map(|row| {
+                WorkspaceId::parse(
+                    row.try_get::<String, _>("workspace_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(connection);
+
+        let mut workspaces = Vec::with_capacity(workspace_ids.len());
+        for id in workspace_ids {
+            workspaces.push(
+                self.get_workspace(&id)
+                    .await?
+                    .ok_or(StoreError::Unavailable)?,
+            );
+        }
+        Ok(workspaces)
+    }
 }
 
 async fn load_task(
@@ -1223,6 +1252,32 @@ impl SessionStore for SqliteStore {
         )
         .map_err(|_| StoreError::Unavailable)?;
         Ok(Some(Session::new(session_id, workspace_id)))
+    }
+
+    async fn list_sessions(&self, workspace_id: &WorkspaceId) -> Result<Vec<Session>, StoreError> {
+        let mut connection = self.connection.lock().await;
+        let rows = sqlx::query(
+            "SELECT session_id, workspace_id FROM sessions WHERE workspace_id = ? ORDER BY session_id",
+        )
+        .bind(workspace_id.as_str())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|_| StoreError::Unavailable)?;
+        rows.into_iter()
+            .map(|row| {
+                let session_id = SessionId::parse(
+                    row.try_get::<String, _>("session_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                let stored_workspace_id = WorkspaceId::parse(
+                    row.try_get::<String, _>("workspace_id")
+                        .map_err(|_| StoreError::Unavailable)?,
+                )
+                .map_err(|_| StoreError::Unavailable)?;
+                Ok(Session::new(session_id, stored_workspace_id))
+            })
+            .collect()
     }
 
     async fn append_message(

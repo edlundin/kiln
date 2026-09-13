@@ -8,3 +8,8 @@ node_modules/
 dist/
 .turbo/
 .DS_Store
+
+# Local analysis caches
+graphify-out/
+.serena/cache/
+.serena/memories/

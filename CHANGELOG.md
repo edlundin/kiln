@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-13 — `chore`
+
+- Ignore generated Graphify output and Serena cache/memory directories while leaving reusable Serena project configuration visible for review.
+
+EDL-288: https://linear.app/edlundin/issue/EDL-288
+
+
+[Commit](pending)
+
+
 ## 2026-09-13 — `feat`
 
 - Added deterministic workspace and session browsing through protocol `0.20.0`, authenticated server routes, Rust client methods, and the native desktop. Saved session replay and reconnect restoration preserve session-scoped drafts, reactions, pending submissions, child starts, and guidance drafts.

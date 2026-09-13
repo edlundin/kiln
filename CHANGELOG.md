@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-13 — `fix`
+
+- Repaired the EDL-287 child-tree black-box sequence so the root remains pending until descendants are terminal, then verifies replay, restart, approval, and cancellation states.
+
+EDL-287: https://linear.app/edlundin/issue/EDL-287
+
+
+[Commit](pending)
+
+
 ## 2026-09-12 — `test`
 
 - Completed EDL-216's repeatable real-daemon vertical-slice proof across path rejection, approval, reconnect/replay, restart, artifacts, cancellation, and recovery.

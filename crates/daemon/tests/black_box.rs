@@ -2092,6 +2092,10 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .json()
         .await
         .expect("second child JSON");
+    assert_eq!(
+        second.parent_run_id.as_deref(),
+        Some(root.run_id.as_str())
+    );
     receive_run_events(&mut socket, &second.run_id, RunState::WaitingForApproval).await;
     assert_ne!(first.run_id, second.run_id);
 
@@ -2178,57 +2182,6 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         error_code::IDEMPOTENCY_CONFLICT,
     )
     .await;
-
-    let root_path = RUN_PATH.replace("{run_id}", &root.run_id);
-    let waiting_root: RunResponse = http
-        .get(format!("http://{}{}", daemon.address, root_path))
-        .send()
-        .await
-        .expect("waiting root response")
-        .json()
-        .await
-        .expect("waiting root JSON");
-    let approval_path =
-        TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &waiting_root.tool_calls[0].tool_call_id);
-    let approval = http
-        .post(format!("http://{}{}", daemon.address, approval_path))
-        .header(IDEMPOTENCY_KEY_HEADER, "complete-tree-root")
-        .json(&ApprovalDecisionRequest {
-            decision: ApprovalDecision::Approved,
-        })
-        .send()
-        .await
-        .expect("root approval response");
-    assert_eq!(approval.status(), StatusCode::OK);
-    receive_run_events(&mut socket, &root.run_id, RunState::Completed).await;
-    let completed_root: RunResponse = http
-        .post(format!(
-            "http://{}{}",
-            daemon.address,
-            RUN_CANCEL_PATH.replace("{run_id}", &root.run_id)
-        ))
-        .send()
-        .await
-        .expect("completed root cancellation response")
-        .json()
-        .await
-        .expect("completed root cancellation JSON");
-    assert_eq!(completed_root.state, RunState::Completed);
-    for sibling_run_id in [&first.run_id, &second.run_id] {
-        let sibling: RunResponse = http
-            .get(format!(
-                "http://{}{}",
-                daemon.address,
-                RUN_PATH.replace("{run_id}", sibling_run_id)
-            ))
-            .send()
-            .await
-            .expect("completed root sibling response")
-            .json()
-            .await
-            .expect("completed root sibling JSON");
-        assert_eq!(sibling.state, RunState::WaitingForApproval);
-    }
 
     let runs_path = SESSION_RUNS_PATH.replace("{session_id}", &session.session_id);
     let listed: SessionRunsResponse = http
@@ -2381,6 +2334,10 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .json()
         .await
         .expect("grandchild JSON");
+    assert_eq!(
+        grandchild.parent_run_id.as_deref(),
+        Some(second.run_id.as_str())
+    );
     receive_run_events(
         &mut cancellation_socket,
         &grandchild.run_id,
@@ -2479,6 +2436,92 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .await
         .expect("sibling after child cancellation JSON");
     assert_eq!(first_after.state, RunState::WaitingForApproval);
+
+    let first_approval_path =
+        TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &first_after.tool_calls[0].tool_call_id);
+    let first_approval = restarted_http
+        .post(format!(
+            "http://{}{}",
+            restarted.address, first_approval_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "complete-tree-first")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        })
+        .send()
+        .await
+        .expect("first child approval response");
+    assert_eq!(first_approval.status(), StatusCode::OK);
+    receive_run_events(
+        &mut cancellation_socket,
+        &first.run_id,
+        RunState::Completed,
+    )
+    .await;
+
+    let root_path = RUN_PATH.replace("{run_id}", &root.run_id);
+    let waiting_root: RunResponse = restarted_http
+        .get(format!("http://{}{}", restarted.address, root_path))
+        .send()
+        .await
+        .expect("waiting root response")
+        .json()
+        .await
+        .expect("waiting root JSON");
+    assert_eq!(waiting_root.state, RunState::WaitingForApproval);
+    let root_approval_path =
+        TOOL_CALL_APPROVAL_PATH.replace("{tool_call_id}", &waiting_root.tool_calls[0].tool_call_id);
+    let root_approval = restarted_http
+        .post(format!(
+            "http://{}{}",
+            restarted.address, root_approval_path
+        ))
+        .header(IDEMPOTENCY_KEY_HEADER, "complete-tree-root")
+        .json(&ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approved,
+        })
+        .send()
+        .await
+        .expect("root approval response");
+    assert_eq!(root_approval.status(), StatusCode::OK);
+    receive_run_events(
+        &mut cancellation_socket,
+        &root.run_id,
+        RunState::Completed,
+    )
+    .await;
+
+    let completed_root: RunResponse = restarted_http
+        .post(format!(
+            "http://{}{}",
+            restarted.address,
+            RUN_CANCEL_PATH.replace("{run_id}", &root.run_id)
+        ))
+        .send()
+        .await
+        .expect("completed root cancellation response")
+        .json()
+        .await
+        .expect("completed root cancellation JSON");
+    assert_eq!(completed_root.state, RunState::Completed);
+    for (sibling_run_id, expected_state) in [
+        (&first.run_id, RunState::Completed),
+        (&second.run_id, RunState::Cancelled),
+    ] {
+        let sibling: RunResponse = restarted_http
+            .get(format!(
+                "http://{}{}",
+                restarted.address,
+                RUN_PATH.replace("{run_id}", sibling_run_id)
+            ))
+            .send()
+            .await
+            .expect("completed root sibling response")
+            .json()
+            .await
+            .expect("completed root sibling JSON");
+        assert_eq!(sibling.state, expected_state);
+    }
     let after_cancellation: SessionEventsResponse = restarted_http
         .get(format!("http://{}{}", restarted.address, events_path))
         .send()
@@ -2510,7 +2553,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
     assert_eq!(recovered_tree.runs.len(), 4);
     for (run_id, expected_state) in [
         (&root.run_id, RunState::Completed),
-        (&first.run_id, RunState::WaitingForApproval),
+        (&first.run_id, RunState::Completed),
         (&second.run_id, RunState::Cancelled),
         (&grandchild.run_id, RunState::Cancelled),
     ] {

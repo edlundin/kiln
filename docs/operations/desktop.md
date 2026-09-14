@@ -192,10 +192,14 @@ clears them.
 ## Current boundaries
 
 Child reactions use durable Events for the displayed child Messages, output,
-and artifact metadata. General change review and artifact-content inspection
-remain pending. Reactions require the selected child's original root to accept
-input. The current executor is not yet a persistent interactive supervisor.
+and artifact metadata. Selecting an artifact opens a temporary inspector
+that fetches its immutable bytes through the existing authenticated artifact
+route. The inspector previews UTF-8 text, JSON, and XML responses up to the
+first 64 KiB; binary and other media types remain download-only. Fetch
+failures show an inline retry action. General change review remains pending.
+Reactions require the selected child's original root to accept input. The
+current executor is not yet a persistent interactive supervisor.
 
 The desktop does not yet provide the secondary Run graph or the global Usage
-ledger. The Run drawer supervises the current root's descendants. EDL-249
-remains in Backlog until the Pencil design is accepted.
+ledger. The Run drawer supervises the current root's descendants. EDL-249 is
+complete; remaining work is tracked by the current Linear progression.

@@ -23,7 +23,13 @@ This handoff covers the EDL-216 and EDL-288 milestones in the Kiln Linear tracke
   - `rtk cargo build -p kiln-desktop --bin kiln-desktop`
   - `rtk git diff --check`
 - Native isolated smoke verified composer/draft restoration across daemon loss and restart; temporary processes were stopped. Reaction and retry branches were code-reviewed after the reconnect fix but were not separately demonstrated, and no automated UI tests exist.
-- Remaining limits: no broad or full test suite was run. The next documented gap is overall Pencil acceptance for [EDL-249](https://linear.app/edlundin/issue/EDL-249), which remains unaccepted; edit `kiln.pen` through Pencil MCP only.
+- Current progression: all 30 Kiln issues in Linear are Done, including [EDL-249](https://linear.app/edlundin/issue/EDL-249). The artifact inspector continuation below is implemented in this worktree, but it has not received runtime visual verification. No broad or full test suite was run.
+
+## Artifact preview continuation
+
+- The desktop now opens artifact entries from the transcript in a temporary inspector. The existing authenticated artifact route is fetched with a streaming 64 KiB cap before buffering. UTF-8 text, JSON, and XML previews are supported; binary and other media types remain download-only, and fetch failures offer retry.
+- Preview state is scoped to the active Session and request/hash identity. Session changes, reconnects, disconnects, and Escape invalidate an open preview so an older response cannot replace the current view.
+- No upload, change review, persistent supervisor, secondary Run graph, or global Usage work is included in this slice.
 
 ## Preservation
 

@@ -22,6 +22,8 @@ pub struct TranscriptRow {
     detail: Option<SharedString>,
     reaction: Option<ClickHandler>,
     reaction_disabled: bool,
+    artifact: Option<ClickHandler>,
+    artifact_disabled: bool,
 }
 
 impl TranscriptRow {
@@ -32,6 +34,8 @@ impl TranscriptRow {
             detail: None,
             reaction: None,
             reaction_disabled: false,
+            artifact: None,
+            artifact_disabled: false,
         }
     }
 
@@ -49,11 +53,21 @@ impl TranscriptRow {
         self.reaction_disabled = disabled;
         self
     }
+
+    pub fn artifact(
+        mut self,
+        disabled: bool,
+        on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.artifact = Some(Rc::new(on_open));
+        self.artifact_disabled = disabled;
+        self
+    }
 }
 
 impl RenderOnce for TranscriptRow {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let role = if self.reaction.is_some() {
+        let role = if self.reaction.is_some() || self.artifact.is_some() {
             Role::Group
         } else {
             Role::Label
@@ -92,6 +106,16 @@ impl RenderOnce for TranscriptRow {
                         .ghost()
                         .disabled(self.reaction_disabled)
                         .on_click(move |event, window, cx| on_react(event, window, cx)),
+                )
+            })
+            .when_some(self.artifact, |content, on_open| {
+                content.child(
+                    Button::new("open-artifact")
+                        .label("Open artifact")
+                        .small()
+                        .ghost()
+                        .disabled(self.artifact_disabled)
+                        .on_click(move |event, window, cx| on_open(event, window, cx)),
                 )
             });
 

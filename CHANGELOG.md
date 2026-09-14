@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-14 — `feat`
+
+- Added bounded desktop artifact inspection for stored transcript artifacts, with authenticated 64 KiB previews for UTF-8 text, JSON, and XML, download-only handling for unsupported content, retries, and stale-session guards.
+
+EDL-249: https://linear.app/edlundin/issue/EDL-249
+
+[Commit](pending)
+
+
+
 ## 2026-09-13 — `chore`
 
 - Ignore generated Graphify output and Serena cache/memory directories while leaving reusable Serena project configuration visible for review.

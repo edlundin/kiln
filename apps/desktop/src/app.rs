@@ -10,9 +10,9 @@ use gpui_component::{
     input::{Input, InputEvent, InputState, TextareaState},
 };
 use kiln_protocol::{
-    ApprovalDecision, ApprovalDecisionRequest, ApprovalState, MessageDeliveryMode, RunInputMode,
-    RunState, SendRunInputRequest, SessionEventResponse, SessionResponse, StartChildRunRequest,
-    WebSocketFrame, WorkspaceResponse,
+    ApprovalDecision, ApprovalDecisionRequest, ApprovalState, ArtifactResponse,
+    MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest, SessionEventResponse,
+    SessionResponse, StartChildRunRequest, WebSocketFrame, WorkspaceResponse,
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
@@ -73,6 +73,12 @@ enum Update {
         workspace_id: String,
         result: Result<Connected, String>,
     },
+    ArtifactLoaded {
+        request_id: u64,
+        session_id: String,
+        content_hash: String,
+        result: Result<kiln_client::ArtifactPreviewDownload, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -98,6 +104,28 @@ struct ReactionDraft {
 struct DraftState {
     content: String,
     reaction: Option<ReactionDraft>,
+}
+
+const ARTIFACT_PREVIEW_LIMIT: usize = 64 * 1024;
+
+struct ArtifactPreview {
+    session_id: String,
+    metadata: ArtifactResponse,
+    state: ArtifactPreviewState,
+}
+
+enum ArtifactPreviewState {
+    Loading,
+    Ready {
+        media_type: String,
+        content: String,
+        truncated: bool,
+    },
+    Failed(String),
+    Unsupported {
+        media_type: String,
+        reason: String,
+    },
 }
 
 pub struct Desktop {
@@ -140,6 +168,8 @@ pub struct Desktop {
     focused_run: Option<String>,
     show_runs: bool,
     error: Option<String>,
+    artifact_request_id: u64,
+    artifact_preview: Option<ArtifactPreview>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -247,6 +277,8 @@ impl Desktop {
             focused_run: None,
             show_runs: false,
             error: None,
+            artifact_request_id: 0,
+            artifact_preview: None,
             _subscriptions: vec![
                 subscription,
                 workspace_query_subscription,
@@ -435,6 +467,50 @@ impl Desktop {
         self.focused_run = None;
         self.composer.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    fn open_artifact(&mut self, content_hash: String, cx: &mut Context<Self>) {
+        if !self.online || self.switching_session.is_some() {
+            return;
+        }
+        let Some(connected) = &self.connection else {
+            return;
+        };
+        let client = connected.client.clone();
+        let Some(metadata) = self.conversation.artifacts.get(&content_hash).cloned() else {
+            return;
+        };
+        let Some(session_id) = self.active_session_id().map(str::to_owned) else {
+            return;
+        };
+
+        self.artifact_request_id = self.artifact_request_id.wrapping_add(1);
+        let request_id = self.artifact_request_id;
+        self.artifact_preview = Some(ArtifactPreview {
+            session_id: session_id.clone(),
+            metadata,
+            state: ArtifactPreviewState::Loading,
+        });
+
+        let updates = self.updates.clone();
+        self.runtime.spawn(async move {
+            let result = client
+                .get_artifact_preview(&content_hash, ARTIFACT_PREVIEW_LIMIT)
+                .await
+                .map_err(|error| connection::error_message("Load artifact", &error));
+            let _ = updates.send(Update::ArtifactLoaded {
+                request_id,
+                session_id,
+                content_hash,
+                result,
+            });
+        });
+        cx.notify();
+    }
+
+    fn close_artifact_preview(&mut self) {
+        self.artifact_request_id = self.artifact_request_id.wrapping_add(1);
+        self.artifact_preview = None;
     }
 
     fn cancel_run(&mut self, run: String, operation: &'static str, cx: &mut Context<Self>) {
@@ -698,6 +774,7 @@ impl Desktop {
     }
 
     fn stash_session_state(&mut self, cx: &mut Context<Self>) {
+        self.close_artifact_preview();
         let Some(session_id) = self.active_session_id().map(str::to_owned) else {
             return;
         };
@@ -746,6 +823,7 @@ impl Desktop {
     }
 
     fn clear_saved_session_state(&mut self) {
+        self.close_artifact_preview();
         self.pending = None;
         self.pending_child_start = None;
         self.pending_by_session.clear();
@@ -842,6 +920,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_artifact_preview();
         let session_id = connected.session.session_id.clone();
         let workspace_id = connected.workspace.workspace_id.clone();
         self.daemon = Some(connected.daemon.clone());
@@ -1293,6 +1372,7 @@ impl Desktop {
             }
             Update::Disconnected { generation, error } => {
                 if generation == self.event_generation {
+                    self.close_artifact_preview();
                     self.online = false;
                     self.error = Some(error);
                 }
@@ -1455,6 +1535,55 @@ impl Desktop {
                         }
                         self.error = Some(error);
                     }
+                }
+            }
+            Update::ArtifactLoaded {
+                request_id,
+                session_id,
+                content_hash,
+                result,
+            } => {
+                if request_id != self.artifact_request_id
+                    || self.active_session_id() != Some(session_id.as_str())
+                {
+                    return;
+                }
+                let Some(preview) = self.artifact_preview.as_mut().filter(|preview| {
+                    preview.session_id == session_id
+                        && preview.metadata.content_hash == content_hash
+                }) else {
+                    return;
+                };
+                match result {
+                    Ok(download) => {
+                        let media_type = download
+                            .media_type
+                            .unwrap_or_else(|| preview.metadata.media_type.clone());
+                        if !supports_artifact_preview(&media_type) {
+                            preview.state = ArtifactPreviewState::Unsupported {
+                                reason: "This file type is kept as a download-only artifact."
+                                    .to_owned(),
+                                media_type,
+                            };
+                        } else {
+                            match text_preview(&download.bytes, download.truncated) {
+                                Ok(content) => {
+                                    preview.state = ArtifactPreviewState::Ready {
+                                        media_type,
+                                        content,
+                                        truncated: download.truncated,
+                                    };
+                                }
+                                Err(reason) => {
+                                    preview.state = ArtifactPreviewState::Unsupported {
+                                        media_type,
+                                        reason: reason.to_owned(),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => preview.state = ArtifactPreviewState::Failed(error),
                 }
             }
         }
@@ -1710,6 +1839,172 @@ impl Desktop {
         rail
     }
 
+    fn artifact_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(preview) = self.artifact_preview.as_ref() else {
+            return div().id("artifact-inspector");
+        };
+
+        let content_hash = preview.metadata.content_hash.clone();
+        let hash_label = compact_content_hash(&content_hash);
+        let metadata = preview.metadata.clone();
+        let media_type = match &preview.state {
+            ArtifactPreviewState::Ready { media_type, .. }
+            | ArtifactPreviewState::Unsupported { media_type, .. } => media_type.clone(),
+            _ => metadata.media_type.clone(),
+        };
+        let mut panel = div()
+            .id("artifact-inspector")
+            .w(px(340.0))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(theme::CHROME)
+            .border_l_1()
+            .border_color(theme::BORDER)
+            .child(
+                div()
+                    .w_full()
+                    .h(px(44.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(theme::BORDER)
+                    .child(
+                        div()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(12.0))
+                            .text_color(theme::TEXT)
+                            .child("ARTIFACT PREVIEW"),
+                    )
+                    .child(
+                        Button::new("close-artifact-preview")
+                            .label("Close")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_artifact_preview();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(theme::BORDER)
+                    .child(
+                        div()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(12.0))
+                            .text_color(theme::TEXT)
+                            .child(hash_label),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::MUTED)
+                            .child(format!("{} · {} bytes", media_type, metadata.size)),
+                    ),
+            );
+
+        let body = match &preview.state {
+            ArtifactPreviewState::Loading => div()
+                .id("artifact-preview-loading")
+                .role(gpui::Role::Status)
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme::MUTED)
+                .child("Loading artifact…"),
+            ArtifactPreviewState::Ready {
+                content, truncated, ..
+            } => {
+                let mut body = div()
+                    .id("artifact-preview-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3();
+                if *truncated {
+                    body = body.child(
+                        div()
+                            .id("artifact-preview-truncation")
+                            .role(gpui::Role::Status)
+                            .text_xs()
+                            .text_color(theme::ATTENTION)
+                            .child("Preview limited to the first 64 KiB."),
+                    );
+                }
+                body.child(
+                    div()
+                        .font_family(theme::MONO_FONT)
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(theme::TEXT_SOFT)
+                        .child(content.clone()),
+                )
+            }
+            ArtifactPreviewState::Failed(error) => {
+                let retry_hash = content_hash.clone();
+                div()
+                    .id("artifact-preview-error")
+                    .role(gpui::Role::Alert)
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .p_3()
+                    .text_sm()
+                    .text_color(theme::DANGER)
+                    .child(error.clone())
+                    .child(
+                        Button::new("retry-artifact-preview")
+                            .label("Retry")
+                            .small()
+                            .disabled(!self.online || self.switching_session.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_artifact(retry_hash.clone(), cx);
+                            })),
+                    )
+            }
+            ArtifactPreviewState::Unsupported { reason, .. } => div()
+                .id("artifact-preview-unsupported")
+                .role(gpui::Role::Status)
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .p_3()
+                .text_sm()
+                .text_color(theme::MUTED)
+                .child("Preview unavailable")
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme::FAINT)
+                        .child(reason.clone()),
+                ),
+        };
+        panel = panel.child(body);
+        panel
+    }
+
     fn connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -1814,6 +2109,15 @@ impl Render for Desktop {
             if let Some(detail) = self.conversation.transcript_detail(item) {
                 row = row.detail(detail);
             }
+            if self.conversation.artifacts.contains_key(&item.content) {
+                let content_hash = item.content.clone();
+                row = row.artifact(
+                    !self.online || self.switching_session.is_some(),
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_artifact(content_hash.clone(), cx);
+                    }),
+                );
+            }
             if let Some(run_id) = item.run_id.as_deref().filter(|run_id| {
                 self.conversation.root_for_run(run_id).is_some_and(|root| {
                     root != *run_id && self.conversation.active_root() == Some(root)
@@ -1889,6 +2193,9 @@ impl Render for Desktop {
                     } else if !session_query.is_empty() {
                         this.session_query
                             .update(cx, |input, cx| input.set_value("", window, cx));
+                    } else if this.artifact_preview.is_some() {
+                        this.close_artifact_preview();
+                        this.composer.read(cx).focus_handle(cx).focus(window, cx);
                     } else if this.show_runs || this.focused_run.is_some() {
                         this.show_runs = false;
                         this.selected_run = None;
@@ -2090,12 +2397,22 @@ impl Render for Desktop {
             );
         }
         if !self.show_connection && self.browser_open && self.daemon.is_some() {
-            div()
+            let mut frame = div()
                 .flex()
                 .size_full()
                 .child(self.workspace_navigator(cx))
                 .child(self.session_drawer(cx))
+                .child(content);
+            if self.artifact_preview.is_some() {
+                frame = frame.child(self.artifact_inspector(cx));
+            }
+            frame
+        } else if !self.show_connection && self.artifact_preview.is_some() {
+            div()
+                .flex()
+                .size_full()
                 .child(content)
+                .child(self.artifact_inspector(cx))
         } else {
             content
         }
@@ -2108,6 +2425,63 @@ fn compact_run_id(run_id: &str) -> String {
 
 fn compact_session_id(session_id: &str) -> String {
     session_id.chars().take(18).collect()
+}
+
+fn compact_content_hash(content_hash: &str) -> String {
+    let length = content_hash.chars().count();
+    if length <= 24 {
+        return content_hash.to_owned();
+    }
+    let prefix: String = content_hash.chars().take(12).collect();
+    let suffix: String = content_hash
+        .chars()
+        .rev()
+        .take(12)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{prefix}…{suffix}")
+}
+
+fn supports_artifact_preview(media_type: &str) -> bool {
+    let media_type = media_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    media_type.starts_with("text/")
+        || media_type == "application/json"
+        || media_type.ends_with("+json")
+        || media_type == "application/xml"
+        || media_type.ends_with("+xml")
+        || matches!(
+            media_type.as_str(),
+            "application/javascript"
+                | "application/x-javascript"
+                | "application/sql"
+                | "application/toml"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/csv"
+        )
+}
+
+fn text_preview(bytes: &[u8], truncated: bool) -> Result<String, &'static str> {
+    let limit = bytes.len().min(ARTIFACT_PREVIEW_LIMIT);
+    let slice = &bytes[..limit];
+    match std::str::from_utf8(slice) {
+        Ok(content) => Ok(content.to_owned()),
+        Err(error) if error.error_len().is_none() => {
+            if truncated {
+                Ok(String::from_utf8_lossy(&slice[..error.valid_up_to()]).into_owned())
+            } else {
+                Err("This artifact is not valid UTF-8 text.")
+            }
+        }
+        Err(_) => Err("This artifact is not valid UTF-8 text."),
+    }
 }
 
 fn run_input_mode_label(mode: RunInputMode) -> &'static str {

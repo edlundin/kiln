@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use kiln_protocol::{
-    ApprovalResponse, MessageDeliveryState, MessageRole, MessageStatus, ModelOutputStream,
-    RunInputMode, RunResponse, RunState, SessionEventDataResponse as Event, SessionEventResponse,
-    TaskResponse, ToolOutputStream, WorkspaceScopeResponse,
+    ApprovalResponse, ArtifactResponse, MessageDeliveryState, MessageRole, MessageStatus,
+    ModelOutputStream, RunInputMode, RunResponse, RunState, SessionEventDataResponse as Event,
+    SessionEventResponse, TaskResponse, ToolOutputStream, WorkspaceScopeResponse,
 };
 
 pub struct TranscriptItem {
@@ -29,6 +29,7 @@ pub struct RunItem {
 #[derive(Default)]
 pub struct Conversation {
     pub transcript: Vec<TranscriptItem>,
+    pub artifacts: BTreeMap<String, ArtifactResponse>,
     pub approvals: BTreeMap<String, ApprovalResponse>,
     pub root_run_id: Option<String>,
     pub runs: BTreeMap<String, RunItem>,
@@ -306,6 +307,8 @@ impl Conversation {
                 tool_call_id,
                 stream,
             } => {
+                self.artifacts
+                    .insert(artifact.content_hash.clone(), artifact.clone());
                 self.replace_entry(TranscriptItem {
                     source_event_id,
                     id: format!(
@@ -313,7 +316,7 @@ impl Conversation {
                         artifact.content_hash
                     ),
                     actor: "Artifact".to_owned(),
-                    content: artifact.content_hash,
+                    content: artifact.content_hash.clone(),
                     run_id: Some(run_id),
                     detail: Some("Stored by the daemon".to_owned()),
                     delivery: None,

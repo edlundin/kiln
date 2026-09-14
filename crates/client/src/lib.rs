@@ -73,6 +73,8 @@ pub enum Error {
     WebSocketSubprotocol,
     #[error("the WebSocket sent an unsupported {kind} message")]
     UnexpectedWebSocketMessage { kind: &'static str },
+    #[error("artifact preview limit must be greater than zero")]
+    InvalidArtifactPreviewLimit,
 }
 
 /// A downloaded immutable artifact and its public response metadata.
@@ -82,6 +84,16 @@ pub struct ArtifactDownload {
     pub media_type: Option<String>,
     pub content_length: Option<u64>,
     pub etag: Option<String>,
+}
+
+/// A bounded artifact response for safe in-app previews.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactPreviewDownload {
+    pub bytes: Vec<u8>,
+    pub media_type: Option<String>,
+    pub content_length: Option<u64>,
+    pub etag: Option<String>,
+    pub truncated: bool,
 }
 
 /// Client for one explicitly selected local Kiln daemon.
@@ -413,6 +425,74 @@ impl Client {
             media_type,
             content_length,
             etag,
+        })
+    }
+
+    /// Fetches at most `max_bytes` for a bounded in-app preview.
+    pub async fn get_artifact_preview(
+        &self,
+        content_hash: &str,
+        max_bytes: usize,
+    ) -> Result<ArtifactPreviewDownload, Error> {
+        if max_bytes == 0 {
+            return Err(Error::InvalidArtifactPreviewLimit);
+        }
+
+        let path = path_with_segment(
+            ARTIFACT_PATH,
+            "{content_hash}",
+            "content_hash",
+            content_hash,
+        )?;
+        let response = self
+            .http
+            .get(self.http_url(&path))
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport {
+                operation: GET_ARTIFACT_OPERATION_ID,
+                source,
+            })?;
+        let response = successful_response(response).await?;
+        let headers = response.headers();
+        let media_type = header_text(headers, reqwest::header::CONTENT_TYPE);
+        let content_length = headers
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+        let etag = header_text(headers, reqwest::header::ETAG);
+        let declared_truncated = content_length.is_some_and(|length| {
+            usize::try_from(length).map_or(true, |length| length > max_bytes)
+        });
+        let capacity = content_length
+            .and_then(|length| usize::try_from(length).ok())
+            .map_or(max_bytes, |length| length.min(max_bytes));
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut stream = response.bytes_stream();
+        let mut truncated = declared_truncated;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|source| Error::HttpTransport {
+                operation: GET_ARTIFACT_OPERATION_ID,
+                source,
+            })?;
+            let remaining = max_bytes.saturating_sub(bytes.len());
+            if chunk.len() > remaining {
+                bytes.extend_from_slice(&chunk[..remaining]);
+                truncated = true;
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() == max_bytes && declared_truncated {
+                break;
+            }
+        }
+
+        Ok(ArtifactPreviewDownload {
+            bytes,
+            media_type,
+            content_length,
+            etag,
+            truncated,
         })
     }
 

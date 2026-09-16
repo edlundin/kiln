@@ -8,6 +8,7 @@ mod native_run;
 mod usage;
 
 use std::{
+    collections::BTreeMap,
     env,
     fs::{self, OpenOptions},
     future::Future,
@@ -40,14 +41,20 @@ use kiln_core::{
     StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor,
     SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId, TaskIdGenerator, TaskMutation,
     TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
-    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceId,
+    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceChangeKind,
+    WorkspaceChangeSummary, WorkspaceChangedFile, WorkspaceCheckout, WorkspaceId,
     WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
     WorkspaceRootId, WorkspaceRootState, WorkspaceStore, canonical_context_manifest_bytes,
     canonical_context_manifest_request_bytes, canonical_model_invocation_request_bytes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
-use tokio::{process::Command, sync::Mutex};
+use tokio::{
+    io::AsyncReadExt,
+    process::Command,
+    sync::Mutex,
+    time::{Duration, timeout},
+};
 use ulid::Ulid;
 
 #[cfg(unix)]
@@ -1211,9 +1218,17 @@ impl SessionStore for SqliteStore {
             .begin()
             .await
             .map_err(|_| StoreError::Unavailable)?;
-        sqlx::query("INSERT INTO sessions (session_id, workspace_id) VALUES (?, ?)")
+        let checkout = session.checkout();
+        sqlx::query(
+            "INSERT INTO sessions (session_id, workspace_id, workspace_root_id, relative_directory, root_path, git_common_directory_path, filesystem_identity) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
             .bind(session.id().as_str())
             .bind(session.workspace_id().as_str())
+            .bind(checkout.map(|checkout| checkout.workspace_root_id().as_str()))
+            .bind(checkout.map(WorkspaceCheckout::relative_directory))
+            .bind(checkout.map(WorkspaceCheckout::root_path))
+            .bind(checkout.map(WorkspaceCheckout::git_common_directory_path))
+            .bind(checkout.map(|checkout| checkout.filesystem_identity().as_str()))
             .execute(&mut *transaction)
             .await
             .map_err(|_| StoreError::Unavailable)?;
@@ -1233,7 +1248,9 @@ impl SessionStore for SqliteStore {
 
     async fn get_session(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
         let mut connection = self.connection.lock().await;
-        let row = sqlx::query("SELECT session_id, workspace_id FROM sessions WHERE session_id = ?")
+        let row = sqlx::query(
+            "SELECT session_id, workspace_id, workspace_root_id, relative_directory, root_path, git_common_directory_path, filesystem_identity FROM sessions WHERE session_id = ?",
+        )
             .bind(id.as_str())
             .fetch_optional(&mut *connection)
             .await
@@ -1251,13 +1268,18 @@ impl SessionStore for SqliteStore {
                 .map_err(|_| StoreError::Unavailable)?,
         )
         .map_err(|_| StoreError::Unavailable)?;
-        Ok(Some(Session::new(session_id, workspace_id)))
+        let checkout = session_checkout(&row, &workspace_id)?;
+        Ok(Some(
+            checkout
+                .map(|checkout| Session::with_checkout(session_id.clone(), checkout))
+                .unwrap_or_else(|| Session::new(session_id, workspace_id)),
+        ))
     }
 
     async fn list_sessions(&self, workspace_id: &WorkspaceId) -> Result<Vec<Session>, StoreError> {
         let mut connection = self.connection.lock().await;
         let rows = sqlx::query(
-            "SELECT session_id, workspace_id FROM sessions WHERE workspace_id = ? ORDER BY session_id",
+            "SELECT session_id, workspace_id, workspace_root_id, relative_directory, root_path, git_common_directory_path, filesystem_identity FROM sessions WHERE workspace_id = ? ORDER BY session_id",
         )
         .bind(workspace_id.as_str())
         .fetch_all(&mut *connection)
@@ -1275,7 +1297,10 @@ impl SessionStore for SqliteStore {
                         .map_err(|_| StoreError::Unavailable)?,
                 )
                 .map_err(|_| StoreError::Unavailable)?;
-                Ok(Session::new(session_id, stored_workspace_id))
+                let checkout = session_checkout(&row, &stored_workspace_id)?;
+                Ok(checkout
+                    .map(|checkout| Session::with_checkout(session_id.clone(), checkout))
+                    .unwrap_or_else(|| Session::new(session_id, stored_workspace_id)))
             })
             .collect()
     }
@@ -1448,6 +1473,58 @@ impl SqliteStore {
             .await
             .map_err(|_| StoreError::Unavailable)?;
         Ok(SessionEventPage::new(events, current_cursor))
+    }
+}
+
+fn session_checkout(
+    row: &sqlx::sqlite::SqliteRow,
+    workspace_id: &WorkspaceId,
+) -> Result<Option<WorkspaceCheckout>, StoreError> {
+    let root_id = row
+        .try_get::<Option<String>, _>("workspace_root_id")
+        .map_err(|_| StoreError::Unavailable)?;
+    let relative_directory = row
+        .try_get::<Option<String>, _>("relative_directory")
+        .map_err(|_| StoreError::Unavailable)?;
+    let root_path = row
+        .try_get::<Option<String>, _>("root_path")
+        .map_err(|_| StoreError::Unavailable)?;
+    let git_common_directory_path = row
+        .try_get::<Option<String>, _>("git_common_directory_path")
+        .map_err(|_| StoreError::Unavailable)?;
+    let filesystem_identity = row
+        .try_get::<Option<String>, _>("filesystem_identity")
+        .map_err(|_| StoreError::Unavailable)?;
+    match (
+        root_id,
+        relative_directory,
+        root_path,
+        git_common_directory_path,
+        filesystem_identity,
+    ) {
+        (
+            Some(root_id),
+            Some(relative_directory),
+            Some(root_path),
+            Some(git_common_directory_path),
+            Some(filesystem_identity),
+        ) => {
+            let root_id = WorkspaceRootId::parse(root_id).map_err(|_| StoreError::Unavailable)?;
+            let filesystem_identity =
+                FilesystemIdentity::new(filesystem_identity).ok_or(StoreError::Unavailable)?;
+            WorkspaceCheckout::from_resolved_paths(
+                workspace_id.clone(),
+                root_id,
+                relative_directory,
+                root_path,
+                git_common_directory_path,
+                filesystem_identity,
+            )
+            .map(Some)
+            .map_err(|_| StoreError::Unavailable)
+        }
+        (None, None, None, None, None) => Ok(None),
+        _ => Err(StoreError::Unavailable),
     }
 }
 
@@ -7322,32 +7399,266 @@ impl WorkspaceRootDiscovery for GitWorkspaceRootDiscovery {
             filesystem_identity,
         })
     }
+
+    async fn summarize_changes(
+        &self,
+        checkout: &WorkspaceCheckout,
+    ) -> Result<WorkspaceChangeSummary, RootDiscoveryError> {
+        let root = Path::new(checkout.root_path());
+        if !root.is_absolute() || !root.is_dir() {
+            return Err(RootDiscoveryError::NotDirectory);
+        }
+        let canonical_root =
+            std::fs::canonicalize(root).map_err(|_| RootDiscoveryError::NotGitRepository)?;
+        if canonical_root != root {
+            return Err(RootDiscoveryError::NotGitRepository);
+        }
+        let filesystem_identity = workspace_root_filesystem_identity(&canonical_root)
+            .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+        if &filesystem_identity != checkout.filesystem_identity() {
+            return Err(RootDiscoveryError::NotGitRepository);
+        }
+        let top = run_git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        )
+        .await?;
+        let resolved_top = std::fs::canonicalize(git_path(&top)?)
+            .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+        if resolved_top != canonical_root {
+            return Err(RootDiscoveryError::NotGitRepository);
+        }
+        let common = run_git(
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .await?;
+        let resolved_common = std::fs::canonicalize(git_path(&common)?)
+            .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+        if resolved_common != Path::new(checkout.git_common_directory_path()) {
+            return Err(RootDiscoveryError::NotGitRepository);
+        }
+
+        let status = run_git_bytes(
+            root,
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+                "--",
+                checkout.relative_directory(),
+            ],
+        )
+        .await?;
+        let numstat = match run_git_bytes(
+            root,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--numstat",
+                "-z",
+                "HEAD",
+                "--",
+                checkout.relative_directory(),
+            ],
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(RootDiscoveryError::NotGitRepository) => {
+                run_git_bytes(
+                    root,
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-renames",
+                        "--cached",
+                        "--numstat",
+                        "-z",
+                        "--",
+                        checkout.relative_directory(),
+                    ],
+                )
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
+
+        let mut files = parse_git_status(&status)?;
+        merge_numstat(&mut files, &numstat)?;
+        let files = files
+            .into_iter()
+            .map(|(path, change)| {
+                let kind = match change.kind {
+                    Some(WorkspaceChangeKind::Untracked) => WorkspaceChangeKind::Untracked,
+                    Some(WorkspaceChangeKind::Deleted) => WorkspaceChangeKind::Deleted,
+                    Some(WorkspaceChangeKind::Conflicted) => WorkspaceChangeKind::Conflicted,
+                    Some(_kind) if change.additions.is_none() || change.deletions.is_none() => {
+                        WorkspaceChangeKind::Binary
+                    }
+                    Some(kind) => kind,
+                    None if change.additions.is_none() || change.deletions.is_none() => {
+                        WorkspaceChangeKind::Binary
+                    }
+                    None => WorkspaceChangeKind::Modified,
+                };
+                WorkspaceChangedFile::new(path, kind, change.additions, change.deletions)
+            })
+            .collect();
+        Ok(WorkspaceChangeSummary::new(checkout.clone(), files))
+    }
+}
+
+#[derive(Default)]
+struct PendingChange {
+    kind: Option<WorkspaceChangeKind>,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+}
+
+fn parse_git_status(output: &[u8]) -> Result<BTreeMap<String, PendingChange>, RootDiscoveryError> {
+    let mut changes: BTreeMap<String, PendingChange> = BTreeMap::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        if record.len() < 4 || record[2] != b' ' {
+            return Err(RootDiscoveryError::NotGitRepository);
+        }
+        let path = std::str::from_utf8(&record[3..])
+            .map_err(|_| RootDiscoveryError::NotGitRepository)?
+            .to_owned();
+        let kind = status_kind(record[0], record[1]);
+        changes.entry(path).or_default().kind = Some(kind);
+    }
+    Ok(changes)
+}
+
+fn status_kind(index: u8, worktree: u8) -> WorkspaceChangeKind {
+    if index == b'?' && worktree == b'?' {
+        WorkspaceChangeKind::Untracked
+    } else if index == b'U' || worktree == b'U' {
+        WorkspaceChangeKind::Conflicted
+    } else if index == b'R' || worktree == b'R' {
+        WorkspaceChangeKind::Renamed
+    } else if index == b'D' || worktree == b'D' {
+        WorkspaceChangeKind::Deleted
+    } else if index == b'A' || worktree == b'A' {
+        WorkspaceChangeKind::Added
+    } else if index == b'T' || worktree == b'T' {
+        WorkspaceChangeKind::TypeChanged
+    } else {
+        WorkspaceChangeKind::Modified
+    }
+}
+
+fn merge_numstat(
+    changes: &mut BTreeMap<String, PendingChange>,
+    output: &[u8],
+) -> Result<(), RootDiscoveryError> {
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let mut fields = record.splitn(3, |byte| *byte == b'\t');
+        let additions = fields.next().ok_or(RootDiscoveryError::NotGitRepository)?;
+        let deletions = fields.next().ok_or(RootDiscoveryError::NotGitRepository)?;
+        let path = fields.next().ok_or(RootDiscoveryError::NotGitRepository)?;
+        let path = std::str::from_utf8(path)
+            .map_err(|_| RootDiscoveryError::NotGitRepository)?
+            .to_owned();
+        let additions = parse_numstat_count(additions)?;
+        let deletions = parse_numstat_count(deletions)?;
+        let change = changes.entry(path).or_default();
+        change.additions = additions;
+        change.deletions = deletions;
+        if additions.is_none() || deletions.is_none() {
+            change.kind.get_or_insert(WorkspaceChangeKind::Binary);
+        }
+    }
+    Ok(())
+}
+
+fn parse_numstat_count(value: &[u8]) -> Result<Option<u64>, RootDiscoveryError> {
+    if value == b"-" {
+        return Ok(None);
+    }
+    std::str::from_utf8(value)
+        .map_err(|_| RootDiscoveryError::NotGitRepository)?
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| RootDiscoveryError::NotGitRepository)
 }
 
 async fn run_git(path: &Path, args: &[&str]) -> Result<String, RootDiscoveryError> {
+    let output = run_git_bytes(path, args).await?;
+    String::from_utf8(output).map_err(|_| RootDiscoveryError::NotGitRepository)
+}
+
+async fn run_git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>, RootDiscoveryError> {
+    const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+    const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
     let mut command = Command::new("git");
-    command.arg("-C").arg(path).args(args);
-    for variable in [
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_WORK_TREE",
-    ] {
-        command.env_remove(variable);
+    command
+        .arg("--no-pager")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(path)
+        .args(args);
+    let path_environment = env::var_os("PATH");
+    command.env_clear();
+    if let Some(path_environment) = path_environment {
+        command.env("PATH", path_environment);
     }
-    let output = command.output().await.map_err(|error| {
-        if error.kind() == ErrorKind::NotFound {
-            RootDiscoveryError::GitUnavailable
-        } else {
-            RootDiscoveryError::NotGitRepository
+    command.env("LC_ALL", "C").env("LANG", "C");
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    timeout(COMMAND_TIMEOUT, async move {
+        let mut child = command.spawn().map_err(|error| {
+            if error.kind() == ErrorKind::NotFound {
+                RootDiscoveryError::GitUnavailable
+            } else {
+                RootDiscoveryError::NotGitRepository
+            }
+        })?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or(RootDiscoveryError::NotGitRepository)?;
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let count = stdout
+                .read(&mut buffer)
+                .await
+                .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+            if count == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..count]);
+            if output.len() > MAX_OUTPUT_BYTES {
+                return Err(RootDiscoveryError::GitUnavailable);
+            }
         }
-    })?;
-    if !output.status.success() {
-        return Err(RootDiscoveryError::NotGitRepository);
-    }
-    String::from_utf8(output.stdout).map_err(|_| RootDiscoveryError::NotGitRepository)
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+        if !status.success() {
+            return Err(RootDiscoveryError::NotGitRepository);
+        }
+        Ok(output)
+    })
+    .await
+    .map_err(|_| RootDiscoveryError::GitUnavailable)?
 }
 
 fn git_path(output: &str) -> Result<PathBuf, RootDiscoveryError> {

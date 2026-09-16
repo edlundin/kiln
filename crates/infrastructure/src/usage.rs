@@ -3,8 +3,8 @@ use kiln_core::{
     ModelInvocationCompletionMutation, ModelInvocationCompletionStore, ProviderUsageMetadata,
     ProviderUsageUpdate, QuantityRelation, UsageAccounting, UsageCompleteness, UsageFinality,
     UsageIdGenerator, UsageMutation, UsageMutationDisposition, UsageObservation,
-    UsageObservationId, UsageQuantity, UsageSource, UsageStore, UsageStoreError,
-    apply_usage_update,
+    UsageObservationId, UsageObservationPage, UsageQuantity, UsageSource, UsageStore,
+    UsageStoreError, apply_usage_update,
 };
 use serde_json::{Value, json};
 
@@ -146,19 +146,27 @@ async fn dispatched_invocation(
         .await
         .map_err(invocation_error)?
         .ok_or(UsageStoreError::ModelInvocationNotFound)?;
+    ensure_dispatched(transaction, &invocation).await?;
+    Ok(invocation)
+}
+
+async fn ensure_dispatched(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    invocation: &ModelInvocation,
+) -> Result<(), UsageStoreError> {
     let dispatched: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM session_events
          WHERE model_invocation_id = ? AND event_type = 'model_invocation.state_changed'
            AND model_invocation_state = 'in_flight')",
     )
-    .bind(id.as_str())
+    .bind(invocation.invocation_id().as_str())
     .fetch_one(&mut **transaction)
     .await
     .map_err(|_| UsageStoreError::Unavailable)?;
     if invocation.state() == ModelInvocationState::Pending || !dispatched {
         return Err(UsageStoreError::InvocationNotDispatched);
     }
-    Ok(invocation)
+    Ok(())
 }
 
 async fn attribution(
@@ -380,6 +388,71 @@ impl UsageStore for SqliteStore {
             .await
             .map_err(|_| UsageStoreError::Unavailable)?;
         Ok(observations)
+    }
+
+    async fn list_latest_usage_observations(
+        &self,
+        after: Option<&ModelInvocationId>,
+        limit: u64,
+    ) -> Result<UsageObservationPage, UsageStoreError> {
+        if limit == 0 || limit > kiln_core::MAX_USAGE_PAGE_LIMIT {
+            return Err(UsageStoreError::InvalidLimit);
+        }
+        let fetch_limit = i64::try_from(limit)
+            .ok()
+            .and_then(|limit| limit.checked_add(1))
+            .ok_or(UsageStoreError::InvalidLimit)?;
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| UsageStoreError::Unavailable)?;
+        let query = if let Some(after) = after {
+            sqlx::query(
+                "SELECT model_invocation_id FROM usage_observations WHERE model_invocation_id > ? GROUP BY model_invocation_id ORDER BY model_invocation_id LIMIT ?",
+            )
+            .bind(after.as_str())
+            .bind(fetch_limit)
+        } else {
+            sqlx::query(
+                "SELECT model_invocation_id FROM usage_observations GROUP BY model_invocation_id ORDER BY model_invocation_id LIMIT ?",
+            )
+            .bind(fetch_limit)
+        };
+        let rows = query
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(|_| UsageStoreError::Unavailable)?;
+        let mut observations = Vec::with_capacity(rows.len());
+        for row in rows {
+            let invocation_id = ModelInvocationId::parse(
+                row.try_get::<String, _>("model_invocation_id")
+                    .map_err(|_| UsageStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| UsageStoreError::IntegrityViolation)?;
+            let invocation = load_model_invocation(&mut transaction, &invocation_id)
+                .await
+                .map_err(invocation_error)?
+                .ok_or(UsageStoreError::IntegrityViolation)?;
+            let history = load_observations(&mut transaction, &invocation).await?;
+            let latest = history
+                .last()
+                .cloned()
+                .ok_or(UsageStoreError::IntegrityViolation)?;
+            dispatched_invocation(&mut transaction, &invocation_id).await?;
+            observations.push(latest);
+        }
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let has_more = observations.len() > limit;
+        observations.truncate(limit);
+        transaction
+            .commit()
+            .await
+            .map_err(|_| UsageStoreError::Unavailable)?;
+        Ok(UsageObservationPage {
+            observations,
+            has_more,
+        })
     }
 }
 

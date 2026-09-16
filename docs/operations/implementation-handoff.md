@@ -29,7 +29,8 @@ This handoff covers the EDL-216 and EDL-288 milestones in the Kiln Linear tracke
 
 - The desktop now opens artifact entries from the transcript in a temporary inspector. The existing authenticated artifact route is fetched with a streaming 64 KiB cap before buffering. UTF-8 text, JSON, and XML previews are supported; binary and other media types remain download-only, and fetch failures offer retry.
 - Preview state is scoped to the active Session and request/hash identity. Session changes, reconnects, disconnects, and Escape invalidate an open preview so an older response cannot replace the current view.
-- No upload, change review, persistent supervisor, secondary Run graph, or global Usage work is included in this slice.
+- The Session change-summary continuation is implemented in the backend and protocol. New Sessions persist the first Workspace root's canonical checkout, Git common directory, normalized `.` scope, and filesystem identity. `GET /v1/sessions/{session_id}/changes` revalidates those captured values, combines staged and unstaged tracked changes against `HEAD`, includes untracked files, and returns sorted paths with nullable counts for untracked or binary files. Git requests clear inherited environment variables except `PATH`, disable external diff and text conversion, and enforce 4 MiB of output and 30 seconds per Git invocation. Legacy Sessions remain readable and report an unavailable checkout for this endpoint.
+- No upload, persistent supervisor, secondary Run graph, or desktop Usage ledger is included in this slice. The backend now exposes a bounded authenticated read-only Usage ledger at `GET /v1/usage`; it reports the latest validated revision per physical Model Invocation and carries no pricing or valuation.
 
 ## Preservation
 

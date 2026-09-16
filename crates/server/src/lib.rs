@@ -1,6 +1,6 @@
 //! HTTP and WebSocket transport for the current Kiln protocol slice.
 
-use std::{future::Future, net::SocketAddr, sync::Arc};
+use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -23,33 +23,36 @@ use axum::{
 };
 use kiln_core::{
     AppendMessage, Artifact, AssignTask, ChildActivityReference as CoreChildActivityReference,
-    ContentHash, CreateTask, CreateWorkspace, EventCursor, Message, MessageDelivery,
-    MessageDeliveryMode as CoreMessageDeliveryMode,
+    ContentHash, CreateTask, CreateWorkspace, DEFAULT_USAGE_PAGE_LIMIT, EventCursor,
+    MAX_USAGE_PAGE_LIMIT, Message, MessageDelivery, MessageDeliveryMode as CoreMessageDeliveryMode,
     MessageDeliveryState as CoreMessageDeliveryState, MessageRole as CoreMessageRole,
-    ReactToRunActivity, RunError, RunId, RunInputMode as CoreRunInputMode, RunSnapshot,
-    RunState as CoreRunState, SendRunInput, Session, SessionError, SessionEventPage,
+    ModelInvocationId, ReactToRunActivity, RunError, RunId, RunInputMode as CoreRunInputMode,
+    RunSnapshot, RunState as CoreRunState, SendRunInput, Session, SessionError, SessionEventPage,
     SessionEventPayload, SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task,
     TaskError, TaskId, TaskOperations, TaskState as CoreTaskState, ToolCall,
     ToolCallState as CoreToolCallState, ToolOutputStream as CoreToolOutputStream, TransitionTask,
-    UpdateTask, WorkspaceError, WorkspaceId, WorkspaceOperations,
+    UpdateTask, UsageLedgerPage, UsageQueryError, WorkspaceError, WorkspaceId, WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
     ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
     ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest,
-    ChildActivityReference, CreateTaskRequest, CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH,
-    IDEMPOTENCY_KEY_HEADER, ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode,
-    MessageDeliveryResponse, MessageDeliveryState, MessageResponse, MessageRole, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH,
-    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest,
-    RunInputMode, RunResponse, RunState, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest, SessionEventDataResponse,
-    SessionEventResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
-    StartChildRunRequest, StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH,
-    TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse, TaskState, ToolCallResponse,
-    ToolCallState, ToolOutputStream, TransitionTaskRequest, UpdateTaskRequest,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame,
-    WorkspaceResponse, WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
+    ChangedFileResponse, ChildActivityReference, CreateTaskRequest, CreateWorkspaceRequest,
+    EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, ListSessionsResponse, ListWorkspacesResponse,
+    MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
+    MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
+    RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
+    SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest, SessionChangesResponse,
+    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
+    SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
+    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
+    TaskState, ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
+    USAGE_PATH, UpdateTaskRequest, UsageAccounting, UsageCompleteness, UsageFinality,
+    UsageLedgerEntryResponse, UsageLedgerResponse, UsageQuantityRelation, UsageQuantityResponse,
+    UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
+    WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -102,6 +105,43 @@ pub trait RunOperations: Send + Sync {
         decision: kiln_core::ApprovalState,
         idempotency_key: String,
     ) -> impl Future<Output = Result<kiln_core::ApprovalDecisionMutation, RunError>> + Send;
+}
+
+pub trait UsageOperations: Send + Sync {
+    fn list_usage_ledger(
+        &self,
+        after: Option<kiln_core::ModelInvocationId>,
+        limit: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<UsageLedgerPage, UsageQueryError>> + Send + '_>>;
+}
+
+impl<S, I> UsageOperations for kiln_core::UsageApplication<S, I>
+where
+    S: kiln_core::UsageStore + 'static,
+    I: kiln_core::UsageIdGenerator + 'static,
+{
+    fn list_usage_ledger(
+        &self,
+        after: Option<kiln_core::ModelInvocationId>,
+        limit: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<UsageLedgerPage, UsageQueryError>> + Send + '_>> {
+        Box::pin(kiln_core::UsageApplication::list_usage_ledger(
+            self, after, limit,
+        ))
+    }
+}
+
+struct UnavailableUsageOperations;
+
+impl UsageOperations for UnavailableUsageOperations {
+    fn list_usage_ledger(
+        &self,
+        after: Option<kiln_core::ModelInvocationId>,
+        limit: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<UsageLedgerPage, UsageQueryError>> + Send + '_>> {
+        let _ = (after, limit);
+        Box::pin(async { Err(UsageQueryError::Unavailable) })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -326,6 +366,7 @@ pub struct AppState<W, S, R> {
     workspace_operations: Arc<W>,
     session_operations: Arc<S>,
     run_operations: Arc<R>,
+    usage_operations: Arc<dyn UsageOperations>,
     event_broadcaster: EventBroadcaster,
     lifecycle: LifecycleCoordinator,
 }
@@ -341,6 +382,7 @@ impl<W, S, R> Clone for AppState<W, S, R> {
             workspace_operations: Arc::clone(&self.workspace_operations),
             session_operations: Arc::clone(&self.session_operations),
             run_operations: Arc::clone(&self.run_operations),
+            usage_operations: Arc::clone(&self.usage_operations),
             event_broadcaster: self.event_broadcaster.clone(),
             lifecycle: self.lifecycle.clone(),
         }
@@ -357,6 +399,31 @@ impl<W, S, R> AppState<W, S, R> {
         event_broadcaster: EventBroadcaster,
         auth_token: AuthToken,
     ) -> Self {
+        Self::with_usage_operations(
+            store,
+            bound_addr,
+            workspace_operations,
+            session_operations,
+            run_operations,
+            UnavailableUsageOperations,
+            event_broadcaster,
+            auth_token,
+        )
+    }
+
+    pub fn with_usage_operations<U>(
+        store: StoreMetadata,
+        bound_addr: SocketAddr,
+        workspace_operations: W,
+        session_operations: S,
+        run_operations: R,
+        usage_operations: U,
+        event_broadcaster: EventBroadcaster,
+        auth_token: AuthToken,
+    ) -> Self
+    where
+        U: UsageOperations + 'static,
+    {
         let bound_authority = bound_addr.to_string();
         Self {
             store,
@@ -367,6 +434,7 @@ impl<W, S, R> AppState<W, S, R> {
             workspace_operations: Arc::new(workspace_operations),
             session_operations: Arc::new(session_operations),
             run_operations: Arc::new(run_operations),
+            usage_operations: Arc::new(usage_operations),
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -398,6 +466,8 @@ where
         .route(TASK_ASSIGNMENT_PATH, post(assign_task))
         .route(TASK_TRANSITION_PATH, post(transition_task))
         .route(SESSION_EVENTS_PATH, get(list_session_events))
+        .route(SESSION_CHANGES_PATH, get(list_session_changes))
+        .route(USAGE_PATH, get(list_usage_ledger))
         .route(SESSION_RUNS_PATH, post(start_run).get(list_session_runs))
         .route(RUN_CHILDREN_PATH, post(start_child_run))
         .route(RUN_PATH, get(get_run))
@@ -1160,6 +1230,75 @@ where
     Ok(Json(session_events_response(&page)))
 }
 
+async fn list_session_changes<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionChangesResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let session_id = SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?;
+    let session = state
+        .session_operations
+        .get_session(session_id)
+        .await
+        .map_err(PublicError::from)?;
+    let checkout = session
+        .checkout()
+        .cloned()
+        .ok_or(PublicError::Session(SessionError::WorkspaceRootNotFound))?;
+    let summary = state
+        .workspace_operations
+        .summarize_changes(checkout)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(session_changes_response(&summary)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageLedgerQuery {
+    after: Option<String>,
+    limit: Option<String>,
+}
+
+async fn list_usage_ledger<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    query: Result<Query<UsageLedgerQuery>, QueryRejection>,
+) -> Result<Json<UsageLedgerResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let Query(query) = query.map_err(|_| PublicError::InvalidRequest)?;
+    let after = query
+        .after
+        .map(ModelInvocationId::parse)
+        .transpose()
+        .map_err(|_| PublicError::InvalidUsageCursor)?;
+    let limit = query
+        .limit
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| PublicError::InvalidUsageLimit)
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_USAGE_PAGE_LIMIT);
+    if !(1..=MAX_USAGE_PAGE_LIMIT).contains(&limit) {
+        return Err(PublicError::InvalidUsageLimit);
+    }
+    let page = state
+        .usage_operations
+        .list_usage_ledger(after, limit)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(usage_ledger_response(&page)))
+}
+
 fn session_response(session: &Session) -> SessionResponse {
     SessionResponse {
         session_id: session.id().as_str().to_owned(),
@@ -1294,6 +1433,102 @@ fn scope_response(scope: &kiln_core::WorkspacePathScope) -> WorkspaceScopeRespon
     WorkspaceScopeResponse {
         workspace_root_id: scope.workspace_root_id().as_str().to_owned(),
         relative_directory: scope.relative_directory().to_owned(),
+    }
+}
+
+fn session_changes_response(summary: &kiln_core::WorkspaceChangeSummary) -> SessionChangesResponse {
+    SessionChangesResponse {
+        workspace_root_id: summary.checkout().workspace_root_id().as_str().to_owned(),
+        relative_directory: summary.checkout().relative_directory().to_owned(),
+        files: summary
+            .files()
+            .iter()
+            .map(|file| ChangedFileResponse {
+                path: file.path().to_owned(),
+                kind: file.kind().as_str().to_owned(),
+                additions: file.additions(),
+                deletions: file.deletions(),
+            })
+            .collect(),
+    }
+}
+
+fn usage_ledger_response(page: &UsageLedgerPage) -> UsageLedgerResponse {
+    UsageLedgerResponse {
+        entries: page
+            .observations
+            .iter()
+            .map(usage_ledger_entry_response)
+            .collect(),
+        next_cursor: page
+            .next_cursor
+            .as_ref()
+            .map(|cursor| cursor.as_str().to_owned()),
+    }
+}
+
+fn usage_ledger_entry_response(
+    observation: &kiln_core::UsageObservation,
+) -> UsageLedgerEntryResponse {
+    let metadata = observation.update.metadata();
+    UsageLedgerEntryResponse {
+        usage_observation_id: observation.observation_id.as_str().to_owned(),
+        model_invocation_id: observation.model_invocation_id.as_str().to_owned(),
+        work_id: observation.work_id.as_str().to_owned(),
+        run_id: observation.run_id.as_str().to_owned(),
+        session_id: observation.session_id.as_str().to_owned(),
+        workspace_id: observation.workspace_id.as_str().to_owned(),
+        provider_account_id: observation.provider_account_id.as_str().to_owned(),
+        requested_model: observation.requested_model.as_str().to_owned(),
+        revision: observation.revision,
+        supersedes_usage_observation_id: observation
+            .supersedes
+            .as_ref()
+            .map(|id| id.as_str().to_owned()),
+        update_id: metadata.update_id.clone(),
+        accounting: match metadata.accounting {
+            kiln_core::UsageAccounting::Delta => UsageAccounting::Delta,
+            kiln_core::UsageAccounting::Cumulative => UsageAccounting::Cumulative,
+        },
+        finality: match metadata.finality {
+            kiln_core::UsageFinality::Partial => UsageFinality::Partial,
+            kiln_core::UsageFinality::Final => UsageFinality::Final,
+            kiln_core::UsageFinality::Correction => UsageFinality::Correction,
+        },
+        completeness: match observation.completeness {
+            kiln_core::UsageCompleteness::Complete => UsageCompleteness::Complete,
+            kiln_core::UsageCompleteness::Partial => UsageCompleteness::Partial,
+            kiln_core::UsageCompleteness::Unknown => UsageCompleteness::Unknown,
+        },
+        observed_at_unix_ms: metadata.observed_at_unix_ms,
+        request_id: metadata.request_id.clone(),
+        resolved_model: metadata.resolved_model.clone(),
+        service_tier: metadata.service_tier.clone(),
+        source: match metadata.source {
+            kiln_core::UsageSource::NativeProvider => UsageSource::NativeProvider,
+        },
+        quantities: observation
+            .quantities
+            .iter()
+            .map(|quantity| UsageQuantityResponse {
+                dimension: quantity.dimension().to_owned(),
+                unit: quantity.unit().to_owned(),
+                amount: quantity.amount(),
+                relation: match quantity.relation() {
+                    kiln_core::QuantityRelation::Additive => UsageQuantityRelation::Additive,
+                    kiln_core::QuantityRelation::Subset { .. } => UsageQuantityRelation::Subset,
+                    kiln_core::QuantityRelation::Informational => {
+                        UsageQuantityRelation::Informational
+                    }
+                },
+                subset_of: match quantity.relation() {
+                    kiln_core::QuantityRelation::Subset { of } => Some(of.clone()),
+                    kiln_core::QuantityRelation::Additive
+                    | kiln_core::QuantityRelation::Informational => None,
+                },
+            })
+            .collect(),
+        is_terminal: observation.is_terminal,
     }
 }
 
@@ -1918,6 +2153,10 @@ enum PublicError {
     InvalidRequest,
     #[error("event cursor is invalid")]
     InvalidEventCursor,
+    #[error("usage cursor is invalid")]
+    InvalidUsageCursor,
+    #[error("usage page limit is invalid")]
+    InvalidUsageLimit,
     #[error("content hash is invalid")]
     InvalidContentHash,
     #[error("Idempotency-Key header is required")]
@@ -1948,6 +2187,8 @@ enum PublicError {
     Run(RunError),
     #[error("artifact operation failed")]
     Artifact(ArtifactFetchError),
+    #[error("usage query failed")]
+    Usage(UsageQueryError),
     #[error("daemon is shutting down")]
     DaemonShuttingDown,
 }
@@ -1979,6 +2220,12 @@ impl From<RunError> for PublicError {
 impl From<ArtifactFetchError> for PublicError {
     fn from(error: ArtifactFetchError) -> Self {
         Self::Artifact(error)
+    }
+}
+
+impl From<UsageQueryError> for PublicError {
+    fn from(error: UsageQueryError) -> Self {
+        Self::Usage(error)
     }
 }
 
@@ -2019,6 +2266,16 @@ impl PublicError {
                 StatusCode::BAD_REQUEST,
                 error_code::INVALID_EVENT_CURSOR,
                 "Invalid Event cursor",
+            ),
+            Self::InvalidUsageCursor => (
+                StatusCode::BAD_REQUEST,
+                error_code::INVALID_USAGE_CURSOR,
+                "Invalid Usage cursor",
+            ),
+            Self::InvalidUsageLimit => (
+                StatusCode::BAD_REQUEST,
+                error_code::INVALID_USAGE_LIMIT,
+                "Invalid Usage page limit",
             ),
             Self::InvalidContentHash => (
                 StatusCode::BAD_REQUEST,
@@ -2118,6 +2375,16 @@ impl PublicError {
                     error_code::WORKSPACE_ROOT_DUPLICATE,
                     "Workspace root conflict",
                 ),
+                WorkspaceError::WorkspaceRootNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::WORKSPACE_ROOT_NOT_FOUND,
+                    "Workspace root not found",
+                ),
+                WorkspaceError::PathOutsideWorkspaceRoot => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::PATH_OUTSIDE_WORKSPACE_ROOT,
+                    "Path is outside the workspace root",
+                ),
                 WorkspaceError::WorkspaceNotFound => (
                     StatusCode::NOT_FOUND,
                     error_code::WORKSPACE_NOT_FOUND,
@@ -2139,6 +2406,11 @@ impl PublicError {
                     StatusCode::NOT_FOUND,
                     error_code::WORKSPACE_NOT_FOUND,
                     "Workspace not found",
+                ),
+                SessionError::WorkspaceRootNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::WORKSPACE_ROOT_NOT_FOUND,
+                    "Workspace checkout is unavailable",
                 ),
                 SessionError::SessionNotFound => (
                     StatusCode::NOT_FOUND,
@@ -2370,6 +2642,23 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::ARTIFACT_STORE_UNAVAILABLE,
                     "Artifact store unavailable",
+                ),
+            },
+            Self::Usage(error) => match error {
+                UsageQueryError::InvalidLimit => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::INVALID_USAGE_LIMIT,
+                    "Invalid Usage page limit",
+                ),
+                UsageQueryError::IntegrityViolation => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::USAGE_INTEGRITY_VIOLATION,
+                    "Usage store integrity violation",
+                ),
+                UsageQueryError::Unavailable => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::USAGE_STORE_UNAVAILABLE,
+                    "Usage store unavailable",
                 ),
             },
         };

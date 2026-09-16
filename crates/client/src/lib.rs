@@ -9,16 +9,18 @@ use kiln_protocol::{
     CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
     ClientIdentity, CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
     GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID,
-    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID,
-    ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse,
-    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH,
-    RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunResponse,
-    SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest,
-    TOOL_CALL_APPROVAL_PATH, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_CHANGES_OPERATION_ID,
+    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
+    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse,
+    ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse, NEGOTIATE_OPERATION_ID,
+    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
+    REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
+    RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunResponse,
+    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID,
+    SessionChangesResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
+    StartChildRunRequest, StartRunRequest, TOOL_CALL_APPROVAL_PATH, USAGE_PATH,
+    UsageLedgerResponse, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
     WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
 };
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -242,6 +244,23 @@ impl Client {
         .await
     }
 
+    pub async fn list_session_changes(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionChangesResponse, Error> {
+        let path = path_with_segment(
+            SESSION_CHANGES_PATH,
+            "{session_id}",
+            "session_id",
+            session_id,
+        )?;
+        self.send_json(
+            LIST_SESSION_CHANGES_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
     pub async fn append_message(
         &self,
         session_id: &str,
@@ -385,6 +404,23 @@ impl Client {
             url.query_pairs_mut().append_pair("after", after);
         }
         self.send_json(LIST_SESSION_EVENTS_OPERATION_ID, self.http.get(url))
+            .await
+    }
+
+    pub async fn list_usage(
+        &self,
+        after: Option<&str>,
+        limit: Option<u64>,
+    ) -> Result<UsageLedgerResponse, Error> {
+        let mut url = self.http_url(USAGE_PATH);
+        if let Some(after) = after {
+            url.query_pairs_mut().append_pair("after", after);
+        }
+        if let Some(limit) = limit {
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.to_string());
+        }
+        self.send_json(LIST_USAGE_OPERATION_ID, self.http.get(url))
             .await
     }
 

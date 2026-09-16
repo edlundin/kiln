@@ -6,7 +6,9 @@ use std::{
     str::FromStr,
 };
 
-use kiln_core::{RunApplication, SessionApplication, StoreMetadata, WorkspaceApplication};
+use kiln_core::{
+    RunApplication, SessionApplication, StoreMetadata, UsageApplication, WorkspaceApplication,
+};
 use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
     DETERMINISTIC_LARGE_OUTPUT_ARGUMENT, DETERMINISTIC_SUBPROCESS_ARGUMENT,
@@ -109,6 +111,7 @@ async fn main() -> ExitCode {
     let workspaces =
         WorkspaceApplication::new(GitWorkspaceRootDiscovery, store.clone(), UlidIdGenerator);
     let sessions = SessionApplication::new(store.clone(), store.clone(), UlidIdGenerator);
+    let usage = UsageApplication::new(store.clone(), UlidIdGenerator);
     let events = EventBroadcaster::default();
     let runs = RunService::new(
         RunApplication::new(store.clone(), UlidIdGenerator),
@@ -139,12 +142,13 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let state = AppState::with_operations(
+    let state = AppState::with_usage_operations(
         StoreMetadata::default(),
         bound_address,
         workspaces,
         sessions,
         runs.clone(),
+        usage,
         events,
         AuthToken::from_bytes(credential.token()),
     );

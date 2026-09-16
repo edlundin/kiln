@@ -12,13 +12,14 @@ use crate::{
     APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ASSIGN_TASK_OPERATION_ID, AppendMessageRequest,
     ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy, ApprovalResponse, ApprovalState,
     ArtifactResponse, AssignTaskRequest, CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID,
-    CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ChildActivityReference,
-    ClientIdentity, ContextManifestCreatedResponse, CreateTaskRequest, CreateWorkspaceRequest,
-    DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID,
-    EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID,
-    LIST_SESSIONS_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse,
+    CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ChangedFileResponse,
+    ChildActivityReference, ClientIdentity, ContextManifestCreatedResponse, CreateTaskRequest,
+    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
+    GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID,
+    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_CHANGES_OPERATION_ID,
+    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
+    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse,
     ListWorkspacesResponse, MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState,
     MessageResponse, MessageRole, MessageStatus, ModelInvocationCompletionKind,
     ModelInvocationEventResponse, ModelInvocationFailureReason, ModelInvocationPurpose,
@@ -26,16 +27,18 @@ use crate::{
     NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
     REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
     RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
-    SEND_RUN_INPUT_OPERATION_ID, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID,
-    SendRunInputRequest, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
-    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
-    TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
-    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UpdateTaskRequest,
-    UsageCompleteness, UsageObservedResponse, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
-    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WorkspaceResponse, WorkspaceRootRequest,
-    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
+    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
+    START_RUN_OPERATION_ID, SendRunInputRequest, SessionChangesResponse, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
+    StartChildRunRequest, StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH,
+    TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID, TaskResponse,
+    TaskState, ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
+    UPDATE_TASK_OPERATION_ID, USAGE_PATH, UpdateTaskRequest, UsageAccounting, UsageCompleteness,
+    UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse, UsageObservedResponse,
+    UsageQuantityRelation, UsageQuantityResponse, UsageSource, WEBSOCKET_CAPABILITY,
+    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WorkspaceResponse,
+    WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -146,6 +149,14 @@ pub fn artifact_files() -> BTreeMap<&'static str, String> {
         "fixtures/session-events-response.json",
         fixture_session_events_response(),
     );
+    files.insert(
+        "fixtures/session-changes-response.json",
+        fixture_session_changes_response(),
+    );
+    files.insert(
+        "fixtures/usage-ledger-response.json",
+        fixture_usage_ledger_response(),
+    );
     files.insert("reference.md", reference());
     files
 }
@@ -246,6 +257,11 @@ fn schema() -> String {
         ("ToolCallResponse", schema_for!(ToolCallResponse)),
         ("RunResponse", schema_for!(RunResponse)),
         ("SessionRunsResponse", schema_for!(SessionRunsResponse)),
+        ("ChangedFileResponse", schema_for!(ChangedFileResponse)),
+        (
+            "SessionChangesResponse",
+            schema_for!(SessionChangesResponse),
+        ),
         (
             "ContextManifestCreatedResponse",
             schema_for!(ContextManifestCreatedResponse),
@@ -268,6 +284,16 @@ fn schema() -> String {
             schema_for!(ModelOutputRecordedResponse),
         ),
         ("UsageCompleteness", schema_for!(UsageCompleteness)),
+        ("UsageAccounting", schema_for!(UsageAccounting)),
+        ("UsageFinality", schema_for!(UsageFinality)),
+        ("UsageSource", schema_for!(UsageSource)),
+        ("UsageQuantityRelation", schema_for!(UsageQuantityRelation)),
+        ("UsageQuantityResponse", schema_for!(UsageQuantityResponse)),
+        (
+            "UsageLedgerEntryResponse",
+            schema_for!(UsageLedgerEntryResponse),
+        ),
+        ("UsageLedgerResponse", schema_for!(UsageLedgerResponse)),
         ("UsageObservedResponse", schema_for!(UsageObservedResponse)),
         ("ModelInvocationStatus", schema_for!(ModelInvocationStatus)),
         (
@@ -345,6 +371,8 @@ fn typescript() -> String {
         ToolCallResponse::decl(&config),
         RunResponse::decl(&config),
         SessionRunsResponse::decl(&config),
+        ChangedFileResponse::decl(&config),
+        SessionChangesResponse::decl(&config),
         ContextManifestCreatedResponse::decl(&config),
         ModelInvocationPurpose::decl(&config),
         ModelInvocationCompletionKind::decl(&config),
@@ -352,6 +380,13 @@ fn typescript() -> String {
         ModelOutputStream::decl(&config),
         ModelOutputRecordedResponse::decl(&config),
         UsageCompleteness::decl(&config),
+        UsageAccounting::decl(&config),
+        UsageFinality::decl(&config),
+        UsageSource::decl(&config),
+        UsageQuantityRelation::decl(&config),
+        UsageQuantityResponse::decl(&config),
+        UsageLedgerEntryResponse::decl(&config),
+        UsageLedgerResponse::decl(&config),
         UsageObservedResponse::decl(&config),
         ModelInvocationStatus::decl(&config),
         ModelInvocationEventResponse::decl(&config),
@@ -463,6 +498,14 @@ fn catalogue() -> String {
             "method": "GET",
             "path": ARTIFACT_PATH,
             "operation": GET_ARTIFACT_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": SESSION_CHANGES_PATH,
+            "operation": LIST_SESSION_CHANGES_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": USAGE_PATH,
+            "operation": LIST_USAGE_OPERATION_ID
         }],
         "websocket": [{
             "method": "GET",
@@ -763,6 +806,54 @@ fn fixture_run_response() -> String {
 fn fixture_session_runs_response() -> String {
     serialize_fixture(&SessionRunsResponse {
         runs: vec![fixture_run()],
+    })
+}
+
+fn fixture_session_changes_response() -> String {
+    serialize_fixture(&SessionChangesResponse {
+        workspace_root_id: "wrt_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+        relative_directory: ".".to_owned(),
+        files: vec![ChangedFileResponse {
+            path: "src/main.rs".to_owned(),
+            kind: "modified".to_owned(),
+            additions: Some(4),
+            deletions: Some(2),
+        }],
+    })
+}
+
+fn fixture_usage_ledger_response() -> String {
+    serialize_fixture(&UsageLedgerResponse {
+        entries: vec![UsageLedgerEntryResponse {
+            usage_observation_id: "uso_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            model_invocation_id: "miv_01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            work_id: "wrk_01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
+            run_id: "run_01ARZ3NDEKTSV4RRFFQ69G5FAY".to_owned(),
+            session_id: "ses_01ARZ3NDEKTSV4RRFFQ69G5FAZ".to_owned(),
+            workspace_id: "wsp_01ARZ3NDEKTSV4RRFFQ69G5FB0".to_owned(),
+            provider_account_id: "pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+            requested_model: "fixture-model".to_owned(),
+            revision: 1,
+            supersedes_usage_observation_id: None,
+            update_id: "upd_fixture".to_owned(),
+            accounting: UsageAccounting::Cumulative,
+            finality: UsageFinality::Final,
+            completeness: UsageCompleteness::Unknown,
+            observed_at_unix_ms: 1_700_000_000_000,
+            request_id: None,
+            resolved_model: None,
+            service_tier: None,
+            source: UsageSource::NativeProvider,
+            quantities: vec![UsageQuantityResponse {
+                dimension: "tokens.input".to_owned(),
+                unit: "token".to_owned(),
+                amount: 0,
+                relation: UsageQuantityRelation::Additive,
+                subset_of: None,
+            }],
+            is_terminal: true,
+        }],
+        next_cursor: None,
     })
 }
 
@@ -1188,6 +1279,58 @@ paths:
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'
+  {SESSION_CHANGES_PATH}:
+
+    get:
+      operationId: {LIST_SESSION_CHANGES_OPERATION_ID}
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '200':
+          description: Read-only change summary for the Session's captured checkout.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionChangesResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  {USAGE_PATH}:
+
+    get:
+      operationId: {LIST_USAGE_OPERATION_ID}
+      parameters:
+        - name: after
+          in: query
+          required: false
+          schema: {{type: string}}
+          description: Exclusive model invocation ID cursor for the next page.
+        - name: limit
+          in: query
+          required: false
+          schema: {{type: integer, minimum: 1, maximum: 1000, default: 100}}
+          description: Maximum number of latest physical invocation revisions to return.
+      responses:
+        '200':
+          description: Latest usage revision for each physical model invocation, ordered by invocation ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageLedgerResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+
   {SESSION_RUNS_PATH}:
     get:
       operationId: {LIST_SESSION_RUNS_OPERATION_ID}
@@ -1565,6 +1708,14 @@ components:
             openapi_schema::<SessionRunsResponse>(),
         ),
         (
+            "ChangedFileResponse",
+            openapi_schema::<ChangedFileResponse>(),
+        ),
+        (
+            "SessionChangesResponse",
+            openapi_schema::<SessionChangesResponse>(),
+        ),
+        (
             "SessionEventDataResponse",
             openapi_schema::<SessionEventDataResponse>(),
         ),
@@ -1590,6 +1741,25 @@ components:
             openapi_schema::<ModelOutputRecordedResponse>(),
         ),
         ("UsageCompleteness", openapi_schema::<UsageCompleteness>()),
+        ("UsageAccounting", openapi_schema::<UsageAccounting>()),
+        ("UsageFinality", openapi_schema::<UsageFinality>()),
+        ("UsageSource", openapi_schema::<UsageSource>()),
+        (
+            "UsageQuantityRelation",
+            openapi_schema::<UsageQuantityRelation>(),
+        ),
+        (
+            "UsageQuantityResponse",
+            openapi_schema::<UsageQuantityResponse>(),
+        ),
+        (
+            "UsageLedgerEntryResponse",
+            openapi_schema::<UsageLedgerEntryResponse>(),
+        ),
+        (
+            "UsageLedgerResponse",
+            openapi_schema::<UsageLedgerResponse>(),
+        ),
         (
             "UsageObservedResponse",
             openapi_schema::<UsageObservedResponse>(),
@@ -1655,7 +1825,9 @@ fn normalize_openapi_references(value: &mut Value) {
 
 fn reference() -> String {
     format!(
-        "# Kiln protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nAll loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.\n\nMessage responses distinguish `user` and `assistant` roles and `complete` or `incomplete` status. Assistant Messages identify their originating Run and model invocation; user Messages have null origin fields. The user-message append endpoint cannot submit assistant Messages.\n\n`model_invocation.output` carries one durable ordered assistant-text or provider-exposed reasoning-summary chunk. Its immutable chunk ID and per-attempt position support exact replay. It does not carry hidden provider reasoning. Chunks are distinct from finalized assistant Messages. With `KILN_RUN_EXECUTOR=deterministic-model`, the daemon runs the explicit native fixture and publishes committed output and assistant Message Events. The default executor remains `deterministic-subprocess`.\n\n`usage.observed` identifies one immutable usage observation revision for a physical model invocation attempt. It carries the logical work and account identity, revision link, completeness, and terminal status. It contains no quantities, prices, prompt text, output text, or raw provider payloads. Usage query endpoints and valuation are not yet implemented.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACES_PATH}` returns all stored Workspaces ordered by `workspace_id`; an empty store returns an empty `workspaces` array. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {WORKSPACE_SESSIONS_PATH}` returns only that Workspace's Sessions ordered by `session_id`; an empty selection returns an empty `sessions` array. An unknown Workspace returns `workspace_not_found`. `GET {SESSION_PATH}` returns it. A Session does not own or depend on a worktree.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the untargeted Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_TASKS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header. It creates one durable pending Task and one `task.created` Event atomically. Parent and dependency links must target Tasks in the same Session. A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET {TASK_PATH}` returns the durable Task snapshot.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header and creates an interactive root Run with durable `run.created` and `run.queued` Events. `POST {RUN_CHILDREN_PATH}` creates one child in the same Session with immutable `parent_run_id`, optional Task assignment, and `interactive` or `read_only` user input mode. It atomically records `run.created`, `run.queued`, `run.child_added`, and, when linked, `task.assigned`. Child keys are scoped to the parent Run. Exact retries return the existing Run without new Events; mismatched key reuse conflicts. `GET {SESSION_RUNS_PATH}` returns a flat ordered list whose parent IDs form the Run tree.\n\n`POST {RUN_INPUT_PATH}` requires `{IDEMPOTENCY_KEY_HEADER}` and creates one user Message targeted to an interactive input-accepting Run plus one queued MessageDelivery. The Message and ordered `message.appended` then `run.input_queued` or `run.interrupt_requested` Events commit atomically. `queued` is normal guidance for a future safe boundary; `interrupt` must be explicit. Exact retries return the original delivery even after the Run becomes terminal. Delivery recording is an internal runtime boundary: successful and failed outcomes are FIFO per Run, while cancellation is valid only after Run termination. This release does not claim provider delivery or scheduler integration.\n\n`ask` records a pending Approval before execution. `read_only` durably denies the subprocess. `full_access` makes the requested scope effective without a prompt. `POST {TOOL_CALL_APPROVAL_PATH}` approves or rejects one pending ToolCall. Approval decisions are durable, first-decision-wins, and idempotent by their own `{IDEMPOTENCY_KEY_HEADER}`. An approval after daemon restart resumes the same Run.\n\nTool output larger than 4,096 bytes is stored as one immutable artifact instead of inline Event content. The `artifact.registered` Event and terminal ToolCall include the content hash, media type, and decimal byte size. `GET {ARTIFACT_PATH}` returns the verified bytes with safe download headers.\n\n`POST {RUN_CANCEL_PATH}` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.\n\nSIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client connects to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}` and offers `{WEBSOCKET_CAPABILITY}` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `{WEBSOCKET_CAPABILITY}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
+        "# Kiln protocol reference\n\nProtocol version: `{PROTOCOL_VERSION}`.\n\nAll loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.\n\nMessage responses distinguish `user` and `assistant` roles and `complete` or `incomplete` status. Assistant Messages identify their originating Run and model invocation; user Messages have null origin fields. The user-message append endpoint cannot submit assistant Messages.\n\n`model_invocation.output` carries one durable ordered assistant-text or provider-exposed reasoning-summary chunk. Its immutable chunk ID and per-attempt position support exact replay. It does not carry hidden provider reasoning. Chunks are distinct from finalized assistant Messages. With `KILN_RUN_EXECUTOR=deterministic-model`, the daemon runs the explicit native fixture and publishes committed output and assistant Message Events. The default executor remains `deterministic-subprocess`.\n\n`usage.observed` identifies one immutable usage observation revision for a physical model invocation attempt. It carries the logical work and account identity, revision link, completeness, and terminal status. It contains no quantities, prices, prompt text, output text, or raw provider payloads. The read-only `GET {USAGE_PATH}` ledger lists the latest validated revision for each physical model invocation, ordered by invocation ID. It accepts an exclusive `after` invocation cursor and a bounded `limit` (default 100, maximum 1000); `next_cursor` is null when the page is complete. Quantities preserve explicit zero values and missing dimensions, and entries carry completeness and source metadata. The ledger reports observations only; pricing, cost, valuation, and allowance data are not included.\n\nThe client sends `POST {NEGOTIATE_PATH}` with a version range, client identity, and requested capabilities. The server returns the selected version, capability lists, store identity, current event cursor, and the event WebSocket endpoint.\n\nThe client creates a durable Workspace with `POST {WORKSPACES_PATH}`, providing a name and one or more named local Git repository roots. `GET {WORKSPACES_PATH}` returns all stored Workspaces ordered by `workspace_id`; an empty store returns an empty `workspaces` array. `GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {WORKSPACE_SESSIONS_PATH}` creates a Session attached to one Workspace. `GET {WORKSPACE_SESSIONS_PATH}` returns only that Workspace's Sessions ordered by `session_id`; an empty selection returns an empty `sessions` array. An unknown Workspace returns `workspace_not_found`. `GET {SESSION_PATH}` returns it. New Sessions capture one registered workspace checkout (the first root at creation and the normalized `.` directory); older Sessions without a persisted checkout remain readable but do not support change summaries.
+
+`GET {SESSION_CHANGES_PATH}` returns a read-only summary for that captured checkout. It combines staged and unstaged tracked changes against `HEAD` once, adds all untracked files under the checkout directory, and sorts paths. Untracked and binary files expose null additions/deletions rather than zero. Each Git invocation is capped at 4 MiB of output and 30 seconds; exceeding either limit returns `git_unavailable`. The operation does not run external diff or text conversion helpers and does not claim worktree isolation.\n\n`POST {SESSION_MESSAGES_PATH}` accepts immutable user message content. Kiln creates the untargeted Message and its `message.appended` Event atomically. Clients cannot append arbitrary Events.\n\n`POST {SESSION_TASKS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header. It creates one durable pending Task and one `task.created` Event atomically. Parent and dependency links must target Tasks in the same Session. A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET {TASK_PATH}` returns the durable Task snapshot.\n\n`POST {SESSION_RUNS_PATH}` requires a non-empty opaque `{IDEMPOTENCY_KEY_HEADER}` header and creates an interactive root Run with durable `run.created` and `run.queued` Events. `POST {RUN_CHILDREN_PATH}` creates one child in the same Session with immutable `parent_run_id`, optional Task assignment, and `interactive` or `read_only` user input mode. It atomically records `run.created`, `run.queued`, `run.child_added`, and, when linked, `task.assigned`. Child keys are scoped to the parent Run. Exact retries return the existing Run without new Events; mismatched key reuse conflicts. `GET {SESSION_RUNS_PATH}` returns a flat ordered list whose parent IDs form the Run tree.\n\n`POST {RUN_INPUT_PATH}` requires `{IDEMPOTENCY_KEY_HEADER}` and creates one user Message targeted to an interactive input-accepting Run plus one queued MessageDelivery. The Message and ordered `message.appended` then `run.input_queued` or `run.interrupt_requested` Events commit atomically. `queued` is normal guidance for a future safe boundary; `interrupt` must be explicit. Exact retries return the original delivery even after the Run becomes terminal. Delivery recording is an internal runtime boundary: successful and failed outcomes are FIFO per Run, while cancellation is valid only after Run termination. This release does not claim provider delivery or scheduler integration.\n\n`ask` records a pending Approval before execution. `read_only` durably denies the subprocess. `full_access` makes the requested scope effective without a prompt. `POST {TOOL_CALL_APPROVAL_PATH}` approves or rejects one pending ToolCall. Approval decisions are durable, first-decision-wins, and idempotent by their own `{IDEMPOTENCY_KEY_HEADER}`. An approval after daemon restart resumes the same Run.\n\nTool output larger than 4,096 bytes is stored as one immutable artifact instead of inline Event content. The `artifact.registered` Event and terminal ToolCall include the content hash, media type, and decimal byte size. `GET {ARTIFACT_PATH}` returns the verified bytes with safe download headers.\n\n`POST {RUN_CANCEL_PATH}` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.\n\nSIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands, lets already accepted commands commit, cancels active Runs, and closes only after their terminal state is durable. Read-only requests remain available while the daemon drains.\n\n`GET {SESSION_EVENTS_PATH}?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.\n\nThe client connects to `GET {EVENTS_WEBSOCKET_PATH}?version={PROTOCOL_VERSION}&capability={WEBSOCKET_CAPABILITY}&after={{cursor}}` and offers `{WEBSOCKET_CAPABILITY}` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `{WEBSOCKET_CAPABILITY}`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.\n\nHTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.\n"
     )
     .replace(
         "`POST /v1/runs/{run_id}/cancel` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.",

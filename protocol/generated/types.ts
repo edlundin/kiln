@@ -88,6 +88,10 @@ export type RunResponse = { run_id: string, session_id: string, parent_run_id: s
 
 export type SessionRunsResponse = { runs: Array<RunResponse>, };
 
+export type ChangedFileResponse = { path: string, kind: string, additions: bigint | null, deletions: bigint | null, };
+
+export type SessionChangesResponse = { workspace_root_id: string, relative_directory: string, files: Array<ChangedFileResponse>, };
+
 export type ContextManifestCreatedResponse = { context_manifest_id: string, run_id: string, content_hash: string, entry_count: bigint, };
 
 export type ModelInvocationPurpose = "generation" | "compaction";
@@ -101,6 +105,20 @@ export type ModelOutputStream = "assistant_text" | "reasoning_summary";
 export type ModelOutputRecordedResponse = { output_chunk_id: string, model_invocation_id: string, run_id: string, position: bigint, stream: ModelOutputStream, content: string, };
 
 export type UsageCompleteness = "complete" | "partial" | "unknown";
+
+export type UsageAccounting = "delta" | "cumulative";
+
+export type UsageFinality = "partial" | "final" | "correction";
+
+export type UsageSource = "native_provider";
+
+export type UsageQuantityRelation = "additive" | "subset" | "informational";
+
+export type UsageQuantityResponse = { dimension: string, unit: string, amount: bigint, relation: UsageQuantityRelation, subset_of: string | null, };
+
+export type UsageLedgerEntryResponse = { usage_observation_id: string, model_invocation_id: string, work_id: string, run_id: string, session_id: string, workspace_id: string, provider_account_id: string, requested_model: string, revision: bigint, supersedes_usage_observation_id: string | null, update_id: string, accounting: UsageAccounting, finality: UsageFinality, completeness: UsageCompleteness, observed_at_unix_ms: bigint, request_id: string | null, resolved_model: string | null, service_tier: string | null, source: UsageSource, quantities: Array<UsageQuantityResponse>, is_terminal: boolean, };
+
+export type UsageLedgerResponse = { entries: Array<UsageLedgerEntryResponse>, next_cursor: string | null, };
 
 export type UsageObservedResponse = { usage_observation_id: string, model_invocation_id: string, work_id: string, run_id: string, provider_account_id: string, revision: bigint, supersedes_usage_observation_id: string | null, completeness: UsageCompleteness, is_terminal: boolean, };
 

@@ -1,0 +1,36 @@
+{
+  "entries": [
+    {
+      "usage_observation_id": "uso_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "model_invocation_id": "miv_01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "work_id": "wrk_01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAY",
+      "session_id": "ses_01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+      "workspace_id": "wsp_01ARZ3NDEKTSV4RRFFQ69G5FB0",
+      "provider_account_id": "pac_01ARZ3NDEKTSV4RRFFQ69G5FB1",
+      "requested_model": "fixture-model",
+      "revision": 1,
+      "supersedes_usage_observation_id": null,
+      "update_id": "upd_fixture",
+      "accounting": "cumulative",
+      "finality": "final",
+      "completeness": "unknown",
+      "observed_at_unix_ms": 1700000000000,
+      "request_id": null,
+      "resolved_model": null,
+      "service_tier": null,
+      "source": "native_provider",
+      "quantities": [
+        {
+          "dimension": "tokens.input",
+          "unit": "tokens",
+          "amount": 0,
+          "relation": "additive",
+          "subset_of": null
+        }
+      ],
+      "is_terminal": true
+    }
+  ],
+  "next_cursor": null
+}

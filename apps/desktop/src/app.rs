@@ -11,8 +11,8 @@ use gpui_component::{
 };
 use kiln_protocol::{
     ApprovalDecision, ApprovalDecisionRequest, ApprovalState, ArtifactResponse,
-    MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest, SessionEventResponse,
-    SessionResponse, StartChildRunRequest, WebSocketFrame, WorkspaceResponse,
+    MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest, SessionChangesResponse,
+    SessionEventResponse, SessionResponse, StartChildRunRequest, WebSocketFrame, WorkspaceResponse,
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
@@ -79,6 +79,11 @@ enum Update {
         content_hash: String,
         result: Result<kiln_client::ArtifactPreviewDownload, String>,
     },
+    ChangesLoaded {
+        request_id: u64,
+        session_id: String,
+        result: Result<SessionChangesResponse, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -128,6 +133,26 @@ enum ArtifactPreviewState {
     },
 }
 
+enum ChangesState {
+    Loading {
+        session_id: String,
+    },
+    Ready {
+        session_id: String,
+        summary: SessionChangesResponse,
+    },
+    Failed {
+        session_id: String,
+        error: String,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InspectorTab {
+    Changes,
+    Artifact,
+}
+
 pub struct Desktop {
     address: Entity<InputState>,
     token_file: Entity<InputState>,
@@ -170,6 +195,9 @@ pub struct Desktop {
     error: Option<String>,
     artifact_request_id: u64,
     artifact_preview: Option<ArtifactPreview>,
+    changes_request_id: u64,
+    changes_state: Option<ChangesState>,
+    inspector_tab: InspectorTab,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -279,6 +307,9 @@ impl Desktop {
             error: None,
             artifact_request_id: 0,
             artifact_preview: None,
+            changes_request_id: 0,
+            changes_state: None,
+            inspector_tab: InspectorTab::Changes,
             _subscriptions: vec![
                 subscription,
                 workspace_query_subscription,
@@ -486,6 +517,7 @@ impl Desktop {
 
         self.artifact_request_id = self.artifact_request_id.wrapping_add(1);
         let request_id = self.artifact_request_id;
+        self.inspector_tab = InspectorTab::Artifact;
         self.artifact_preview = Some(ArtifactPreview {
             session_id: session_id.clone(),
             metadata,
@@ -511,6 +543,63 @@ impl Desktop {
     fn close_artifact_preview(&mut self) {
         self.artifact_request_id = self.artifact_request_id.wrapping_add(1);
         self.artifact_preview = None;
+        if self.changes_state.is_some() {
+            self.inspector_tab = InspectorTab::Changes;
+        }
+    }
+
+    fn close_inspector(&mut self) {
+        self.artifact_request_id = self.artifact_request_id.wrapping_add(1);
+        self.changes_request_id = self.changes_request_id.wrapping_add(1);
+        self.artifact_preview = None;
+        self.changes_state = None;
+        self.inspector_tab = InspectorTab::Changes;
+    }
+
+    fn request_changes(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if !self.online || self.switching_session.is_some() {
+            return;
+        }
+        let Some(connected) = &self.connection else {
+            return;
+        };
+
+        self.changes_request_id = self.changes_request_id.wrapping_add(1);
+        let request_id = self.changes_request_id;
+        let client = connected.client.clone();
+        self.inspector_tab = InspectorTab::Changes;
+        self.changes_state = Some(ChangesState::Loading {
+            session_id: session_id.clone(),
+        });
+        let updates = self.updates.clone();
+        self.runtime.spawn(async move {
+            let result = client
+                .list_session_changes(&session_id)
+                .await
+                .map_err(|error| connection::error_message("Load changes", &error));
+            let _ = updates.send(Update::ChangesLoaded {
+                request_id,
+                session_id,
+                result,
+            });
+        });
+        cx.notify();
+    }
+
+    fn request_active_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.active_session_id().map(str::to_owned) else {
+            return;
+        };
+        self.request_changes(session_id, cx);
+    }
+
+    fn toggle_changes(&mut self, cx: &mut Context<Self>) {
+        if self.changes_state.is_some() {
+            self.close_inspector();
+            cx.notify();
+        } else {
+            self.request_active_changes(cx);
+        }
     }
 
     fn cancel_run(&mut self, run: String, operation: &'static str, cx: &mut Context<Self>) {
@@ -774,7 +863,7 @@ impl Desktop {
     }
 
     fn stash_session_state(&mut self, cx: &mut Context<Self>) {
-        self.close_artifact_preview();
+        self.close_inspector();
         let Some(session_id) = self.active_session_id().map(str::to_owned) else {
             return;
         };
@@ -823,7 +912,7 @@ impl Desktop {
     }
 
     fn clear_saved_session_state(&mut self) {
-        self.close_artifact_preview();
+        self.close_inspector();
         self.pending = None;
         self.pending_child_start = None;
         self.pending_by_session.clear();
@@ -920,7 +1009,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_artifact_preview();
+        self.close_inspector();
         let session_id = connected.session.session_id.clone();
         let workspace_id = connected.workspace.workspace_id.clone();
         self.daemon = Some(connected.daemon.clone());
@@ -1372,7 +1461,7 @@ impl Desktop {
             }
             Update::Disconnected { generation, error } => {
                 if generation == self.event_generation {
-                    self.close_artifact_preview();
+                    self.close_inspector();
                     self.online = false;
                     self.error = Some(error);
                 }
@@ -1584,6 +1673,31 @@ impl Desktop {
                         }
                     }
                     Err(error) => preview.state = ArtifactPreviewState::Failed(error),
+                }
+            }
+            Update::ChangesLoaded {
+                request_id,
+                session_id,
+                result,
+            } => {
+                if request_id != self.changes_request_id
+                    || self.active_session_id() != Some(session_id.as_str())
+                {
+                    return;
+                }
+                let state = match result {
+                    Ok(summary) => ChangesState::Ready {
+                        session_id: session_id.clone(),
+                        summary,
+                    },
+                    Err(error) => ChangesState::Failed {
+                        session_id: session_id.clone(),
+                        error,
+                    },
+                };
+                let current_session_id = self.changes_state.as_ref().map(changes_state_session_id);
+                if current_session_id == Some(session_id.as_str()) {
+                    self.changes_state = Some(state);
                 }
             }
         }
@@ -2005,6 +2119,247 @@ impl Desktop {
         panel
     }
 
+    fn changes_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(state) = self.changes_state.as_ref() else {
+            return div().id("changes-inspector");
+        };
+        let session_id = changes_state_session_id(state).to_owned();
+        let panel = div()
+            .id("changes-inspector")
+            .w(px(340.0))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(theme::CHROME)
+            .border_l_1()
+            .border_color(theme::BORDER)
+            .child(
+                div()
+                    .w_full()
+                    .h(px(44.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(theme::BORDER)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_family(theme::MONO_FONT)
+                                    .text_size(px(12.0))
+                                    .text_color(theme::TEXT)
+                                    .child("CHANGES"),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::MONO_FONT)
+                                    .text_size(px(10.0))
+                                    .text_color(theme::FAINT)
+                                    .child(format!("Session {}", compact_session_id(&session_id))),
+                            ),
+                    )
+                    .child(
+                        Button::new("close-changes-inspector")
+                            .label("Close")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_inspector();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(theme::BORDER)
+                    .child(
+                        Button::new("changes-tab")
+                            .label("Changes")
+                            .small()
+                            .ghost()
+                            .selected(self.inspector_tab == InspectorTab::Changes)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector_tab = InspectorTab::Changes;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.artifact_preview.is_some(), |tabs| {
+                        tabs.child(
+                            Button::new("artifact-tab")
+                                .label("Artifact")
+                                .small()
+                                .ghost()
+                                .selected(self.inspector_tab == InspectorTab::Artifact)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.inspector_tab = InspectorTab::Artifact;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            );
+
+        let body = match state {
+            ChangesState::Loading { .. } => div()
+                .id("changes-loading")
+                .role(gpui::Role::Status)
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(theme::MUTED)
+                .child("Loading changes…"),
+            ChangesState::Failed { error, .. } => {
+                let retry_session_id = session_id.clone();
+                div()
+                    .id("changes-error")
+                    .role(gpui::Role::Alert)
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .p_3()
+                    .text_sm()
+                    .text_color(theme::DANGER)
+                    .child(error.clone())
+                    .child(
+                        Button::new("retry-changes")
+                            .label("Retry")
+                            .small()
+                            .disabled(!self.online || self.switching_session.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_changes(retry_session_id.clone(), cx);
+                            })),
+                    )
+            }
+            ChangesState::Ready { summary, .. } => {
+                let (additions, deletions, binary, untracked) = change_summary_counts(summary);
+                let mut body = div()
+                    .id("changes-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .child(
+                        div()
+                            .id("changes-summary")
+                            .role(gpui::Role::Status)
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .pb_2()
+                            .border_b_1()
+                            .border_color(theme::BORDER)
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme::TEXT)
+                                    .child(format!(
+                                        "{} changed file{}",
+                                        summary.files.len(),
+                                        if summary.files.len() == 1 { "" } else { "s" }
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::MUTED)
+                                    .child(format!(
+                                        "Added {additions} · Deleted {deletions} · Binary {binary} · Untracked {untracked}"
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::MONO_FONT)
+                                    .text_size(px(11.0))
+                                    .line_height(px(16.0))
+                                    .text_color(theme::FAINT)
+                                    .child(format!(
+                                        "Checkout · {} · root {}",
+                                        summary.relative_directory,
+                                        compact_session_id(&summary.workspace_root_id)
+                                    )),
+                            ),
+                    );
+
+                if summary.files.is_empty() {
+                    body = body.child(
+                        div()
+                            .id("changes-empty")
+                            .role(gpui::Role::Status)
+                            .py_8()
+                            .text_center()
+                            .text_sm()
+                            .text_color(theme::MUTED)
+                            .child("No changes in this checkout."),
+                    );
+                } else {
+                    let mut files = div().id("changes-file-list").flex().flex_col().gap_1();
+                    for (index, file) in summary.files.iter().enumerate() {
+                        let status = change_kind_label(&file.kind);
+                        let file_counts = change_file_counts(file);
+                        files = files.child(
+                            div()
+                                .id(SharedString::from(format!("change-file-{index}")))
+                                .w_full()
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .gap_2()
+                                .px_2()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(theme::BORDER)
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .font_family(theme::MONO_FONT)
+                                                .text_size(px(12.0))
+                                                .line_height(px(17.0))
+                                                .text_color(theme::TEXT)
+                                                .child(file.path.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme::MUTED)
+                                                .child(format!("{status} · {file_counts}")),
+                                        ),
+                                ),
+                        );
+                    }
+                    body = body.child(files);
+                }
+                body
+            }
+        };
+        panel.child(body)
+    }
+
     fn connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -2193,8 +2548,8 @@ impl Render for Desktop {
                     } else if !session_query.is_empty() {
                         this.session_query
                             .update(cx, |input, cx| input.set_value("", window, cx));
-                    } else if this.artifact_preview.is_some() {
-                        this.close_artifact_preview();
+                    } else if this.artifact_preview.is_some() || this.changes_state.is_some() {
+                        this.close_inspector();
                         this.composer.read(cx).focus_handle(cx).focus(window, cx);
                     } else if this.show_runs || this.focused_run.is_some() {
                         this.show_runs = false;
@@ -2259,6 +2614,22 @@ impl Render for Desktop {
                                         this.show_runs = !this.show_runs;
                                         cx.notify();
                                     })),
+                            )
+                            .child(
+                                Button::new("toggle-changes")
+                                    .label(if self.changes_state.is_some() {
+                                        "Close Changes".to_owned()
+                                    } else {
+                                        "Changes".to_owned()
+                                    })
+                                    .disabled(
+                                        self.connection.is_none()
+                                            || !self.online
+                                            || self.switching_session.is_some(),
+                                    )
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_changes(cx)),
+                                    ),
                             )
                             .child(
                                 Button::new("connection-settings")
@@ -2403,16 +2774,22 @@ impl Render for Desktop {
                 .child(self.workspace_navigator(cx))
                 .child(self.session_drawer(cx))
                 .child(content);
-            if self.artifact_preview.is_some() {
+            if self.inspector_tab == InspectorTab::Changes && self.changes_state.is_some() {
+                frame = frame.child(self.changes_inspector(cx));
+            } else if self.artifact_preview.is_some() {
                 frame = frame.child(self.artifact_inspector(cx));
             }
             frame
-        } else if !self.show_connection && self.artifact_preview.is_some() {
-            div()
-                .flex()
-                .size_full()
-                .child(content)
-                .child(self.artifact_inspector(cx))
+        } else if !self.show_connection
+            && (self.changes_state.is_some() || self.artifact_preview.is_some())
+        {
+            let mut frame = div().flex().size_full().child(content);
+            if self.inspector_tab == InspectorTab::Changes && self.changes_state.is_some() {
+                frame = frame.child(self.changes_inspector(cx));
+            } else if self.artifact_preview.is_some() {
+                frame = frame.child(self.artifact_inspector(cx));
+            }
+            frame
         } else {
             content
         }
@@ -2442,6 +2819,55 @@ fn compact_content_hash(content_hash: &str) -> String {
         .rev()
         .collect();
     format!("{prefix}…{suffix}")
+}
+
+fn changes_state_session_id(state: &ChangesState) -> &str {
+    match state {
+        ChangesState::Loading { session_id }
+        | ChangesState::Ready { session_id, .. }
+        | ChangesState::Failed { session_id, .. } => session_id,
+    }
+}
+
+fn change_summary_counts(summary: &SessionChangesResponse) -> (u64, u64, usize, usize) {
+    let mut additions = 0;
+    let mut deletions = 0;
+    let mut binary = 0;
+    let mut untracked = 0;
+    for file in &summary.files {
+        additions += file.additions.unwrap_or(0);
+        deletions += file.deletions.unwrap_or(0);
+        binary += usize::from(file.kind == "binary");
+        untracked += usize::from(file.kind == "untracked");
+    }
+    (additions, deletions, binary, untracked)
+}
+
+fn change_file_counts(file: &kiln_protocol::ChangedFileResponse) -> String {
+    match (file.additions, file.deletions) {
+        (Some(additions), Some(deletions)) => format!("+{additions} · −{deletions}"),
+        (Some(additions), None) => format!("+{additions} · deletion count unavailable"),
+        (None, Some(deletions)) => format!("addition count unavailable · −{deletions}"),
+        (None, None) => match file.kind.as_str() {
+            "binary" => "Binary · line counts unavailable".to_owned(),
+            "untracked" => "Untracked · line counts unavailable".to_owned(),
+            _ => "Line counts unavailable".to_owned(),
+        },
+    }
+}
+
+fn change_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "added" => "Added",
+        "modified" => "Modified",
+        "deleted" => "Deleted",
+        "type_changed" => "Type changed",
+        "conflicted" => "Conflicted",
+        "renamed" => "Renamed",
+        "untracked" => "Untracked",
+        "binary" => "Binary",
+        _ => "Changed",
+    }
 }
 
 fn supports_artifact_preview(media_type: &str) -> bool {

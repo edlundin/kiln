@@ -46,7 +46,8 @@ Read frames with `EventStream::next_frame()`. It returns the protocol's `Ack`,
 The client supports creating and retrieving Workspaces and Sessions, appending
 user Messages, starting root and child Runs, listing a Session's Run tree,
 retrieving Runs, sending Run input, cancelling Runs, deciding ToolCall approvals,
-reading Session events, and retrieving artifacts.
+reading Session events, listing the captured Session checkout's Git changes,
+listing the global Usage ledger, and retrieving artifacts.
 These operations use the daemon's public contracts. The daemon owns validation,
 permission decisions, durable state, and process execution.
 
@@ -71,8 +72,24 @@ Use the stable public problem code to handle a rejected HTTP request. Do not
 infer permission or Run state from a transport failure. Retrieve the Run or retry
 the same idempotent command when its result is uncertain.
 
+`list_session_changes` is read-only and takes only a Session ID. The daemon uses
+the checkout captured when that Session was created; clients cannot supply a
+filesystem path. A missing legacy checkout, a changed root identity, or a
+different Git common directory is reported as an unavailable workspace root.
+Each Git invocation is bounded to 4 MiB of output and 30 seconds.
+
 `Error::Api { status, problem }` retains the HTTP status and the protocol's
-`ProblemDetails`, including its stable `code`. Artifact downloads return bytes
+`ProblemDetails`, including its stable `code`.
+
+`list_usage` is read-only and accepts an optional exclusive Model Invocation ID
+`after` cursor and `limit`. The default page size is 100 and the maximum is
+1,000. Each entry is the latest validated revision for one physical invocation,
+including explicit counted quantities, missing dimensions, zero values,
+completeness, source, and normalized provider metadata. `next_cursor` is null
+on the final page. The endpoint reports observations and does not provide
+pricing, cost, or valuation.
+
+Artifact downloads return bytes
 and response metadata through `get_artifact`; they do not use the JSON decoder.
 
 ## Event replay

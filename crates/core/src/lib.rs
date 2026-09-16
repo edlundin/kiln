@@ -389,6 +389,97 @@ pub struct WorkspacePathScope {
     relative_directory: String,
 }
 
+/// The immutable workspace checkout selected for a Session.
+///
+/// The resolved root path is captured when the Session is created. Read-only
+/// operations use this path so a later Workspace snapshot cannot silently
+/// redirect an existing Session to a different checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkspaceCheckout {
+    workspace_id: WorkspaceId,
+    workspace_root_id: WorkspaceRootId,
+    relative_directory: String,
+    root_path: String,
+    git_common_directory_path: String,
+    filesystem_identity: FilesystemIdentity,
+}
+
+impl WorkspaceCheckout {
+    pub fn new(
+        workspace_id: WorkspaceId,
+        root: &WorkspaceRoot,
+        scope: WorkspacePathScope,
+    ) -> Result<Self, WorkspaceError> {
+        if root.id() != scope.workspace_root_id() {
+            return Err(WorkspaceError::WorkspaceRootNotFound);
+        }
+        Ok(Self {
+            workspace_id,
+            workspace_root_id: root.id().clone(),
+            relative_directory: scope.relative_directory().to_owned(),
+            root_path: root.canonical_path().to_owned(),
+            git_common_directory_path: root.git_common_directory_path().to_owned(),
+            filesystem_identity: root.filesystem_identity().clone(),
+        })
+    }
+
+    pub fn from_resolved_paths(
+        workspace_id: WorkspaceId,
+        workspace_root_id: WorkspaceRootId,
+        relative_directory: impl AsRef<Path>,
+        root_path: impl Into<String>,
+        git_common_directory_path: impl Into<String>,
+        filesystem_identity: FilesystemIdentity,
+    ) -> Result<Self, WorkspaceError> {
+        let root_path = root_path.into();
+        let git_common_directory_path = git_common_directory_path.into();
+        if root_path.is_empty() || git_common_directory_path.is_empty() {
+            return Err(WorkspaceError::WorkspaceRootMissing);
+        }
+        let scope = WorkspacePathScope::new(workspace_root_id.clone(), relative_directory)
+            .map_err(|_| WorkspaceError::PathOutsideWorkspaceRoot)?;
+        Ok(Self {
+            workspace_id,
+            workspace_root_id,
+            relative_directory: scope.relative_directory,
+            root_path,
+            git_common_directory_path,
+            filesystem_identity,
+        })
+    }
+
+    pub fn workspace_id(&self) -> &WorkspaceId {
+        &self.workspace_id
+    }
+
+    pub fn workspace_root_id(&self) -> &WorkspaceRootId {
+        &self.workspace_root_id
+    }
+
+    pub fn relative_directory(&self) -> &str {
+        &self.relative_directory
+    }
+
+    pub fn root_path(&self) -> &str {
+        &self.root_path
+    }
+
+    pub fn git_common_directory_path(&self) -> &str {
+        &self.git_common_directory_path
+    }
+
+    pub fn filesystem_identity(&self) -> &FilesystemIdentity {
+        &self.filesystem_identity
+    }
+
+    pub fn scope(&self) -> WorkspacePathScope {
+        WorkspacePathScope {
+            workspace_root_id: self.workspace_root_id.clone(),
+            relative_directory: self.relative_directory.clone(),
+        }
+    }
+}
+
 impl WorkspacePathScope {
     pub fn new(
         workspace_root_id: WorkspaceRootId,
@@ -440,6 +531,96 @@ impl WorkspacePathScope {
 
     pub fn relative_directory(&self) -> &str {
         &self.relative_directory
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    TypeChanged,
+    Conflicted,
+    Renamed,
+    Untracked,
+    Binary,
+}
+
+impl WorkspaceChangeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Modified => "modified",
+            Self::Deleted => "deleted",
+            Self::TypeChanged => "type_changed",
+            Self::Conflicted => "conflicted",
+            Self::Renamed => "renamed",
+            Self::Untracked => "untracked",
+            Self::Binary => "binary",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChangedFile {
+    path: String,
+    kind: WorkspaceChangeKind,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+}
+
+impl WorkspaceChangedFile {
+    pub fn new(
+        path: String,
+        kind: WorkspaceChangeKind,
+        additions: Option<u64>,
+        deletions: Option<u64>,
+    ) -> Self {
+        Self {
+            path,
+            kind,
+            additions,
+            deletions,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn kind(&self) -> WorkspaceChangeKind {
+        self.kind
+    }
+
+    /// `None` means the count is not meaningful, such as an untracked or
+    /// binary file. It is never rendered as a misleading zero.
+    pub fn additions(&self) -> Option<u64> {
+        self.additions
+    }
+
+    pub fn deletions(&self) -> Option<u64> {
+        self.deletions
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChangeSummary {
+    checkout: WorkspaceCheckout,
+    files: Vec<WorkspaceChangedFile>,
+}
+
+impl WorkspaceChangeSummary {
+    pub fn new(checkout: WorkspaceCheckout, mut files: Vec<WorkspaceChangedFile>) -> Self {
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Self { checkout, files }
+    }
+
+    pub fn checkout(&self) -> &WorkspaceCheckout {
+        &self.checkout
+    }
+
+    pub fn files(&self) -> &[WorkspaceChangedFile] {
+        &self.files
     }
 }
 
@@ -541,11 +722,24 @@ pub struct AssistantMessageOrigin {
 pub struct Session {
     id: SessionId,
     workspace_id: WorkspaceId,
+    checkout: Option<WorkspaceCheckout>,
 }
 
 impl Session {
     pub fn new(id: SessionId, workspace_id: WorkspaceId) -> Self {
-        Self { id, workspace_id }
+        Self {
+            id,
+            workspace_id,
+            checkout: None,
+        }
+    }
+
+    pub fn with_checkout(id: SessionId, checkout: WorkspaceCheckout) -> Self {
+        Self {
+            id,
+            workspace_id: checkout.workspace_id.clone(),
+            checkout: Some(checkout),
+        }
     }
 
     pub fn id(&self) -> &SessionId {
@@ -554,6 +748,10 @@ impl Session {
 
     pub fn workspace_id(&self) -> &WorkspaceId {
         &self.workspace_id
+    }
+
+    pub fn checkout(&self) -> Option<&WorkspaceCheckout> {
+        self.checkout.as_ref()
     }
 }
 
@@ -3869,6 +4067,7 @@ pub enum TaskStoreError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionError {
     WorkspaceNotFound,
+    WorkspaceRootNotFound,
     SessionNotFound,
     MessageContentRequired,
     InvalidMessageOrigin,
@@ -5591,10 +5790,16 @@ where
             .get_workspace(&workspace_id)
             .await
             .map_err(|_| SessionError::WorkspaceStoreUnavailable)?;
-        if workspace.is_none() {
-            return Err(SessionError::WorkspaceNotFound);
-        }
-        let session = Session::new(self.ids.session_id(), workspace_id.clone());
+        let workspace = workspace.ok_or(SessionError::WorkspaceNotFound)?;
+        let root = workspace
+            .roots()
+            .first()
+            .ok_or(SessionError::WorkspaceRootNotFound)?;
+        let scope = WorkspacePathScope::new(root.id().clone(), ".")
+            .map_err(|_| SessionError::WorkspaceRootNotFound)?;
+        let checkout = WorkspaceCheckout::new(workspace_id.clone(), root, scope)
+            .map_err(|_| SessionError::WorkspaceRootNotFound)?;
+        let session = Session::with_checkout(self.ids.session_id(), checkout);
         let event =
             SessionEvent::session_created(self.ids.event_id(), session.id.clone(), workspace_id);
         self.session_store
@@ -5859,7 +6064,7 @@ pub struct WorkspaceRootInput {
     pub path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FilesystemIdentity(String);
 
 impl FilesystemIdentity {
@@ -6017,6 +6222,13 @@ impl Workspace {
     pub fn root(&self, id: &WorkspaceRootId) -> Option<&WorkspaceRoot> {
         self.roots.iter().find(|root| root.id() == id)
     }
+
+    pub fn checkout(&self, scope: WorkspacePathScope) -> Result<WorkspaceCheckout, WorkspaceError> {
+        let root = self
+            .root(scope.workspace_root_id())
+            .ok_or(WorkspaceError::WorkspaceRootNotFound)?;
+        WorkspaceCheckout::new(self.id.clone(), root, scope)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6050,6 +6262,8 @@ pub enum WorkspaceError {
     WorkspaceRootNotDirectory,
     WorkspaceRootNotGitRepository,
     WorkspaceRootDuplicate,
+    WorkspaceRootNotFound,
+    PathOutsideWorkspaceRoot,
     WorkspaceNotFound,
     GitUnavailable,
     WorkspaceStoreUnavailable,
@@ -6060,6 +6274,14 @@ pub trait WorkspaceRootDiscovery: Send + Sync {
         &self,
         path: &Path,
     ) -> impl Future<Output = Result<DiscoveredWorkspaceRoot, RootDiscoveryError>> + Send;
+
+    fn summarize_changes(
+        &self,
+        checkout: &WorkspaceCheckout,
+    ) -> impl Future<Output = Result<WorkspaceChangeSummary, RootDiscoveryError>> + Send {
+        let _ = checkout;
+        async { Err(RootDiscoveryError::GitUnavailable) }
+    }
 }
 
 pub trait WorkspaceStore: Send + Sync {
@@ -6091,6 +6313,10 @@ pub trait WorkspaceOperations: Send + Sync {
     fn list_workspaces(
         &self,
     ) -> impl Future<Output = Result<Vec<Workspace>, WorkspaceError>> + Send;
+    fn summarize_changes(
+        &self,
+        checkout: WorkspaceCheckout,
+    ) -> impl Future<Output = Result<WorkspaceChangeSummary, WorkspaceError>> + Send;
 }
 
 pub struct WorkspaceApplication<D, S, I> {
@@ -6173,6 +6399,31 @@ where
             .await
             .map_err(|_| WorkspaceError::WorkspaceStoreUnavailable)
     }
+
+    pub async fn summarize_changes(
+        &self,
+        checkout: WorkspaceCheckout,
+    ) -> Result<WorkspaceChangeSummary, WorkspaceError> {
+        let workspace = self
+            .store
+            .get_workspace(checkout.workspace_id())
+            .await
+            .map_err(|_| WorkspaceError::WorkspaceStoreUnavailable)?
+            .ok_or(WorkspaceError::WorkspaceNotFound)?;
+        let root = workspace
+            .root(checkout.workspace_root_id())
+            .ok_or(WorkspaceError::WorkspaceRootNotFound)?;
+        if root.canonical_path() != checkout.root_path()
+            || root.git_common_directory_path() != checkout.git_common_directory_path()
+            || root.filesystem_identity() != checkout.filesystem_identity()
+        {
+            return Err(WorkspaceError::WorkspaceRootNotFound);
+        }
+        self.discovery
+            .summarize_changes(&checkout)
+            .await
+            .map_err(WorkspaceError::from)
+    }
 }
 
 impl<D, S, I> WorkspaceOperations for WorkspaceApplication<D, S, I>
@@ -6194,6 +6445,13 @@ where
 
     async fn list_workspaces(&self) -> Result<Vec<Workspace>, WorkspaceError> {
         WorkspaceApplication::list_workspaces(self).await
+    }
+
+    async fn summarize_changes(
+        &self,
+        checkout: WorkspaceCheckout,
+    ) -> Result<WorkspaceChangeSummary, WorkspaceError> {
+        WorkspaceApplication::summarize_changes(self, checkout).await
     }
 }
 

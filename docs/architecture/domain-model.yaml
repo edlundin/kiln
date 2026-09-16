@@ -138,7 +138,7 @@ entities:
       - missing_quantities_differ_from_observed_zero
       - metadata_event_commits_with_observation
       - final_usage_and_invocation_outcome_can_commit_atomically
-    initial_slice: internal_durable_counted_units_without_valuation_or_query_API
+initial_slice: durable_counted_units_with_bounded_latest_revision_ledger_without_valuation
   Run:
     required:
       - id

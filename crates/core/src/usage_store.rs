@@ -9,6 +9,9 @@ use crate::{
     WorkspaceId,
 };
 
+pub const DEFAULT_USAGE_PAGE_LIMIT: u64 = 100;
+pub const MAX_USAGE_PAGE_LIMIT: u64 = 1_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageObservationId(String);
 
@@ -44,6 +47,30 @@ pub struct UsageObservation {
     pub is_terminal: bool,
 }
 
+/// A bounded store page containing the validated latest revision for each
+/// physical model invocation selected by the query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageObservationPage {
+    pub observations: Vec<UsageObservation>,
+    pub has_more: bool,
+}
+
+/// The read-only Usage ledger projection. `next_cursor` is the last physical
+/// invocation ID in this page and is passed back as the exclusive `after`
+/// cursor for the next page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageLedgerPage {
+    pub observations: Vec<UsageObservation>,
+    pub next_cursor: Option<ModelInvocationId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageQueryError {
+    InvalidLimit,
+    IntegrityViolation,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageStoreError {
     ModelInvocationNotFound,
@@ -51,6 +78,7 @@ pub enum UsageStoreError {
     AttributionMismatch,
     IdempotencyConflict,
     InvalidUpdate,
+    InvalidLimit,
     IntegrityViolation,
     Unavailable,
 }
@@ -123,6 +151,15 @@ pub trait UsageStore: Send + Sync {
         &self,
         model_invocation_id: &ModelInvocationId,
     ) -> impl Future<Output = Result<Vec<UsageObservation>, UsageStoreError>> + Send;
+
+    fn list_latest_usage_observations(
+        &self,
+        after: Option<&ModelInvocationId>,
+        limit: u64,
+    ) -> impl Future<Output = Result<UsageObservationPage, UsageStoreError>> + Send {
+        let _ = (after, limit);
+        async { Err(UsageStoreError::Unavailable) }
+    }
 }
 
 pub struct UsageApplication<S, I> {
@@ -157,6 +194,37 @@ impl<S: UsageStore, I: UsageIdGenerator> UsageApplication<S, I> {
         self.store
             .list_usage_observations(&model_invocation_id)
             .await
+    }
+
+    pub async fn list_usage_ledger(
+        &self,
+        after: Option<ModelInvocationId>,
+        limit: u64,
+    ) -> Result<UsageLedgerPage, UsageQueryError> {
+        if limit == 0 || limit > MAX_USAGE_PAGE_LIMIT {
+            return Err(UsageQueryError::InvalidLimit);
+        }
+        let page = self
+            .store
+            .list_latest_usage_observations(after.as_ref(), limit)
+            .await
+            .map_err(|error| match error {
+                UsageStoreError::InvalidLimit => UsageQueryError::InvalidLimit,
+                UsageStoreError::IntegrityViolation => UsageQueryError::IntegrityViolation,
+                _ => UsageQueryError::Unavailable,
+            })?;
+        let next_cursor = page
+            .has_more
+            .then(|| {
+                page.observations
+                    .last()
+                    .map(|observation| observation.model_invocation_id.clone())
+            })
+            .flatten();
+        Ok(UsageLedgerPage {
+            observations: page.observations,
+            next_cursor,
+        })
     }
 }
 

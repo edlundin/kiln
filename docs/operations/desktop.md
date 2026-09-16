@@ -196,7 +196,15 @@ and artifact metadata. Selecting an artifact opens a temporary inspector
 that fetches its immutable bytes through the existing authenticated artifact
 route. The inspector previews UTF-8 text, JSON, and XML responses up to the
 first 64 KiB; binary and other media types remain download-only. Fetch
-failures show an inline retry action. General change review remains pending.
+failures show an inline retry action. The Changes inspector loads the
+read-only summary for the active Session's captured checkout. It lists tracked
+and untracked files in path order, shows each file kind, and displays line
+counts only when Git reports meaningful values. A Session created before
+checkout persistence may remain readable while its change summary reports an
+unavailable checkout. The daemon revalidates the captured root, filesystem
+identity, and Git common directory before reading status; Git output is capped
+at 4 MiB per Git invocation and each Git invocation is capped at 30 seconds;
+the operation does not claim worktree isolation.
 Reactions require the selected child's original root to accept input. The
 current executor is not yet a persistent interactive supervisor.
 

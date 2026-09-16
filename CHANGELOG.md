@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-16 — `feat`
+
+- Added an authenticated Session checkout changes summary and a bounded read-only Usage ledger API with keyset pagination over the latest revision for each physical invocation.
+
+[Commit](pending)
+
+
 ## 2026-09-14 — `feat`
 
 - Added bounded desktop artifact inspection for stored transcript artifacts, with authenticated 64 KiB previews for UTF-8 text, JSON, and XML, download-only handling for unsupported content, retries, and stale-session guards.

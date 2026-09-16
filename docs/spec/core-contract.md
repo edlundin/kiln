@@ -496,8 +496,16 @@ counts. `tokens.input.cached` is a subset of input, and
 `tokens.output.reasoning` is a subset of output. Subsets cannot exceed their
 known parent quantity and must not be added to totals. This first boundary
 supports unsigned integer counted units. Fractional units, monetary valuation,
-pricing catalogs, allowance snapshots, and aggregate query endpoints remain
+pricing catalogs, allowance snapshots, and aggregate valuation queries remain
 pending.
+
+The read-only global Usage ledger returns the latest validated revision for
+each physical Model Invocation, ordered by invocation ID. It uses an exclusive
+invocation ID cursor and bounded pages, preserves explicit zero quantities and
+missing dimensions, and carries source, completeness, and normalized provider
+metadata. Retries remain separate ledger entries even when they share a
+logical work ID. The ledger reports observations only; it does not calculate
+prices, costs, or monetary totals.
 
 Observations retain normalized update metadata, effective quantities, revision
 links, and ownership across restart. Reads validate the revision chain and

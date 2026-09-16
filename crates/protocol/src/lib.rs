@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.20.0";
+pub const PROTOCOL_VERSION: &str = "0.21.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -23,6 +23,8 @@ pub const SESSION_PATH: &str = "/v1/sessions/{session_id}";
 pub const SESSION_MESSAGES_PATH: &str = "/v1/sessions/{session_id}/messages";
 pub const SESSION_TASKS_PATH: &str = "/v1/sessions/{session_id}/tasks";
 pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
+pub const SESSION_CHANGES_PATH: &str = "/v1/sessions/{session_id}/changes";
+pub const USAGE_PATH: &str = "/v1/usage";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_CHILDREN_PATH: &str = "/v1/runs/{parent_run_id}/children";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
@@ -49,6 +51,8 @@ pub const UPDATE_TASK_OPERATION_ID: &str = "update_task";
 pub const ASSIGN_TASK_OPERATION_ID: &str = "assign_task";
 pub const TRANSITION_TASK_OPERATION_ID: &str = "transition_task";
 pub const LIST_SESSION_EVENTS_OPERATION_ID: &str = "list_session_events";
+pub const LIST_SESSION_CHANGES_OPERATION_ID: &str = "list_session_changes";
+pub const LIST_USAGE_OPERATION_ID: &str = "list_usage";
 pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const START_CHILD_RUN_OPERATION_ID: &str = "start_child_run";
 pub const LIST_SESSION_RUNS_OPERATION_ID: &str = "list_session_runs";
@@ -98,6 +102,8 @@ pub mod error_code {
     pub const INVALID_TASK_ASSIGNMENT: &str = "invalid_task_assignment";
     pub const TASK_STORE_UNAVAILABLE: &str = "task_store_unavailable";
     pub const INVALID_EVENT_CURSOR: &str = "invalid_event_cursor";
+    pub const INVALID_USAGE_CURSOR: &str = "invalid_usage_cursor";
+    pub const INVALID_USAGE_LIMIT: &str = "invalid_usage_limit";
     pub const IDEMPOTENCY_KEY_REQUIRED: &str = "idempotency_key_required";
     pub const INVALID_IDEMPOTENCY_KEY: &str = "invalid_idempotency_key";
     pub const SESSION_STORE_UNAVAILABLE: &str = "session_store_unavailable";
@@ -123,6 +129,8 @@ pub mod error_code {
     pub const INVALID_CONTENT_HASH: &str = "invalid_content_hash";
     pub const ARTIFACT_NOT_FOUND: &str = "artifact_not_found";
     pub const ARTIFACT_STORE_UNAVAILABLE: &str = "artifact_store_unavailable";
+    pub const USAGE_STORE_UNAVAILABLE: &str = "usage_store_unavailable";
+    pub const USAGE_INTEGRITY_VIOLATION: &str = "usage_integrity_violation";
 
     pub const ALL: &[&str] = &[
         AUTHENTICATION_REQUIRED,
@@ -163,6 +171,8 @@ pub mod error_code {
         INVALID_TASK_ASSIGNMENT,
         TASK_STORE_UNAVAILABLE,
         INVALID_EVENT_CURSOR,
+        INVALID_USAGE_CURSOR,
+        INVALID_USAGE_LIMIT,
         IDEMPOTENCY_KEY_REQUIRED,
         INVALID_IDEMPOTENCY_KEY,
         SESSION_STORE_UNAVAILABLE,
@@ -188,6 +198,8 @@ pub mod error_code {
         INVALID_CONTENT_HASH,
         ARTIFACT_NOT_FOUND,
         ARTIFACT_STORE_UNAVAILABLE,
+        USAGE_STORE_UNAVAILABLE,
+        USAGE_INTEGRITY_VIOLATION,
     ];
 }
 
@@ -582,6 +594,25 @@ pub struct SessionRunsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct ChangedFileResponse {
+    pub path: String,
+    pub kind: String,
+    #[schemars(with = "RequiredNullableU64")]
+    pub additions: Option<u64>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub deletions: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionChangesResponse {
+    pub workspace_root_id: String,
+    pub relative_directory: String,
+    pub files: Vec<ChangedFileResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct WorkspaceScopeResponse {
     pub workspace_root_id: String,
     pub relative_directory: String,
@@ -689,6 +720,81 @@ pub struct UsageObservedResponse {
     pub supersedes_usage_observation_id: Option<String>,
     pub completeness: UsageCompleteness,
     pub is_terminal: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageAccounting {
+    Delta,
+    Cumulative,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageFinality {
+    Partial,
+    Final,
+    Correction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSource {
+    NativeProvider,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageQuantityRelation {
+    Additive,
+    Subset,
+    Informational,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct UsageQuantityResponse {
+    pub dimension: String,
+    pub unit: String,
+    pub amount: u64,
+    pub relation: UsageQuantityRelation,
+    #[schemars(with = "RequiredNullableString")]
+    pub subset_of: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct UsageLedgerEntryResponse {
+    pub usage_observation_id: String,
+    pub model_invocation_id: String,
+    pub work_id: String,
+    pub run_id: String,
+    pub session_id: String,
+    pub workspace_id: String,
+    pub provider_account_id: String,
+    pub requested_model: String,
+    pub revision: u64,
+    #[schemars(with = "RequiredNullableString")]
+    pub supersedes_usage_observation_id: Option<String>,
+    pub update_id: String,
+    pub accounting: UsageAccounting,
+    pub finality: UsageFinality,
+    pub completeness: UsageCompleteness,
+    pub observed_at_unix_ms: u64,
+    #[schemars(with = "RequiredNullableString")]
+    pub request_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub resolved_model: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub service_tier: Option<String>,
+    pub source: UsageSource,
+    pub quantities: Vec<UsageQuantityResponse>,
+    pub is_terminal: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct UsageLedgerResponse {
+    pub entries: Vec<UsageLedgerEntryResponse>,
+    #[schemars(with = "RequiredNullableString")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -847,6 +953,22 @@ impl JsonSchema for RequiredNullableI32 {
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         json_schema!({"type": ["integer", "null"], "format": "int32"})
+    }
+}
+
+struct RequiredNullableU64;
+
+impl JsonSchema for RequiredNullableU64 {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableU64".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({"type": ["integer", "null"], "format": "uint64"})
     }
 }
 

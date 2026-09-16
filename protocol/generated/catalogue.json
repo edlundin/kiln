@@ -41,6 +41,8 @@
     "invalid_task_assignment",
     "task_store_unavailable",
     "invalid_event_cursor",
+    "invalid_usage_cursor",
+    "invalid_usage_limit",
     "idempotency_key_required",
     "invalid_idempotency_key",
     "session_store_unavailable",
@@ -65,7 +67,9 @@
     "idempotency_conflict",
     "invalid_content_hash",
     "artifact_not_found",
-    "artifact_store_unavailable"
+    "artifact_store_unavailable",
+    "usage_store_unavailable",
+    "usage_integrity_violation"
   ],
   "http": [
     {
@@ -112,6 +116,16 @@
       "method": "GET",
       "operation": "list_session_events",
       "path": "/v1/sessions/{session_id}/events"
+    },
+    {
+      "method": "GET",
+      "operation": "list_session_changes",
+      "path": "/v1/sessions/{session_id}/changes"
+    },
+    {
+      "method": "GET",
+      "operation": "list_usage",
+      "path": "/v1/usage"
     },
     {
       "method": "POST",

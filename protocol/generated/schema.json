@@ -155,6 +155,39 @@
       "title": "AssignTaskRequest",
       "type": "object"
     },
+    "ChangedFileResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "additions": {
+          "format": "uint64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "deletions": {
+          "format": "uint64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "additions",
+        "deletions"
+      ],
+      "title": "ChangedFileResponse",
+      "type": "object"
+    },
     "ChildActivityReference": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1512,6 +1545,63 @@
         "delivery_mode"
       ],
       "title": "SendRunInputRequest",
+      "type": "object"
+    },
+    "SessionChangesResponse": {
+      "$defs": {
+        "ChangedFileResponse": {
+          "properties": {
+            "additions": {
+              "format": "uint64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "deletions": {
+              "format": "uint64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "kind",
+            "additions",
+            "deletions"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "files": {
+          "items": {
+            "$ref": "#/$defs/ChangedFileResponse"
+          },
+          "type": "array"
+        },
+        "relative_directory": {
+          "type": "string"
+        },
+        "workspace_root_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace_root_id",
+        "relative_directory",
+        "files"
+      ],
+      "title": "SessionChangesResponse",
       "type": "object"
     },
     "SessionEventDataResponse": {
@@ -5846,6 +5936,15 @@
       "title": "UpdateTaskRequest",
       "type": "object"
     },
+    "UsageAccounting": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "delta",
+        "cumulative"
+      ],
+      "title": "UsageAccounting",
+      "type": "string"
+    },
     "UsageCompleteness": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "enum": [
@@ -5855,6 +5954,403 @@
       ],
       "title": "UsageCompleteness",
       "type": "string"
+    },
+    "UsageFinality": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "partial",
+        "final",
+        "correction"
+      ],
+      "title": "UsageFinality",
+      "type": "string"
+    },
+    "UsageLedgerEntryResponse": {
+      "$defs": {
+        "UsageAccounting": {
+          "enum": [
+            "delta",
+            "cumulative"
+          ],
+          "type": "string"
+        },
+        "UsageCompleteness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "UsageFinality": {
+          "enum": [
+            "partial",
+            "final",
+            "correction"
+          ],
+          "type": "string"
+        },
+        "UsageQuantityRelation": {
+          "enum": [
+            "additive",
+            "subset",
+            "informational"
+          ],
+          "type": "string"
+        },
+        "UsageQuantityResponse": {
+          "properties": {
+            "amount": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dimension": {
+              "type": "string"
+            },
+            "relation": {
+              "$ref": "#/$defs/UsageQuantityRelation"
+            },
+            "subset_of": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "dimension",
+            "unit",
+            "amount",
+            "relation",
+            "subset_of"
+          ],
+          "type": "object"
+        },
+        "UsageSource": {
+          "enum": [
+            "native_provider"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "accounting": {
+          "$ref": "#/$defs/UsageAccounting"
+        },
+        "completeness": {
+          "$ref": "#/$defs/UsageCompleteness"
+        },
+        "finality": {
+          "$ref": "#/$defs/UsageFinality"
+        },
+        "is_terminal": {
+          "type": "boolean"
+        },
+        "model_invocation_id": {
+          "type": "string"
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider_account_id": {
+          "type": "string"
+        },
+        "quantities": {
+          "items": {
+            "$ref": "#/$defs/UsageQuantityResponse"
+          },
+          "type": "array"
+        },
+        "request_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested_model": {
+          "type": "string"
+        },
+        "resolved_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "service_tier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/UsageSource"
+        },
+        "supersedes_usage_observation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "update_id": {
+          "type": "string"
+        },
+        "usage_observation_id": {
+          "type": "string"
+        },
+        "work_id": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "usage_observation_id",
+        "model_invocation_id",
+        "work_id",
+        "run_id",
+        "session_id",
+        "workspace_id",
+        "provider_account_id",
+        "requested_model",
+        "revision",
+        "supersedes_usage_observation_id",
+        "update_id",
+        "accounting",
+        "finality",
+        "completeness",
+        "observed_at_unix_ms",
+        "request_id",
+        "resolved_model",
+        "service_tier",
+        "source",
+        "quantities",
+        "is_terminal"
+      ],
+      "title": "UsageLedgerEntryResponse",
+      "type": "object"
+    },
+    "UsageLedgerResponse": {
+      "$defs": {
+        "UsageAccounting": {
+          "enum": [
+            "delta",
+            "cumulative"
+          ],
+          "type": "string"
+        },
+        "UsageCompleteness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "UsageFinality": {
+          "enum": [
+            "partial",
+            "final",
+            "correction"
+          ],
+          "type": "string"
+        },
+        "UsageLedgerEntryResponse": {
+          "properties": {
+            "accounting": {
+              "$ref": "#/$defs/UsageAccounting"
+            },
+            "completeness": {
+              "$ref": "#/$defs/UsageCompleteness"
+            },
+            "finality": {
+              "$ref": "#/$defs/UsageFinality"
+            },
+            "is_terminal": {
+              "type": "boolean"
+            },
+            "model_invocation_id": {
+              "type": "string"
+            },
+            "observed_at_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "provider_account_id": {
+              "type": "string"
+            },
+            "quantities": {
+              "items": {
+                "$ref": "#/$defs/UsageQuantityResponse"
+              },
+              "type": "array"
+            },
+            "request_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "requested_model": {
+              "type": "string"
+            },
+            "resolved_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "service_tier": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/UsageSource"
+            },
+            "supersedes_usage_observation_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "update_id": {
+              "type": "string"
+            },
+            "usage_observation_id": {
+              "type": "string"
+            },
+            "work_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "usage_observation_id",
+            "model_invocation_id",
+            "work_id",
+            "run_id",
+            "session_id",
+            "workspace_id",
+            "provider_account_id",
+            "requested_model",
+            "revision",
+            "supersedes_usage_observation_id",
+            "update_id",
+            "accounting",
+            "finality",
+            "completeness",
+            "observed_at_unix_ms",
+            "request_id",
+            "resolved_model",
+            "service_tier",
+            "source",
+            "quantities",
+            "is_terminal"
+          ],
+          "type": "object"
+        },
+        "UsageQuantityRelation": {
+          "enum": [
+            "additive",
+            "subset",
+            "informational"
+          ],
+          "type": "string"
+        },
+        "UsageQuantityResponse": {
+          "properties": {
+            "amount": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dimension": {
+              "type": "string"
+            },
+            "relation": {
+              "$ref": "#/$defs/UsageQuantityRelation"
+            },
+            "subset_of": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "dimension",
+            "unit",
+            "amount",
+            "relation",
+            "subset_of"
+          ],
+          "type": "object"
+        },
+        "UsageSource": {
+          "enum": [
+            "native_provider"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/UsageLedgerEntryResponse"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entries",
+        "next_cursor"
+      ],
+      "title": "UsageLedgerResponse",
+      "type": "object"
     },
     "UsageObservedResponse": {
       "$defs": {
@@ -5916,6 +6412,68 @@
       ],
       "title": "UsageObservedResponse",
       "type": "object"
+    },
+    "UsageQuantityRelation": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "additive",
+        "subset",
+        "informational"
+      ],
+      "title": "UsageQuantityRelation",
+      "type": "string"
+    },
+    "UsageQuantityResponse": {
+      "$defs": {
+        "UsageQuantityRelation": {
+          "enum": [
+            "additive",
+            "subset",
+            "informational"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "amount": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dimension": {
+          "type": "string"
+        },
+        "relation": {
+          "$ref": "#/$defs/UsageQuantityRelation"
+        },
+        "subset_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dimension",
+        "unit",
+        "amount",
+        "relation",
+        "subset_of"
+      ],
+      "title": "UsageQuantityResponse",
+      "type": "object"
+    },
+    "UsageSource": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "enum": [
+        "native_provider"
+      ],
+      "title": "UsageSource",
+      "type": "string"
     },
     "WebSocketFrame": {
       "$defs": {

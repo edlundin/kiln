@@ -3,6 +3,7 @@
 ## 2026-09-16 — `feat`
 
 - Added an authenticated Session checkout changes summary and a bounded read-only Usage ledger API with keyset pagination over the latest revision for each physical invocation.
+- Added a desktop Usage ledger view and refreshed generated protocol artifacts for protocol `0.21.0`.
 
 [Commit](pending)
 

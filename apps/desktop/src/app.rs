@@ -12,7 +12,9 @@ use gpui_component::{
 use kiln_protocol::{
     ApprovalDecision, ApprovalDecisionRequest, ApprovalState, ArtifactResponse,
     MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest, SessionChangesResponse,
-    SessionEventResponse, SessionResponse, StartChildRunRequest, WebSocketFrame, WorkspaceResponse,
+    SessionEventResponse, SessionResponse, StartChildRunRequest, UsageAccounting,
+    UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
+    UsageQuantityRelation, UsageSource, WebSocketFrame, WorkspaceResponse,
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
@@ -84,6 +86,13 @@ enum Update {
         session_id: String,
         result: Result<SessionChangesResponse, String>,
     },
+    UsageLoaded {
+        request_id: u64,
+        connection_generation: u64,
+        destination_generation: u64,
+        after: Option<String>,
+        result: Result<UsageLedgerResponse, String>,
+    },
 }
 
 #[derive(Clone)]
@@ -112,6 +121,7 @@ struct DraftState {
 }
 
 const ARTIFACT_PREVIEW_LIMIT: usize = 64 * 1024;
+const USAGE_PAGE_LIMIT: u64 = 100;
 
 struct ArtifactPreview {
     session_id: String,
@@ -145,6 +155,62 @@ enum ChangesState {
         session_id: String,
         error: String,
     },
+}
+
+struct UsageState {
+    entries: Vec<UsageLedgerEntryResponse>,
+    next_cursor: Option<String>,
+    loading: bool,
+    loading_more: bool,
+    has_loaded: bool,
+    error: Option<String>,
+    retry_after: Option<String>,
+    request_id: u64,
+    destination_generation: u64,
+    expanded: std::collections::BTreeSet<String>,
+}
+
+impl Default for UsageState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            next_cursor: None,
+            loading: false,
+            loading_more: false,
+            has_loaded: false,
+            error: None,
+            retry_after: None,
+            request_id: 0,
+            destination_generation: 0,
+            expanded: std::collections::BTreeSet::new(),
+        }
+    }
+}
+
+impl UsageState {
+    fn invalidate_request(&mut self) {
+        self.request_id = self.request_id.wrapping_add(1);
+        self.loading = false;
+        self.loading_more = false;
+    }
+
+    fn destination_changed(&mut self) {
+        self.destination_generation = self.destination_generation.wrapping_add(1);
+        self.invalidate_request();
+        self.error = None;
+        self.retry_after = None;
+        self.expanded.clear();
+    }
+
+    fn clear_for_store(&mut self) {
+        self.invalidate_request();
+        self.entries.clear();
+        self.next_cursor = None;
+        self.has_loaded = false;
+        self.error = None;
+        self.retry_after = None;
+        self.expanded.clear();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -198,6 +264,8 @@ pub struct Desktop {
     changes_request_id: u64,
     changes_state: Option<ChangesState>,
     inspector_tab: InspectorTab,
+    show_usage: bool,
+    usage: UsageState,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -310,6 +378,8 @@ impl Desktop {
             changes_request_id: 0,
             changes_state: None,
             inspector_tab: InspectorTab::Changes,
+            show_usage: false,
+            usage: UsageState::default(),
             _subscriptions: vec![
                 subscription,
                 workspace_query_subscription,
@@ -332,6 +402,9 @@ impl Desktop {
         }
         self.connection_generation = self.connection_generation.wrapping_add(1);
         self.event_generation = self.event_generation.wrapping_add(1);
+        self.usage.invalidate_request();
+        self.usage.error = None;
+        self.usage.retry_after = None;
         let generation = self.connection_generation;
         self.online = false;
         self.busy = true;
@@ -816,6 +889,101 @@ impl Desktop {
             .map(|connected| connected.session.session_id.as_str())
     }
 
+    fn leave_usage(&mut self) {
+        if self.show_usage {
+            self.show_usage = false;
+            self.usage.destination_changed();
+        }
+    }
+
+    fn toggle_usage(&mut self, cx: &mut Context<Self>) {
+        if self.daemon.is_none() {
+            return;
+        }
+        if self.show_usage {
+            self.leave_usage();
+        } else {
+            self.show_usage = true;
+            self.show_runs = false;
+            self.focused_run = None;
+            self.close_inspector();
+            self.usage.destination_changed();
+            self.refresh_usage(cx);
+        }
+        cx.notify();
+    }
+
+    fn start_usage_request(&mut self, after: Option<String>, cx: &mut Context<Self>) {
+        if !self.online {
+            self.usage.invalidate_request();
+            self.usage.error = Some("Reconnect to load the global Usage ledger.".to_owned());
+            self.usage.retry_after = after;
+            cx.notify();
+            return;
+        }
+        let Some(daemon) = self.daemon.as_ref() else {
+            self.usage.invalidate_request();
+            self.usage.error =
+                Some("Connect to a daemon to load the global Usage ledger.".to_owned());
+            self.usage.retry_after = after;
+            cx.notify();
+            return;
+        };
+
+        self.usage.request_id = self.usage.request_id.wrapping_add(1);
+        let request_id = self.usage.request_id;
+        let connection_generation = self.connection_generation;
+        let destination_generation = self.usage.destination_generation;
+        let is_continuation = after.is_some();
+        self.usage.loading = !is_continuation;
+        self.usage.loading_more = is_continuation;
+        self.usage.error = None;
+        self.usage.retry_after = None;
+
+        let client = daemon.client.clone();
+        let call_after = after.clone();
+        let updates = self.updates.clone();
+        self.runtime.spawn(async move {
+            let result = client
+                .list_usage(call_after.as_deref(), Some(USAGE_PAGE_LIMIT))
+                .await
+                .map_err(|error| connection::error_message("Load Usage ledger", &error));
+            let _ = updates.send(Update::UsageLoaded {
+                request_id,
+                connection_generation,
+                destination_generation,
+                after,
+                result,
+            });
+        });
+        cx.notify();
+    }
+
+    fn refresh_usage(&mut self, cx: &mut Context<Self>) {
+        self.start_usage_request(None, cx);
+    }
+
+    fn load_more_usage(&mut self, cx: &mut Context<Self>) {
+        if self.usage.loading || self.usage.loading_more {
+            return;
+        }
+        let Some(after) = self.usage.next_cursor.clone() else {
+            return;
+        };
+        self.start_usage_request(Some(after), cx);
+    }
+
+    fn retry_usage(&mut self, cx: &mut Context<Self>) {
+        self.start_usage_request(self.usage.retry_after.clone(), cx);
+    }
+
+    fn toggle_usage_entry(&mut self, observation_id: String, cx: &mut Context<Self>) {
+        if !self.usage.expanded.insert(observation_id.clone()) {
+            self.usage.expanded.remove(&observation_id);
+        }
+        cx.notify();
+    }
+
     fn request_sessions(&mut self, workspace_id: String) {
         let Some(daemon) = &self.daemon else {
             return;
@@ -849,6 +1017,9 @@ impl Desktop {
             return;
         }
         self.selected_workspace_id = Some(workspace_id.clone());
+        if self.show_usage {
+            self.usage.destination_changed();
+        }
         self.selected_session_id = self
             .active_session_id()
             .filter(|session_id| {
@@ -859,6 +1030,9 @@ impl Desktop {
             })
             .map(str::to_owned);
         self.request_sessions(workspace_id);
+        if self.show_usage && self.online {
+            self.refresh_usage(cx);
+        }
         cx.notify();
     }
 
@@ -913,6 +1087,7 @@ impl Desktop {
 
     fn clear_saved_session_state(&mut self) {
         self.close_inspector();
+        self.usage.clear_for_store();
         self.pending = None;
         self.pending_child_start = None;
         self.pending_by_session.clear();
@@ -937,6 +1112,7 @@ impl Desktop {
         {
             return;
         }
+        self.leave_usage();
         if self.active_session_id() == Some(session_id.as_str()) {
             self.composer.read(cx).focus_handle(cx).focus(window, cx);
             return;
@@ -979,6 +1155,7 @@ impl Desktop {
         let Some(daemon) = self.daemon.clone() else {
             return;
         };
+        self.leave_usage();
         self.stash_session_state(cx);
         if let Some(stream) = self.stream.take() {
             stream.abort();
@@ -1052,6 +1229,10 @@ impl Desktop {
         self.event_generation = self.event_generation.wrapping_add(1);
         self.request_sessions(workspace_id);
         self.subscribe(self.event_generation);
+        self.request_active_changes(cx);
+        if self.show_usage {
+            self.refresh_usage(cx);
+        }
     }
 
     fn workspace_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1418,6 +1599,9 @@ impl Desktop {
                             self.request_sessions(workspace_id);
                         }
                         self.error = None;
+                        if self.show_usage {
+                            self.refresh_usage(cx);
+                        }
                     }
                     Ok(connection::ConnectionResult::Session(connected)) => {
                         let same_session = self.connection.as_ref().is_some_and(|previous| {
@@ -1436,15 +1620,18 @@ impl Desktop {
                             self.pending_child_start = None;
                             self.guidance.clear();
                         }
-                self.install_connected(connected, true, window, cx);
-            }
-            Err(error) => {
-                if let Some(session_id) = self.active_session_id().map(str::to_owned) {
-                    self.restore_session_state(&session_id, window, cx);
-                }
-                self.show_connection = true;
-                self.error = Some(error);
-            }
+                        self.install_connected(connected, true, window, cx);
+                    }
+                    Err(error) => {
+                        if let Some(session_id) = self.active_session_id().map(str::to_owned) {
+                            self.restore_session_state(&session_id, window, cx);
+                        }
+                        self.usage.invalidate_request();
+                        self.usage.error = Some(format!("Usage unavailable: {error}"));
+                        self.usage.retry_after = None;
+                        self.show_connection = true;
+                        self.error = Some(error);
+                    }
                 }
             }
             Update::Event {
@@ -1462,6 +1649,11 @@ impl Desktop {
             Update::Disconnected { generation, error } => {
                 if generation == self.event_generation {
                     self.close_inspector();
+                    self.usage.invalidate_request();
+                    self.usage.error = Some(
+                        "Connection lost. Reconnect to refresh the global Usage ledger.".to_owned(),
+                    );
+                    self.usage.retry_after = None;
                     self.online = false;
                     self.error = Some(error);
                 }
@@ -1698,6 +1890,47 @@ impl Desktop {
                 let current_session_id = self.changes_state.as_ref().map(changes_state_session_id);
                 if current_session_id == Some(session_id.as_str()) {
                     self.changes_state = Some(state);
+                }
+            }
+            Update::UsageLoaded {
+                request_id,
+                connection_generation,
+                destination_generation,
+                after,
+                result,
+            } => {
+                if request_id != self.usage.request_id
+                    || connection_generation != self.connection_generation
+                    || destination_generation != self.usage.destination_generation
+                {
+                    return;
+                }
+                self.usage.loading = false;
+                self.usage.loading_more = false;
+                match result {
+                    Ok(response) => {
+                        if after.is_some() {
+                            self.usage.entries.extend(response.entries);
+                        } else {
+                            self.usage.entries = response.entries;
+                        }
+                        self.usage.next_cursor = response.next_cursor;
+                        self.usage.has_loaded = true;
+                        self.usage.error = None;
+                        self.usage.retry_after = None;
+                        if after.is_none() {
+                            self.usage.expanded.retain(|entry_id| {
+                                self.usage
+                                    .entries
+                                    .iter()
+                                    .any(|entry| &entry.usage_observation_id == entry_id)
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        self.usage.error = Some(error);
+                        self.usage.retry_after = after;
+                    }
                 }
             }
         }
@@ -2360,6 +2593,444 @@ impl Desktop {
         panel.child(body)
     }
 
+    fn usage_entry(
+        &self,
+        entry: &UsageLedgerEntryResponse,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let observation_id = entry.usage_observation_id.clone();
+        let expanded = self.usage.expanded.contains(&observation_id);
+        let requested_model = entry.requested_model.clone();
+        let resolved_model = entry
+            .resolved_model
+            .clone()
+            .unwrap_or_else(|| "Not reported".to_owned());
+        let source = usage_source_label(entry.source);
+        let status = format!(
+            "Revision {} · {} · {}",
+            entry.revision,
+            usage_finality_label(entry.finality),
+            usage_completeness_label(entry.completeness),
+        );
+        let provider = format!(
+            "Provider account · {} · Source · {source}",
+            entry.provider_account_id
+        );
+        let toggle_label = if expanded {
+            "Hide details"
+        } else {
+            "Show details"
+        };
+        let accessibility_label = format!(
+            "Usage observation for requested model {}. Resolved model {}. {}. {}.",
+            requested_model, resolved_model, provider, status
+        );
+        let observation_id_for_click = observation_id.clone();
+        let mut quantities = div()
+            .id(SharedString::from(format!(
+                "usage-quantities-{observation_id}"
+            )))
+            .flex()
+            .flex_col()
+            .gap_1();
+        if entry.quantities.is_empty() {
+            quantities = quantities.child(
+                div()
+                    .text_xs()
+                    .text_color(theme::FAINT)
+                    .child("No quantities reported; missing dimensions remain unreported."),
+            );
+        } else {
+            for quantity in &entry.quantities {
+                quantities = quantities.child(
+                    div()
+                        .font_family(theme::MONO_FONT)
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(theme::TEXT_SOFT)
+                        .child(usage_quantity_label(quantity)),
+                );
+            }
+        }
+
+        let mut row = div()
+            .id(SharedString::from(format!("usage-entry-{observation_id}")))
+            .role(gpui::Role::ListItem)
+            .aria_label(accessibility_label)
+            .w_full()
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(theme::BORDER)
+            .child(
+                Button::new(SharedString::from(format!(
+                    "usage-entry-toggle-{observation_id}"
+                )))
+                .ghost()
+                .accessibility_label(toggle_label)
+                .w_full()
+                .h_auto()
+                .items_start()
+                .px_3()
+                .py_3()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_usage_entry(observation_id_for_click.clone(), cx);
+                }))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .text_sm()
+                                        .text_color(theme::TEXT)
+                                        .child(requested_model),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .text_xs()
+                                        .text_color(theme::MUTED)
+                                        .child(format!("Resolved model · {resolved_model}")),
+                                )
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .text_xs()
+                                        .text_color(theme::MUTED)
+                                        .child(provider),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_size(px(11.0))
+                                        .text_color(theme::TEXT_SOFT)
+                                        .child(status),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::ACCENT)
+                                        .child(toggle_label),
+                                ),
+                        ),
+                ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .pb_3()
+                    .child(
+                        div()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(10.0))
+                            .text_color(theme::FAINT)
+                            .child("QUANTITIES · PRESERVED AS REPORTED"),
+                    )
+                    .child(quantities)
+                    .child(div().text_xs().text_color(theme::MUTED).child(format!(
+                        "Observed at Unix ms {} · Accounting · {} · {}",
+                        entry.observed_at_unix_ms,
+                        usage_accounting_label(entry.accounting),
+                        if entry.is_terminal {
+                            "Terminal invocation"
+                        } else {
+                            "Invocation still open"
+                        }
+                    ))),
+            );
+
+        if expanded {
+            let mut details = div()
+                .id(SharedString::from(format!(
+                    "usage-details-{observation_id}"
+                )))
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .pb_3()
+                .pt_1()
+                .border_t_1()
+                .border_color(theme::BORDER)
+                .child(
+                    div()
+                        .font_family(theme::MONO_FONT)
+                        .text_size(px(10.0))
+                        .text_color(theme::FAINT)
+                        .child("IDENTIFIERS · DURABLE OWNERSHIP"),
+                )
+                .child(usage_detail(
+                    "Invocation",
+                    entry.model_invocation_id.clone(),
+                ))
+                .child(usage_detail(
+                    "Usage observation",
+                    entry.usage_observation_id.clone(),
+                ))
+                .child(usage_detail("Update", entry.update_id.clone()))
+                .child(usage_detail("Work", entry.work_id.clone()))
+                .child(usage_detail("Run", entry.run_id.clone()))
+                .child(usage_detail("Session", entry.session_id.clone()))
+                .child(usage_detail("Workspace", entry.workspace_id.clone()))
+                .child(usage_detail(
+                    "Supersedes",
+                    entry
+                        .supersedes_usage_observation_id
+                        .clone()
+                        .unwrap_or_else(|| "Not reported".to_owned()),
+                ))
+                .child(usage_detail(
+                    "Request",
+                    entry
+                        .request_id
+                        .clone()
+                        .unwrap_or_else(|| "Not reported".to_owned()),
+                ))
+                .child(usage_detail(
+                    "Service tier",
+                    entry
+                        .service_tier
+                        .clone()
+                        .unwrap_or_else(|| "Not reported".to_owned()),
+                ));
+            if let Some(resolved_model) = &entry.resolved_model {
+                details = details.child(usage_detail("Resolved model", resolved_model.clone()));
+            } else {
+                details = details.child(usage_detail("Resolved model", "Not reported".to_owned()));
+            }
+            row = row.child(details);
+        }
+        row
+    }
+
+    fn usage_screen(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let refresh_disabled =
+            !self.online || self.usage.loading || self.usage.loading_more || self.daemon.is_none();
+        let refresh_label = if self.usage.loading {
+            "Refreshing…"
+        } else if self.usage.loading_more {
+            "Loading…"
+        } else {
+            "Refresh"
+        };
+        let loaded_count = self.usage.entries.len();
+        let mut workbench = div()
+            .id("usage-workbench")
+            .w_full()
+            .max_w(px(1104.0))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .px_6()
+            .py_6()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xl().child("Usage"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme::MUTED)
+                                    .child("Global daemon ledger · latest revision per physical invocation"),
+                            ),
+                    )
+                    .child(
+                        Button::new("refresh-usage")
+                            .label(refresh_label)
+                            .small()
+                            .disabled(refresh_disabled)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_usage(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("usage-ledger-note")
+                    .role(gpui::Role::Status)
+                    .w_full()
+                    .text_xs()
+                    .text_color(theme::FAINT)
+                    .child("Entries are observations only. Quantities remain separate; this view does not calculate totals or valuation."),
+            );
+
+        if let Some(error) = self.usage.error.clone() {
+            let retry_label = if self.usage.retry_after.is_some() {
+                "Retry load more"
+            } else {
+                "Retry"
+            };
+            workbench = workbench.child(
+                div()
+                    .id("usage-error")
+                    .role(gpui::Role::Alert)
+                    .aria_label(error.clone())
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_3()
+                    .border_l_2()
+                    .border_color(theme::DANGER)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(theme::DANGER)
+                            .child(error),
+                    )
+                    .child(
+                        Button::new("retry-usage")
+                            .label(retry_label)
+                            .small()
+                            .disabled(!self.online || self.usage.loading || self.usage.loading_more)
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_usage(cx))),
+                    ),
+            );
+        }
+
+        if self.usage.loading && self.usage.entries.is_empty() {
+            workbench = workbench.child(
+                div()
+                    .id("usage-loading")
+                    .role(gpui::Role::Status)
+                    .w_full()
+                    .py_16()
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child("Loading global Usage ledger…"),
+            );
+        } else if self.usage.entries.is_empty() && self.usage.error.is_none() {
+            let message = if self.daemon.is_none() {
+                "Connect to a daemon to view the global Usage ledger."
+            } else if !self.online {
+                "Reconnect to view the global Usage ledger."
+            } else if self.usage.has_loaded {
+                "No usage observations are available in this daemon ledger."
+            } else {
+                "Open Usage to load the global daemon ledger."
+            };
+            workbench = workbench.child(
+                div()
+                    .id("usage-empty")
+                    .role(gpui::Role::Status)
+                    .w_full()
+                    .py_16()
+                    .text_center()
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child(message),
+            );
+        } else if !self.usage.entries.is_empty() {
+            let summary = if self.usage.loading {
+                format!("Refreshing · {loaded_count} loaded ledger entries")
+            } else if self.usage.loading_more {
+                format!("Loading next page · {loaded_count} loaded ledger entries")
+            } else {
+                format!("{loaded_count} loaded ledger entries · global daemon scope")
+            };
+            let mut rows = div()
+                .id("usage-ledger-rows")
+                .role(gpui::Role::List)
+                .w_full()
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(theme::BORDER);
+            for entry in &self.usage.entries {
+                rows = rows.child(self.usage_entry(entry, cx));
+            }
+            workbench = workbench
+                .child(
+                    div()
+                        .id("usage-summary")
+                        .role(gpui::Role::Status)
+                        .w_full()
+                        .text_xs()
+                        .text_color(theme::MUTED)
+                        .child(summary),
+                )
+                .child(rows);
+            if let Some(after) = self.usage.next_cursor.clone() {
+                let load_more_disabled = !self.online
+                    || self.usage.loading
+                    || self.usage.loading_more
+                    || self.usage.error.is_some();
+                workbench = workbench.child(
+                    div()
+                        .id("usage-load-more-row")
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .pt_2()
+                        .child(
+                            Button::new("load-more-usage")
+                                .label(if self.usage.loading_more {
+                                    "Loading next page…"
+                                } else {
+                                    "Load more"
+                                })
+                                .small()
+                                .disabled(load_more_disabled)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.usage.next_cursor.as_deref() == Some(after.as_str()) {
+                                        this.load_more_usage(cx);
+                                    }
+                                })),
+                        ),
+                );
+            }
+        }
+
+        div()
+            .id("usage-screen")
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .justify_center()
+            .bg(theme::BG)
+            .child(workbench)
+    }
+
     fn connection_form(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -2537,6 +3208,11 @@ impl Render for Desktop {
                     ),
             );
         }
+        let heading = if self.show_usage {
+            "Usage".to_owned()
+        } else {
+            title
+        };
         let mut content = div()
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && !this.show_connection {
@@ -2548,6 +3224,9 @@ impl Render for Desktop {
                     } else if !session_query.is_empty() {
                         this.session_query
                             .update(cx, |input, cx| input.set_value("", window, cx));
+                    } else if this.show_usage {
+                        this.leave_usage();
+                        this.composer.read(cx).focus_handle(cx).focus(window, cx);
                     } else if this.artifact_preview.is_some() || this.changes_state.is_some() {
                         this.close_inspector();
                         this.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -2577,14 +3256,31 @@ impl Render for Desktop {
                     .py_3()
                     .border_b_1()
                     .border_color(theme::BORDER)
-                    .child(div().text_sm().child(title))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().child(heading))
+                            .when(self.show_usage, |view| {
+                                view.child(
+                                    div()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_size(px(10.0))
+                                        .text_color(theme::FAINT)
+                                        .child("global"),
+                                )
+                            }),
+                    )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_3()
-                            .when_some(self.conversation.root_state(), |view, state| {
-                                view.child(RunStatus::new(state))
+                            .when(!self.show_usage, |view| {
+                                view.when_some(self.conversation.root_state(), |view, state| {
+                                    view.child(RunStatus::new(state))
+                                })
                             })
                             .child(
                                 Button::new("toggle-browser")
@@ -2600,6 +3296,19 @@ impl Render for Desktop {
                                     })),
                             )
                             .child(
+                                Button::new("toggle-usage")
+                                    .label(if self.show_usage {
+                                        "Close Usage"
+                                    } else {
+                                        "Usage"
+                                    })
+                                    .selected(self.show_usage)
+                                    .disabled(self.daemon.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_usage(cx);
+                                    })),
+                            )
+                            .child(
                                 Button::new("toggle-runs")
                                     .label(if self.show_runs {
                                         "Close Runs".to_owned()
@@ -2607,7 +3316,8 @@ impl Render for Desktop {
                                         format!("Runs · {}", self.conversation.runs.len())
                                     })
                                     .disabled(
-                                        self.connection.is_none()
+                                        self.show_usage
+                                            || self.connection.is_none()
                                             || self.switching_session.is_some(),
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2623,7 +3333,8 @@ impl Render for Desktop {
                                         "Changes".to_owned()
                                     })
                                     .disabled(
-                                        self.connection.is_none()
+                                        self.show_usage
+                                            || self.connection.is_none()
                                             || !self.online
                                             || self.switching_session.is_some(),
                                     )
@@ -2636,6 +3347,9 @@ impl Render for Desktop {
                                     .label("Connection")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.show_connection = !this.show_connection;
+                                        if this.show_connection {
+                                            this.leave_usage();
+                                        }
                                         cx.notify();
                                     })),
                             ),
@@ -2690,6 +3404,8 @@ impl Render for Desktop {
                     .justify_center()
                     .child(self.connection_form(cx)),
             );
+        } else if self.show_usage {
+            content = content.child(self.usage_screen(cx));
         } else {
             content = content.child(
                 div()
@@ -2793,6 +3509,79 @@ impl Render for Desktop {
         } else {
             content
         }
+    }
+}
+
+fn usage_detail(
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .w(px(112.0))
+                .flex_none()
+                .text_xs()
+                .text_color(theme::MUTED)
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .font_family(theme::MONO_FONT)
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(theme::TEXT_SOFT)
+                .child(value.into()),
+        )
+}
+
+fn usage_quantity_label(quantity: &kiln_protocol::UsageQuantityResponse) -> String {
+    let relation = match quantity.relation {
+        UsageQuantityRelation::Additive => "additive".to_owned(),
+        UsageQuantityRelation::Informational => "informational".to_owned(),
+        UsageQuantityRelation::Subset => quantity.subset_of.as_deref().map_or_else(
+            || "subset · parent not reported".to_owned(),
+            |parent| format!("subset of {parent}"),
+        ),
+    };
+    format!(
+        "{} · {} {} · {relation}",
+        quantity.dimension, quantity.amount, quantity.unit
+    )
+}
+
+fn usage_accounting_label(accounting: UsageAccounting) -> &'static str {
+    match accounting {
+        UsageAccounting::Delta => "delta",
+        UsageAccounting::Cumulative => "cumulative",
+    }
+}
+
+fn usage_finality_label(finality: UsageFinality) -> &'static str {
+    match finality {
+        UsageFinality::Partial => "partial",
+        UsageFinality::Final => "final",
+        UsageFinality::Correction => "correction",
+    }
+}
+
+fn usage_completeness_label(completeness: UsageCompleteness) -> &'static str {
+    match completeness {
+        UsageCompleteness::Complete => "complete",
+        UsageCompleteness::Partial => "partial completeness",
+        UsageCompleteness::Unknown => "unknown completeness",
+    }
+}
+
+fn usage_source_label(source: UsageSource) -> &'static str {
+    match source {
+        UsageSource::NativeProvider => "native provider",
     }
 }
 

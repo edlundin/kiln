@@ -118,16 +118,6 @@
       "path": "/v1/sessions/{session_id}/events"
     },
     {
-      "method": "GET",
-      "operation": "list_session_changes",
-      "path": "/v1/sessions/{session_id}/changes"
-    },
-    {
-      "method": "GET",
-      "operation": "list_usage",
-      "path": "/v1/usage"
-    },
-    {
       "method": "POST",
       "operation": "create_task",
       "path": "/v1/sessions/{session_id}/tasks"
@@ -196,9 +186,19 @@
       "method": "GET",
       "operation": "get_artifact",
       "path": "/v1/artifacts/{content_hash}"
+    },
+    {
+      "method": "GET",
+      "operation": "list_session_changes",
+      "path": "/v1/sessions/{session_id}/changes"
+    },
+    {
+      "method": "GET",
+      "operation": "list_usage",
+      "path": "/v1/usage"
     }
   ],
-  "protocol_version": "0.20.0",
+  "protocol_version": "0.21.0",
   "websocket": [
     {
       "method": "GET",

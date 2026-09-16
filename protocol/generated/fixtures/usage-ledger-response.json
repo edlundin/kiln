@@ -23,7 +23,7 @@
       "quantities": [
         {
           "dimension": "tokens.input",
-          "unit": "tokens",
+          "unit": "token",
           "amount": 0,
           "relation": "additive",
           "subset_of": null

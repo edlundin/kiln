@@ -1,6 +1,6 @@
 # Kiln protocol reference
 
-Protocol version: `0.20.0`.
+Protocol version: `0.21.0`.
 
 All loopback HTTP requests require the persistent local credential as `Authorization: Bearer <token>`. The server also validates the exact bound `Host` and, when present, the loopback `Origin`.
 
@@ -36,6 +36,6 @@ SIGINT and SIGTERM start graceful shutdown. Kiln rejects later mutating commands
 
 `GET /v1/sessions/{session_id}/events?after=0` returns that Session's committed Events after the opaque decimal cursor. Event IDs are stable identities. The daemon-wide cursor orders committed audit records; it is not required to be numerically contiguous. The response current cursor and Event rows come from one storage snapshot.
 
-The client connects to `GET /v1/events?version=0.20.0&capability=kiln.events.websocket&after={cursor}` and offers `kiln.events.websocket` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `kiln.events.websocket`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.
+The client connects to `GET /v1/events?version=0.21.0&capability=kiln.events.websocket&after={cursor}` and offers `kiln.events.websocket` plus `kiln.auth.<token>` as WebSocket subprotocols. The server echoes only `kiln.events.websocket`. With `after`, the server acknowledges and replays the exact durable global suffix through one snapshot boundary, then queries durable events after each wake-up. Without `after`, the server preserves live-only delivery from the connection snapshot.
 
 HTTP errors use the protocol-owned `ProblemDetails` shape. Clients make decisions from the stable `code` field. `catalogue.json` lists the error codes implemented by this release.

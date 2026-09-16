@@ -1,6 +1,6 @@
 {
-  "min_version": "0.20.0",
-  "max_version": "0.20.0",
+  "min_version": "0.21.0",
+  "max_version": "0.21.0",
   "client": {
     "name": "fixture-client",
     "build": "fixture"

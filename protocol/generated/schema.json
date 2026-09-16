@@ -7895,7 +7895,7 @@
       "type": "object"
     }
   },
-  "$id": "https://kiln.dev/protocol/0.20.0/schema.json",
+  "$id": "https://kiln.dev/protocol/0.21.0/schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Kiln daemon protocol",
   "type": "object"

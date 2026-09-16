@@ -208,6 +208,9 @@ the operation does not claim worktree isolation.
 Reactions require the selected child's original root to accept input. The
 current executor is not yet a persistent interactive supervisor.
 
-The desktop does not yet provide the secondary Run graph or the global Usage
-ledger. The Run drawer supervises the current root's descendants. EDL-249 is
+The desktop provides a global Usage ledger for the daemon's latest validated
+usage revisions. The ledger uses cursors for pagination, keeps quantities separate,
+and exposes observation metadata without calculating totals or valuation.
+The desktop does not yet provide the secondary Run graph. The Run drawer
+supervises the current root's descendants. EDL-249 is
 complete; remaining work is tracked by the current Linear progression.

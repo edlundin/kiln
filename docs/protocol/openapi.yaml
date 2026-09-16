@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Kiln daemon protocol
-  version: 0.20.0
+  version: 0.21.0
   description: Kiln loopback protocol contract.
 security:
   - bearerAuth: []

@@ -11,7 +11,8 @@ use gpui_component::{
 };
 use kiln_protocol::{
     ApprovalDecision, ApprovalDecisionRequest, ApprovalState, ArtifactResponse,
-    MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest, SessionChangesResponse,
+    MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest, SessionChangeDiffContent,
+    SessionChangeDiffResponse, SessionChangeDiffUnavailableReason, SessionChangesResponse,
     SessionEventResponse, SessionResponse, StartChildRunRequest, UsageAccounting,
     UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
     UsageQuantityRelation, UsageSource, WebSocketFrame, WorkspaceResponse,
@@ -86,6 +87,12 @@ enum Update {
         session_id: String,
         result: Result<SessionChangesResponse, String>,
     },
+    ChangeDiffLoaded {
+        request_id: u64,
+        session_id: String,
+        path: String,
+        result: Result<SessionChangeDiffResponse, String>,
+    },
     UsageLoaded {
         request_id: u64,
         connection_generation: u64,
@@ -153,6 +160,23 @@ enum ChangesState {
     },
     Failed {
         session_id: String,
+        error: String,
+    },
+}
+
+enum ChangeDiffState {
+    Loading {
+        session_id: String,
+        path: String,
+    },
+    Ready {
+        session_id: String,
+        path: String,
+        diff: SessionChangeDiffResponse,
+    },
+    Failed {
+        session_id: String,
+        path: String,
         error: String,
     },
 }
@@ -263,6 +287,8 @@ pub struct Desktop {
     artifact_preview: Option<ArtifactPreview>,
     changes_request_id: u64,
     changes_state: Option<ChangesState>,
+    change_diff_request_id: u64,
+    change_diff_state: Option<ChangeDiffState>,
     inspector_tab: InspectorTab,
     show_usage: bool,
     usage: UsageState,
@@ -377,6 +403,8 @@ impl Desktop {
             artifact_preview: None,
             changes_request_id: 0,
             changes_state: None,
+            change_diff_request_id: 0,
+            change_diff_state: None,
             inspector_tab: InspectorTab::Changes,
             show_usage: false,
             usage: UsageState::default(),
@@ -573,6 +601,11 @@ impl Desktop {
         cx.notify();
     }
 
+    fn invalidate_change_diff(&mut self) {
+        self.change_diff_request_id = self.change_diff_request_id.wrapping_add(1);
+        self.change_diff_state = None;
+    }
+
     fn open_artifact(&mut self, content_hash: String, cx: &mut Context<Self>) {
         if !self.online || self.switching_session.is_some() {
             return;
@@ -624,6 +657,7 @@ impl Desktop {
     fn close_inspector(&mut self) {
         self.artifact_request_id = self.artifact_request_id.wrapping_add(1);
         self.changes_request_id = self.changes_request_id.wrapping_add(1);
+        self.invalidate_change_diff();
         self.artifact_preview = None;
         self.changes_state = None;
         self.inspector_tab = InspectorTab::Changes;
@@ -633,13 +667,17 @@ impl Desktop {
         if !self.online || self.switching_session.is_some() {
             return;
         }
-        let Some(connected) = &self.connection else {
+        let Some(client) = self
+            .connection
+            .as_ref()
+            .map(|connected| connected.client.clone())
+        else {
             return;
         };
 
+        self.invalidate_change_diff();
         self.changes_request_id = self.changes_request_id.wrapping_add(1);
         let request_id = self.changes_request_id;
-        let client = connected.client.clone();
         self.inspector_tab = InspectorTab::Changes;
         self.changes_state = Some(ChangesState::Loading {
             session_id: session_id.clone(),
@@ -656,6 +694,69 @@ impl Desktop {
                 result,
             });
         });
+        cx.notify();
+    }
+
+    fn request_change_diff(&mut self, session_id: String, path: String, cx: &mut Context<Self>) {
+        if !self.online
+            || self.switching_session.is_some()
+            || self.active_session_id() != Some(session_id.as_str())
+        {
+            return;
+        }
+        let Some(client) = self
+            .connection
+            .as_ref()
+            .map(|connected| connected.client.clone())
+        else {
+            return;
+        };
+
+        self.change_diff_request_id = self.change_diff_request_id.wrapping_add(1);
+        let request_id = self.change_diff_request_id;
+        self.inspector_tab = InspectorTab::Changes;
+        self.change_diff_state = Some(ChangeDiffState::Loading {
+            session_id: session_id.clone(),
+            path: path.clone(),
+        });
+        let updates = self.updates.clone();
+        self.runtime.spawn(async move {
+            let result = client
+                .get_session_change_diff(&session_id, &path)
+                .await
+                .map_err(|error| connection::error_message("Load change diff", &error));
+            let _ = updates.send(Update::ChangeDiffLoaded {
+                request_id,
+                session_id,
+                path,
+                result,
+            });
+        });
+        cx.notify();
+    }
+
+    fn retry_change_diff(&mut self, cx: &mut Context<Self>) {
+        let Some((session_id, path)) =
+            self.change_diff_state
+                .as_ref()
+                .and_then(|state| match state {
+                    ChangeDiffState::Loading { .. } => None,
+                    ChangeDiffState::Ready {
+                        session_id, path, ..
+                    }
+                    | ChangeDiffState::Failed {
+                        session_id, path, ..
+                    } => Some((session_id.clone(), path.clone())),
+                })
+        else {
+            return;
+        };
+        self.request_change_diff(session_id, path, cx);
+    }
+
+    fn back_from_change_diff(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_change_diff();
+        self.inspector_tab = InspectorTab::Changes;
         cx.notify();
     }
 
@@ -1892,6 +1993,41 @@ impl Desktop {
                     self.changes_state = Some(state);
                 }
             }
+            Update::ChangeDiffLoaded {
+                request_id,
+                session_id,
+                path,
+                result,
+            } => {
+                if request_id != self.change_diff_request_id
+                    || self.active_session_id() != Some(session_id.as_str())
+                {
+                    return;
+                }
+                let state = match result {
+                    Ok(diff) if diff.path == path => ChangeDiffState::Ready {
+                        session_id: session_id.clone(),
+                        path: path.clone(),
+                        diff,
+                    },
+                    Ok(_) => return,
+                    Err(error) => ChangeDiffState::Failed {
+                        session_id: session_id.clone(),
+                        path: path.clone(),
+                        error,
+                    },
+                };
+                let current = self.change_diff_state.as_ref().and_then(|state| {
+                    Some(match state {
+                        ChangeDiffState::Loading { path, .. }
+                        | ChangeDiffState::Ready { path, .. }
+                        | ChangeDiffState::Failed { path, .. } => path.as_str(),
+                    })
+                });
+                if current == Some(path.as_str()) {
+                    self.change_diff_state = Some(state);
+                }
+            }
             Update::UsageLoaded {
                 request_id,
                 connection_generation,
@@ -2357,6 +2493,56 @@ impl Desktop {
             return div().id("changes-inspector");
         };
         let session_id = changes_state_session_id(state).to_owned();
+        let diff_open = self.change_diff_state.is_some();
+        let heading = if diff_open { "CHANGE DIFF" } else { "CHANGES" };
+
+        let mut tabs = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(theme::BORDER);
+        if diff_open {
+            tabs = tabs.child(
+                Button::new("back-change-diff")
+                    .label("Back")
+                    .small()
+                    .ghost()
+                    .accessibility_label("Back to changed files")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.back_from_change_diff(cx);
+                    })),
+            );
+        } else {
+            tabs = tabs.child(
+                Button::new("changes-tab")
+                    .label("Changes")
+                    .small()
+                    .ghost()
+                    .selected(self.inspector_tab == InspectorTab::Changes)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.inspector_tab = InspectorTab::Changes;
+                        cx.notify();
+                    })),
+            );
+        }
+        if self.artifact_preview.is_some() {
+            tabs = tabs.child(
+                Button::new("artifact-tab")
+                    .label("Artifact")
+                    .small()
+                    .ghost()
+                    .selected(self.inspector_tab == InspectorTab::Artifact)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.inspector_tab = InspectorTab::Artifact;
+                        cx.notify();
+                    })),
+            );
+        }
+
         let panel = div()
             .id("changes-inspector")
             .w(px(340.0))
@@ -2387,7 +2573,7 @@ impl Desktop {
                                     .font_family(theme::MONO_FONT)
                                     .text_size(px(12.0))
                                     .text_color(theme::TEXT)
-                                    .child("CHANGES"),
+                                    .child(heading),
                             )
                             .child(
                                 div()
@@ -2408,186 +2594,319 @@ impl Desktop {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(theme::BORDER)
-                    .child(
-                        Button::new("changes-tab")
-                            .label("Changes")
-                            .small()
-                            .ghost()
-                            .selected(self.inspector_tab == InspectorTab::Changes)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.inspector_tab = InspectorTab::Changes;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.artifact_preview.is_some(), |tabs| {
-                        tabs.child(
-                            Button::new("artifact-tab")
-                                .label("Artifact")
-                                .small()
-                                .ghost()
-                                .selected(self.inspector_tab == InspectorTab::Artifact)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.inspector_tab = InspectorTab::Artifact;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
-            );
+            .child(tabs);
 
-        let body = match state {
-            ChangesState::Loading { .. } => div()
-                .id("changes-loading")
-                .role(gpui::Role::Status)
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(theme::MUTED)
-                .child("Loading changes…"),
-            ChangesState::Failed { error, .. } => {
-                let retry_session_id = session_id.clone();
-                div()
-                    .id("changes-error")
-                    .role(gpui::Role::Alert)
+        let body = if let Some(diff_state) = self.change_diff_state.as_ref() {
+            match diff_state {
+                ChangeDiffState::Loading { path, session_id } => div()
+                    .id("change-diff-loading")
+                    .role(gpui::Role::Status)
                     .flex_1()
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_3()
-                    .p_3()
-                    .text_sm()
-                    .text_color(theme::DANGER)
-                    .child(error.clone())
-                    .child(
-                        Button::new("retry-changes")
-                            .label("Retry")
-                            .small()
-                            .disabled(!self.online || self.switching_session.is_some())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.request_changes(retry_session_id.clone(), cx);
-                            })),
-                    )
-            }
-            ChangesState::Ready { summary, .. } => {
-                let (additions, deletions, binary, untracked) = change_summary_counts(summary);
-                let mut body = div()
-                    .id("changes-content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
                     .gap_2()
                     .p_3()
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child(format!(
+                        "Loading diff for Session {}…",
+                        compact_session_id(session_id)
+                    ))
                     .child(
                         div()
-                            .id("changes-summary")
-                            .role(gpui::Role::Status)
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .pb_2()
-                            .border_b_1()
-                            .border_color(theme::BORDER)
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme::TEXT)
-                                    .child(format!(
-                                        "{} changed file{}",
-                                        summary.files.len(),
-                                        if summary.files.len() == 1 { "" } else { "s" }
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme::MUTED)
-                                    .child(format!(
-                                        "Added {additions} · Deleted {deletions} · Binary {binary} · Untracked {untracked}"
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .font_family(theme::MONO_FONT)
-                                    .text_size(px(11.0))
-                                    .line_height(px(16.0))
-                                    .text_color(theme::FAINT)
-                                    .child(format!(
-                                        "Checkout · {} · root {}",
-                                        summary.relative_directory,
-                                        compact_session_id(&summary.workspace_root_id)
-                                    )),
-                            ),
-                    );
-
-                if summary.files.is_empty() {
-                    body = body.child(
-                        div()
-                            .id("changes-empty")
-                            .role(gpui::Role::Status)
-                            .py_8()
-                            .text_center()
-                            .text_sm()
-                            .text_color(theme::MUTED)
-                            .child("No changes in this checkout."),
-                    );
-                } else {
-                    let mut files = div().id("changes-file-list").flex().flex_col().gap_1();
-                    for (index, file) in summary.files.iter().enumerate() {
-                        let status = change_kind_label(&file.kind);
-                        let file_counts = change_file_counts(file);
-                        files = files.child(
+                            .font_family(theme::MONO_FONT)
+                            .text_xs()
+                            .text_color(theme::FAINT)
+                            .child(path.clone()),
+                    ),
+                ChangeDiffState::Failed { path, error, .. } => {
+                    let retry_error = error.clone();
+                    div()
+                        .id("change-diff-error")
+                        .role(gpui::Role::Alert)
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .p_3()
+                        .text_sm()
+                        .text_color(theme::DANGER)
+                        .child(format!("Could not load diff for {path}."))
+                        .child(retry_error)
+                        .child(
+                            Button::new("retry-change-diff")
+                                .label("Retry")
+                                .small()
+                                .disabled(!self.online || self.switching_session.is_some())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.retry_change_diff(cx);
+                                })),
+                        )
+                }
+                ChangeDiffState::Ready { diff, .. } => {
+                    let mut body = div()
+                        .id("change-diff-content")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .child(
                             div()
-                                .id(SharedString::from(format!("change-file-{index}")))
-                                .w_full()
+                                .id("change-diff-summary")
+                                .role(gpui::Role::Status)
                                 .flex()
-                                .items_start()
-                                .justify_between()
-                                .gap_2()
-                                .px_2()
-                                .py_2()
+                                .flex_col()
+                                .gap_1()
+                                .pb_2()
                                 .border_b_1()
                                 .border_color(theme::BORDER)
                                 .child(
                                     div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .font_family(theme::MONO_FONT)
-                                                .text_size(px(12.0))
-                                                .line_height(px(17.0))
-                                                .text_color(theme::TEXT)
-                                                .child(file.path.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(theme::MUTED)
-                                                .child(format!("{status} · {file_counts}")),
-                                        ),
+                                        .font_family(theme::MONO_FONT)
+                                        .text_size(px(12.0))
+                                        .line_height(px(17.0))
+                                        .text_color(theme::TEXT)
+                                        .child(diff.path.clone()),
+                                )
+                                .child(div().text_xs().text_color(theme::MUTED).child(format!(
+                                    "{} · {}",
+                                    change_kind_label(&diff.kind),
+                                    diff.relative_directory
+                                ))),
+                        );
+                    match &diff.content {
+                        SessionChangeDiffContent::Ready { patch, truncated } => {
+                            if patch.is_empty() {
+                                body = body.child(
+                                    div()
+                                        .id("change-diff-empty")
+                                        .role(gpui::Role::Status)
+                                        .py_8()
+                                        .text_center()
+                                        .text_sm()
+                                        .text_color(theme::MUTED)
+                                        .child("No textual changes to display."),
+                                );
+                            } else {
+                                body = body.child(
+                                    div()
+                                        .id("change-diff-patch")
+                                        .w_full()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.0))
+                                        .text_color(theme::TEXT_SOFT)
+                                        .child(patch.clone()),
+                                );
+                            }
+                            if *truncated {
+                                body = body.child(
+                                    div()
+                                        .id("change-diff-truncation")
+                                        .role(gpui::Role::Status)
+                                        .text_xs()
+                                        .text_color(theme::ATTENTION)
+                                        .child("Diff preview truncated at 256 KiB."),
+                                );
+                            }
+                        }
+                        SessionChangeDiffContent::Unavailable { reason } => {
+                            body = body.child(
+                                div()
+                                    .id("change-diff-unsupported")
+                                    .role(gpui::Role::Status)
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_3()
+                                    .text_sm()
+                                    .text_color(theme::MUTED)
+                                    .child("Diff unavailable")
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::FAINT)
+                                            .child(change_diff_unavailable_reason_label(*reason)),
+                                    ),
+                            );
+                        }
+                    }
+                    body
+                }
+            }
+        } else {
+            match state {
+                ChangesState::Loading { .. } => div()
+                    .id("changes-loading")
+                    .role(gpui::Role::Status)
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(theme::MUTED)
+                    .child("Loading changes…"),
+                ChangesState::Failed { error, .. } => {
+                    let retry_session_id = session_id.clone();
+                    div()
+                        .id("changes-error")
+                        .role(gpui::Role::Alert)
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .p_3()
+                        .text_sm()
+                        .text_color(theme::DANGER)
+                        .child(error.clone())
+                        .child(
+                            Button::new("retry-changes")
+                                .label("Retry")
+                                .small()
+                                .disabled(!self.online || self.switching_session.is_some())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.request_changes(retry_session_id.clone(), cx);
+                                })),
+                        )
+                }
+                ChangesState::Ready { summary, .. } => {
+                    let (additions, deletions, binary, untracked) = change_summary_counts(summary);
+                    let mut body = div()
+                        .id("changes-content")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_3()
+                        .child(
+                            div()
+                                .id("changes-summary")
+                                .role(gpui::Role::Status)
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .pb_2()
+                                .border_b_1()
+                                .border_color(theme::BORDER)
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme::TEXT)
+                                        .child(format!(
+                                            "{} changed file{}",
+                                            summary.files.len(),
+                                            if summary.files.len() == 1 { "" } else { "s" }
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme::MUTED)
+                                        .child(format!(
+                                            "Added {additions} · Deleted {deletions} · Binary {binary} · Untracked {untracked}"
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_size(px(11.0))
+                                        .line_height(px(16.0))
+                                        .text_color(theme::FAINT)
+                                        .child(format!(
+                                            "Checkout · {} · root {}",
+                                            summary.relative_directory,
+                                            compact_session_id(&summary.workspace_root_id)
+                                        )),
                                 ),
                         );
+
+                    if summary.files.is_empty() {
+                        body = body.child(
+                            div()
+                                .id("changes-empty")
+                                .role(gpui::Role::Status)
+                                .py_8()
+                                .text_center()
+                                .text_sm()
+                                .text_color(theme::MUTED)
+                                .child("No changes in this checkout."),
+                        );
+                    } else {
+                        let mut files = div().id("changes-file-list").flex().flex_col().gap_1();
+                        let selected_path =
+                            self.change_diff_state.as_ref().map(change_diff_state_path);
+                        for (index, file) in summary.files.iter().enumerate() {
+                            let status = change_kind_label(&file.kind);
+                            let file_counts = change_file_counts(file);
+                            let path = file.path.clone();
+                            let selected = selected_path == Some(file.path.as_str());
+                            let path_for_click = path.clone();
+                            let session_id_for_click = session_id.clone();
+                            files = files.child(
+                                Button::new(SharedString::from(format!("change-file-{index}")))
+                                    .ghost()
+                                    .selected(selected)
+                                    .disabled(!self.online || self.switching_session.is_some())
+                                    .accessibility_label(format!(
+                                        "Open diff for {}. Status: {}. {}.",
+                                        path, status, file_counts
+                                    ))
+                                    .w_full()
+                                    .h_auto()
+                                    .flex()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap_2()
+                                    .px_2()
+                                    .py_2()
+                                    .border_b_1()
+                                    .border_color(theme::BORDER)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .font_family(theme::MONO_FONT)
+                                                    .text_size(px(12.0))
+                                                    .line_height(px(17.0))
+                                                    .text_color(theme::TEXT)
+                                                    .child(file.path.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme::MUTED)
+                                                    .child(format!("{status} · {file_counts}")),
+                                            ),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request_change_diff(
+                                            session_id_for_click.clone(),
+                                            path_for_click.clone(),
+                                            cx,
+                                        );
+                                    })),
+                            );
+                        }
+                        body = body.child(files);
                     }
-                    body = body.child(files);
+                    body
                 }
-                body
             }
         };
         panel.child(body)
@@ -3615,6 +3934,39 @@ fn changes_state_session_id(state: &ChangesState) -> &str {
         ChangesState::Loading { session_id }
         | ChangesState::Ready { session_id, .. }
         | ChangesState::Failed { session_id, .. } => session_id,
+    }
+}
+
+fn change_diff_state_path(state: &ChangeDiffState) -> &str {
+    match state {
+        ChangeDiffState::Loading { path, .. }
+        | ChangeDiffState::Ready { path, .. }
+        | ChangeDiffState::Failed { path, .. } => path,
+    }
+}
+
+fn change_diff_unavailable_reason_label(
+    reason: SessionChangeDiffUnavailableReason,
+) -> &'static str {
+    match reason {
+        SessionChangeDiffUnavailableReason::Untracked => {
+            "This file is untracked, so there is no committed baseline diff."
+        }
+        SessionChangeDiffUnavailableReason::Binary => {
+            "Binary files are listed in the summary but are not rendered as text."
+        }
+        SessionChangeDiffUnavailableReason::Conflicted => {
+            "Conflicted files are not rendered until the conflict is resolved."
+        }
+        SessionChangeDiffUnavailableReason::Renamed => {
+            "Renamed files do not have a single text diff in this view."
+        }
+        SessionChangeDiffUnavailableReason::UnsupportedFileType => {
+            "This file type is not supported for a safe text preview."
+        }
+        SessionChangeDiffUnavailableReason::UnsupportedEncoding => {
+            "This file is not encoded as supported UTF-8 text."
+        }
     }
 }
 

@@ -28,7 +28,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.20.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.22.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.
@@ -204,7 +204,13 @@ checkout persistence may remain readable while its change summary reports an
 unavailable checkout. The daemon revalidates the captured root, filesystem
 identity, and Git common directory before reading status; Git output is capped
 at 4 MiB per Git invocation and each Git invocation is capped at 30 seconds;
-the operation does not claim worktree isolation.
+the operation does not claim worktree isolation. Select a changed file to load
+its authenticated read-only diff. Text previews are capped at 4 MiB per input
+file and 256 KiB of rendered patch, with an explicit truncation notice. Added,
+deleted, and modified text files show the patch; untracked, binary, conflicted,
+renamed, unsupported file types, and unsupported encodings show an explicit
+unavailable state. Refreshing the summary or changing Session invalidates an
+open diff.
 Reactions require the selected child's original root to accept input. The
 current executor is not yet a persistent interactive supervisor.
 

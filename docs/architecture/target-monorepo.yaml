@@ -151,7 +151,7 @@ source_of_truth:
   user_interface: docs/ui/README.md
 
 planned_contract_locations:
-  http: protocol/openapi.yaml
+  http: docs/protocol/openapi.yaml
   persisted_data: schemas/data-model.schema.json
   plugin_installation: schemas/plugin-manifest.schema.json
 

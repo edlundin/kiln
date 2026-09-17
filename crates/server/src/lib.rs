@@ -31,7 +31,8 @@ use kiln_core::{
     SessionEventPayload, SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task,
     TaskError, TaskId, TaskOperations, TaskState as CoreTaskState, ToolCall,
     ToolCallState as CoreToolCallState, ToolOutputStream as CoreToolOutputStream, TransitionTask,
-    UpdateTask, UsageLedgerPage, UsageQueryError, WorkspaceError, WorkspaceId, WorkspaceOperations,
+    UpdateTask, UsageLedgerPage, UsageQueryError, WorkspaceChangePath, WorkspaceError, WorkspaceId,
+    WorkspaceOperations,
 };
 use kiln_protocol::{
     ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
@@ -43,10 +44,11 @@ use kiln_protocol::{
     MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
     ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
     RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
-    SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest, SessionChangesResponse,
-    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
+    SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest,
+    SessionChangeDiffContent, SessionChangeDiffResponse, SessionChangeDiffUnavailableReason,
+    SessionChangesResponse, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
+    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
     TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
     TaskState, ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
     USAGE_PATH, UpdateTaskRequest, UsageAccounting, UsageCompleteness, UsageFinality,
@@ -467,6 +469,7 @@ where
         .route(TASK_TRANSITION_PATH, post(transition_task))
         .route(SESSION_EVENTS_PATH, get(list_session_events))
         .route(SESSION_CHANGES_PATH, get(list_session_changes))
+        .route(SESSION_CHANGE_DIFF_PATH, get(get_session_change_diff))
         .route(USAGE_PATH, get(list_usage_ledger))
         .route(SESSION_RUNS_PATH, post(start_run).get(list_session_runs))
         .route(RUN_CHILDREN_PATH, post(start_child_run))
@@ -1257,6 +1260,43 @@ where
     Ok(Json(session_changes_response(&summary)))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionChangeDiffQuery {
+    path: String,
+}
+
+async fn get_session_change_diff<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(session_id): Path<String>,
+    query: Result<Query<SessionChangeDiffQuery>, QueryRejection>,
+) -> Result<Json<SessionChangeDiffResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let session_id = SessionId::parse(session_id).map_err(|_| PublicError::InvalidRequest)?;
+    let Query(query) = query.map_err(|_| PublicError::InvalidRequest)?;
+    let path = WorkspaceChangePath::parse(query.path)
+        .map_err(|_| PublicError::Workspace(WorkspaceError::PathOutsideWorkspaceRoot))?;
+    let session = state
+        .session_operations
+        .get_session(session_id)
+        .await
+        .map_err(PublicError::from)?;
+    let checkout = session
+        .checkout()
+        .cloned()
+        .ok_or(PublicError::Session(SessionError::WorkspaceRootNotFound))?;
+    let diff = state
+        .workspace_operations
+        .diff_change(checkout, path)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(session_change_diff_response(&diff)))
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UsageLedgerQuery {
@@ -1450,6 +1490,50 @@ fn session_changes_response(summary: &kiln_core::WorkspaceChangeSummary) -> Sess
                 deletions: file.deletions(),
             })
             .collect(),
+    }
+}
+
+fn session_change_diff_response(
+    diff: &kiln_core::WorkspaceChangeDiff,
+) -> SessionChangeDiffResponse {
+    let content = match diff.content() {
+        kiln_core::WorkspaceChangeDiffContent::Text { patch, truncated } => {
+            SessionChangeDiffContent::Ready {
+                patch: patch.clone(),
+                truncated: *truncated,
+            }
+        }
+        kiln_core::WorkspaceChangeDiffContent::Unavailable(reason) => {
+            SessionChangeDiffContent::Unavailable {
+                reason: match reason {
+                    kiln_core::WorkspaceChangeDiffUnavailableReason::Untracked => {
+                        SessionChangeDiffUnavailableReason::Untracked
+                    }
+                    kiln_core::WorkspaceChangeDiffUnavailableReason::Binary => {
+                        SessionChangeDiffUnavailableReason::Binary
+                    }
+                    kiln_core::WorkspaceChangeDiffUnavailableReason::Conflicted => {
+                        SessionChangeDiffUnavailableReason::Conflicted
+                    }
+                    kiln_core::WorkspaceChangeDiffUnavailableReason::Renamed => {
+                        SessionChangeDiffUnavailableReason::Renamed
+                    }
+                    kiln_core::WorkspaceChangeDiffUnavailableReason::UnsupportedFileType => {
+                        SessionChangeDiffUnavailableReason::UnsupportedFileType
+                    }
+                    kiln_core::WorkspaceChangeDiffUnavailableReason::UnsupportedEncoding => {
+                        SessionChangeDiffUnavailableReason::UnsupportedEncoding
+                    }
+                },
+            }
+        }
+    };
+    SessionChangeDiffResponse {
+        workspace_root_id: diff.checkout().workspace_root_id().as_str().to_owned(),
+        relative_directory: diff.checkout().relative_directory().to_owned(),
+        path: diff.file().path().to_owned(),
+        kind: diff.file().kind().as_str().to_owned(),
+        content,
     }
 }
 
@@ -2399,6 +2483,11 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::WORKSPACE_STORE_UNAVAILABLE,
                     "Workspace store unavailable",
+                ),
+                WorkspaceError::ChangeNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::CHANGE_NOT_FOUND,
+                    "Workspace change not found",
                 ),
             },
             Self::Session(error) => match error {

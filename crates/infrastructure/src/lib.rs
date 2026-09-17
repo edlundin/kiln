@@ -41,9 +41,10 @@ use kiln_core::{
     StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor,
     SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId, TaskIdGenerator, TaskMutation,
     TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
-    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceChangeKind,
-    WorkspaceChangeSummary, WorkspaceChangedFile, WorkspaceCheckout, WorkspaceId,
-    WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
+    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceChangeDiff,
+    WorkspaceChangeDiffContent, WorkspaceChangeDiffUnavailableReason, WorkspaceChangeKind,
+    WorkspaceChangePath, WorkspaceChangeSummary, WorkspaceChangedFile, WorkspaceCheckout,
+    WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
     WorkspaceRootId, WorkspaceRootState, WorkspaceStore, canonical_context_manifest_bytes,
     canonical_context_manifest_request_bytes, canonical_model_invocation_request_bytes,
 };
@@ -7446,7 +7447,7 @@ impl WorkspaceRootDiscovery for GitWorkspaceRootDiscovery {
                 "--porcelain=v1",
                 "-z",
                 "--untracked-files=all",
-                "--no-renames",
+                "--renames",
                 "--",
                 checkout.relative_directory(),
             ],
@@ -7458,7 +7459,7 @@ impl WorkspaceRootDiscovery for GitWorkspaceRootDiscovery {
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
-                "--no-renames",
+                "--find-renames",
                 "--numstat",
                 "-z",
                 "HEAD",
@@ -7476,7 +7477,7 @@ impl WorkspaceRootDiscovery for GitWorkspaceRootDiscovery {
                         "diff",
                         "--no-ext-diff",
                         "--no-textconv",
-                        "--no-renames",
+                        "--find-renames",
                         "--cached",
                         "--numstat",
                         "-z",
@@ -7498,6 +7499,7 @@ impl WorkspaceRootDiscovery for GitWorkspaceRootDiscovery {
                     Some(WorkspaceChangeKind::Untracked) => WorkspaceChangeKind::Untracked,
                     Some(WorkspaceChangeKind::Deleted) => WorkspaceChangeKind::Deleted,
                     Some(WorkspaceChangeKind::Conflicted) => WorkspaceChangeKind::Conflicted,
+                    Some(WorkspaceChangeKind::Renamed) => WorkspaceChangeKind::Renamed,
                     Some(_kind) if change.additions.is_none() || change.deletions.is_none() => {
                         WorkspaceChangeKind::Binary
                     }
@@ -7512,6 +7514,83 @@ impl WorkspaceRootDiscovery for GitWorkspaceRootDiscovery {
             .collect();
         Ok(WorkspaceChangeSummary::new(checkout.clone(), files))
     }
+
+    async fn diff_change(
+        &self,
+        checkout: &WorkspaceCheckout,
+        path: &WorkspaceChangePath,
+    ) -> Result<WorkspaceChangeDiff, RootDiscoveryError> {
+        if !path.is_within(checkout) {
+            return Err(RootDiscoveryError::NotGitRepository);
+        }
+
+        let summary = self.summarize_changes(checkout).await?;
+        let file = summary
+            .files()
+            .iter()
+            .find(|file| file.path() == path.as_str())
+            .cloned()
+            .ok_or(RootDiscoveryError::ChangeNotFound)?;
+
+        let content = match file.kind() {
+            WorkspaceChangeKind::Untracked => WorkspaceChangeDiffContent::Unavailable(
+                WorkspaceChangeDiffUnavailableReason::Untracked,
+            ),
+            WorkspaceChangeKind::Binary => WorkspaceChangeDiffContent::Unavailable(
+                WorkspaceChangeDiffUnavailableReason::Binary,
+            ),
+            WorkspaceChangeKind::Conflicted => WorkspaceChangeDiffContent::Unavailable(
+                WorkspaceChangeDiffUnavailableReason::Conflicted,
+            ),
+            WorkspaceChangeKind::Renamed => WorkspaceChangeDiffContent::Unavailable(
+                WorkspaceChangeDiffUnavailableReason::Renamed,
+            ),
+            WorkspaceChangeKind::TypeChanged => WorkspaceChangeDiffContent::Unavailable(
+                WorkspaceChangeDiffUnavailableReason::UnsupportedFileType,
+            ),
+            WorkspaceChangeKind::Added
+            | WorkspaceChangeKind::Modified
+            | WorkspaceChangeKind::Deleted => {
+                let working = match read_workspace_file(checkout, path)? {
+                    WorkspaceFileContent::Missing
+                        if file.kind() == WorkspaceChangeKind::Deleted =>
+                    {
+                        Vec::new()
+                    }
+                    WorkspaceFileContent::Missing => {
+                        return Err(RootDiscoveryError::ChangeNotFound);
+                    }
+                    WorkspaceFileContent::Unsupported => {
+                        return Ok(WorkspaceChangeDiff::new(
+                            checkout.clone(),
+                            file,
+                            WorkspaceChangeDiffContent::Unavailable(
+                                WorkspaceChangeDiffUnavailableReason::UnsupportedFileType,
+                            ),
+                        ));
+                    }
+                    WorkspaceFileContent::Bytes(bytes) => bytes,
+                };
+                let head = if file.kind() == WorkspaceChangeKind::Added {
+                    Vec::new()
+                } else {
+                    read_head_blob(checkout, path).await?
+                };
+                let patch = diff_bytes(checkout, path, &head, &working).await?;
+                match String::from_utf8(patch) {
+                    Ok(patch) => {
+                        let (patch, truncated) = truncate_diff(patch);
+                        WorkspaceChangeDiffContent::Text { patch, truncated }
+                    }
+                    Err(_) => WorkspaceChangeDiffContent::Unavailable(
+                        WorkspaceChangeDiffUnavailableReason::UnsupportedEncoding,
+                    ),
+                }
+            }
+        };
+
+        Ok(WorkspaceChangeDiff::new(checkout.clone(), file, content))
+    }
 }
 
 #[derive(Default)]
@@ -7523,10 +7602,14 @@ struct PendingChange {
 
 fn parse_git_status(output: &[u8]) -> Result<BTreeMap<String, PendingChange>, RootDiscoveryError> {
     let mut changes: BTreeMap<String, PendingChange> = BTreeMap::new();
-    for record in output
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
+    let records = output.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut record_index = 0;
+    while record_index < records.len() {
+        let record = records[record_index];
+        record_index += 1;
+        if record.is_empty() {
+            continue;
+        }
         if record.len() < 4 || record[2] != b' ' {
             return Err(RootDiscoveryError::NotGitRepository);
         }
@@ -7534,6 +7617,16 @@ fn parse_git_status(output: &[u8]) -> Result<BTreeMap<String, PendingChange>, Ro
             .map_err(|_| RootDiscoveryError::NotGitRepository)?
             .to_owned();
         let kind = status_kind(record[0], record[1]);
+        if kind == WorkspaceChangeKind::Renamed {
+            let source = *records
+                .get(record_index)
+                .ok_or(RootDiscoveryError::NotGitRepository)?;
+            record_index += 1;
+            if source.is_empty() {
+                return Err(RootDiscoveryError::NotGitRepository);
+            }
+            std::str::from_utf8(source).map_err(|_| RootDiscoveryError::NotGitRepository)?;
+        }
         changes.entry(path).or_default().kind = Some(kind);
     }
     Ok(changes)
@@ -7544,7 +7637,7 @@ fn status_kind(index: u8, worktree: u8) -> WorkspaceChangeKind {
         WorkspaceChangeKind::Untracked
     } else if index == b'U' || worktree == b'U' {
         WorkspaceChangeKind::Conflicted
-    } else if index == b'R' || worktree == b'R' {
+    } else if index == b'R' || worktree == b'R' || index == b'C' || worktree == b'C' {
         WorkspaceChangeKind::Renamed
     } else if index == b'D' || worktree == b'D' {
         WorkspaceChangeKind::Deleted
@@ -7561,22 +7654,45 @@ fn merge_numstat(
     changes: &mut BTreeMap<String, PendingChange>,
     output: &[u8],
 ) -> Result<(), RootDiscoveryError> {
-    for record in output
-        .split(|byte| *byte == 0)
-        .filter(|record| !record.is_empty())
-    {
+    let records = output.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut record_index = 0;
+    while record_index < records.len() {
+        let record = records[record_index];
+        record_index += 1;
+        if record.is_empty() {
+            continue;
+        }
         let mut fields = record.splitn(3, |byte| *byte == b'\t');
         let additions = fields.next().ok_or(RootDiscoveryError::NotGitRepository)?;
         let deletions = fields.next().ok_or(RootDiscoveryError::NotGitRepository)?;
         let path = fields.next().ok_or(RootDiscoveryError::NotGitRepository)?;
+        let additions = parse_numstat_count(additions)?;
+        let deletions = parse_numstat_count(deletions)?;
+        let (path, renamed) = if path.is_empty() {
+            let source = *records
+                .get(record_index)
+                .ok_or(RootDiscoveryError::NotGitRepository)?;
+            let destination = *records
+                .get(record_index + 1)
+                .ok_or(RootDiscoveryError::NotGitRepository)?;
+            record_index += 2;
+            if source.is_empty() || destination.is_empty() {
+                return Err(RootDiscoveryError::NotGitRepository);
+            }
+            std::str::from_utf8(source).map_err(|_| RootDiscoveryError::NotGitRepository)?;
+            (destination, true)
+        } else {
+            (path, false)
+        };
         let path = std::str::from_utf8(path)
             .map_err(|_| RootDiscoveryError::NotGitRepository)?
             .to_owned();
-        let additions = parse_numstat_count(additions)?;
-        let deletions = parse_numstat_count(deletions)?;
         let change = changes.entry(path).or_default();
         change.additions = additions;
         change.deletions = deletions;
+        if renamed {
+            change.kind.get_or_insert(WorkspaceChangeKind::Renamed);
+        }
         if additions.is_none() || deletions.is_none() {
             change.kind.get_or_insert(WorkspaceChangeKind::Binary);
         }
@@ -7595,12 +7711,217 @@ fn parse_numstat_count(value: &[u8]) -> Result<Option<u64>, RootDiscoveryError> 
         .map_err(|_| RootDiscoveryError::NotGitRepository)
 }
 
+const MAX_DIFF_FILE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DIFF_PREVIEW_BYTES: usize = 256 * 1024;
+
+enum WorkspaceFileContent {
+    Missing,
+    Unsupported,
+    Bytes(Vec<u8>),
+}
+
+#[cfg(unix)]
+fn read_workspace_file(
+    checkout: &WorkspaceCheckout,
+    path: &WorkspaceChangePath,
+) -> Result<WorkspaceFileContent, RootDiscoveryError> {
+    let root = Path::new(checkout.root_path());
+    let root_fd = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == Errno::NOENT {
+            RootDiscoveryError::ChangeNotFound
+        } else {
+            RootDiscoveryError::NotGitRepository
+        }
+    })?;
+    let components = Path::new(path.as_str()).components().collect::<Vec<_>>();
+    let (filename, parents) = components
+        .split_last()
+        .ok_or(RootDiscoveryError::ChangeNotFound)?;
+    let mut directory = root_fd;
+    for component in parents {
+        let std::path::Component::Normal(component) = component else {
+            return Err(RootDiscoveryError::NotGitRepository);
+        };
+        directory = match openat(
+            &directory,
+            *component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(directory) => directory,
+            Err(error) if error == Errno::NOENT => return Ok(WorkspaceFileContent::Missing),
+            Err(_) => return Err(RootDiscoveryError::NotGitRepository),
+        };
+    }
+    let std::path::Component::Normal(filename) = filename else {
+        return Err(RootDiscoveryError::NotGitRepository);
+    };
+    let file = match openat(
+        &directory,
+        *filename,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(file) => file,
+        Err(error) if error == Errno::NOENT => return Ok(WorkspaceFileContent::Missing),
+        Err(error) if error == Errno::LOOP => return Ok(WorkspaceFileContent::Unsupported),
+        Err(_) => return Err(RootDiscoveryError::NotGitRepository),
+    };
+    let file = std::fs::File::from(file);
+    if !file
+        .metadata()
+        .map_err(|_| RootDiscoveryError::NotGitRepository)?
+        .is_file()
+    {
+        return Ok(WorkspaceFileContent::Unsupported);
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_DIFF_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+    if bytes.len() > MAX_DIFF_FILE_BYTES {
+        return Err(RootDiscoveryError::GitUnavailable);
+    }
+    Ok(WorkspaceFileContent::Bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn read_workspace_file(
+    checkout: &WorkspaceCheckout,
+    path: &WorkspaceChangePath,
+) -> Result<WorkspaceFileContent, RootDiscoveryError> {
+    let root = std::fs::canonicalize(checkout.root_path())
+        .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+    let candidate = root.join(path.as_str());
+    let canonical = match std::fs::canonicalize(&candidate) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(WorkspaceFileContent::Missing);
+        }
+        Err(_) => return Err(RootDiscoveryError::NotGitRepository),
+    };
+    if !canonical.starts_with(&root) {
+        return Ok(WorkspaceFileContent::Unsupported);
+    }
+    let metadata =
+        std::fs::symlink_metadata(&canonical).map_err(|_| RootDiscoveryError::NotGitRepository)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(WorkspaceFileContent::Unsupported);
+    }
+    let file = std::fs::File::open(canonical).map_err(|_| RootDiscoveryError::NotGitRepository)?;
+    let mut bytes = Vec::new();
+    file.take((MAX_DIFF_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| RootDiscoveryError::NotGitRepository)?;
+    if bytes.len() > MAX_DIFF_FILE_BYTES {
+        return Err(RootDiscoveryError::GitUnavailable);
+    }
+    Ok(WorkspaceFileContent::Bytes(bytes))
+}
+
+async fn read_head_blob(
+    checkout: &WorkspaceCheckout,
+    path: &WorkspaceChangePath,
+) -> Result<Vec<u8>, RootDiscoveryError> {
+    let object = format!("HEAD:{}", path.as_str());
+    run_git_bytes(
+        Path::new(checkout.root_path()),
+        &["cat-file", "blob", &object],
+    )
+    .await
+}
+
+async fn diff_bytes(
+    checkout: &WorkspaceCheckout,
+    path: &WorkspaceChangePath,
+    head: &[u8],
+    working: &[u8],
+) -> Result<Vec<u8>, RootDiscoveryError> {
+    let temp = tempfile::tempdir().map_err(|_| RootDiscoveryError::GitUnavailable)?;
+    let head_path = temp.path().join("head");
+    let working_path = temp.path().join("working");
+    fs::write(&head_path, head).map_err(|_| RootDiscoveryError::GitUnavailable)?;
+    fs::write(&working_path, working).map_err(|_| RootDiscoveryError::GitUnavailable)?;
+    let head_path = head_path
+        .to_str()
+        .ok_or(RootDiscoveryError::GitUnavailable)?;
+    let working_path = working_path
+        .to_str()
+        .ok_or(RootDiscoveryError::GitUnavailable)?;
+    let args = [
+        "diff",
+        "--no-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--unified=3",
+        "--",
+        head_path,
+        working_path,
+    ];
+    let patch = run_git_bytes_with_status(Path::new(checkout.root_path()), &args, true).await?;
+    let head_output_path = format!("a/{}", head_path.trim_start_matches('/'));
+    let working_output_path = format!("b/{}", working_path.trim_start_matches('/'));
+    let head_label = format!("a/{}", path.as_str());
+    let working_label = format!("b/{}", path.as_str());
+    let patch = replace_bytes(&patch, head_output_path.as_bytes(), head_label.as_bytes());
+    Ok(replace_bytes(
+        &patch,
+        working_output_path.as_bytes(),
+        working_label.as_bytes(),
+    ))
+}
+
+fn replace_bytes(input: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    if from.is_empty() || from == to {
+        return input.to_vec();
+    }
+    let mut output = Vec::with_capacity(input.len());
+    let mut offset = 0;
+    while let Some(relative) = input[offset..]
+        .windows(from.len())
+        .position(|window| window == from)
+    {
+        let start = offset + relative;
+        output.extend_from_slice(&input[offset..start]);
+        output.extend_from_slice(to);
+        offset = start + from.len();
+    }
+    output.extend_from_slice(&input[offset..]);
+    output
+}
+
+fn truncate_diff(mut patch: String) -> (String, bool) {
+    if patch.len() <= MAX_DIFF_PREVIEW_BYTES {
+        return (patch, false);
+    }
+    let mut end = MAX_DIFF_PREVIEW_BYTES;
+    while !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    patch.truncate(end);
+    (patch, true)
+}
+
 async fn run_git(path: &Path, args: &[&str]) -> Result<String, RootDiscoveryError> {
     let output = run_git_bytes(path, args).await?;
     String::from_utf8(output).map_err(|_| RootDiscoveryError::NotGitRepository)
 }
 
 async fn run_git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>, RootDiscoveryError> {
+    run_git_bytes_with_status(path, args, false).await
+}
+
+async fn run_git_bytes_with_status(
+    path: &Path,
+    args: &[&str],
+    allow_diff_exit: bool,
+) -> Result<Vec<u8>, RootDiscoveryError> {
     const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -7608,6 +7929,9 @@ async fn run_git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>, RootDiscov
     command
         .arg("--no-pager")
         .arg("--no-optional-locks")
+        .arg("--literal-pathspecs")
+        .arg("-c")
+        .arg("core.fsmonitor=false")
         .arg("-C")
         .arg(path)
         .args(args);
@@ -7652,7 +7976,7 @@ async fn run_git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>, RootDiscov
             .wait()
             .await
             .map_err(|_| RootDiscoveryError::NotGitRepository)?;
-        if !status.success() {
+        if !status.success() && !(allow_diff_exit && status.code() == Some(1)) {
             return Err(RootDiscoveryError::NotGitRepository);
         }
         Ok(output)

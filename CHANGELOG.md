@@ -2,6 +2,13 @@
 
 ## 2026-09-16 — `feat`
 
+- Added the authenticated, bounded selected-file diff flow for the desktop Changes inspector through protocol `0.22.0`, including explicit unsupported and truncation states.
+
+[Commit](pending)
+
+
+## 2026-09-16 — `feat`
+
 - Added an authenticated Session checkout changes summary and a bounded read-only Usage ledger API with keyset pagination over the latest revision for each physical invocation.
 - Added a desktop Usage ledger view and refreshed generated protocol artifacts for protocol `0.21.0`.
 

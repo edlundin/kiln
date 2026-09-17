@@ -8,16 +8,18 @@ use kiln_protocol::{
     APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, AppendMessageRequest, ApprovalDecisionRequest,
     CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
     ClientIdentity, CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
-    GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER, LIST_SESSION_CHANGES_OPERATION_ID,
-    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
-    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse,
-    ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse, NEGOTIATE_OPERATION_ID,
-    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
+    GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
+    GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
+    LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
+    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_USAGE_OPERATION_ID,
+    LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse, ListWorkspacesResponse,
+    MessageDeliveryResponse, MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
     REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
     RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunResponse,
-    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID,
+    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID, SessionChangeDiffResponse,
     SessionChangesResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
     StartChildRunRequest, StartRunRequest, TOOL_CALL_APPROVAL_PATH, USAGE_PATH,
     UsageLedgerResponse, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
@@ -259,6 +261,23 @@ impl Client {
             self.http.get(self.http_url(&path)),
         )
         .await
+    }
+
+    pub async fn get_session_change_diff(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<SessionChangeDiffResponse, Error> {
+        let route = path_with_segment(
+            SESSION_CHANGE_DIFF_PATH,
+            "{session_id}",
+            "session_id",
+            session_id,
+        )?;
+        let mut url = self.http_url(&route);
+        url.query_pairs_mut().append_pair("path", path);
+        self.send_json(GET_SESSION_CHANGE_DIFF_OPERATION_ID, self.http.get(url))
+            .await
     }
 
     pub async fn append_message(

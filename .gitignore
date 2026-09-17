@@ -13,3 +13,7 @@ dist/
 graphify-out/
 .serena/cache/
 .serena/memories/
+
+# Protocol contract artifacts are regenerated from canonical Rust DTOs.
+protocol/generated/
+docs/protocol/openapi.yaml

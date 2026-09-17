@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.21.0";
+pub const PROTOCOL_VERSION: &str = "0.22.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -24,6 +24,7 @@ pub const SESSION_MESSAGES_PATH: &str = "/v1/sessions/{session_id}/messages";
 pub const SESSION_TASKS_PATH: &str = "/v1/sessions/{session_id}/tasks";
 pub const SESSION_EVENTS_PATH: &str = "/v1/sessions/{session_id}/events";
 pub const SESSION_CHANGES_PATH: &str = "/v1/sessions/{session_id}/changes";
+pub const SESSION_CHANGE_DIFF_PATH: &str = "/v1/sessions/{session_id}/change-diff";
 pub const USAGE_PATH: &str = "/v1/usage";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_CHILDREN_PATH: &str = "/v1/runs/{parent_run_id}/children";
@@ -52,6 +53,7 @@ pub const ASSIGN_TASK_OPERATION_ID: &str = "assign_task";
 pub const TRANSITION_TASK_OPERATION_ID: &str = "transition_task";
 pub const LIST_SESSION_EVENTS_OPERATION_ID: &str = "list_session_events";
 pub const LIST_SESSION_CHANGES_OPERATION_ID: &str = "list_session_changes";
+pub const GET_SESSION_CHANGE_DIFF_OPERATION_ID: &str = "get_session_change_diff";
 pub const LIST_USAGE_OPERATION_ID: &str = "list_usage";
 pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const START_CHILD_RUN_OPERATION_ID: &str = "start_child_run";
@@ -131,6 +133,7 @@ pub mod error_code {
     pub const ARTIFACT_STORE_UNAVAILABLE: &str = "artifact_store_unavailable";
     pub const USAGE_STORE_UNAVAILABLE: &str = "usage_store_unavailable";
     pub const USAGE_INTEGRITY_VIOLATION: &str = "usage_integrity_violation";
+    pub const CHANGE_NOT_FOUND: &str = "change_not_found";
 
     pub const ALL: &[&str] = &[
         AUTHENTICATION_REQUIRED,
@@ -200,6 +203,7 @@ pub mod error_code {
         ARTIFACT_STORE_UNAVAILABLE,
         USAGE_STORE_UNAVAILABLE,
         USAGE_INTEGRITY_VIOLATION,
+        CHANGE_NOT_FOUND,
     ];
 }
 
@@ -609,6 +613,40 @@ pub struct SessionChangesResponse {
     pub workspace_root_id: String,
     pub relative_directory: String,
     pub files: Vec<ChangedFileResponse>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionChangeDiffUnavailableReason {
+    Untracked,
+    Binary,
+    Conflicted,
+    Renamed,
+    UnsupportedFileType,
+    UnsupportedEncoding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionChangeDiffContent {
+    Ready {
+        patch: String,
+        truncated: bool,
+    },
+    Unavailable {
+        reason: SessionChangeDiffUnavailableReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionChangeDiffResponse {
+    pub workspace_root_id: String,
+    pub relative_directory: String,
+    pub path: String,
+    pub kind: String,
+    pub content: SessionChangeDiffContent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

@@ -561,6 +561,130 @@ impl WorkspaceChangeKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkspaceChangePath(String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceChangePathError {
+    Empty,
+    Absolute,
+    ParentTraversal,
+    Prefix,
+    InvalidComponent,
+}
+
+impl WorkspaceChangePath {
+    pub fn parse(value: impl Into<String>) -> Result<Self, WorkspaceChangePathError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(WorkspaceChangePathError::Empty);
+        }
+        if value
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+        {
+            return Err(WorkspaceChangePathError::InvalidComponent);
+        }
+        if value.contains('\\') {
+            return Err(WorkspaceChangePathError::Prefix);
+        }
+
+        let input = Path::new(&value);
+        if input.is_absolute() {
+            return Err(WorkspaceChangePathError::Absolute);
+        }
+        if value.starts_with("\\\\") || value.as_bytes().get(1) == Some(&b':') {
+            return Err(WorkspaceChangePathError::Prefix);
+        }
+
+        let mut components = Vec::new();
+        for component in input.components() {
+            match component {
+                std::path::Component::Normal(value) => components.push(
+                    value
+                        .to_str()
+                        .ok_or(WorkspaceChangePathError::InvalidComponent)?
+                        .to_owned(),
+                ),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    return Err(WorkspaceChangePathError::ParentTraversal);
+                }
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    return Err(WorkspaceChangePathError::Prefix);
+                }
+            }
+        }
+        if components.is_empty() {
+            return Err(WorkspaceChangePathError::Empty);
+        }
+
+        Ok(Self(components.join("/")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_within(&self, checkout: &WorkspaceCheckout) -> bool {
+        let scope = checkout.relative_directory();
+        scope == "."
+            || self
+                .0
+                .strip_prefix(scope)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceChangeDiffUnavailableReason {
+    Untracked,
+    Binary,
+    Conflicted,
+    Renamed,
+    UnsupportedFileType,
+    UnsupportedEncoding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceChangeDiffContent {
+    Text { patch: String, truncated: bool },
+    Unavailable(WorkspaceChangeDiffUnavailableReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChangeDiff {
+    checkout: WorkspaceCheckout,
+    file: WorkspaceChangedFile,
+    content: WorkspaceChangeDiffContent,
+}
+
+impl WorkspaceChangeDiff {
+    pub fn new(
+        checkout: WorkspaceCheckout,
+        file: WorkspaceChangedFile,
+        content: WorkspaceChangeDiffContent,
+    ) -> Self {
+        Self {
+            checkout,
+            file,
+            content,
+        }
+    }
+
+    pub fn checkout(&self) -> &WorkspaceCheckout {
+        &self.checkout
+    }
+
+    pub fn file(&self) -> &WorkspaceChangedFile {
+        &self.file
+    }
+
+    pub fn content(&self) -> &WorkspaceChangeDiffContent {
+        &self.content
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceChangedFile {
     path: String,
@@ -6243,6 +6367,7 @@ pub enum RootDiscoveryError {
     NotDirectory,
     NotGitRepository,
     GitUnavailable,
+    ChangeNotFound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6267,6 +6392,7 @@ pub enum WorkspaceError {
     WorkspaceNotFound,
     GitUnavailable,
     WorkspaceStoreUnavailable,
+    ChangeNotFound,
 }
 
 pub trait WorkspaceRootDiscovery: Send + Sync {
@@ -6280,6 +6406,15 @@ pub trait WorkspaceRootDiscovery: Send + Sync {
         checkout: &WorkspaceCheckout,
     ) -> impl Future<Output = Result<WorkspaceChangeSummary, RootDiscoveryError>> + Send {
         let _ = checkout;
+        async { Err(RootDiscoveryError::GitUnavailable) }
+    }
+
+    fn diff_change(
+        &self,
+        checkout: &WorkspaceCheckout,
+        path: &WorkspaceChangePath,
+    ) -> impl Future<Output = Result<WorkspaceChangeDiff, RootDiscoveryError>> + Send {
+        let _ = (checkout, path);
         async { Err(RootDiscoveryError::GitUnavailable) }
     }
 }
@@ -6317,6 +6452,11 @@ pub trait WorkspaceOperations: Send + Sync {
         &self,
         checkout: WorkspaceCheckout,
     ) -> impl Future<Output = Result<WorkspaceChangeSummary, WorkspaceError>> + Send;
+    fn diff_change(
+        &self,
+        checkout: WorkspaceCheckout,
+        path: WorkspaceChangePath,
+    ) -> impl Future<Output = Result<WorkspaceChangeDiff, WorkspaceError>> + Send;
 }
 
 pub struct WorkspaceApplication<D, S, I> {
@@ -6424,6 +6564,37 @@ where
             .await
             .map_err(WorkspaceError::from)
     }
+
+    pub async fn diff_change(
+        &self,
+        checkout: WorkspaceCheckout,
+        path: WorkspaceChangePath,
+    ) -> Result<WorkspaceChangeDiff, WorkspaceError> {
+        if !path.is_within(&checkout) {
+            return Err(WorkspaceError::PathOutsideWorkspaceRoot);
+        }
+
+        let workspace = self
+            .store
+            .get_workspace(checkout.workspace_id())
+            .await
+            .map_err(|_| WorkspaceError::WorkspaceStoreUnavailable)?
+            .ok_or(WorkspaceError::WorkspaceNotFound)?;
+        let root = workspace
+            .root(checkout.workspace_root_id())
+            .ok_or(WorkspaceError::WorkspaceRootNotFound)?;
+        if root.canonical_path() != checkout.root_path()
+            || root.git_common_directory_path() != checkout.git_common_directory_path()
+            || root.filesystem_identity() != checkout.filesystem_identity()
+        {
+            return Err(WorkspaceError::WorkspaceRootNotFound);
+        }
+
+        self.discovery
+            .diff_change(&checkout, &path)
+            .await
+            .map_err(WorkspaceError::from)
+    }
 }
 
 impl<D, S, I> WorkspaceOperations for WorkspaceApplication<D, S, I>
@@ -6453,6 +6624,14 @@ where
     ) -> Result<WorkspaceChangeSummary, WorkspaceError> {
         WorkspaceApplication::summarize_changes(self, checkout).await
     }
+
+    async fn diff_change(
+        &self,
+        checkout: WorkspaceCheckout,
+        path: WorkspaceChangePath,
+    ) -> Result<WorkspaceChangeDiff, WorkspaceError> {
+        WorkspaceApplication::diff_change(self, checkout, path).await
+    }
 }
 
 fn validate_workspace_name(name: &str) -> Result<(), WorkspaceError> {
@@ -6470,6 +6649,7 @@ impl From<RootDiscoveryError> for WorkspaceError {
             RootDiscoveryError::NotDirectory => Self::WorkspaceRootNotDirectory,
             RootDiscoveryError::NotGitRepository => Self::WorkspaceRootNotGitRepository,
             RootDiscoveryError::GitUnavailable => Self::GitUnavailable,
+            RootDiscoveryError::ChangeNotFound => Self::ChangeNotFound,
         }
     }
 }

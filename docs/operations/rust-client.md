@@ -76,7 +76,13 @@ the same idempotent command when its result is uncertain.
 the checkout captured when that Session was created; clients cannot supply a
 filesystem path. A missing legacy checkout, a changed root identity, or a
 different Git common directory is reported as an unavailable workspace root.
-Each Git invocation is bounded to 4 MiB of output and 30 seconds.
+`get_session_change_diff(session_id, path)` requests one selected changed file
+after `list_session_changes`. The path is sent as a URL query parameter and
+the daemon revalidates it against the captured checkout. Each Git invocation is
+bounded to 4 MiB of output and 30 seconds. The response is either a UTF-8
+unified patch truncated at 256 KiB or an explicit unavailable reason for
+untracked, binary, conflicted, renamed, unsupported file types, or unsupported
+encodings.
 
 `Error::Api { status, problem }` retains the HTTP status and the protocol's
 `ProblemDetails`, including its stable `code`.

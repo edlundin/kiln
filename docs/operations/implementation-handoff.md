@@ -10,6 +10,8 @@ attachment persistence repair in the Kiln Linear tracker.
 
 ## Status
 
+- The EDL-309 desktop continuation adds a global Settings provider-account view using the public Rust client: safe account summaries, idempotent account creation/reuse, Codex device-code presentation with copy/open actions, manual status checks, and exact-attempt cancellation. The view retains terminal and cleanup-required outcomes, rejects unexpected verification URLs, and scopes responses to one daemon connection. Reconnect replaces the view and recovers durable account state through listing. Runs still use the deterministic executor. Account recovery, disconnect/revoke, browser PKCE, and API-key entry remain pending. Native visual inspection covered the global Settings layout and account-list empty state against an isolated daemon; it found and resolved clipping caused by workspace drawers. Live OAuth/vault behavior, terminal sign-in states, and minimum-window layout were not verified at runtime.
+
 - [EDL-214](https://linear.app/edlundin/issue/EDL-214) and [EDL-215](https://linear.app/edlundin/issue/EDL-215) are verified Done.
 - [EDL-216](https://linear.app/edlundin/issue/EDL-216) has a passing focused real-daemon proof and current measurements recorded in [docs/learning/edl-216.md](../learning/edl-216.md). The historical baseline links to the current record from [docs/architecture/measurement-baseline.md](../architecture/measurement-baseline.md).
 - [EDL-287](https://linear.app/edlundin/issue/EDL-287) repair is complete: the child test keeps the root pending until descendants are terminal, with direct parent/state assertions and no production weakening. The named test passes; the full suite was not rerun.

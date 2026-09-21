@@ -2,8 +2,8 @@
 
 Kiln Desktop is a native GPUI client for the local `kilnd` daemon. The daemon
 is a separate process and continues to run if the window closes. The current
-desktop path uses the deterministic model fixture. It does not connect to a
-live model provider.
+desktop run path uses the deterministic model fixture. Settings can connect
+a Codex subscription account, but Runs do not yet use that live provider.
 
 The desktop has only been verified on macOS. It requests the host fonts `Inter`
 and `IBM Plex Mono`; the application bundle does not include font files.
@@ -64,6 +64,36 @@ the binary and `Info.plist`. Start `kilnd` separately before you connect.
 The desktop dependencies are pinned exactly to `gpui-pre` 0.3.2,
 `gpui-pre-platform` 0.3.2, and `gpui-component` 0.6.1. Update these pins
 together only after checking compatibility.
+
+## Provider accounts
+
+After connecting to the daemon, open **Settings** in the global toolbar. Provider
+accounts are independent of the selected Workspace or Session. **Refresh accounts**
+loads the daemon's saved account summaries; **Sign in to Codex** reuses a connecting
+subscription account or creates one through the idempotent account API.
+
+Use **Open verification page** and **Copy code** to complete device sign-in in your
+browser, then choose **Check sign-in**. Status checks are user-initiated; the daemon
+owns polling OpenAI and credential storage. **Cancel sign-in** addresses only the
+displayed attempt. Expired/replaced attempts require refreshing the account list
+before starting again. A cleanup-required result is shown explicitly and blocks
+another attempt in that view.
+
+Closing Settings does not cancel sign-in. Reconnecting the desktop discards its
+connection-scoped attempt display; refresh the accounts to recover the durable
+state. An unfinished connecting account can start a replacement attempt. Closing
+the desktop leaves daemon-owned work running. Account recovery after credentials
+expire, disconnect/revoke controls, browser PKCE, and API-key entry are not yet
+available in the desktop. A connected account does not enable live model Runs.
+
+Only public account metadata, the device user code, and the verification address
+enter the view. Tokens and vault references stay in the daemon. The desktop opens
+only the Codex verification address and never auto-opens a URL returned by a daemon.
+
+Compilation and source checks passed, and the global Settings layout/account-list
+empty state was inspected in the native app against an isolated local daemon.
+Live OAuth, credential-vault operations, sign-in terminal states, and minimum-window
+layout remain unverified at runtime.
 
 ## Start or resume a session
 

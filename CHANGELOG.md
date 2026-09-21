@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added global desktop Settings for provider accounts with Codex device sign-in, safe account summaries, manual status checks, and exact-attempt cancellation.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added the authenticated provider-account create/list/get API with durable idempotency and the public Codex device-login start, status, and cancellation continuation through protocol `0.23.0`, including opaque attempt IDs and retained terminal states.
 
 EDL-309: https://linear.app/edlundin/issue/EDL-309

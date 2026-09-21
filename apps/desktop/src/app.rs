@@ -21,6 +21,7 @@ use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
 use crate::{
     PasteAttachments,
+    accounts::AccountSettings,
     components::{
         ApprovalPanel, AttachmentChip, AttachmentThumbnail, ChildRunRow, ClickHandler, Composer,
         GuidanceComposer, RunStatus, TranscriptRow,
@@ -320,6 +321,8 @@ pub struct Desktop {
     change_diff_state: Option<ChangeDiffState>,
     inspector_tab: InspectorTab,
     show_usage: bool,
+    show_settings: bool,
+    account_settings: Option<Entity<AccountSettings>>,
     usage: UsageState,
     _subscriptions: Vec<Subscription>,
 }
@@ -437,6 +440,8 @@ impl Desktop {
             change_diff_state: None,
             inspector_tab: InspectorTab::Changes,
             show_usage: false,
+            show_settings: false,
+            account_settings: None,
             usage: UsageState::default(),
             _subscriptions: vec![
                 subscription,
@@ -459,6 +464,9 @@ impl Desktop {
             stream.abort();
         }
         self.connection_generation = self.connection_generation.wrapping_add(1);
+        // A settings entity belongs to one authenticated daemon connection. In-flight
+        // responses cannot populate a replacement daemon's account view.
+        self.account_settings = None;
         self.event_generation = self.event_generation.wrapping_add(1);
         self.usage.invalidate_request();
         self.usage.error = None;
@@ -1280,6 +1288,7 @@ impl Desktop {
     }
 
     fn leave_usage(&mut self) {
+        self.show_settings = false;
         if self.show_usage {
             self.show_usage = false;
             self.usage.destination_changed();
@@ -1293,6 +1302,7 @@ impl Desktop {
         if self.show_usage {
             self.leave_usage();
         } else {
+            self.show_settings = false;
             self.show_usage = true;
             self.show_runs = false;
             self.focused_run = None;
@@ -1301,6 +1311,35 @@ impl Desktop {
             self.refresh_usage(cx);
         }
         cx.notify();
+    }
+
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
+        if self.daemon.is_none() {
+            return;
+        }
+        if self.show_settings {
+            self.show_settings = false;
+        } else {
+            self.leave_usage();
+            self.show_settings = true;
+            self.show_connection = false;
+            self.show_runs = false;
+            self.focused_run = None;
+            self.close_inspector();
+            self.ensure_account_settings(cx);
+        }
+        cx.notify();
+    }
+
+    fn ensure_account_settings(&mut self, cx: &mut Context<Self>) {
+        if self.account_settings.is_none() && self.online {
+            if let Some(daemon) = &self.daemon {
+                let client = daemon.client.clone();
+                let runtime = self.runtime.clone();
+                self.account_settings =
+                    Some(cx.new(|cx| AccountSettings::new(client, runtime, cx)));
+            }
+        }
     }
 
     fn start_usage_request(&mut self, after: Option<String>, cx: &mut Context<Self>) {
@@ -1621,6 +1660,9 @@ impl Desktop {
         self.online = true;
         self.busy = false;
         self.switching_session = None;
+        if let Some(settings) = &self.account_settings {
+            settings.update(cx, |settings, cx| settings.set_online(true, cx));
+        }
         self.show_connection = false;
         self.selected_run = None;
         self.focused_run = None;
@@ -2048,6 +2090,9 @@ impl Desktop {
             }
             Update::Disconnected { generation, error } => {
                 if generation == self.event_generation {
+                    if let Some(settings) = &self.account_settings {
+                        settings.update(cx, |settings, cx| settings.set_online(false, cx));
+                    }
                     self.close_inspector();
                     self.usage.invalidate_request();
                     self.usage.error = Some(
@@ -3876,7 +3921,12 @@ impl Render for Desktop {
                     ),
             );
         }
-        let heading = if self.show_usage {
+        if self.show_settings {
+            self.ensure_account_settings(cx);
+        }
+        let heading = if self.show_settings {
+            "Settings".to_owned()
+        } else if self.show_usage {
             "Usage".to_owned()
         } else {
             title
@@ -3892,6 +3942,9 @@ impl Render for Desktop {
                     } else if !session_query.is_empty() {
                         this.session_query
                             .update(cx, |input, cx| input.set_value("", window, cx));
+                    } else if this.show_settings {
+                        this.show_settings = false;
+                        this.composer.read(cx).focus_handle(cx).focus(window, cx);
                     } else if this.show_usage {
                         this.leave_usage();
                         this.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -3912,12 +3965,14 @@ impl Render for Desktop {
             }))
             .flex()
             .flex_col()
+            .min_w_0()
             .size_full()
             .bg(theme::BG)
             .text_color(theme::TEXT)
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .px_5()
@@ -3930,7 +3985,7 @@ impl Render for Desktop {
                             .items_center()
                             .gap_2()
                             .child(div().text_sm().child(heading))
-                            .when(self.show_usage, |view| {
+                            .when(self.show_usage || self.show_settings, |view| {
                                 view.child(
                                     div()
                                         .font_family(theme::MONO_FONT)
@@ -3943,9 +3998,10 @@ impl Render for Desktop {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_3()
-                            .when(!self.show_usage, |view| {
+                            .when(!self.show_usage && !self.show_settings, |view| {
                                 view.when_some(self.conversation.root_state(), |view, state| {
                                     view.child(RunStatus::new(state))
                                 })
@@ -3957,7 +4013,7 @@ impl Render for Desktop {
                                     } else {
                                         "Browse"
                                     })
-                                    .disabled(self.daemon.is_none())
+                                    .disabled(self.daemon.is_none() || self.show_settings)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.browser_open = !this.browser_open;
                                         cx.notify();
@@ -3977,6 +4033,19 @@ impl Render for Desktop {
                                     })),
                             )
                             .child(
+                                Button::new("toggle-settings")
+                                    .label(if self.show_settings {
+                                        "Close Settings"
+                                    } else {
+                                        "Settings"
+                                    })
+                                    .selected(self.show_settings)
+                                    .disabled(self.daemon.is_none())
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_settings(cx)),
+                                    ),
+                            )
+                            .child(
                                 Button::new("toggle-runs")
                                     .label(if self.show_runs {
                                         "Close Runs".to_owned()
@@ -3985,6 +4054,7 @@ impl Render for Desktop {
                                     })
                                     .disabled(
                                         self.show_usage
+                                            || self.show_settings
                                             || self.connection.is_none()
                                             || self.switching_session.is_some(),
                                     )
@@ -4002,6 +4072,7 @@ impl Render for Desktop {
                                     })
                                     .disabled(
                                         self.show_usage
+                                            || self.show_settings
                                             || self.connection.is_none()
                                             || !self.online
                                             || self.switching_session.is_some(),
@@ -4071,6 +4142,25 @@ impl Render for Desktop {
                     .flex()
                     .justify_center()
                     .child(self.connection_form(cx)),
+            );
+        } else if self.show_settings {
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .when_some(self.account_settings.clone(), |view, settings| {
+                        view.child(settings)
+                    })
+                    .when(self.account_settings.is_none(), |view| {
+                        view.child(
+                            div()
+                                .px_6()
+                                .py_6()
+                                .child("Reconnect to manage provider accounts."),
+                        )
+                    }),
             );
         } else if self.show_usage {
             content = content.child(self.usage_screen(cx));
@@ -4160,7 +4250,11 @@ impl Render for Desktop {
                     ),
             );
         }
-        if !self.show_connection && self.browser_open && self.daemon.is_some() {
+        if !self.show_connection
+            && !self.show_settings
+            && self.browser_open
+            && self.daemon.is_some()
+        {
             let mut frame = div()
                 .flex()
                 .size_full()

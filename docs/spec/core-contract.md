@@ -798,7 +798,10 @@ to shutdown handling.
 
 The daemon holds an exclusive `auth/daemon.lock` file lock for its process
 lifetime. A second daemon using the same data directory exits before opening
-the store. The lock file is never removed or truncated.
+the store. The lock file is never removed or truncated. SIGTERM and interrupt
+handlers register before readiness is emitted, so an immediate shutdown signal
+uses the cleanup path even before the signal-wait task is first polled. Failure
+to install either handler prevents readiness.
 
 Before readiness, the daemon reconciles stored deterministic native Runs even
 when the current executor setting selects subprocesses. Only the known fixture

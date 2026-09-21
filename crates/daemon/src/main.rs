@@ -177,6 +177,15 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Install handlers synchronously before readiness. A supervisor may send
+    // SIGTERM immediately after reading that line, before a spawned task runs.
+    let shutdown_signal = match configured_shutdown_signal() {
+        Ok(signal) => signal,
+        Err(error) => {
+            eprintln!("kilnd: cannot configure shutdown signals: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let readiness = serde_json::json!({
         "event": "ready",
         "address": bound_address.to_string(),
@@ -208,7 +217,7 @@ async fn main() -> ExitCode {
     let lifecycle = state.lifecycle();
     let signal_lifecycle = lifecycle.clone();
     tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
+        shutdown_signal.await;
         signal_lifecycle.request_shutdown();
     });
     let graceful_shutdown = async move {
@@ -374,24 +383,17 @@ fn stop_fixture_child(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-async fn wait_for_shutdown_signal() {
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(terminate) => terminate,
-            Err(error) => {
-                eprintln!("kilnd: cannot listen for SIGTERM: {error}");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            if let Err(error) = result {
-                eprintln!("kilnd: cannot listen for interrupt: {error}");
-            }
+fn configured_shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()> + Send> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = terminate.recv() => {}
         }
-        _ = terminate.recv() => {}
-    }
+    })
 }
 
 fn listen_address() -> Result<SocketAddr, String> {

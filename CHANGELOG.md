@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `fix`
+
+- Registered daemon shutdown signals before readiness, closing a startup race that could bypass graceful cleanup on immediate SIGTERM.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `feat`
 
 - Connected native tool proposals to sequential approval, fresh-claim file execution, cancellation, and ordered result context, with explicit opt-in byte limits. Live provider activation remains pending.

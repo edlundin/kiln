@@ -189,3 +189,129 @@ pub trait ModelContinuationStore: Send + Sync {
         limits: ModelContinuationLimits,
     ) -> impl Future<Output = Result<Option<ModelInvocationContinuation>, ModelContinuationError>> + Send;
 }
+
+/// A context snapshot of private replay metadata, never the replay payload.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ModelContinuationReference {
+    session_id: crate::SessionId,
+    invocation_id: ModelInvocationId,
+    run_id: RunId,
+    provider_account_id: ProviderAccountId,
+    provider: ProviderType,
+    model: ModelId,
+    format: String,
+    payload_size: u64,
+    content_hash: crate::ContentHash,
+    content_json: String,
+}
+
+impl fmt::Debug for ModelContinuationReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ModelContinuationReference")
+            .field("invocation_id", &self.invocation_id)
+            .field("bytes", &self.payload_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModelContinuationReference {
+    pub fn new(
+        run: &crate::Run,
+        invocation: &ModelInvocation,
+        format: String,
+        payload_size: u64,
+        content_hash: crate::ContentHash,
+    ) -> Result<Self, ModelContinuationError> {
+        if invocation.run_id() != run.run_id()
+            || invocation.purpose() != ModelInvocationPurpose::Generation
+            || !matches!(
+                invocation
+                    .outcome()
+                    .and_then(|outcome| outcome.completion_kind()),
+                Some(
+                    ModelInvocationCompletionKind::AssistantOutput
+                        | ModelInvocationCompletionKind::ToolRequests
+                )
+            )
+            || payload_size == 0
+            || !crate::model_tool_request::valid_identifier(&format, format.len())
+        {
+            return Err(ModelContinuationError::InvalidBinding);
+        }
+        let mut content = serde_json::json!({
+            "version": 1,
+            "session_id": run.session_id().as_str(),
+            "run_id": run.run_id().as_str(),
+            "model_invocation_id": invocation.invocation_id().as_str(),
+            "provider_account_id": invocation.provider_account_id().as_str(),
+            "provider": invocation.settings().provider().as_str(),
+            "model": invocation.settings().model().as_str(),
+            "format": format,
+            "payload_size": payload_size,
+            "content_hash": content_hash.as_str(),
+        });
+        content.sort_all_objects();
+        let content_json = content.to_string();
+        Ok(Self {
+            session_id: run.session_id().clone(),
+            invocation_id: invocation.invocation_id().clone(),
+            run_id: run.run_id().clone(),
+            provider_account_id: invocation.provider_account_id().clone(),
+            provider: invocation.settings().provider().clone(),
+            model: invocation.settings().model().clone(),
+            format,
+            payload_size,
+            content_hash,
+            content_json,
+        })
+    }
+
+    pub fn validate_destination(
+        &self,
+        destination: &ModelInvocation,
+    ) -> Result<(), ModelContinuationError> {
+        if destination.invocation_id() == &self.invocation_id
+            || destination.run_id() != &self.run_id
+            || destination.provider_account_id() != &self.provider_account_id
+            || destination.settings().provider() != &self.provider
+            || destination.settings().model() != &self.model
+            || destination.purpose() != ModelInvocationPurpose::Generation
+        {
+            return Err(ModelContinuationError::InvalidBinding);
+        }
+        Ok(())
+    }
+
+    pub fn matches(&self, continuation: &ModelInvocationContinuation) -> bool {
+        continuation.invocation_id == self.invocation_id
+            && continuation.run_id == self.run_id
+            && continuation.provider_account_id == self.provider_account_id
+            && continuation.provider == self.provider
+            && continuation.model == self.model
+            && continuation.format == self.format
+            && continuation.payload.len() as u64 == self.payload_size
+            && continuation.content_hash() == self.content_hash
+    }
+
+    pub fn session_id(&self) -> &crate::SessionId {
+        &self.session_id
+    }
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+    pub fn invocation_id(&self) -> &ModelInvocationId {
+        &self.invocation_id
+    }
+    pub fn format(&self) -> &str {
+        &self.format
+    }
+    pub fn payload_size(&self) -> u64 {
+        self.payload_size
+    }
+    pub fn content_hash(&self) -> &crate::ContentHash {
+        &self.content_hash
+    }
+    pub fn content_json(&self) -> &str {
+        &self.content_json
+    }
+}

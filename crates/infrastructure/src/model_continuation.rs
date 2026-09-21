@@ -224,3 +224,91 @@ async fn load_continuation(
     }
     Ok(Some(continuation))
 }
+
+pub(super) async fn load_reference(
+    transaction: &mut Transaction<'_, Sqlite>,
+    run: &kiln_core::Run,
+    invocation_id: &ModelInvocationId,
+    destination_sequence: Option<i64>,
+) -> Result<kiln_core::ModelContinuationReference, Error> {
+    let (sequence, invocation) = super::load_model_invocation_unchecked(transaction, invocation_id)
+        .await
+        .map_err(Error::Invocation)?
+        .ok_or(Error::InvalidBinding)?;
+    super::model_tool_exchange::validate_source_metadata(
+        transaction,
+        run,
+        sequence,
+        &invocation,
+        destination_sequence,
+    )
+    .await
+    .map_err(|error| match error {
+        kiln_core::ModelToolExchangeError::Unavailable => Error::Unavailable,
+        _ => Error::IntegrityViolation,
+    })?;
+    if !super::usage::has_final_usage(transaction, &invocation)
+        .await
+        .map_err(|_| Error::Unavailable)?
+    {
+        return Err(Error::IntegrityViolation);
+    }
+    if invocation
+        .outcome()
+        .and_then(|outcome| outcome.completion_kind())
+        == Some(ModelInvocationCompletionKind::ToolRequests)
+        && super::model_tool_request::load_requests(transaction, &invocation)
+            .await
+            .map_err(Error::Requests)?
+            .is_none()
+    {
+        return Err(Error::IntegrityViolation);
+    }
+    let row = sqlx::query(
+        "SELECT run_id, provider_account_id, provider, model, format,
+        payload_size, length(payload) AS actual_size, content_hash
+        FROM model_invocation_continuations WHERE model_invocation_id = ?",
+    )
+    .bind(invocation_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| Error::Unavailable)?
+    .ok_or(Error::InvalidBinding)?;
+    for (column, expected) in [
+        ("run_id", invocation.run_id().as_str()),
+        (
+            "provider_account_id",
+            invocation.provider_account_id().as_str(),
+        ),
+        ("provider", invocation.settings().provider().as_str()),
+        ("model", invocation.settings().model().as_str()),
+    ] {
+        if row
+            .try_get::<String, _>(column)
+            .map_err(|_| Error::IntegrityViolation)?
+            != expected
+        {
+            return Err(Error::IntegrityViolation);
+        }
+    }
+    let size: i64 = row
+        .try_get("payload_size")
+        .map_err(|_| Error::IntegrityViolation)?;
+    if size <= 0
+        || row
+            .try_get::<i64, _>("actual_size")
+            .map_err(|_| Error::IntegrityViolation)?
+            != size
+    {
+        return Err(Error::IntegrityViolation);
+    }
+    let format = row
+        .try_get("format")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let hash = kiln_core::ContentHash::parse(
+        row.try_get::<String, _>("content_hash")
+            .map_err(|_| Error::IntegrityViolation)?,
+    )
+    .map_err(|_| Error::IntegrityViolation)?;
+    kiln_core::ModelContinuationReference::new(run, &invocation, format, size as u64, hash)
+}

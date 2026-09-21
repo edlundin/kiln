@@ -799,10 +799,30 @@ as terminal output. After a successful stop or while draining an invalid stream,
 it discards both replay and proposals while retaining valid terminal usage under
 the cancelled/failure outcome. No live adapter emits this variant yet.
 
-Subsequent request assembly must select verified earlier
-continuations from the same Run/account/model without duplication or promotion
-to instructions. Tool exchange snapshots alone are insufficient for that
-continuation. Live transport and subscription compatibility remain pending.
+Migration `0032` adds tagged `provider_continuation` context references. The
+snapshot contains source invocation/Run/Session/account/provider/model, format,
+size, and the private content hash, rather than payload bytes. Existing version-2
+entry encodings remain unchanged, and version-1 construction rejects this kind.
+Duplicate or foreign Run/Session sources are rejected. Creation/reads check
+terminal source usage and proposals, source context ownership and older manifest
+sequence, and retry metadata without recursively expanding earlier payloads.
+Stored canonical reference content must match reconstructed metadata.
+
+Invocation creation, integrity reads, and provider claims reject continuation
+references from a different Run/account/provider/model or the same invocation.
+The native driver records one continuation reference before that response's tool
+exchanges and preserves it when queued input requires another generation.
+
+`ProviderContextLimits` includes explicit per-continuation and total continuation
+byte ceilings. Assembly preflights all references and destination bindings before
+any payload read. `StoredProviderContextReader` combines SQLite replay with
+filesystem artifact reads. The store verifies actual bytes, and core assembly
+independently matches the returned binding/format/size/hash to its snapshot.
+Missing, corrupt, or over-budget replay fails the full assembly. The resulting
+`ProviderContextEntry::Continuation` remains typed private data; it is never
+promoted to an instruction. It must be serialized once, alongside the matching
+function outputs, by the future live adapter. Live transport, model-specific
+serialization and subscription compatibility remain pending.
 
 Source: official [function-calling guidance](https://developers.openai.com/api/docs/guides/function-calling),
 [stateless encrypted reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses),

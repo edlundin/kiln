@@ -269,21 +269,22 @@ impl RunService {
                 ProviderClaim::Duplicate { .. } => return Err(RunError::InvalidTransition),
             };
             let invocation = request.invocation().clone();
-            let (outcome, steered) = match self.provider_registry.start(request).await {
-                Ok(mut operation) => {
-                    self.drive_native_operation(&invocation, &mut operation, &mut cancellation)
-                        .await?
-                }
-                Err(error) => {
-                    let outcome = failure_outcome(error);
-                    self.persist_native_update(
-                        invocation.invocation_id(),
-                        unknown_terminal(&invocation, outcome)?,
-                    )
-                    .await?;
-                    (outcome, false)
-                }
-            };
+            let (outcome, steered, has_continuation) =
+                match self.provider_registry.start(request).await {
+                    Ok(mut operation) => {
+                        self.drive_native_operation(&invocation, &mut operation, &mut cancellation)
+                            .await?
+                    }
+                    Err(error) => {
+                        let outcome = failure_outcome(error);
+                        self.persist_native_update(
+                            invocation.invocation_id(),
+                            unknown_terminal(&invocation, outcome)?,
+                        )
+                        .await?;
+                        (outcome, false, false)
+                    }
+                };
             self.active.changed.notify_waiters();
             let snapshot = self.runs.get_run(run_id.clone()).await?;
             if matches!(
@@ -294,6 +295,11 @@ impl RunService {
             }
             if steered {
                 continue;
+            }
+            if has_continuation {
+                entries.push(ContextManifestEntryInput::Continuation {
+                    invocation_id: invocation.invocation_id().clone(),
+                });
             }
             if outcome.completion_kind() == Some(ModelInvocationCompletionKind::ToolRequests) {
                 match self
@@ -361,7 +367,7 @@ impl RunService {
         invocation: &ModelInvocation,
         operation: &mut O,
         cancellation: &mut oneshot::Receiver<()>,
-    ) -> Result<(ModelInvocationOutcome, bool), RunError> {
+    ) -> Result<(ModelInvocationOutcome, bool, bool), RunError> {
         let mut stopped = false;
         let mut steered = false;
         loop {
@@ -404,7 +410,7 @@ impl RunService {
                         let outcome = failure_outcome(error);
                         self.stop_native_after_error(invocation, operation, outcome)
                             .await?;
-                        return Ok((outcome, false));
+                        return Ok((outcome, false, false));
                     }
                     let update = match update {
                         ProviderUpdate::ToolRequests { usage, .. }
@@ -422,6 +428,8 @@ impl RunService {
                         }
                         update => update,
                     };
+                    let has_continuation =
+                        matches!(&update, ProviderUpdate::CompletedWithContinuation { .. });
                     let outcome = match &update {
                         ProviderUpdate::Finished { outcome, .. }
                         | ProviderUpdate::CompletedWithContinuation { outcome, .. } => {
@@ -445,7 +453,7 @@ impl RunService {
                         return Err(error);
                     }
                     if let Some(outcome) = outcome {
-                        return Ok((outcome, steered));
+                        return Ok((outcome, steered, has_continuation));
                     }
                 }
                 other => {
@@ -456,7 +464,7 @@ impl RunService {
                     );
                     self.stop_native_after_error(invocation, operation, outcome)
                         .await?;
-                    return Ok((outcome, false));
+                    return Ok((outcome, false, false));
                 }
             }
         }

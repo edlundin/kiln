@@ -1152,6 +1152,9 @@ impl ContextInstructionProvenance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextManifestEntryInput {
+    Continuation {
+        invocation_id: ModelInvocationId,
+    },
     Instruction {
         provenance: ContextInstructionProvenance,
         content: String,
@@ -1166,6 +1169,9 @@ pub enum ContextManifestEntryInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextManifestEntry {
+    ContinuationReference {
+        reference: ModelContinuationReference,
+    },
     ToolExchangeSnapshot {
         exchange: ModelToolExchange,
     },
@@ -1216,6 +1222,7 @@ impl ContextManifestEntry {
 
     pub fn content(&self) -> &str {
         match self {
+            Self::ContinuationReference { reference } => reference.content_json(),
             Self::ToolExchangeSnapshot { exchange } => exchange.content_json(),
             Self::Instruction { content, .. }
             | Self::MessageSnapshot { content, .. }
@@ -1306,6 +1313,7 @@ impl ContextManifest {
         let mut user_message_ids = HashSet::new();
         let mut reaction_ids = HashSet::new();
         let mut tool_call_ids = HashSet::new();
+        let mut continuation_ids = HashSet::new();
         for entry in &entries {
             if entry.content().is_empty()
                 || !matches!(
@@ -1317,6 +1325,9 @@ impl ContextManifest {
                 ) && entry.content().trim().is_empty()
             {
                 return Err(match entry {
+                    ContextManifestEntry::ContinuationReference { .. } => {
+                        InvalidContextManifest::InvalidContinuation
+                    }
                     ContextManifestEntry::ToolExchangeSnapshot { .. } => {
                         InvalidContextManifest::InvalidToolExchange
                     }
@@ -1332,6 +1343,14 @@ impl ContextManifest {
                 });
             }
             match entry {
+                ContextManifestEntry::ContinuationReference { reference }
+                    if !allow_tool_exchanges
+                        || reference.run_id() != &run_id
+                        || reference.session_id() != &session_id
+                        || !continuation_ids.insert(reference.invocation_id()) =>
+                {
+                    return Err(InvalidContextManifest::InvalidContinuation);
+                }
                 ContextManifestEntry::ToolExchangeSnapshot { exchange }
                     if !allow_tool_exchanges
                         || exchange.run_id() != &run_id
@@ -1465,6 +1484,7 @@ impl ContextManifest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidContextManifest {
+    InvalidContinuation,
     InvalidToolExchange,
     InvalidAttachment,
     InvalidChildActivity,
@@ -1523,6 +1543,10 @@ pub fn canonical_context_manifest_bytes(
     for (position, entry) in entries.iter().enumerate() {
         push_context_field(&mut encoded, &usize_context_bytes(position));
         match entry {
+            ContextManifestEntry::ContinuationReference { reference } => {
+                push_context_field(&mut encoded, b"provider_continuation");
+                push_context_field(&mut encoded, reference.content_json().as_bytes());
+            }
             ContextManifestEntry::ToolExchangeSnapshot { exchange } => {
                 push_context_field(&mut encoded, b"tool_exchange");
                 push_context_field(&mut encoded, exchange.content_json().as_bytes());
@@ -1578,6 +1602,10 @@ pub fn canonical_context_manifest_request_bytes(command: &CreateContextManifest)
     for (position, entry) in command.entries.iter().enumerate() {
         push_context_field(&mut encoded, &usize_context_bytes(position));
         match entry {
+            ContextManifestEntryInput::Continuation { invocation_id } => {
+                push_context_field(&mut encoded, b"provider_continuation");
+                push_context_field(&mut encoded, invocation_id.as_str().as_bytes());
+            }
             ContextManifestEntryInput::ToolExchange { tool_call_id } => {
                 push_context_field(&mut encoded, b"tool_exchange");
                 push_context_field(&mut encoded, tool_call_id.as_str().as_bytes());

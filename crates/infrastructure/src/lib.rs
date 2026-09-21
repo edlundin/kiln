@@ -3,8 +3,8 @@
 mod assistant_message;
 mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
-mod model_output;
 mod model_continuation;
+mod model_output;
 mod model_tool_adoption;
 mod model_tool_catalog;
 mod model_tool_completion;
@@ -14,6 +14,7 @@ mod model_tool_request;
 mod native_run;
 mod provider_account;
 mod provider_context;
+pub use provider_context::StoredProviderContextReader;
 mod secret_store;
 pub use secret_store::OsSecretStore;
 mod usage;
@@ -3151,6 +3152,8 @@ async fn validate_model_invocation_integrity(
     if run.session_id() != manifest.session_id() {
         return Err(ModelInvocationStoreError::IntegrityViolation);
     }
+    validate_context_continuation_destinations(&manifest, invocation)
+        .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
 
     // ponytail: validating every retry chain can repeat O(n²) reads when listing
     // a long history; batch validation by work ID if those histories require it.
@@ -3212,6 +3215,20 @@ fn model_invocation_matches(left: &ModelInvocation, right: &ModelInvocation) -> 
         && left.capabilities() == right.capabilities()
         && left.purpose() == right.purpose()
         && left.retry_of() == right.retry_of()
+}
+
+fn validate_context_continuation_destinations(
+    manifest: &ContextManifest,
+    invocation: &ModelInvocation,
+) -> Result<(), ModelInvocationStoreError> {
+    for entry in manifest.entries() {
+        if let ContextManifestEntry::ContinuationReference { reference } = entry {
+            reference
+                .validate_destination(invocation)
+                .map_err(|_| ModelInvocationStoreError::InvalidTransition)?;
+        }
+    }
+    Ok(())
 }
 
 fn model_invocation_request_fields_match(left: &ModelInvocation, right: &ModelInvocation) -> bool {
@@ -3480,6 +3497,7 @@ impl ModelInvocationStore for SqliteStore {
             retry_of: command.retry_of.clone(),
         })
         .map_err(|_| ModelInvocationStoreError::IntegrityViolation)?;
+        validate_context_continuation_destinations(&manifest, &invocation)?;
         insert_model_invocation(&mut transaction, &invocation).await?;
         sqlx::query(
             "INSERT INTO create_model_invocation_idempotencies
@@ -3989,6 +4007,18 @@ async fn resolve_context_manifest_entries(
     let mut message_ids = std::collections::HashSet::new();
     for input in inputs {
         match input {
+            ContextManifestEntryInput::Continuation { invocation_id } => {
+                let reference =
+                    model_continuation::load_reference(transaction, run, invocation_id, None)
+                        .await
+                        .map_err(|error| match error {
+                            kiln_core::ModelContinuationError::Unavailable => {
+                                ContextManifestStoreError::Unavailable
+                            }
+                            _ => ContextManifestStoreError::IntegrityViolation,
+                        })?;
+                entries.push(ContextManifestEntry::ContinuationReference { reference });
+            }
             ContextManifestEntryInput::ToolExchange { tool_call_id } => {
                 let exchange = model_tool_exchange::load_exchange(
                     transaction,
@@ -4195,6 +4225,17 @@ async fn persist_context_manifest_entries(
             role,
             content,
         ) = match entry {
+            ContextManifestEntry::ContinuationReference { reference } => (
+                "provider_continuation",
+                "provider_continuation",
+                None,
+                Some(reference.run_id().as_str()),
+                None,
+                None,
+                None,
+                None,
+                reference.content_json(),
+            ),
             ContextManifestEntry::Instruction {
                 provenance,
                 content,
@@ -4251,12 +4292,18 @@ async fn persist_context_manifest_entries(
                 exchange.content_json(),
             ),
         };
+        let source_model_invocation_id = match entry {
+            ContextManifestEntry::ContinuationReference { reference } => {
+                Some(reference.invocation_id().as_str())
+            }
+            _ => None,
+        };
         sqlx::query(
             "INSERT INTO context_manifest_entries (
                  context_manifest_id, position, entry_kind, provenance,
                  workspace_root_id, source_run_id, source_event_id, source_tool_call_id,
-                 message_id, message_role, content
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 message_id, message_role, content, source_model_invocation_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(manifest.context_manifest_id().as_str())
         .bind(position)
@@ -4269,6 +4316,7 @@ async fn persist_context_manifest_entries(
         .bind(message_id)
         .bind(role)
         .bind(content)
+        .bind(source_model_invocation_id)
         .execute(&mut **transaction)
         .await
         .map_err(|_| ContextManifestStoreError::Unavailable)?;
@@ -4376,7 +4424,7 @@ async fn load_context_manifest(
         return Err(ContextManifestStoreError::IntegrityViolation);
     }
     let rows = sqlx::query(
-        "SELECT position, entry_kind, provenance, workspace_root_id, source_run_id, source_event_id, source_tool_call_id,
+        "SELECT position, entry_kind, provenance, workspace_root_id, source_run_id, source_event_id, source_tool_call_id, source_model_invocation_id,
                 message_id, message_role, content
          FROM context_manifest_entries WHERE context_manifest_id = ? ORDER BY position ASC",
     )
@@ -4414,6 +4462,12 @@ async fn load_context_manifest(
             .try_get::<Option<String>, _>("source_tool_call_id")
             .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
         if entry_kind != "tool_exchange" && source_tool_call_id.is_some() {
+            return Err(ContextManifestStoreError::IntegrityViolation);
+        }
+        let source_model_invocation_id = row
+            .try_get::<Option<String>, _>("source_model_invocation_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        if entry_kind != "provider_continuation" && source_model_invocation_id.is_some() {
             return Err(ContextManifestStoreError::IntegrityViolation);
         }
         let entry = if entry_kind == "instruction" {
@@ -4533,6 +4587,46 @@ async fn load_context_manifest(
                 })?;
             ContextManifestEntry::child_activity_snapshot(reaction_message_id, reference, content)
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+        } else if entry_kind == "provider_continuation" && provenance == "provider_continuation" {
+            if encoding_version != 2
+                || source_event_id.is_some()
+                || source_tool_call_id.is_some()
+                || row
+                    .try_get::<Option<String>, _>("workspace_root_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .is_some()
+                || row
+                    .try_get::<Option<String>, _>("message_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .is_some()
+                || row
+                    .try_get::<Option<String>, _>("message_role")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .is_some()
+                || row
+                    .try_get::<Option<String>, _>("source_run_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .as_deref()
+                    != Some(run_id.as_str())
+            {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
+            let invocation_id = ModelInvocationId::parse(
+                source_model_invocation_id.ok_or(ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let reference = model_continuation::load_reference(
+                transaction,
+                &run,
+                &invocation_id,
+                Some(manifest_sequence),
+            )
+            .await
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            if reference.content_json() != content {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
+            ContextManifestEntry::ContinuationReference { reference }
         } else if entry_kind == "tool_exchange" && provenance == "tool_exchange" {
             if encoding_version != 2
                 || source_event_id.is_some()

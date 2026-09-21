@@ -119,7 +119,7 @@ pub(super) async fn load_exchange(
 /// Validate source identity and chronology without recursively reloading every
 /// prior manifest. Each destination snapshot independently binds full exchange
 /// content; source manifest headers/retry metadata retain the provenance chain.
-async fn validate_source_metadata(
+pub(super) async fn validate_source_metadata(
     transaction: &mut Transaction<'_, Sqlite>,
     run: &kiln_core::Run,
     sequence: i64,

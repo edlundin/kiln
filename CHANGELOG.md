@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Bound private provider replay into context manifests and added verified, bounded continuation loading with same-Run/account/model checks.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Routed provider continuation updates through atomic terminal storage and native cancellation/error handling while keeping replay payloads private.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

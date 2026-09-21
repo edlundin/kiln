@@ -99,6 +99,13 @@ impl<
         {
             return Err(ProviderClaimError::ContextMismatch);
         }
+        for entry in manifest.entries() {
+            if let crate::ContextManifestEntry::ContinuationReference { reference } = entry {
+                reference
+                    .validate_destination(&invocation)
+                    .map_err(|_| ProviderClaimError::ContextMismatch)?;
+            }
+        }
         let expected = invocation
             .transition(ModelInvocationState::InFlight, None)
             .map_err(|_| ProviderClaimError::IntegrityViolation)?;

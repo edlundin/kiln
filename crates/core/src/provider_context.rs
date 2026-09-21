@@ -15,6 +15,8 @@ pub struct ProviderContextLimits {
     pub max_text_bytes: u64,
     pub max_attachment_bytes: u64,
     pub max_total_attachment_bytes: u64,
+    pub max_continuation_bytes: u64,
+    pub max_total_continuation_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,9 @@ pub enum ProviderContextError {
     ArtifactUnavailable,
     ArtifactCorrupt,
     InvalidManifest,
+    ContinuationLimitExceeded,
+    ContinuationUnavailable,
+    ContinuationCorrupt,
 }
 
 /// Implementations must bound the read by the expected artifact size and the
@@ -37,6 +42,14 @@ pub trait ProviderContextArtifactReader: Send + Sync {
         artifact: &Artifact,
         max_bytes: u64,
     ) -> impl Future<Output = Result<Vec<u8>, ProviderContextError>> + Send;
+}
+
+pub trait ProviderContextContinuationReader: Send + Sync {
+    fn read_context_continuation(
+        &self,
+        reference: &crate::ModelContinuationReference,
+        max_bytes: u64,
+    ) -> impl Future<Output = Result<crate::ModelInvocationContinuation, ProviderContextError>> + Send;
 }
 
 /// No Debug: context content and attachment bytes are model input, not diagnostics.
@@ -56,6 +69,10 @@ impl ProviderContextAttachment {
 }
 
 pub enum ProviderContextEntry {
+    Continuation {
+        reference: crate::ModelContinuationReference,
+        continuation: crate::ModelInvocationContinuation,
+    },
     ToolExchange {
         exchange: crate::ModelToolExchange,
         stdout_artifact: Option<ProviderContextAttachment>,
@@ -111,7 +128,7 @@ impl ProviderRequest {
     /// further reads and discards partial assembly; it does not publish output.
     pub async fn assemble_context(
         &self,
-        reader: &impl ProviderContextArtifactReader,
+        reader: &(impl ProviderContextArtifactReader + ProviderContextContinuationReader),
         limits: ProviderContextLimits,
     ) -> Result<ProviderContext, ProviderContextError> {
         let manifest = self.manifest();
@@ -121,6 +138,8 @@ impl ProviderRequest {
         if limits.max_text_bytes == 0
             || limits.max_attachment_bytes == 0
             || limits.max_total_attachment_bytes == 0
+            || limits.max_continuation_bytes == 0
+            || limits.max_total_continuation_bytes == 0
         {
             return Err(ProviderContextError::InvalidLimits);
         }
@@ -133,6 +152,22 @@ impl ProviderRequest {
                 .ok_or(ProviderContextError::TextLimitExceeded)?;
             if text_bytes > limits.max_text_bytes {
                 return Err(ProviderContextError::TextLimitExceeded);
+            }
+        }
+        let mut continuation_bytes = 0_u64;
+        for entry in manifest.entries() {
+            if let ContextManifestEntry::ContinuationReference { reference } = entry {
+                reference
+                    .validate_destination(self.invocation())
+                    .map_err(|_| ProviderContextError::InvalidManifest)?;
+                continuation_bytes = continuation_bytes
+                    .checked_add(reference.payload_size())
+                    .ok_or(ProviderContextError::ContinuationLimitExceeded)?;
+                if reference.payload_size() > limits.max_continuation_bytes
+                    || continuation_bytes > limits.max_total_continuation_bytes
+                {
+                    return Err(ProviderContextError::ContinuationLimitExceeded);
+                }
             }
         }
         let mut attachment_bytes = 0_u64;
@@ -168,6 +203,18 @@ impl ProviderRequest {
         let mut entries = Vec::with_capacity(manifest.entries().len());
         for entry in manifest.entries() {
             entries.push(match entry {
+                ContextManifestEntry::ContinuationReference { reference } => {
+                    let continuation = reader
+                        .read_context_continuation(reference, limits.max_continuation_bytes)
+                        .await?;
+                    if !reference.matches(&continuation) {
+                        return Err(ProviderContextError::ContinuationCorrupt);
+                    }
+                    ProviderContextEntry::Continuation {
+                        reference: reference.clone(),
+                        continuation,
+                    }
+                }
                 ContextManifestEntry::ToolExchangeSnapshot { exchange } => {
                     let stdout_artifact = load_optional_artifact(
                         reader,

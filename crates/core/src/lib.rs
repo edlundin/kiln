@@ -6,6 +6,7 @@ use ulid::Ulid;
 
 mod assistant_message;
 mod child_activity;
+mod configuration_sync;
 mod model_continuation;
 mod model_credential;
 mod model_output;
@@ -25,6 +26,7 @@ mod usage_store;
 mod workspace_file_read;
 pub use assistant_message::*;
 pub use child_activity::*;
+pub use configuration_sync::*;
 pub use model_continuation::*;
 pub use model_credential::*;
 pub use model_output::*;

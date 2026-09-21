@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Define master-instance configuration synchronization authority, scope, enrollment, offline behavior, and revision checks for shared settings, global MCP, and global skills.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Add opt-in native public API Runs with an explicit account/model/capability selection and caller-defined context, transport, and response budgets.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

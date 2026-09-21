@@ -730,6 +730,9 @@ the public protocol.
 
 - extend local authentication with remote identity and enrollment;
 - define daemon discovery and enrollment;
+- synchronize shared settings, global MCP definitions, and global skills from one
+  explicitly designated master to followers, per the
+  [configuration synchronization contract](configuration-sync.md) (EDL-322);
 - add multi-user ownership and audit policy;
 - add the review-first mobile client; and
 - add deployment and operational documentation.

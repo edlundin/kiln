@@ -45,6 +45,7 @@ pub enum ResponsesRequestError {
 /// credentials and does not establish subscription-endpoint compatibility.
 pub struct ResponsesRequestBody {
     json: Vec<u8>,
+    invocation_id: ModelInvocationId,
 }
 
 impl fmt::Debug for ResponsesRequestBody {
@@ -299,11 +300,20 @@ impl ResponsesRequestBody {
         if image_count != 0 && writer.bytes.len() > 512_000_000 {
             return Err(Error::RequestLimitExceeded);
         }
-        Ok(Self { json: writer.bytes })
+        Ok(Self {
+            json: writer.bytes,
+            invocation_id: invocation.invocation_id().clone(),
+        })
     }
 
     pub fn as_json(&self) -> &[u8] {
         &self.json
+    }
+    pub(crate) fn matches(&self, request: &ProviderRequest) -> bool {
+        &self.invocation_id == request.invocation().invocation_id()
+    }
+    pub(crate) fn into_json(self) -> Vec<u8> {
+        self.json
     }
 }
 

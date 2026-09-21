@@ -994,6 +994,19 @@ and raw HTTP errors are never exposed. Actual TLS/authentication/timeout/cancel
 behavior has not been exercised. Native account/model registration, progressive
 output, subscription compatibility and live acceptance remain open.
 
+`OpenAiApiModelProvider` implements the existing provider port by composing a
+shared account application/vault, a context reader and explicit context/transport
+limits. `start` first checks provider/pinning, assembles verified input and
+serializes the full request before accessing credentials. The typed serialized
+body binds to the immutable invocation and moves into the HTTP request without
+encoding twice. Input failures therefore precede vault access. It then resolves
+the pinned credential and returns the lazy HTTP operation; no model request is
+sent during preparation. Account management must share these same application
+and vault instances so lifecycle/entry locks are shared. Errors cross the port
+only as content-free core categories. Model/account registration, capability
+selection, and daemon activation remain explicit caller responsibilities and
+are not yet wired for live requests.
+
 Source: official [Responses streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses),
 and [streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events),
 consulted 2026-09-21. No live streaming acceptance is claimed.

@@ -94,12 +94,29 @@ impl OpenAiApiTransport {
         context: &ProviderContext,
         credential: ResolvedModelCredential,
     ) -> Result<OpenAiApiOperation, OpenAiApiTransportError> {
+        let body = self.encode(&request, context)?;
+        self.prepare_encoded(request, body, credential)
+    }
+
+    pub(crate) fn encode(
+        &self,
+        request: &ProviderRequest,
+        context: &ProviderContext,
+    ) -> Result<ResponsesRequestBody, OpenAiApiTransportError> {
+        ResponsesRequestBody::from_context(request, context, self.limits.request)
+            .map_err(|_| OpenAiApiTransportError::InvalidRequest)
+    }
+
+    pub(crate) fn prepare_encoded(
+        &self,
+        request: ProviderRequest,
+        body: ResponsesRequestBody,
+        credential: ResolvedModelCredential,
+    ) -> Result<OpenAiApiOperation, OpenAiApiTransportError> {
         use OpenAiApiTransportError as Error;
-        if !credential.matches(&request) {
+        if !credential.matches(&request) || !body.matches(&request) {
             return Err(Error::CredentialMismatch);
         }
-        let body = ResponsesRequestBody::from_context(&request, context, self.limits.request)
-            .map_err(|_| Error::InvalidRequest)?;
         let key = OpenAiApiKey::from_credential(
             request.invocation().provider_account_id(),
             credential.into_secret(),
@@ -118,7 +135,7 @@ impl OpenAiApiTransport {
             .header(AUTHORIZATION, authorization)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "text/event-stream")
-            .body(body.as_json().to_vec())
+            .body(body.into_json())
             .build()
             .map_err(|_| Error::InvalidRequest)?;
         let invocation = request.invocation().clone();

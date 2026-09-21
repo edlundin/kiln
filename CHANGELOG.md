@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-22 — `feat`
+
+- Composed the public API model-provider adapter with verified input preparation before pinned credential access and lazy HTTP dispatch.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-22 — `fix`
 
 - Preserve the pending Responses HTTP send across daemon notification polls so dropping an update future neither interrupts nor resends the request.

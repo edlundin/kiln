@@ -861,12 +861,18 @@ and source review do not establish live API acceptance. Model-specific capabilit
 validation, transport, credential-generation binding, streaming normalization,
 compaction, and subscription endpoint compatibility remain pending.
 
-`ResponsesCompletion::from_response_json` normalizes a successful public Responses
-envelope within the supported subset. It requires `object:response`, completed
-status, no error/incomplete details, and bounded response/model/tier identifiers.
+`ResponsesCompletion::from_response_json` normalizes a terminal public Responses
+envelope within the supported subset. It requires `object:response`, terminal
+status and bounded response/model/tier identifiers. Successful completions must
+have no error/incomplete details.
 Explicit ceilings cover raw response bytes, visible output, replay, proposals and
-continuation. Failed, incomplete and nonterminal responses return `NotCompleted`;
-they cannot manufacture a successful continuation through this interface.
+continuation. Nonterminal/unknown statuses return `NotTerminal`. Failed responses
+yield a generic ProviderError outcome. Incomplete and provider-cancelled responses
+yield a generic Unknown failure; a remote cancellation is not proof of local user
+cancellation. Their valid final usage is retained, while partial output, tool
+proposals, private replay, and raw provider error diagnostics are discarded.
+Missing usage remains Unknown and malformed usage still fails validation. None
+of these outcomes can manufacture a successful continuation.
 
 Assistant text/refusals and safe reasoning summaries produce ordered nonempty
 output chunks. Encrypted reasoning remains only in private replay. Function
@@ -885,8 +891,9 @@ are retained alongside invocation/account/work attribution. Complete output,
 inert proposals, final usage and bound continuation must validate before any
 updates are returned. Transport must persist the output before the terminal
 update and reconcile any already-emitted streaming deltas with final output to
-avoid duplication. Failed/incomplete usage accounting and stream reconciliation
-remain unimplemented; no live adapter calls this helper.
+avoid duplication. Local stop draining can retain normalized final usage under
+the locally cancelled/interrupted outcome. Stream reconciliation and live
+transport remain unimplemented; no live adapter calls this helper.
 
 `ResponsesSseDecoder` incrementally frames provider-private JSON events across
 arbitrary byte/UTF-8 boundaries, accepts LF/CRLF/CR, one initial BOM, comments and

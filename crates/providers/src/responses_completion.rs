@@ -1,9 +1,9 @@
 use kiln_core::{
-    ModelContinuationLimits, ModelInvocationCompletionKind, ModelInvocationOutcome,
-    ModelOutputStream, ModelToolRequestBatch, ModelToolRequestInput, ModelToolRequestLimits,
-    ProviderRequest, ProviderUpdate, ProviderUsageMetadata, ProviderUsageUpdate, QuantityRelation,
-    RecordModelOutput, UsageAccounting, UsageCompleteness, UsageFinality, UsageQuantity,
-    UsageSource,
+    ModelContinuationLimits, ModelInvocationCompletionKind, ModelInvocationFailureReason,
+    ModelInvocationOutcome, ModelOutputStream, ModelToolRequestBatch, ModelToolRequestInput,
+    ModelToolRequestLimits, ProviderRequest, ProviderUpdate, ProviderUsageMetadata,
+    ProviderUsageUpdate, QuantityRelation, RecordModelOutput, UsageAccounting, UsageCompleteness,
+    UsageFinality, UsageQuantity, UsageSource,
 };
 use serde_json::Value;
 
@@ -24,7 +24,7 @@ pub enum ResponsesCompletionError {
     InvalidLimits,
     ResponseLimitExceeded,
     InvalidEnvelope,
-    NotCompleted,
+    NotTerminal,
     InvalidReplay,
     InvalidToolRequests,
     InvalidUsage,
@@ -32,8 +32,9 @@ pub enum ResponsesCompletionError {
     InvalidContinuation,
 }
 
-/// One successful response within the supported Responses subset, not an SSE decoder. No updates are
-/// returned until output, proposals, replay and final usage all validate.
+/// One terminal response within the supported Responses subset, not an SSE decoder.
+/// Successful output, proposals, replay and final usage validate before exposure.
+/// Failed/incomplete responses retain usage but discard partial output/proposals/replay.
 /// Deliberately no Debug: the response contains model content and private replay.
 pub struct ResponsesCompletion {
     output: Vec<RecordModelOutput>,
@@ -76,12 +77,19 @@ impl ResponsesCompletion {
         if envelope["object"] != "response" {
             return Err(Error::InvalidEnvelope);
         }
-        if envelope["status"] != "completed" {
-            return Err(Error::NotCompleted);
-        }
-        if !envelope["error"].is_null() || !envelope["incomplete_details"].is_null() {
-            return Err(Error::InvalidEnvelope);
-        }
+        let failure = match envelope["status"].as_str() {
+            Some("completed") => {
+                if !envelope["error"].is_null() || !envelope["incomplete_details"].is_null() {
+                    return Err(Error::InvalidEnvelope);
+                }
+                None
+            }
+            Some("failed") => Some(ModelInvocationFailureReason::ProviderError),
+            // Token caps, content filtering, and provider-side cancellation are
+            // not successful generation or proof of a local user cancellation.
+            Some("incomplete" | "cancelled") => Some(ModelInvocationFailureReason::Unknown),
+            _ => return Err(Error::NotTerminal),
+        };
         let response_id = identifier(&envelope["id"], limits.max_identifier_bytes)?;
         let resolved_model = identifier(&envelope["model"], limits.max_identifier_bytes)?;
         let service_tier = if envelope["service_tier"].is_null() {
@@ -89,6 +97,40 @@ impl ResponsesCompletion {
         } else {
             Some(identifier(&envelope["service_tier"], limits.max_identifier_bytes)?.to_owned())
         };
+        let (completeness, quantities) = usage_quantities(&envelope["usage"])?;
+        let usage = ProviderUsageUpdate::new(
+            ProviderUsageMetadata {
+                update_id: format!("responses:{}:terminal", invocation.invocation_id().as_str()),
+                provider_account_id: invocation.provider_account_id().clone(),
+                work_id: invocation.work_id().clone(),
+                model_invocation_id: invocation.invocation_id().clone(),
+                accounting: UsageAccounting::Cumulative,
+                finality: UsageFinality::Final,
+                completeness,
+                observed_at_unix_ms,
+                request_id: Some(response_id.to_owned()),
+                resolved_model: Some(resolved_model.to_owned()),
+                service_tier,
+                source: UsageSource::NativeProvider,
+            },
+            quantities,
+        )
+        .map_err(|_| Error::InvalidUsage)?;
+        if let Some(reason) = failure {
+            // Unsuccessful output may be partial or lack encrypted reasoning.
+            // Do not parse it into proposals or expose provider diagnostic text.
+            let terminal = ProviderUpdate::Finished {
+                outcome: ModelInvocationOutcome::failed(reason),
+                usage,
+            };
+            terminal
+                .validate_for(invocation)
+                .map_err(|_| Error::InvalidEnvelope)?;
+            return Ok(Self {
+                output: Vec::new(),
+                terminal,
+            });
+        }
         let output_json =
             serde_json::to_vec(&envelope["output"]).map_err(|_| Error::InvalidReplay)?;
         let replay = ResponsesReplay::from_output_json(&output_json, limits.replay)
@@ -185,25 +227,6 @@ impl ResponsesCompletion {
                 .map_err(|_| Error::InvalidToolRequests)?,
             )
         };
-        let (completeness, quantities) = usage_quantities(&envelope["usage"])?;
-        let usage = ProviderUsageUpdate::new(
-            ProviderUsageMetadata {
-                update_id: format!("responses:{}:terminal", invocation.invocation_id().as_str()),
-                provider_account_id: invocation.provider_account_id().clone(),
-                work_id: invocation.work_id().clone(),
-                model_invocation_id: invocation.invocation_id().clone(),
-                accounting: UsageAccounting::Cumulative,
-                finality: UsageFinality::Final,
-                completeness,
-                observed_at_unix_ms,
-                request_id: Some(response_id.to_owned()),
-                resolved_model: Some(resolved_model.to_owned()),
-                service_tier,
-                source: UsageSource::NativeProvider,
-            },
-            quantities,
-        )
-        .map_err(|_| Error::InvalidUsage)?;
         let outcome = ModelInvocationOutcome::completed(if requests.is_some() {
             ModelInvocationCompletionKind::ToolRequests
         } else {

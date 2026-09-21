@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `fix`
+
+- Preserve valid final usage from failed, incomplete, and provider-cancelled Responses without adopting partial tools or replay.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `feat`
 
 - Added bounded incremental Responses SSE framing with payload-safe diagnostics and explicit malformed/truncated stream failures.

@@ -1,7 +1,8 @@
 use std::future::Future;
 
 use crate::{
-    EventId, ProviderType, RunError, RunId, RunIdGenerator, RunMutation, RunSnapshot, RunStoreError,
+    EventId, ModelInvocationId, ProviderType, RunError, RunId, RunIdGenerator, RunMutation,
+    RunSnapshot, RunStoreError,
 };
 
 pub trait NativeRunStore: Send + Sync {
@@ -9,6 +10,15 @@ pub trait NativeRunStore: Send + Sync {
         &self,
         provider: &ProviderType,
     ) -> impl Future<Output = Result<Vec<RunSnapshot>, RunStoreError>> + Send;
+
+    /// Atomically reject an unclaimed generation and fail its otherwise idle Run.
+    /// This cannot terminalize an in-flight request or invent provider usage.
+    fn reject_native_invocation(
+        &self,
+        invocation_id: &ModelInvocationId,
+        invocation_event_id: EventId,
+        run_event_id: EventId,
+    ) -> impl Future<Output = Result<RunMutation<RunSnapshot>, RunStoreError>> + Send;
 
     fn fail_native_run(
         &self,
@@ -35,6 +45,16 @@ impl<S: NativeRunStore, I: RunIdGenerator> NativeRunApplication<S, I> {
     ) -> Result<Vec<RunSnapshot>, RunError> {
         self.store
             .list_recoverable_native_runs(&provider)
+            .await
+            .map_err(crate::map_run_store_error)
+    }
+
+    pub async fn reject_native_invocation(
+        &self,
+        invocation_id: ModelInvocationId,
+    ) -> Result<RunMutation<RunSnapshot>, RunError> {
+        self.store
+            .reject_native_invocation(&invocation_id, self.ids.event_id(), self.ids.event_id())
             .await
             .map_err(crate::map_run_store_error)
     }

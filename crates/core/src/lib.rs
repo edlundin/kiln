@@ -1921,11 +1921,13 @@ impl ModelInvocationState {
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Pending, Self::InFlight | Self::Cancelled)
-                | (
-                    Self::InFlight,
-                    Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
-                )
+            (
+                Self::Pending,
+                Self::InFlight | Self::Cancelled | Self::Failed
+            ) | (
+                Self::InFlight,
+                Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+            )
         )
     }
 
@@ -2286,6 +2288,15 @@ impl ModelInvocation {
             .as_ref()
             .is_some_and(|outcome| outcome.state() != state)
             || outcome.is_some() != state.is_terminal()
+        {
+            return Err(ModelInvocationError::InvalidTransition);
+        }
+        if self.state == ModelInvocationState::Pending
+            && state == ModelInvocationState::Failed
+            && outcome
+                != Some(ModelInvocationOutcome::failed(
+                    ModelInvocationFailureReason::InvalidRequest,
+                ))
         {
             return Err(ModelInvocationError::InvalidTransition);
         }
@@ -2683,7 +2694,7 @@ impl RunState {
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Queued, Self::Running | Self::Cancelled)
+            (Self::Queued, Self::Running | Self::Cancelled | Self::Failed)
                 | (Self::Queued, Self::Cancelling)
                 | (
                     Self::Running,
@@ -4556,6 +4567,7 @@ pub enum ModelInvocationError {
     IdempotencyKeyRequired,
     IdempotencyConflict,
     InvalidTransition,
+    CredentialRejected,
     FinalUsageRequired,
     IntegrityViolation,
     StoreUnavailable,
@@ -4575,6 +4587,7 @@ pub enum ModelInvocationStoreError {
     IdempotencyKeyRequired,
     IdempotencyConflict,
     InvalidTransition,
+    CredentialRejected,
     FinalUsageRequired,
     IntegrityViolation,
     Unavailable,
@@ -5282,6 +5295,7 @@ fn map_model_invocation_store_error(error: ModelInvocationStoreError) -> ModelIn
         }
         ModelInvocationStoreError::IdempotencyConflict => ModelInvocationError::IdempotencyConflict,
         ModelInvocationStoreError::InvalidTransition => ModelInvocationError::InvalidTransition,
+        ModelInvocationStoreError::CredentialRejected => ModelInvocationError::CredentialRejected,
         ModelInvocationStoreError::FinalUsageRequired => ModelInvocationError::FinalUsageRequired,
         ModelInvocationStoreError::IntegrityViolation => ModelInvocationError::IntegrityViolation,
         ModelInvocationStoreError::Unavailable => ModelInvocationError::StoreUnavailable,

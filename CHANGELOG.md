@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-22 — `fix`
+
+- Fail native Runs cleanly when credential authorization or replay-version checks reject a model claim before dispatch.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-22 — `feat`
 
 - Composed the public API model-provider adapter with verified input preparation before pinned credential access and lazy HTTP dispatch.

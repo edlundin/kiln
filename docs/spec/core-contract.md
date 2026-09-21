@@ -513,6 +513,17 @@ invocation's `in_flight` transition. Active ToolCalls prevent the claim. A
 duplicate claim cannot authorize another provider request. The caller must
 dispatch only after an `Applied` claim result.
 
+Credential authorization/version rejection is distinct from storage failure.
+The native coordinator may reject the still-pending generation with an
+`invalid_request` outcome and fail its queued or running Run atomically.
+This writes both state Events without an in-flight transition, credential
+snapshot, provider request, or usage observation. The guarded rejection requires
+all other work and descendants to be terminal, no pending approvals, and only
+validated native ToolCalls. Cancellation takes precedence. A concurrent claim
+prevents rejection; it cannot terminalize an in-flight request. A reconnect after
+the rejected claim does not implicitly retry that attempt. The ordinary finish
+operation still cannot fail pending work.
+
 Only one non-terminal invocation can exist for a Run. Run terminal transitions
 must check for active invocation work in the same storage transaction. Creating
 or changing an invocation and writing its metadata Event are atomic.
@@ -1200,7 +1211,8 @@ invocation without new Events, including after a later usage correction.
 
 A dispatched invocation cannot enter a terminal state through the separate
 finish operation unless its latest usage observation is final. Pending
-cancellation requires no usage because dispatch has not occurred. Existing
+cancellation and guarded pre-dispatch rejection require no usage because dispatch
+has not occurred. Existing
 terminal records remain readable, and exact terminal retries remain valid.
 This boundary permits late usage for an already terminal invocation only if a
 durable dispatch transition exists. Automatic terminal observations and

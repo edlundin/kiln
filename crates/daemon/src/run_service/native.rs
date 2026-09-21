@@ -253,16 +253,31 @@ impl RunService {
                     }
                     let claim = ProviderApplication::new(self.store.clone(), UlidIdGenerator)
                         .claim(invocation.value.invocation_id().clone())
-                        .await
-                        .map_err(|_| RunError::RunStoreUnavailable)?;
-                    if let ProviderClaim::Applied { events, .. } = &claim {
-                        self.events.publish(events.clone());
+                        .await;
+                    match claim {
+                        Ok(claim) => {
+                            if let ProviderClaim::Applied { events, .. } = &claim {
+                                self.events.publish(events.clone());
+                            }
+                            Some(Ok(claim))
+                        }
+                        Err(kiln_core::ProviderClaimError::Invocation(
+                            kiln_core::ModelInvocationStoreError::CredentialRejected,
+                        )) => Some(Err(invocation.value.invocation_id().clone())),
+                        Err(_) => return Err(RunError::RunStoreUnavailable),
                     }
-                    Some(claim)
                 }
             };
             let Some(claim) = claim else {
                 return self.finish_native_cancellation(run_id).await;
+            };
+            let claim = match claim {
+                Ok(claim) => claim,
+                Err(invocation_id) => {
+                    return self
+                        .finish_native_claim_rejection(run_id, invocation_id)
+                        .await;
+                }
             };
             let request = match claim {
                 ProviderClaim::Applied { request, .. } => request,
@@ -547,6 +562,30 @@ impl RunService {
         self.events.publish(mutation.events);
         self.retain_incomplete_native_messages(&mutation.value)
             .await?;
+        Ok(mutation.value)
+    }
+
+    async fn finish_native_claim_rejection(
+        &self,
+        run_id: RunId,
+        invocation_id: ModelInvocationId,
+    ) -> Result<RunSnapshot, RunError> {
+        self.wait_for_descendants_terminal(&run_id).await?;
+        let _sequence = self.commit_sequence.lock().await;
+        if matches!(
+            self.runs.get_run(run_id.clone()).await?.run().state(),
+            RunState::Cancelling | RunState::Cancelled
+        ) {
+            drop(_sequence);
+            return self.finish_native_cancellation(run_id).await;
+        }
+        let mutation = NativeRunApplication::new(self.store.clone(), UlidIdGenerator)
+            .reject_native_invocation(invocation_id)
+            .await?;
+        self.events.publish(mutation.events);
+        self.retain_incomplete_native_messages(&mutation.value)
+            .await?;
+        self.active.changed.notify_waiters();
         Ok(mutation.value)
     }
 

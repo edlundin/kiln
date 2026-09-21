@@ -65,7 +65,7 @@ pub(super) async fn freeze(
         if account.provider_type() != invocation.settings().provider()
             || account.state() != ProviderAccountState::Connected
         {
-            return Err(Error::InvalidTransition);
+            return Err(Error::CredentialRejected);
         }
         let workspace: Option<String> = sqlx::query_scalar(
             "SELECT s.workspace_id FROM runs r
@@ -80,7 +80,7 @@ pub(super) async fn freeze(
         .map_err(|_| Error::Unavailable)?;
         Some(ModelInvocationCredential::new(
             invocation.invocation_id().clone(),
-            WorkspaceId::parse(workspace.ok_or(Error::InvalidTransition)?)
+            WorkspaceId::parse(workspace.ok_or(Error::CredentialRejected)?)
                 .map_err(|_| Error::IntegrityViolation)?,
             account
                 .secret_ref()
@@ -113,7 +113,7 @@ pub(super) async fn freeze(
         match (&credential, &prior) {
             (Some(current), Some(prior)) if current.same_version(prior) => {}
             (None, None) => {}
-            _ => return Err(Error::InvalidTransition),
+            _ => return Err(Error::CredentialRejected),
         }
     }
     if let Some(credential) = credential {

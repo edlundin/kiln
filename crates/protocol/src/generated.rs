@@ -11,36 +11,42 @@ use ts_rs::{Config, TS};
 use crate::{
     APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ARTIFACTS_PATH, ASSIGN_TASK_OPERATION_ID,
     AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
-    ApprovalResponse, ApprovalState, ArtifactResponse, AssignTaskRequest, CANCEL_RUN_OPERATION_ID,
-    CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
-    ChangedFileResponse, ChildActivityReference, ClientIdentity, ContextManifestCreatedResponse,
-    CreateTaskRequest, CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID,
-    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
-    GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
-    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_USAGE_OPERATION_ID,
-    LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse, ListWorkspacesResponse,
-    MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
-    MessageRole, MessageStatus, ModelInvocationCompletionKind, ModelInvocationEventResponse,
-    ModelInvocationFailureReason, ModelInvocationPurpose, ModelInvocationStatus,
-    ModelOutputRecordedResponse, ModelOutputStream, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
-    REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
-    RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
-    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
-    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID, SendRunInputRequest,
+    ApprovalResponse, ApprovalState, ArtifactResponse, AssignTaskRequest,
+    CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, CANCEL_RUN_OPERATION_ID,
+    CREATE_PROVIDER_ACCOUNT_OPERATION_ID, CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID,
+    CREATE_WORKSPACE_OPERATION_ID, ChangedFileResponse, ChildActivityReference, ClientIdentity,
+    ContextManifestCreatedResponse, CreateProviderAccountRequest, CreateTaskRequest,
+    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
+    GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, GET_PROVIDER_ACCOUNT_OPERATION_ID,
+    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
+    GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
+    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
+    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
+    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse,
+    ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode, MessageDeliveryResponse,
+    MessageDeliveryState, MessageResponse, MessageRole, MessageStatus,
+    ModelInvocationCompletionKind, ModelInvocationEventResponse, ModelInvocationFailureReason,
+    ModelInvocationPurpose, ModelInvocationStatus, ModelOutputRecordedResponse, ModelOutputStream,
+    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH,
+    PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse,
+    ProviderAccountLoginState, ProviderAccountResponse, REACT_TO_RUN_ACTIVITY_OPERATION_ID,
+    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH,
+    ReactToRunActivityRequest, RunInputMode, RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID,
+    SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
+    START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, START_RUN_OPERATION_ID, SendRunInputRequest,
     SessionChangeDiffContent, SessionChangeDiffResponse, SessionChangeDiffUnavailableReason,
     SessionChangesResponse, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
-    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
-    TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
-    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID,
-    UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UpdateTaskRequest, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
-    UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse, UsageSource,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
+    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartProviderAccountLoginResponse,
+    StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
+    TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState,
+    ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
+    UPDATE_TASK_OPERATION_ID, UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UpdateTaskRequest,
+    UsageAccounting, UsageCompleteness, UsageFinality, UsageLedgerEntryResponse,
+    UsageLedgerResponse, UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse,
+    UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
     WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
     error_code,
 };
@@ -96,6 +102,26 @@ pub fn artifact_files() -> BTreeMap<&'static str, String> {
     files.insert(
         "fixtures/list-workspaces-response.json",
         fixture_list_workspaces_response(),
+    );
+    files.insert(
+        "fixtures/create-provider-account-request.json",
+        fixture_create_provider_account_request(),
+    );
+    files.insert(
+        "fixtures/provider-account-response.json",
+        fixture_provider_account_response(),
+    );
+    files.insert(
+        "fixtures/list-provider-accounts-response.json",
+        fixture_list_provider_accounts_response(),
+    );
+    files.insert(
+        "fixtures/start-provider-account-login-response.json",
+        fixture_start_provider_account_login_response(),
+    );
+    files.insert(
+        "fixtures/provider-account-login-response.json",
+        fixture_provider_account_login_response(),
     );
     files.insert(
         "fixtures/append-message-request.json",
@@ -215,6 +241,30 @@ fn schema() -> String {
         (
             "ListWorkspacesResponse",
             schema_for!(ListWorkspacesResponse),
+        ),
+        (
+            "CreateProviderAccountRequest",
+            schema_for!(CreateProviderAccountRequest),
+        ),
+        (
+            "ProviderAccountResponse",
+            schema_for!(ProviderAccountResponse),
+        ),
+        (
+            "ListProviderAccountsResponse",
+            schema_for!(ListProviderAccountsResponse),
+        ),
+        (
+            "StartProviderAccountLoginResponse",
+            schema_for!(StartProviderAccountLoginResponse),
+        ),
+        (
+            "ProviderAccountLoginState",
+            schema_for!(ProviderAccountLoginState),
+        ),
+        (
+            "ProviderAccountLoginResponse",
+            schema_for!(ProviderAccountLoginResponse),
         ),
         ("AppendMessageRequest", schema_for!(AppendMessageRequest)),
         ("CreateTaskRequest", schema_for!(CreateTaskRequest)),
@@ -357,6 +407,12 @@ fn typescript() -> String {
         WorkspaceRootResponse::decl(&config),
         WorkspaceResponse::decl(&config),
         ListWorkspacesResponse::decl(&config),
+        CreateProviderAccountRequest::decl(&config),
+        ProviderAccountResponse::decl(&config),
+        ListProviderAccountsResponse::decl(&config),
+        StartProviderAccountLoginResponse::decl(&config),
+        ProviderAccountLoginState::decl(&config),
+        ProviderAccountLoginResponse::decl(&config),
         AppendMessageRequest::decl(&config),
         CreateTaskRequest::decl(&config),
         UpdateTaskRequest::decl(&config),
@@ -445,6 +501,30 @@ fn catalogue() -> String {
             "method": "GET",
             "path": WORKSPACE_PATH,
             "operation": GET_WORKSPACE_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": PROVIDER_ACCOUNTS_PATH,
+            "operation": CREATE_PROVIDER_ACCOUNT_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": PROVIDER_ACCOUNTS_PATH,
+            "operation": LIST_PROVIDER_ACCOUNTS_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": PROVIDER_ACCOUNT_PATH,
+            "operation": GET_PROVIDER_ACCOUNT_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": PROVIDER_ACCOUNT_LOGIN_PATH,
+            "operation": START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+            "operation": GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+            "operation": CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID
         }, {
             "method": "POST",
             "path": WORKSPACE_SESSIONS_PATH,
@@ -665,6 +745,77 @@ fn fixture_list_workspaces_response() -> String {
             name: "fixture-workspace".to_owned(),
             roots: Vec::new(),
         }],
+    })
+}
+
+fn fixture_create_provider_account_request() -> String {
+    serialize_fixture(&CreateProviderAccountRequest {
+        provider_type: "openai_codex_subscription".to_owned(),
+        label: "ChatGPT subscription".to_owned(),
+        workspace_ids: vec!["wsp_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()],
+    })
+}
+
+fn fixture_provider_account_response() -> String {
+    serialize_fixture(&ProviderAccountResponse {
+        provider_account_id: "pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+        provider_type: "openai_codex_subscription".to_owned(),
+        label: "ChatGPT subscription".to_owned(),
+        state: "connecting".to_owned(),
+        created_at_unix_ms: 1_700_000_000_000,
+        updated_at_unix_ms: 1_700_000_000_000,
+        last_used_at_unix_ms: None,
+        capabilities_refreshed_at_unix_ms: None,
+    })
+}
+
+fn fixture_list_provider_accounts_response() -> String {
+    serialize_fixture(&ListProviderAccountsResponse {
+        provider_accounts: vec![ProviderAccountResponse {
+            provider_account_id: "pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+            provider_type: "openai_codex_subscription".to_owned(),
+            label: "ChatGPT subscription".to_owned(),
+            state: "connecting".to_owned(),
+            created_at_unix_ms: 1_700_000_000_000,
+            updated_at_unix_ms: 1_700_000_000_000,
+            last_used_at_unix_ms: None,
+            capabilities_refreshed_at_unix_ms: None,
+        }],
+    })
+}
+
+fn fixture_start_provider_account_login_response() -> String {
+    serialize_fixture(&StartProviderAccountLoginResponse {
+        attempt_id: "pla_01ARZ3NDEKTSV4RRFFQ69G5FB2".to_owned(),
+        verification_url: "https://auth.openai.com/codex/device".to_owned(),
+        user_code: "ABCD-EFGH".to_owned(),
+        account: ProviderAccountResponse {
+            provider_account_id: "pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+            provider_type: "openai_codex_subscription".to_owned(),
+            label: "ChatGPT subscription".to_owned(),
+            state: "connecting".to_owned(),
+            created_at_unix_ms: 1_700_000_000_000,
+            updated_at_unix_ms: 1_700_000_000_000,
+            last_used_at_unix_ms: None,
+            capabilities_refreshed_at_unix_ms: None,
+        },
+    })
+}
+
+fn fixture_provider_account_login_response() -> String {
+    serialize_fixture(&ProviderAccountLoginResponse {
+        attempt_id: "pla_01ARZ3NDEKTSV4RRFFQ69G5FB2".to_owned(),
+        state: ProviderAccountLoginState::Pending,
+        account: ProviderAccountResponse {
+            provider_account_id: "pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+            provider_type: "openai_codex_subscription".to_owned(),
+            label: "ChatGPT subscription".to_owned(),
+            state: "connecting".to_owned(),
+            created_at_unix_ms: 1_700_000_000_000,
+            updated_at_unix_ms: 1_700_000_000_000,
+            last_used_at_unix_ms: None,
+            capabilities_refreshed_at_unix_ms: None,
+        },
     })
 }
 
@@ -1041,6 +1192,141 @@ paths:
         '400':
           $ref: '#/components/responses/Problem'
         '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  {PROVIDER_ACCOUNTS_PATH}:
+    post:
+      operationId: {CREATE_PROVIDER_ACCOUNT_OPERATION_ID}
+      parameters:
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProviderAccountRequest'
+      responses:
+        '201':
+          description: Created provider account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccountResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+    get:
+      operationId: {LIST_PROVIDER_ACCOUNTS_OPERATION_ID}
+      responses:
+        '200':
+          description: Provider account snapshots ordered by account ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListProviderAccountsResponse'
+        '500':
+          $ref: '#/components/responses/Problem'
+  {PROVIDER_ACCOUNT_PATH}:
+    get:
+      operationId: {GET_PROVIDER_ACCOUNT_OPERATION_ID}
+      parameters:
+        - name: provider_account_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '200':
+          description: Stored provider account snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccountResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  {PROVIDER_ACCOUNT_LOGIN_PATH}:
+    post:
+      operationId: {START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID}
+      parameters:
+        - name: provider_account_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '201':
+          description: Started device login.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartProviderAccountLoginResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '502':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}:
+    get:
+      operationId: {GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID}
+      parameters:
+        - name: provider_account_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: attempt_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '200':
+          description: Nonblocking login attempt status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccountLoginResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: {CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID}
+      parameters:
+        - name: provider_account_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: attempt_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '200':
+          description: Login attempt cancellation result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccountLoginResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
           $ref: '#/components/responses/Problem'
         '500':
           $ref: '#/components/responses/Problem'
@@ -1742,6 +2028,30 @@ components:
         ),
         ("WorkspaceResponse", openapi_schema::<WorkspaceResponse>()),
         (
+            "CreateProviderAccountRequest",
+            openapi_schema::<CreateProviderAccountRequest>(),
+        ),
+        (
+            "ProviderAccountResponse",
+            openapi_schema::<ProviderAccountResponse>(),
+        ),
+        (
+            "ListProviderAccountsResponse",
+            openapi_schema::<ListProviderAccountsResponse>(),
+        ),
+        (
+            "StartProviderAccountLoginResponse",
+            openapi_schema::<StartProviderAccountLoginResponse>(),
+        ),
+        (
+            "ProviderAccountLoginState",
+            openapi_schema::<ProviderAccountLoginState>(),
+        ),
+        (
+            "ProviderAccountLoginResponse",
+            openapi_schema::<ProviderAccountLoginResponse>(),
+        ),
+        (
             "AppendMessageRequest",
             openapi_schema::<AppendMessageRequest>(),
         ),
@@ -1947,6 +2257,10 @@ fn reference() -> String {
     .replace(
         "`POST /v1/runs/{run_id}/cancel` is naturally idempotent for the addressed Run. It records `run.cancellation_requested`, stops owned execution, waits for process exit, and returns the durable terminal Run. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. A completion committed before the cancellation request remains authoritative.",
         "`POST /v1/runs/{run_id}/cancel` is naturally idempotent for the addressed Run and its descendants. It preserves the addressed Run's parent and siblings, records durable cancellation intent across the selected subtree before signalling owned processes, and returns only after descendant Runs and ToolCalls are terminal. Cancelling while approval is pending rejects that Approval and denies the ToolCall without starting a process. Each Run cancellation terminal commit atomically marks its queued MessageDeliveries cancelled and records `run.input_cancelled`; exact input retries return that cancelled delivery. A completion committed before the cancellation request remains authoritative.",
+    )
+    .replace(
+        &format!("`GET {WORKSPACE_PATH}` returns the stored snapshot."),
+        &format!("`GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {PROVIDER_ACCOUNTS_PATH}` requires a non-empty `{IDEMPOTENCY_KEY_HEADER}` header and creates an empty `connecting` provider account from a provider type, label, and optional workspace associations. A repeated key with the same provider type, label, and normalized workspace associations returns the original account; a changed request is an idempotency conflict. Account list and get responses expose only safe account metadata; credential references, provider subjects, arbitrary metadata, and credential bytes are never returned. `POST {PROVIDER_ACCOUNT_LOGIN_PATH}` starts the supported Codex device login and returns an opaque process-local attempt ID, verification URL, and user code. `GET {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}` is nonblocking and reports `pending`, `connected`, `failed`, `cancelled`, or `cleanup_required`; the latest terminal result remains available until a replacement starts. `POST {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}` cancels the addressed attempt. Attempts are ephemeral and are not resumed after daemon restart."),
     )
     .replace(
         "A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.",

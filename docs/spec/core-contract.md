@@ -304,10 +304,17 @@ to `reauth_required`, while transient rejection leaves it connected and does
 not cache the failure. This is serialized refresh with successful-version
 coalescing, not general single-flight for transient failures.
 
-OAuth PKCE/device-code flows, revocation, protocol routes, and live provider
-transport remain pending. The deterministic fixture continues to use its
-explicit registry-only account identity and does not require a persisted
-account or secret.
+The authenticated protocol now exposes safe provider-account create, list, and
+get snapshots plus the Codex device-code login start, nonblocking status, and
+cancellation routes. Account creation requires a non-empty `Idempotency-Key`;
+an exact retry returns the original account and changed payload reuse is a
+typed conflict. Account responses omit secret references, provider subjects,
+arbitrary metadata, and credential material. Login attempt IDs are
+opaque and process-local; the latest terminal result remains addressable until
+an explicit replacement, while daemon restart makes prior attempts unavailable.
+The deterministic fixture continues to use its explicit registry-only account
+identity and does not require a persisted account or secret. Live OAuth,
+vault, and UI runtime verification remain pending.
 
 The first `openai_codex_subscription` credential adapter stores a versioned
 provider-private envelope inside `SecretValue`; its ChatGPT account identifier
@@ -324,8 +331,8 @@ ChatGPT account claim. This reads identity metadata from the trusted HTTPS/vault
 token but does not claim to verify the JWT signature. Unauthorized,
 `invalid_grant`, and known expired, reused, or invalidated refresh-token errors
 require reauthentication; transport, malformed response, and unknown failures
-remain transient. Browser/device login, revocation, public account operations,
-and live model transport remain pending.
+remain transient. Browser UI integration, revocation, and live model transport
+remain pending.
 
 The native device-code slice follows the Codex service contract rather than a
 generic RFC device flow. It polls immediately, treats only `403` and `404` as
@@ -347,9 +354,11 @@ exact `SecretRef` published by that attempt; a changed reference is a typed
 conflict and is never deleted. Daemon shutdown cancels and joins active
 attempts and permanently closes the coordinator before taking its join
 snapshot, so a queued or later begin cannot register new work. A cancelled
-shutdown call can be retried because attempt handles remain owned. No protocol,
-client, or UI entrypoint exists yet, and no live device
-login or vault runtime proof has run.
+shutdown call can be retried because attempt handles remain owned. The
+authenticated protocol and typed client expose the account create/list/get and
+device-login start/status/cancel entrypoints; status reports
+`cleanup_required` when conditional credential cleanup cannot be completed. No
+live device login or vault runtime proof has run.
 
 The initial settings snapshot stores provider and model identifiers, an optional
 output-token setting, optional reasoning effort, and versioned tool, vision,

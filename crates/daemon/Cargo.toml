@@ -16,6 +16,7 @@ kiln-server = { path = "../server" }
 kiln-protocol = { path = "../protocol" }
 serde_json.workspace = true
 tokio.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

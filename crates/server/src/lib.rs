@@ -27,8 +27,9 @@ use kiln_core::{
     ContentHash, CreateTask, CreateWorkspace, DEFAULT_USAGE_PAGE_LIMIT, EventCursor,
     MAX_USAGE_PAGE_LIMIT, Message, MessageDelivery, MessageDeliveryMode as CoreMessageDeliveryMode,
     MessageDeliveryState as CoreMessageDeliveryState, MessageRole as CoreMessageRole,
-    ModelInvocationId, ReactToRunActivity, RunError, RunId, RunInputMode as CoreRunInputMode,
-    RunSnapshot, RunState as CoreRunState, SendRunInput, Session, SessionError, SessionEventPage,
+    ModelInvocationId, ProviderAccount, ProviderAccountError, ProviderAccountId, ProviderType,
+    ReactToRunActivity, RunError, RunId, RunInputMode as CoreRunInputMode, RunSnapshot,
+    RunState as CoreRunState, SendRunInput, Session, SessionError, SessionEventPage,
     SessionEventPayload, SessionId, SessionOperations, StoreMetadata, StoredSessionEvent, Task,
     TaskError, TaskId, TaskOperations, TaskState as CoreTaskState, ToolCall,
     ToolCallState as CoreToolCallState, ToolOutputStream as CoreToolOutputStream, TransitionTask,
@@ -39,17 +40,21 @@ use kiln_protocol::{
     ARTIFACT_PATH, ARTIFACT_SESSION_HEADER, ARTIFACTS_PATH, AppendMessageRequest, ApprovalDecision,
     ApprovalDecisionRequest, ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
     ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest,
-    ChangedFileResponse, ChildActivityReference, CreateTaskRequest, CreateWorkspaceRequest,
-    EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, ListSessionsResponse, ListWorkspacesResponse,
+    ChangedFileResponse, ChildActivityReference, CreateProviderAccountRequest, CreateTaskRequest,
+    CreateWorkspaceRequest, EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER,
+    ListProviderAccountsResponse, ListSessionsResponse, ListWorkspacesResponse,
     MAX_ARTIFACT_UPLOAD_BYTES, MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState,
     MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
-    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
-    RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
-    SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest,
-    SessionChangeDiffContent, SessionChangeDiffResponse, SessionChangeDiffUnavailableReason,
-    SessionChangesResponse, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
+    PROTOCOL_VERSION, PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH,
+    PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse,
+    ProviderAccountLoginState, ProviderAccountResponse, RUN_CANCEL_PATH, RUN_CHILDREN_PATH,
+    RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode,
+    RunResponse, RunState, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH,
+    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
+    SendRunInputRequest, SessionChangeDiffContent, SessionChangeDiffResponse,
+    SessionChangeDiffUnavailableReason, SessionChangesResponse, SessionEventDataResponse,
+    SessionEventResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
+    StartChildRunRequest, StartProviderAccountLoginResponse, StartRunRequest, StoreIdentity,
     TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
     TaskState, ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
     USAGE_PATH, UpdateTaskRequest, UsageAccounting, UsageCompleteness, UsageFinality,
@@ -110,6 +115,152 @@ pub trait RunOperations: Send + Sync {
     ) -> impl Future<Output = Result<kiln_core::ApprovalDecisionMutation, RunError>> + Send;
 }
 
+#[derive(Debug, Clone)]
+pub struct ProviderAccountCreateCommand {
+    pub provider_type: ProviderType,
+    pub label: String,
+    pub workspace_ids: Vec<WorkspaceId>,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderAccountLoginStart {
+    pub attempt_id: String,
+    pub verification_url: String,
+    pub user_code: String,
+    pub account: ProviderAccount,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderAccountLoginStatus {
+    pub attempt_id: String,
+    pub state: ProviderAccountLoginState,
+    pub account: ProviderAccount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ProviderAccountOperationError {
+    #[error("the provider account request is invalid")]
+    InvalidRequest,
+    #[error("the provider account was not found")]
+    AccountNotFound,
+    #[error("the provider account workspace association is invalid")]
+    WorkspaceAssociationMismatch,
+    #[error("the provider account limit was reached")]
+    ProviderAccountLimitReached,
+    #[error("the provider account idempotency key was reused with a different request")]
+    IdempotencyConflict,
+    #[error("the provider account store is unavailable")]
+    StoreUnavailable,
+    #[error("the provider account credential store is unavailable")]
+    CredentialStoreUnavailable,
+    #[error("the provider account is in an invalid state")]
+    InvalidState,
+    #[error("the provider account login attempt was not found")]
+    AttemptNotFound,
+    #[error("the provider account login provider is unavailable")]
+    LoginUnavailable,
+    #[error("the provider account login failed")]
+    LoginFailed,
+    #[error("the provider account login was cancelled")]
+    Cancelled,
+}
+
+impl From<ProviderAccountError> for ProviderAccountOperationError {
+    fn from(error: ProviderAccountError) -> Self {
+        match error {
+            ProviderAccountError::AccountNotFound => Self::AccountNotFound,
+            ProviderAccountError::WorkspaceAssociationMismatch => {
+                Self::WorkspaceAssociationMismatch
+            }
+            ProviderAccountError::ProviderAccountLimitReached => Self::ProviderAccountLimitReached,
+            ProviderAccountError::IdempotencyConflict => Self::IdempotencyConflict,
+            ProviderAccountError::StoreUnavailable => Self::StoreUnavailable,
+            ProviderAccountError::CredentialStore(_)
+            | ProviderAccountError::CredentialCleanupRequired { .. }
+            | ProviderAccountError::CredentialStoreRequired => Self::CredentialStoreUnavailable,
+            ProviderAccountError::ProviderTypeMismatch
+            | ProviderAccountError::InvalidLabel
+            | ProviderAccountError::InvalidSubject
+            | ProviderAccountError::InvalidSecretRef
+            | ProviderAccountError::InvalidMetadata
+            | ProviderAccountError::InvalidTimestamp
+            | ProviderAccountError::SecretRefRequired
+            | ProviderAccountError::SecretRefForbidden
+            | ProviderAccountError::InvalidTransition
+            | ProviderAccountError::AccountNotConnected
+            | ProviderAccountError::IntegrityViolation
+            | ProviderAccountError::CredentialVersionConflict
+            | ProviderAccountError::CredentialRefresh(_) => Self::InvalidRequest,
+        }
+    }
+}
+
+pub trait ProviderAccountOperations: Send + Sync {
+    fn create_provider_account(
+        &self,
+        command: ProviderAccountCreateCommand,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccount, ProviderAccountOperationError>> + Send + '_,
+        >,
+    >;
+
+    fn list_provider_accounts(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<ProviderAccount>, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    >;
+
+    fn get_provider_account(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccount, ProviderAccountOperationError>> + Send + '_,
+        >,
+    >;
+
+    fn start_provider_account_login(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccountLoginStart, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    >;
+
+    fn get_provider_account_login(
+        &self,
+        account_id: ProviderAccountId,
+        attempt_id: String,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccountLoginStatus, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    >;
+
+    fn cancel_provider_account_login(
+        &self,
+        account_id: ProviderAccountId,
+        attempt_id: String,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccountLoginStatus, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    >;
+}
+
 pub trait UsageOperations: Send + Sync {
     fn list_usage_ledger(
         &self,
@@ -144,6 +295,85 @@ impl UsageOperations for UnavailableUsageOperations {
     ) -> Pin<Box<dyn Future<Output = Result<UsageLedgerPage, UsageQueryError>> + Send + '_>> {
         let _ = (after, limit);
         Box::pin(async { Err(UsageQueryError::Unavailable) })
+    }
+}
+
+struct UnavailableProviderAccountOperations;
+
+impl ProviderAccountOperations for UnavailableProviderAccountOperations {
+    fn create_provider_account(
+        &self,
+        _command: ProviderAccountCreateCommand,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccount, ProviderAccountOperationError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::StoreUnavailable) })
+    }
+
+    fn list_provider_accounts(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<ProviderAccount>, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::StoreUnavailable) })
+    }
+
+    fn get_provider_account(
+        &self,
+        _account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccount, ProviderAccountOperationError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::StoreUnavailable) })
+    }
+
+    fn start_provider_account_login(
+        &self,
+        _account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccountLoginStart, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::LoginUnavailable) })
+    }
+
+    fn get_provider_account_login(
+        &self,
+        _account_id: ProviderAccountId,
+        _attempt_id: String,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccountLoginStatus, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::LoginUnavailable) })
+    }
+
+    fn cancel_provider_account_login(
+        &self,
+        _account_id: ProviderAccountId,
+        _attempt_id: String,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccountLoginStatus, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::LoginUnavailable) })
     }
 }
 
@@ -386,6 +616,7 @@ pub struct AppState<W, S, R> {
     session_operations: Arc<S>,
     run_operations: Arc<R>,
     usage_operations: Arc<dyn UsageOperations>,
+    provider_account_operations: Arc<dyn ProviderAccountOperations>,
     event_broadcaster: EventBroadcaster,
     lifecycle: LifecycleCoordinator,
 }
@@ -402,6 +633,7 @@ impl<W, S, R> Clone for AppState<W, S, R> {
             session_operations: Arc::clone(&self.session_operations),
             run_operations: Arc::clone(&self.run_operations),
             usage_operations: Arc::clone(&self.usage_operations),
+            provider_account_operations: Arc::clone(&self.provider_account_operations),
             event_broadcaster: self.event_broadcaster.clone(),
             lifecycle: self.lifecycle.clone(),
         }
@@ -454,6 +686,38 @@ impl<W, S, R> AppState<W, S, R> {
             session_operations: Arc::new(session_operations),
             run_operations: Arc::new(run_operations),
             usage_operations: Arc::new(usage_operations),
+            provider_account_operations: Arc::new(UnavailableProviderAccountOperations),
+            event_broadcaster,
+            lifecycle: LifecycleCoordinator::new(),
+        }
+    }
+
+    pub fn with_provider_account_operations<U>(
+        store: StoreMetadata,
+        bound_addr: SocketAddr,
+        workspace_operations: W,
+        session_operations: S,
+        run_operations: R,
+        usage_operations: U,
+        provider_account_operations: Arc<dyn ProviderAccountOperations>,
+        event_broadcaster: EventBroadcaster,
+        auth_token: AuthToken,
+    ) -> Self
+    where
+        U: UsageOperations + 'static,
+    {
+        let bound_authority = bound_addr.to_string();
+        Self {
+            store,
+            event_websocket_endpoint: format!("ws://{bound_addr}{EVENTS_WEBSOCKET_PATH}"),
+            http_origin: format!("http://{bound_authority}"),
+            bound_authority,
+            auth_token,
+            workspace_operations: Arc::new(workspace_operations),
+            session_operations: Arc::new(session_operations),
+            run_operations: Arc::new(run_operations),
+            usage_operations: Arc::new(usage_operations),
+            provider_account_operations,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -474,6 +738,19 @@ where
         .route(NEGOTIATE_PATH, post(negotiate))
         .route(WORKSPACES_PATH, get(list_workspaces).post(create_workspace))
         .route(WORKSPACE_PATH, get(get_workspace))
+        .route(
+            PROVIDER_ACCOUNTS_PATH,
+            get(list_provider_accounts).post(create_provider_account),
+        )
+        .route(PROVIDER_ACCOUNT_PATH, get(get_provider_account))
+        .route(
+            PROVIDER_ACCOUNT_LOGIN_PATH,
+            post(start_provider_account_login),
+        )
+        .route(
+            PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+            get(get_provider_account_login).post(cancel_provider_account_login),
+        )
         .route(
             WORKSPACE_SESSIONS_PATH,
             get(list_sessions).post(create_session),
@@ -679,6 +956,146 @@ where
     Ok(Json(workspace_response(&workspace)))
 }
 
+async fn create_provider_account<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    headers: axum::http::HeaderMap,
+    StrictJson(request): StrictJson<CreateProviderAccountRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let provider_type = ProviderType::parse(request.provider_type)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let workspace_ids = request
+        .workspace_ids
+        .into_iter()
+        .map(WorkspaceId::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let account = state
+        .provider_account_operations
+        .create_provider_account(ProviderAccountCreateCommand {
+            provider_type,
+            label: request.label,
+            workspace_ids,
+            idempotency_key,
+        })
+        .await
+        .map_err(PublicError::from)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(provider_account_response(&account)),
+    ))
+}
+
+async fn list_provider_accounts<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+) -> Result<Json<ListProviderAccountsResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let accounts = state
+        .provider_account_operations
+        .list_provider_accounts()
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(ListProviderAccountsResponse {
+        provider_accounts: accounts.iter().map(provider_account_response).collect(),
+    }))
+}
+
+async fn get_provider_account<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(provider_account_id): Path<String>,
+) -> Result<Json<ProviderAccountResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let account_id = ProviderAccountId::parse(provider_account_id)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let account = state
+        .provider_account_operations
+        .get_provider_account(account_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(provider_account_response(&account)))
+}
+
+async fn start_provider_account_login<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(provider_account_id): Path<String>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let account_id = ProviderAccountId::parse(provider_account_id)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let login = state
+        .provider_account_operations
+        .start_provider_account_login(account_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(StartProviderAccountLoginResponse {
+            attempt_id: login.attempt_id,
+            verification_url: login.verification_url,
+            user_code: login.user_code,
+            account: provider_account_response(&login.account),
+        }),
+    ))
+}
+
+async fn get_provider_account_login<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path((provider_account_id, attempt_id)): Path<(String, String)>,
+) -> Result<Json<ProviderAccountLoginResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let account_id = ProviderAccountId::parse(provider_account_id)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let login = state
+        .provider_account_operations
+        .get_provider_account_login(account_id, attempt_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(provider_account_login_response(&login)))
+}
+
+async fn cancel_provider_account_login<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path((provider_account_id, attempt_id)): Path<(String, String)>,
+) -> Result<Json<ProviderAccountLoginResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let account_id = ProviderAccountId::parse(provider_account_id)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let login = state
+        .provider_account_operations
+        .cancel_provider_account_login(account_id, attempt_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(provider_account_login_response(&login)))
+}
+
 fn workspace_response(workspace: &kiln_core::Workspace) -> WorkspaceResponse {
     WorkspaceResponse {
         workspace_id: workspace.id().as_str().to_owned(),
@@ -696,6 +1113,29 @@ fn workspace_response(workspace: &kiln_core::Workspace) -> WorkspaceResponse {
                 state: root.state().as_str().to_owned(),
             })
             .collect(),
+    }
+}
+
+fn provider_account_response(account: &ProviderAccount) -> ProviderAccountResponse {
+    ProviderAccountResponse {
+        provider_account_id: account.id().as_str().to_owned(),
+        provider_type: account.provider_type().as_str().to_owned(),
+        label: account.label().to_owned(),
+        state: account.state().as_str().to_owned(),
+        created_at_unix_ms: account.created_at_unix_ms(),
+        updated_at_unix_ms: account.updated_at_unix_ms(),
+        last_used_at_unix_ms: account.last_used_at_unix_ms(),
+        capabilities_refreshed_at_unix_ms: account.capabilities_refreshed_at_unix_ms(),
+    }
+}
+
+fn provider_account_login_response(
+    login: &ProviderAccountLoginStatus,
+) -> ProviderAccountLoginResponse {
+    ProviderAccountLoginResponse {
+        attempt_id: login.attempt_id.clone(),
+        state: login.state,
+        account: provider_account_response(&login.account),
     }
 }
 
@@ -2360,6 +2800,8 @@ enum PublicError {
     ArtifactUpload(ArtifactUploadError),
     #[error("usage query failed")]
     Usage(UsageQueryError),
+    #[error("provider account operation failed")]
+    ProviderAccount(ProviderAccountOperationError),
     #[error("daemon is shutting down")]
     DaemonShuttingDown,
 }
@@ -2403,6 +2845,12 @@ impl From<ArtifactUploadError> for PublicError {
 impl From<UsageQueryError> for PublicError {
     fn from(error: UsageQueryError) -> Self {
         Self::Usage(error)
+    }
+}
+
+impl From<ProviderAccountOperationError> for PublicError {
+    fn from(error: ProviderAccountOperationError) -> Self {
+        Self::ProviderAccount(error)
     }
 }
 
@@ -2868,6 +3316,68 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::USAGE_STORE_UNAVAILABLE,
                     "Usage store unavailable",
+                ),
+            },
+            Self::ProviderAccount(error) => match error {
+                ProviderAccountOperationError::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::PROVIDER_ACCOUNT_INVALID,
+                    "Invalid provider account",
+                ),
+                ProviderAccountOperationError::AccountNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::PROVIDER_ACCOUNT_NOT_FOUND,
+                    "Provider account not found",
+                ),
+                ProviderAccountOperationError::WorkspaceAssociationMismatch => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID,
+                    "Invalid provider account workspace association",
+                ),
+                ProviderAccountOperationError::ProviderAccountLimitReached => (
+                    StatusCode::CONFLICT,
+                    error_code::PROVIDER_ACCOUNT_LIMIT_REACHED,
+                    "Provider account limit reached",
+                ),
+                ProviderAccountOperationError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Idempotency key was reused with a different provider account request",
+                ),
+                ProviderAccountOperationError::StoreUnavailable => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
+                    "Provider account store unavailable",
+                ),
+                ProviderAccountOperationError::CredentialStoreUnavailable => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
+                    "Provider account credential store unavailable",
+                ),
+                ProviderAccountOperationError::InvalidState => (
+                    StatusCode::CONFLICT,
+                    error_code::PROVIDER_ACCOUNT_INVALID_STATE,
+                    "Provider account is in an invalid state",
+                ),
+                ProviderAccountOperationError::AttemptNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::PROVIDER_ACCOUNT_LOGIN_NOT_FOUND,
+                    "Provider account login attempt not found",
+                ),
+                ProviderAccountOperationError::LoginUnavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::PROVIDER_ACCOUNT_LOGIN_UNAVAILABLE,
+                    "Provider account login unavailable",
+                ),
+                ProviderAccountOperationError::LoginFailed => (
+                    StatusCode::BAD_GATEWAY,
+                    error_code::PROVIDER_ACCOUNT_LOGIN_FAILED,
+                    "Provider account login failed",
+                ),
+                ProviderAccountOperationError::Cancelled => (
+                    StatusCode::CONFLICT,
+                    error_code::PROVIDER_ACCOUNT_INVALID_STATE,
+                    "Provider account login cancelled",
                 ),
             },
         };

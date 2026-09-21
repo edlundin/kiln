@@ -1,22 +1,29 @@
 use std::{
     collections::HashMap,
+    pin::Pin,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use kiln_core::{
-    ProviderAccount, ProviderAccountApplication, ProviderAccountError, ProviderAccountId,
-    ProviderAccountState, ProviderType,
+    CreateProviderAccount, ProviderAccount, ProviderAccountApplication, ProviderAccountError,
+    ProviderAccountId, ProviderAccountState, ProviderType,
 };
 use kiln_infrastructure::{OsSecretStore, SqliteStore, UlidIdGenerator};
+use kiln_protocol::ProviderAccountLoginState;
 use kiln_providers::{
     CodexDeviceAuthorization, CodexDeviceLoginClient, CodexDeviceLoginError,
     OPENAI_CODEX_SUBSCRIPTION_PROVIDER_TYPE,
+};
+use kiln_server::{
+    ProviderAccountCreateCommand, ProviderAccountLoginStart, ProviderAccountLoginStatus,
+    ProviderAccountOperationError, ProviderAccountOperations,
 };
 use tokio::{
     sync::{Mutex, watch},
     task::JoinHandle,
 };
+use ulid::Ulid;
 
 pub(crate) struct ProviderAccountLoginCoordinator {
     application: Arc<ProviderAccountApplication<SqliteStore, UlidIdGenerator>>,
@@ -27,6 +34,7 @@ pub(crate) struct ProviderAccountLoginCoordinator {
 }
 
 struct LoginAttempt {
+    id: String,
     cancellation: watch::Sender<bool>,
     task: Mutex<AttemptTask>,
 }
@@ -37,25 +45,19 @@ enum AttemptTask {
 }
 
 pub(crate) struct ProviderAccountLoginDisplay {
+    attempt_id: String,
     verification_url: String,
     user_code: String,
-}
-
-impl ProviderAccountLoginDisplay {
-    pub(crate) fn verification_url(&self) -> &str {
-        &self.verification_url
-    }
-    pub(crate) fn user_code(&self) -> &str {
-        &self.user_code
-    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum ProviderAccountLoginError {
     Account(ProviderAccountError),
-    Device(CodexDeviceLoginError),
+    DeviceUnavailable,
+    DeviceFailed,
     InvalidProvider,
     InvalidState,
+    AttemptNotFound,
     Cancelled,
     ClockUnavailable,
     TaskFailed,
@@ -63,14 +65,15 @@ pub(crate) enum ProviderAccountLoginError {
 
 impl ProviderAccountLoginCoordinator {
     pub(crate) fn new(
-        store: SqliteStore,
+        application: Arc<ProviderAccountApplication<SqliteStore, UlidIdGenerator>>,
         secret_store: OsSecretStore,
     ) -> Result<Self, ProviderAccountLoginError> {
         Ok(Self {
-            application: Arc::new(ProviderAccountApplication::new(store, UlidIdGenerator)),
+            application,
             secret_store,
             client: Arc::new(
-                CodexDeviceLoginClient::new().map_err(ProviderAccountLoginError::Device)?,
+                CodexDeviceLoginClient::new()
+                    .map_err(|_| ProviderAccountLoginError::DeviceFailed)?,
             ),
             control: Mutex::new(false),
             attempts: Mutex::new(HashMap::new()),
@@ -87,10 +90,7 @@ impl ProviderAccountLoginCoordinator {
         }
         if let Some(previous) = self.attempts.lock().await.get(&account_id).cloned() {
             previous.cancellation.send_replace(true);
-            match join_attempt(&previous).await {
-                Ok(_) | Err(ProviderAccountLoginError::Cancelled) => {}
-                Err(error) => return Err(error),
-            }
+            let _ = join_attempt(&previous).await;
             self.remove_if_same(&account_id, &previous).await;
         }
         let account = self
@@ -104,15 +104,25 @@ impl ProviderAccountLoginCoordinator {
         if account.state() != ProviderAccountState::Connecting || account.secret_ref().is_some() {
             return Err(ProviderAccountLoginError::InvalidState);
         }
-        let authorization = self
-            .client
-            .begin()
-            .await
-            .map_err(ProviderAccountLoginError::Device)?;
+        let authorization = self.client.begin().await.map_err(|error| match error {
+            CodexDeviceLoginError::Unavailable | CodexDeviceLoginError::Transport => {
+                ProviderAccountLoginError::DeviceUnavailable
+            }
+            CodexDeviceLoginError::Rejected
+            | CodexDeviceLoginError::InvalidResponse
+            | CodexDeviceLoginError::Cancelled
+            | CodexDeviceLoginError::Expired
+            | CodexDeviceLoginError::InvalidAccountBinding
+            | CodexDeviceLoginError::InvalidTransportLimits => {
+                ProviderAccountLoginError::DeviceFailed
+            }
+        })?;
         let display = ProviderAccountLoginDisplay {
+            attempt_id: format!("pla_{}", Ulid::generate()),
             verification_url: authorization.verification_url().to_owned(),
             user_code: authorization.user_code().to_owned(),
         };
+        let mut attempts = self.attempts.lock().await;
         let (cancellation, receiver) = watch::channel(false);
         let application = Arc::clone(&self.application);
         let secret_store = self.secret_store.clone();
@@ -129,9 +139,10 @@ impl ProviderAccountLoginCoordinator {
             )
             .await
         });
-        self.attempts.lock().await.insert(
+        attempts.insert(
             account_id,
             Arc::new(LoginAttempt {
+                id: display.attempt_id.clone(),
                 cancellation,
                 task: Mutex::new(AttemptTask::Running(task)),
             }),
@@ -139,41 +150,59 @@ impl ProviderAccountLoginCoordinator {
         Ok(display)
     }
 
-    pub(crate) async fn finish(
-        &self,
-        account_id: ProviderAccountId,
-    ) -> Result<ProviderAccount, ProviderAccountLoginError> {
-        let attempt = self
-            .attempts
-            .lock()
-            .await
-            .get(&account_id)
-            .cloned()
-            .ok_or(ProviderAccountLoginError::InvalidState)?;
-        let outcome = join_attempt(&attempt).await;
-        self.remove_if_same(&account_id, &attempt).await;
-        outcome
-    }
-
     pub(crate) async fn cancel(
         &self,
         account_id: ProviderAccountId,
-    ) -> Result<(), ProviderAccountLoginError> {
-        let attempt = self
-            .attempts
-            .lock()
-            .await
-            .get(&account_id)
-            .cloned()
-            .ok_or(ProviderAccountLoginError::InvalidState)?;
+        attempt_id: String,
+    ) -> Result<ProviderAccountLoginStatus, ProviderAccountLoginError> {
+        let attempt = self.attempt(&account_id, &attempt_id).await?;
         attempt.cancellation.send_replace(true);
-        let outcome = match join_attempt(&attempt).await {
-            Err(ProviderAccountLoginError::Cancelled) => Ok(()),
-            Ok(_) => Err(ProviderAccountLoginError::InvalidState),
-            Err(error) => Err(error),
-        };
-        self.remove_if_same(&account_id, &attempt).await;
-        outcome
+        let _ = join_attempt(&attempt).await;
+        self.status_for_attempt(account_id, attempt_id, attempt)
+            .await
+    }
+
+    pub(crate) async fn status(
+        &self,
+        account_id: ProviderAccountId,
+        attempt_id: String,
+    ) -> Result<ProviderAccountLoginStatus, ProviderAccountLoginError> {
+        let attempt = self.attempt(&account_id, &attempt_id).await?;
+        self.status_for_attempt(account_id, attempt_id, attempt)
+            .await
+    }
+
+    pub(crate) async fn create_account(
+        &self,
+        command: ProviderAccountCreateCommand,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
+        self.application
+            .create_provider_account_with_idempotency(
+                CreateProviderAccount {
+                    provider_type: command.provider_type,
+                    label: command.label,
+                    subject: None,
+                    secret_ref: None,
+                    state: ProviderAccountState::Connecting,
+                    workspace_ids: command.workspace_ids,
+                    created_at_unix_ms: now_millis()
+                        .map_err(|_| ProviderAccountError::StoreUnavailable)?,
+                    metadata: Default::default(),
+                },
+                command.idempotency_key,
+            )
+            .await
+    }
+
+    pub(crate) async fn list_accounts(&self) -> Result<Vec<ProviderAccount>, ProviderAccountError> {
+        self.application.list_provider_accounts(None).await
+    }
+
+    pub(crate) async fn get_account(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
+        self.application.get_provider_account(account_id).await
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), ProviderAccountLoginError> {
@@ -210,6 +239,42 @@ impl ProviderAccountLoginCoordinator {
             attempts.remove(account_id);
         }
     }
+
+    async fn attempt(
+        &self,
+        account_id: &ProviderAccountId,
+        attempt_id: &str,
+    ) -> Result<Arc<LoginAttempt>, ProviderAccountLoginError> {
+        self.attempts
+            .lock()
+            .await
+            .get(account_id)
+            .filter(|attempt| attempt.id == attempt_id)
+            .cloned()
+            .ok_or(ProviderAccountLoginError::AttemptNotFound)
+    }
+
+    async fn status_for_attempt(
+        &self,
+        account_id: ProviderAccountId,
+        attempt_id: String,
+        attempt: Arc<LoginAttempt>,
+    ) -> Result<ProviderAccountLoginStatus, ProviderAccountLoginError> {
+        let (state, completed) = poll_attempt(&attempt).await;
+        let account = match completed {
+            Some(Ok(account)) => account,
+            Some(Err(_)) | None => self
+                .application
+                .get_provider_account(account_id)
+                .await
+                .map_err(ProviderAccountLoginError::Account)?,
+        };
+        Ok(ProviderAccountLoginStatus {
+            attempt_id,
+            state,
+            account,
+        })
+    }
 }
 
 async fn join_attempt(
@@ -229,6 +294,37 @@ async fn join_attempt(
     }
 }
 
+async fn poll_attempt(
+    attempt: &Arc<LoginAttempt>,
+) -> (
+    ProviderAccountLoginState,
+    Option<Result<ProviderAccount, ProviderAccountLoginError>>,
+) {
+    let mut task = attempt.task.lock().await;
+    let outcome = match &mut *task {
+        AttemptTask::Complete(outcome) => Some(outcome.clone()),
+        AttemptTask::Running(handle) if !handle.is_finished() => None,
+        AttemptTask::Running(handle) => {
+            let outcome = (&mut *handle)
+                .await
+                .map_err(|_| ProviderAccountLoginError::TaskFailed)
+                .and_then(|outcome| outcome);
+            *task = AttemptTask::Complete(outcome.clone());
+            Some(outcome)
+        }
+    };
+    let state = match outcome.as_ref() {
+        None => ProviderAccountLoginState::Pending,
+        Some(Ok(_)) => ProviderAccountLoginState::Connected,
+        Some(Err(ProviderAccountLoginError::Cancelled)) => ProviderAccountLoginState::Cancelled,
+        Some(Err(ProviderAccountLoginError::Account(
+            ProviderAccountError::CredentialCleanupRequired { .. },
+        ))) => ProviderAccountLoginState::CleanupRequired,
+        Some(Err(_)) => ProviderAccountLoginState::Failed,
+    };
+    (state, outcome)
+}
+
 async fn run_attempt(
     application: Arc<ProviderAccountApplication<SqliteStore, UlidIdGenerator>>,
     secret_store: OsSecretStore,
@@ -240,11 +336,17 @@ async fn run_attempt(
     let result = client
         .complete(authorization, cancellation.clone())
         .await
-        .map_err(|error| {
-            if error == CodexDeviceLoginError::Cancelled {
-                ProviderAccountLoginError::Cancelled
-            } else {
-                ProviderAccountLoginError::Device(error)
+        .map_err(|error| match error {
+            CodexDeviceLoginError::Cancelled => ProviderAccountLoginError::Cancelled,
+            CodexDeviceLoginError::Unavailable | CodexDeviceLoginError::Transport => {
+                ProviderAccountLoginError::DeviceUnavailable
+            }
+            CodexDeviceLoginError::Expired
+            | CodexDeviceLoginError::Rejected
+            | CodexDeviceLoginError::InvalidResponse
+            | CodexDeviceLoginError::InvalidAccountBinding
+            | CodexDeviceLoginError::InvalidTransportLimits => {
+                ProviderAccountLoginError::DeviceFailed
             }
         })?;
     if *cancellation.borrow() {
@@ -282,4 +384,144 @@ fn now() -> Result<u64, ProviderAccountLoginError> {
         .ok()
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
         .ok_or(ProviderAccountLoginError::ClockUnavailable)
+}
+
+fn now_millis() -> Result<u64, ProviderAccountLoginError> {
+    now()
+}
+
+impl ProviderAccountOperations for ProviderAccountLoginCoordinator {
+    fn create_provider_account(
+        &self,
+        command: ProviderAccountCreateCommand,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderAccount, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.create_account(command)
+                .await
+                .map_err(ProviderAccountOperationError::from)
+        })
+    }
+
+    fn list_provider_accounts(
+        &self,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<ProviderAccount>, ProviderAccountOperationError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.list_accounts()
+                .await
+                .map_err(ProviderAccountOperationError::from)
+        })
+    }
+
+    fn get_provider_account(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderAccount, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.get_account(account_id)
+                .await
+                .map_err(ProviderAccountOperationError::from)
+        })
+    }
+
+    fn start_provider_account_login(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ProviderAccountLoginStart, ProviderAccountOperationError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let display = self
+                .begin(account_id.clone())
+                .await
+                .map_err(ProviderAccountOperationError::from)?;
+            let account = self
+                .get_account(account_id)
+                .await
+                .map_err(ProviderAccountOperationError::from)?;
+            Ok(ProviderAccountLoginStart {
+                attempt_id: display.attempt_id,
+                verification_url: display.verification_url,
+                user_code: display.user_code,
+                account,
+            })
+        })
+    }
+
+    fn get_provider_account_login(
+        &self,
+        account_id: ProviderAccountId,
+        attempt_id: String,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ProviderAccountLoginStatus, ProviderAccountOperationError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.status(account_id, attempt_id)
+                .await
+                .map_err(ProviderAccountOperationError::from)
+        })
+    }
+
+    fn cancel_provider_account_login(
+        &self,
+        account_id: ProviderAccountId,
+        attempt_id: String,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ProviderAccountLoginStatus, ProviderAccountOperationError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.cancel(account_id, attempt_id)
+                .await
+                .map_err(ProviderAccountOperationError::from)
+        })
+    }
+}
+
+impl From<ProviderAccountLoginError> for ProviderAccountOperationError {
+    fn from(error: ProviderAccountLoginError) -> Self {
+        match error {
+            ProviderAccountLoginError::Account(error) => error.into(),
+            ProviderAccountLoginError::AttemptNotFound => Self::AttemptNotFound,
+            ProviderAccountLoginError::InvalidProvider
+            | ProviderAccountLoginError::InvalidState => Self::InvalidState,
+            ProviderAccountLoginError::Cancelled => Self::Cancelled,
+            ProviderAccountLoginError::DeviceUnavailable => Self::LoginUnavailable,
+            ProviderAccountLoginError::DeviceFailed
+            | ProviderAccountLoginError::ClockUnavailable
+            | ProviderAccountLoginError::TaskFailed => Self::LoginFailed,
+        }
+    }
 }

@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.22.0";
+pub const PROTOCOL_VERSION: &str = "0.23.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -20,6 +20,11 @@ pub const NEGOTIATE_PATH: &str = "/v1/protocol/negotiate";
 pub const EVENTS_WEBSOCKET_PATH: &str = "/v1/events";
 pub const WORKSPACES_PATH: &str = "/v1/workspaces";
 pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
+pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
+pub const PROVIDER_ACCOUNT_PATH: &str = "/v1/provider-accounts/{provider_account_id}";
+pub const PROVIDER_ACCOUNT_LOGIN_PATH: &str = "/v1/provider-accounts/{provider_account_id}/login";
+pub const PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH: &str =
+    "/v1/provider-accounts/{provider_account_id}/login/{attempt_id}";
 pub const WORKSPACE_SESSIONS_PATH: &str = "/v1/workspaces/{workspace_id}/sessions";
 pub const SESSION_PATH: &str = "/v1/sessions/{session_id}";
 pub const SESSION_MESSAGES_PATH: &str = "/v1/sessions/{session_id}/messages";
@@ -45,6 +50,12 @@ pub const EVENT_STREAM_OPERATION_ID: &str = "event_stream";
 pub const CREATE_WORKSPACE_OPERATION_ID: &str = "create_workspace";
 pub const LIST_WORKSPACES_OPERATION_ID: &str = "list_workspaces";
 pub const GET_WORKSPACE_OPERATION_ID: &str = "get_workspace";
+pub const CREATE_PROVIDER_ACCOUNT_OPERATION_ID: &str = "create_provider_account";
+pub const LIST_PROVIDER_ACCOUNTS_OPERATION_ID: &str = "list_provider_accounts";
+pub const GET_PROVIDER_ACCOUNT_OPERATION_ID: &str = "get_provider_account";
+pub const START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID: &str = "start_provider_account_login";
+pub const GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID: &str = "get_provider_account_login";
+pub const CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID: &str = "cancel_provider_account_login";
 pub const CREATE_SESSION_OPERATION_ID: &str = "create_session";
 pub const LIST_SESSIONS_OPERATION_ID: &str = "list_sessions";
 pub const GET_SESSION_OPERATION_ID: &str = "get_session";
@@ -138,6 +149,16 @@ pub mod error_code {
     pub const USAGE_STORE_UNAVAILABLE: &str = "usage_store_unavailable";
     pub const USAGE_INTEGRITY_VIOLATION: &str = "usage_integrity_violation";
     pub const CHANGE_NOT_FOUND: &str = "change_not_found";
+    pub const PROVIDER_ACCOUNT_NOT_FOUND: &str = "provider_account_not_found";
+    pub const PROVIDER_ACCOUNT_INVALID: &str = "provider_account_invalid";
+    pub const PROVIDER_ACCOUNT_LIMIT_REACHED: &str = "provider_account_limit_reached";
+    pub const PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID: &str =
+        "provider_account_workspace_association_invalid";
+    pub const PROVIDER_ACCOUNT_STORE_UNAVAILABLE: &str = "provider_account_store_unavailable";
+    pub const PROVIDER_ACCOUNT_INVALID_STATE: &str = "provider_account_invalid_state";
+    pub const PROVIDER_ACCOUNT_LOGIN_NOT_FOUND: &str = "provider_account_login_not_found";
+    pub const PROVIDER_ACCOUNT_LOGIN_UNAVAILABLE: &str = "provider_account_login_unavailable";
+    pub const PROVIDER_ACCOUNT_LOGIN_FAILED: &str = "provider_account_login_failed";
 
     pub const ALL: &[&str] = &[
         AUTHENTICATION_REQUIRED,
@@ -208,6 +229,15 @@ pub mod error_code {
         USAGE_STORE_UNAVAILABLE,
         USAGE_INTEGRITY_VIOLATION,
         CHANGE_NOT_FOUND,
+        PROVIDER_ACCOUNT_NOT_FOUND,
+        PROVIDER_ACCOUNT_INVALID,
+        PROVIDER_ACCOUNT_LIMIT_REACHED,
+        PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID,
+        PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
+        PROVIDER_ACCOUNT_INVALID_STATE,
+        PROVIDER_ACCOUNT_LOGIN_NOT_FOUND,
+        PROVIDER_ACCOUNT_LOGIN_UNAVAILABLE,
+        PROVIDER_ACCOUNT_LOGIN_FAILED,
     ];
 }
 
@@ -299,6 +329,64 @@ pub struct WorkspaceResponse {
 #[serde(rename_all = "snake_case")]
 pub struct ListWorkspacesResponse {
     pub workspaces: Vec<WorkspaceResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
+pub struct CreateProviderAccountRequest {
+    pub provider_type: String,
+    pub label: String,
+    #[serde(default)]
+    pub workspace_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderAccountResponse {
+    pub provider_account_id: String,
+    pub provider_type: String,
+    pub label: String,
+    pub state: String,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    #[schemars(with = "RequiredNullableU64")]
+    pub last_used_at_unix_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub capabilities_refreshed_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ListProviderAccountsResponse {
+    pub provider_accounts: Vec<ProviderAccountResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct StartProviderAccountLoginResponse {
+    pub attempt_id: String,
+    pub verification_url: String,
+    pub user_code: String,
+    pub account: ProviderAccountResponse,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAccountLoginState {
+    Pending,
+    Connected,
+    Failed,
+    Cancelled,
+    CleanupRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderAccountLoginResponse {
+    pub attempt_id: String,
+    pub state: ProviderAccountLoginState,
+    pub account: ProviderAccountResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

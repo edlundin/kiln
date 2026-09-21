@@ -14,112 +14,97 @@ impl ProviderAccountStore for SqliteStore {
         account: &ProviderAccount,
         workspace_ids: &[WorkspaceId],
     ) -> Result<(), ProviderAccountStoreError> {
-        if has_duplicate_workspace_ids(workspace_ids) {
-            return Err(ProviderAccountStoreError::IntegrityViolation);
-        }
-        let metadata_json = serde_json::to_string(account.metadata())
-            .map_err(|_| ProviderAccountStoreError::IntegrityViolation)?;
-        let created_at_unix_ms = to_sql_timestamp(account.created_at_unix_ms())?;
-        let updated_at_unix_ms = to_sql_timestamp(account.updated_at_unix_ms())?;
-        let last_used_at_unix_ms = account
-            .last_used_at_unix_ms()
-            .map(to_sql_timestamp)
-            .transpose()?;
-        let capabilities_refreshed_at_unix_ms = account
-            .capabilities_refreshed_at_unix_ms()
-            .map(to_sql_timestamp)
-            .transpose()?;
-
         let mut connection = self.connection.lock().await;
         let mut transaction = sqlx::Connection::begin(&mut *connection)
             .await
             .map_err(|_| ProviderAccountStoreError::Unavailable)?;
-        if account.state() != ProviderAccountState::Disconnected
-            && sqlx::query_scalar::<_, i64>(
-                "SELECT EXISTS(
-                    SELECT 1 FROM provider_accounts
-                    WHERE provider_type = ?
-                      AND state IN ('connecting', 'connected', 'reauth_required')
-                )",
-            )
-            .bind(account.provider_type().as_str())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|_| ProviderAccountStoreError::Unavailable)?
-                != 0
-        {
-            return Err(ProviderAccountStoreError::ProviderAccountLimitReached);
-        }
-
-        let insert = sqlx::query(
-            "INSERT INTO provider_accounts (
-                provider_account_id, provider_type, label, provider_subject,
-                secret_ref, state, created_at_unix_ms, updated_at_unix_ms,
-                last_used_at_unix_ms, capabilities_refreshed_at_unix_ms, metadata_json
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(account.id().as_str())
-        .bind(account.provider_type().as_str())
-        .bind(account.label())
-        .bind(account.subject())
-        .bind(account.secret_ref().map(SecretRef::as_str))
-        .bind(account.state().as_str())
-        .bind(created_at_unix_ms)
-        .bind(updated_at_unix_ms)
-        .bind(last_used_at_unix_ms)
-        .bind(capabilities_refreshed_at_unix_ms)
-        .bind(metadata_json)
-        .execute(&mut *transaction)
-        .await;
-        if let Err(error) = insert {
-            if is_unique_violation(&error) {
-                let account_exists = sqlx::query_scalar::<_, i64>(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM provider_accounts WHERE provider_account_id = ?
-                    )",
-                )
-                .bind(account.id().as_str())
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(|_| ProviderAccountStoreError::Unavailable)?;
-                if account_exists != 0 {
-                    return Err(ProviderAccountStoreError::IntegrityViolation);
-                }
-                let active_exists =
-                    active_provider_account_exists(&mut transaction, account.provider_type(), None)
-                        .await?;
-                if active_exists {
-                    return Err(ProviderAccountStoreError::ProviderAccountLimitReached);
-                }
-            }
-            return Err(ProviderAccountStoreError::Unavailable);
-        }
-
-        for workspace_id in workspace_ids {
-            let exists = sqlx::query_scalar::<_, i64>(
-                "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = ?)",
-            )
-            .bind(workspace_id.as_str())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
-            if exists == 0 {
-                return Err(ProviderAccountStoreError::WorkspaceNotFound);
-            }
-            sqlx::query(
-                "INSERT INTO provider_account_workspaces (provider_account_id, workspace_id)
-                 VALUES (?, ?)",
-            )
-            .bind(account.id().as_str())
-            .bind(workspace_id.as_str())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
-        }
+        insert_provider_account(&mut transaction, account, workspace_ids).await?;
         transaction
             .commit()
             .await
             .map_err(|_| ProviderAccountStoreError::Unavailable)
+    }
+
+    async fn create_provider_account_idempotent(
+        &self,
+        account: &ProviderAccount,
+        workspace_ids: &[WorkspaceId],
+        idempotency_key: &str,
+    ) -> Result<ProviderAccount, ProviderAccountStoreError> {
+        if idempotency_key.is_empty() || has_duplicate_workspace_ids(workspace_ids) {
+            return Err(ProviderAccountStoreError::IntegrityViolation);
+        }
+        let workspace_ids_json = normalized_workspace_ids_json(workspace_ids)?;
+        let mut connection = self.connection.lock().await;
+        let mut transaction = sqlx::Connection::begin(&mut *connection)
+            .await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+
+        if let Some(row) = sqlx::query(
+            "SELECT provider_account_id, provider_type, label, workspace_ids_json
+             FROM provider_account_create_idempotencies
+             WHERE idempotency_key = ?",
+        )
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| ProviderAccountStoreError::Unavailable)?
+        {
+            let stored_provider_type = row
+                .try_get::<String, _>("provider_type")
+                .map_err(|_| ProviderAccountStoreError::IntegrityViolation)?;
+            let stored_label = row
+                .try_get::<String, _>("label")
+                .map_err(|_| ProviderAccountStoreError::IntegrityViolation)?;
+            let stored_workspace_ids = row
+                .try_get::<String, _>("workspace_ids_json")
+                .map_err(|_| ProviderAccountStoreError::IntegrityViolation)?;
+            if stored_provider_type != account.provider_type().as_str()
+                || stored_label != account.label()
+                || stored_workspace_ids != workspace_ids_json
+            {
+                return Err(ProviderAccountStoreError::IdempotencyConflict);
+            }
+            let account_id = ProviderAccountId::parse(
+                row.try_get::<String, _>("provider_account_id")
+                    .map_err(|_| ProviderAccountStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ProviderAccountStoreError::IntegrityViolation)?;
+            let account = load_provider_account(&mut transaction, &account_id)
+                .await?
+                .ok_or(ProviderAccountStoreError::IntegrityViolation)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+            return Ok(account);
+        }
+
+        insert_provider_account(&mut transaction, account, workspace_ids).await?;
+        sqlx::query(
+            "INSERT INTO provider_account_create_idempotencies (
+                idempotency_key, provider_account_id, provider_type, label, workspace_ids_json
+             ) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(idempotency_key)
+        .bind(account.id().as_str())
+        .bind(account.provider_type().as_str())
+        .bind(account.label())
+        .bind(workspace_ids_json)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if is_unique_violation(&error) {
+                ProviderAccountStoreError::IdempotencyConflict
+            } else {
+                ProviderAccountStoreError::Unavailable
+            }
+        })?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+        Ok(account.clone())
     }
 
     async fn get_provider_account(
@@ -333,11 +318,127 @@ impl ProviderAccountStore for SqliteStore {
     }
 }
 
+async fn insert_provider_account(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    account: &ProviderAccount,
+    workspace_ids: &[WorkspaceId],
+) -> Result<(), ProviderAccountStoreError> {
+    if has_duplicate_workspace_ids(workspace_ids) {
+        return Err(ProviderAccountStoreError::IntegrityViolation);
+    }
+    let metadata_json = serde_json::to_string(account.metadata())
+        .map_err(|_| ProviderAccountStoreError::IntegrityViolation)?;
+    let created_at_unix_ms = to_sql_timestamp(account.created_at_unix_ms())?;
+    let updated_at_unix_ms = to_sql_timestamp(account.updated_at_unix_ms())?;
+    let last_used_at_unix_ms = account
+        .last_used_at_unix_ms()
+        .map(to_sql_timestamp)
+        .transpose()?;
+    let capabilities_refreshed_at_unix_ms = account
+        .capabilities_refreshed_at_unix_ms()
+        .map(to_sql_timestamp)
+        .transpose()?;
+
+    if account.state() != ProviderAccountState::Disconnected
+        && sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(
+                SELECT 1 FROM provider_accounts
+                WHERE provider_type = ?
+                  AND state IN ('connecting', 'connected', 'reauth_required')
+            )",
+        )
+        .bind(account.provider_type().as_str())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| ProviderAccountStoreError::Unavailable)?
+            != 0
+    {
+        return Err(ProviderAccountStoreError::ProviderAccountLimitReached);
+    }
+
+    let insert = sqlx::query(
+        "INSERT INTO provider_accounts (
+            provider_account_id, provider_type, label, provider_subject,
+            secret_ref, state, created_at_unix_ms, updated_at_unix_ms,
+            last_used_at_unix_ms, capabilities_refreshed_at_unix_ms, metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(account.id().as_str())
+    .bind(account.provider_type().as_str())
+    .bind(account.label())
+    .bind(account.subject())
+    .bind(account.secret_ref().map(SecretRef::as_str))
+    .bind(account.state().as_str())
+    .bind(created_at_unix_ms)
+    .bind(updated_at_unix_ms)
+    .bind(last_used_at_unix_ms)
+    .bind(capabilities_refreshed_at_unix_ms)
+    .bind(metadata_json)
+    .execute(&mut **transaction)
+    .await;
+    if let Err(error) = insert {
+        if is_unique_violation(&error) {
+            let account_exists = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(
+                    SELECT 1 FROM provider_accounts WHERE provider_account_id = ?
+                )",
+            )
+            .bind(account.id().as_str())
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+            if account_exists != 0 {
+                return Err(ProviderAccountStoreError::IntegrityViolation);
+            }
+            let active_exists =
+                active_provider_account_exists(transaction, account.provider_type(), None).await?;
+            if active_exists {
+                return Err(ProviderAccountStoreError::ProviderAccountLimitReached);
+            }
+        }
+        return Err(ProviderAccountStoreError::Unavailable);
+    }
+
+    for workspace_id in workspace_ids {
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM workspaces WHERE workspace_id = ?)",
+        )
+        .bind(workspace_id.as_str())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+        if exists == 0 {
+            return Err(ProviderAccountStoreError::WorkspaceNotFound);
+        }
+        sqlx::query(
+            "INSERT INTO provider_account_workspaces (provider_account_id, workspace_id)
+             VALUES (?, ?)",
+        )
+        .bind(account.id().as_str())
+        .bind(workspace_id.as_str())
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+    }
+    Ok(())
+}
+
 fn has_duplicate_workspace_ids(workspace_ids: &[WorkspaceId]) -> bool {
     workspace_ids
         .iter()
         .enumerate()
         .any(|(index, id)| workspace_ids[..index].contains(id))
+}
+
+fn normalized_workspace_ids_json(
+    workspace_ids: &[WorkspaceId],
+) -> Result<String, ProviderAccountStoreError> {
+    let mut normalized = workspace_ids
+        .iter()
+        .map(|workspace_id| workspace_id.as_str())
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    serde_json::to_string(&normalized).map_err(|_| ProviderAccountStoreError::IntegrityViolation)
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {

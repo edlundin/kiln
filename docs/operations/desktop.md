@@ -28,7 +28,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.22.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.23.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.

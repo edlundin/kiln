@@ -6,25 +6,31 @@ use std::net::SocketAddr;
 use futures_util::{SinkExt, StreamExt};
 use kiln_protocol::{
     APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ARTIFACT_SESSION_HEADER, ARTIFACTS_PATH,
-    AppendMessageRequest, ApprovalDecisionRequest, ArtifactResponse, CANCEL_RUN_OPERATION_ID,
-    CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
+    AppendMessageRequest, ApprovalDecisionRequest, ArtifactResponse,
+    CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, CANCEL_RUN_OPERATION_ID,
+    CREATE_PROVIDER_ACCOUNT_OPERATION_ID, CREATE_SESSION_OPERATION_ID,
+    CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateProviderAccountRequest,
     CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
-    GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
+    GET_ARTIFACT_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    GET_PROVIDER_ACCOUNT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
     GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
-    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_USAGE_OPERATION_ID,
-    LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse, ListWorkspacesResponse,
-    MessageDeliveryResponse, MessageResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
-    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, ProblemDetails,
+    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
+    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
+    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse,
+    ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse,
+    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH,
+    PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse, ProviderAccountResponse,
     REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
     RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunResponse,
     SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
     SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID, SessionChangeDiffResponse,
-    SessionChangesResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
-    StartChildRunRequest, StartRunRequest, TOOL_CALL_APPROVAL_PATH, UPLOAD_ARTIFACT_OPERATION_ID,
-    USAGE_PATH, UsageLedgerResponse, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
-    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    START_CHILD_RUN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    START_RUN_OPERATION_ID, SessionChangeDiffResponse, SessionChangesResponse,
+    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
+    StartProviderAccountLoginResponse, StartRunRequest, TOOL_CALL_APPROVAL_PATH,
+    UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UsageLedgerResponse, WEBSOCKET_CAPABILITY,
+    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
 };
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
@@ -206,6 +212,110 @@ impl Client {
         self.send_json(
             GET_WORKSPACE_OPERATION_ID,
             self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    pub async fn create_provider_account(
+        &self,
+        idempotency_key: &str,
+        request: &CreateProviderAccountRequest,
+    ) -> Result<ProviderAccountResponse, Error> {
+        self.send_json(
+            CREATE_PROVIDER_ACCOUNT_OPERATION_ID,
+            with_idempotency_key(
+                self.http.post(self.http_url(PROVIDER_ACCOUNTS_PATH)),
+                idempotency_key,
+            )?
+            .json(request),
+        )
+        .await
+    }
+
+    pub async fn list_provider_accounts(&self) -> Result<ListProviderAccountsResponse, Error> {
+        self.send_json(
+            LIST_PROVIDER_ACCOUNTS_OPERATION_ID,
+            self.http.get(self.http_url(PROVIDER_ACCOUNTS_PATH)),
+        )
+        .await
+    }
+
+    pub async fn get_provider_account(
+        &self,
+        provider_account_id: &str,
+    ) -> Result<ProviderAccountResponse, Error> {
+        let path = path_with_segment(
+            PROVIDER_ACCOUNT_PATH,
+            "{provider_account_id}",
+            "provider_account_id",
+            provider_account_id,
+        )?;
+        self.send_json(
+            GET_PROVIDER_ACCOUNT_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    pub async fn start_provider_account_login(
+        &self,
+        provider_account_id: &str,
+    ) -> Result<StartProviderAccountLoginResponse, Error> {
+        let path = path_with_segment(
+            PROVIDER_ACCOUNT_LOGIN_PATH,
+            "{provider_account_id}",
+            "provider_account_id",
+            provider_account_id,
+        )?;
+        self.send_json(
+            START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+            self.http.post(self.http_url(&path)),
+        )
+        .await
+    }
+
+    pub async fn get_provider_account_login(
+        &self,
+        provider_account_id: &str,
+        attempt_id: &str,
+    ) -> Result<ProviderAccountLoginResponse, Error> {
+        let path = path_with_segments(
+            PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+            &[
+                (
+                    "{provider_account_id}",
+                    "provider_account_id",
+                    provider_account_id,
+                ),
+                ("{attempt_id}", "attempt_id", attempt_id),
+            ],
+        )?;
+        self.send_json(
+            GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    pub async fn cancel_provider_account_login(
+        &self,
+        provider_account_id: &str,
+        attempt_id: &str,
+    ) -> Result<ProviderAccountLoginResponse, Error> {
+        let path = path_with_segments(
+            PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+            &[
+                (
+                    "{provider_account_id}",
+                    "provider_account_id",
+                    provider_account_id,
+                ),
+                ("{attempt_id}", "attempt_id", attempt_id),
+            ],
+        )?;
+        self.send_json(
+            CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+            self.http.post(self.http_url(&path)),
         )
         .await
     }
@@ -767,21 +877,31 @@ fn path_with_segment(
     name: &'static str,
     value: &str,
 ) -> Result<String, Error> {
-    if value.is_empty() || value == "." || value == ".." {
-        return Err(Error::InvalidPathSegment { name });
-    }
-    let (prefix, suffix) = template
-        .split_once(placeholder)
-        .expect("canonical protocol path contains its declared placeholder");
+    path_with_segments(template, &[(placeholder, name, value)])
+}
+
+fn path_with_segments(
+    template: &str,
+    replacements: &[(&str, &'static str, &str)],
+) -> Result<String, Error> {
     let mut url =
         reqwest::Url::parse("http://127.0.0.1/").expect("the canonical URL base is valid");
-    url.set_path(prefix);
     let mut segments = url
         .path_segments_mut()
         .expect("the canonical HTTP URL supports path segments");
-    segments.pop_if_empty().push(value);
-    for suffix_segment in suffix.split('/').filter(|segment| !segment.is_empty()) {
-        segments.push(suffix_segment);
+    segments.pop_if_empty();
+    for template_segment in template.split('/').filter(|segment| !segment.is_empty()) {
+        if let Some((_, name, value)) = replacements
+            .iter()
+            .find(|(placeholder, _, _)| *placeholder == template_segment)
+        {
+            if value.is_empty() || *value == "." || *value == ".." {
+                return Err(Error::InvalidPathSegment { name });
+            }
+            segments.push(value);
+        } else {
+            segments.push(template_segment);
+        }
     }
     drop(segments);
     Ok(url.path().to_owned())

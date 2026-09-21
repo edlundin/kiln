@@ -2,6 +2,15 @@
 
 ## 2026-09-21 — `feat`
 
+- Added the authenticated provider-account create/list/get API with durable idempotency and the public Codex device-login start, status, and cancellation continuation through protocol `0.23.0`, including opaque attempt IDs and retained terminal states.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added the native Codex device-code login continuation with bounded polling, credential validation, coordinator-owned cancellation and joining, conditional account cleanup, and daemon shutdown integration.
 
 EDL-309: https://linear.app/edlundin/issue/EDL-309

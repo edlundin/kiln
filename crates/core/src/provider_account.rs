@@ -467,6 +467,23 @@ pub trait ProviderAccountStore: Send + Sync {
         account: &ProviderAccount,
         workspace_ids: &[WorkspaceId],
     ) -> impl Future<Output = Result<(), ProviderAccountStoreError>> + Send;
+    /// Creates an account and records the request's idempotency key in the
+    /// same durable transaction when the store supports it. The default keeps
+    /// older store implementations source-compatible; such stores receive
+    /// the normal create semantics and should be upgraded before exposing
+    /// idempotent creation to clients.
+    fn create_provider_account_idempotent(
+        &self,
+        account: &ProviderAccount,
+        workspace_ids: &[WorkspaceId],
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<ProviderAccount, ProviderAccountStoreError>> + Send {
+        async move {
+            let _ = idempotency_key;
+            self.create_provider_account(account, workspace_ids).await?;
+            Ok(account.clone())
+        }
+    }
     fn get_provider_account(
         &self,
         id: &ProviderAccountId,
@@ -535,10 +552,36 @@ where
         &self,
         command: CreateProviderAccount,
     ) -> Result<ProviderAccount, ProviderAccountError> {
+        let workspace_ids = command.workspace_ids.clone();
+        let account = self.new_provider_account(command)?;
+        self.store
+            .create_provider_account(&account, &workspace_ids)
+            .await
+            .map_err(map_provider_account_store_error)?;
+        Ok(account)
+    }
+
+    pub async fn create_provider_account_with_idempotency(
+        &self,
+        command: CreateProviderAccount,
+        idempotency_key: String,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
+        let workspace_ids = command.workspace_ids.clone();
+        let account = self.new_provider_account(command)?;
+        self.store
+            .create_provider_account_idempotent(&account, &workspace_ids, &idempotency_key)
+            .await
+            .map_err(map_provider_account_store_error)
+    }
+
+    fn new_provider_account(
+        &self,
+        command: CreateProviderAccount,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
         if command.secret_ref.is_some() || command.state == ProviderAccountState::Connected {
             return Err(ProviderAccountError::CredentialStoreRequired);
         }
-        let account = ProviderAccount::new(
+        ProviderAccount::new(
             self.ids.provider_account_id(),
             command.provider_type,
             command.label,
@@ -550,12 +593,7 @@ where
             None,
             None,
             command.metadata,
-        )?;
-        self.store
-            .create_provider_account(&account, &command.workspace_ids)
-            .await
-            .map_err(map_provider_account_store_error)?;
-        Ok(account)
+        )
     }
 
     pub async fn get_provider_account(

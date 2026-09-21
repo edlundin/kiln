@@ -9,9 +9,9 @@ use std::{
 };
 
 use kiln_core::{
-    ModelId, ModelInvocationCompletionKind, ModelInvocationOutcome, ProviderAccountId,
-    ProviderType, RunApplication, SessionApplication, StoreMetadata, UsageApplication,
-    UsageCompleteness, WorkspaceApplication,
+    ModelId, ModelInvocationCompletionKind, ModelInvocationOutcome, ProviderAccountApplication,
+    ProviderAccountId, ProviderType, RunApplication, SessionApplication, StoreMetadata,
+    UsageApplication, UsageCompleteness, WorkspaceApplication,
 };
 use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
@@ -29,9 +29,6 @@ use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
 
 use crate::run_service::RunService;
 
-// This slice has no public login route; main still owns the coordinator so
-// shutdown always cancels and joins any future internal caller's attempts.
-#[allow(dead_code)]
 mod provider_login;
 mod run_service;
 
@@ -135,8 +132,12 @@ async fn main() -> ExitCode {
         WorkspaceApplication::new(GitWorkspaceRootDiscovery, store.clone(), UlidIdGenerator);
     let sessions = SessionApplication::new(store.clone(), store.clone(), UlidIdGenerator);
     let usage = UsageApplication::new(store.clone(), UlidIdGenerator);
-    let provider_logins = match provider_login::ProviderAccountLoginCoordinator::new(
+    let provider_accounts = Arc::new(ProviderAccountApplication::new(
         store.clone(),
+        UlidIdGenerator,
+    ));
+    let provider_logins = match provider_login::ProviderAccountLoginCoordinator::new(
+        Arc::clone(&provider_accounts),
         kiln_infrastructure::OsSecretStore::open_default(),
     ) {
         Ok(logins) => Arc::new(logins),
@@ -176,13 +177,16 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let state = AppState::with_usage_operations(
+    let provider_account_operations: Arc<dyn kiln_server::ProviderAccountOperations> =
+        provider_logins.clone();
+    let state = AppState::with_provider_account_operations(
         StoreMetadata::default(),
         bound_address,
         workspaces,
         sessions,
         runs.clone(),
         usage,
+        provider_account_operations,
         events,
         AuthToken::from_bytes(credential.token()),
     );

@@ -58,6 +58,13 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let native_file_read = match run_service::configured_file_read() {
+        Ok(tool) => tool,
+        Err(error) => {
+            eprintln!("kilnd: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let provider_registry = if deterministic_model {
         match deterministic_provider_registry() {
             Ok(registry) => registry,
@@ -162,6 +169,7 @@ async fn main() -> ExitCode {
         artifacts,
     )
     .with_deterministic_model(deterministic_model)
+    .with_native_file_read(native_file_read)
     .with_provider_registry(provider_registry);
 
     if let Err(error) = runs.reconcile_deterministic_model_runs().await {

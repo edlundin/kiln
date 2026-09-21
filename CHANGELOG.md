@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `feat`
+
+- Connected native tool proposals to sequential approval, fresh-claim file execution, cancellation, and ordered result context, with explicit opt-in byte limits. Live provider activation remains pending.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `fix`
 
 - Discarded buffered tool proposals after native provider cancellation while retaining final usage, preventing stopped work from blocking a steered generation.

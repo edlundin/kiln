@@ -6,11 +6,11 @@ use kiln_core::{
     CreateContextManifest, CreateModelInvocation, GenerationSettings, MessageDeliveryMode,
     MessageDeliveryState, ModelCapabilitySnapshot, ModelId, ModelInvocation,
     ModelInvocationCompletionKind, ModelInvocationFailureReason, ModelInvocationId,
-    ModelInvocationPurpose, ModelInvocationSettings, ModelProviderOperation, NativeRunApplication,
-    ProviderAccountId, ProviderApplication, ProviderClaim, ProviderError, ProviderType,
-    ProviderUpdate, ProviderUpdateMutation, ProviderUsageMetadata, ProviderUsageUpdate,
-    ReasoningSettings, RecordRunInputDelivery, UsageAccounting, UsageCompleteness, UsageFinality,
-    UsageSource,
+    ModelInvocationPurpose, ModelInvocationSettings, ModelProviderOperation, ModelToolCatalogStore,
+    NativeRunApplication, ProviderAccountId, ProviderApplication, ProviderClaim, ProviderError,
+    ProviderType, ProviderUpdate, ProviderUpdateMutation, ProviderUsageMetadata,
+    ProviderUsageUpdate, ReasoningSettings, RecordRunInputDelivery, UsageAccounting,
+    UsageCompleteness, UsageFinality, UsageSource,
 };
 use kiln_providers::{
     DETERMINISTIC_MODEL_ID, DETERMINISTIC_PROVIDER_ACCOUNT_ID, DETERMINISTIC_PROVIDER_TYPE,
@@ -239,6 +239,18 @@ impl RunService {
                             .await
                             .map_err(|_| RunError::RunStoreUnavailable)?;
                     self.events.publish(invocation.events);
+                    if invocation.value.capabilities().tool_calls() == CapabilitySupport::Supported
+                    {
+                        if let Some(tool) = &self.native_file_read {
+                            self.store
+                                .attach_model_tool_catalog(
+                                    invocation.value.invocation_id(),
+                                    tool.catalog(),
+                                )
+                                .await
+                                .map_err(|_| RunError::RunStoreUnavailable)?;
+                        }
+                    }
                     let claim = ProviderApplication::new(self.store.clone(), UlidIdGenerator)
                         .claim(invocation.value.invocation_id().clone())
                         .await
@@ -282,6 +294,25 @@ impl RunService {
             }
             if steered {
                 continue;
+            }
+            if outcome.completion_kind() == Some(ModelInvocationCompletionKind::ToolRequests) {
+                match self
+                    .execute_native_tools(&invocation, &mut cancellation)
+                    .await?
+                {
+                    native_tools::NativeToolBatchOutcome::Completed(tool_calls) => {
+                        entries.extend(tool_calls.into_iter().map(|tool_call_id| {
+                            ContextManifestEntryInput::ToolExchange { tool_call_id }
+                        }));
+                        continue;
+                    }
+                    native_tools::NativeToolBatchOutcome::Cancelled => {
+                        return self.finish_native_cancellation(run_id).await;
+                    }
+                    native_tools::NativeToolBatchOutcome::Rejected => {
+                        return self.finish_native_failure(run_id).await;
+                    }
+                }
             }
             if outcome.completion_kind() != Some(ModelInvocationCompletionKind::AssistantOutput) {
                 return self.finish_native_failure(run_id).await;

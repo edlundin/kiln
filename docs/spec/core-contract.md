@@ -709,8 +709,9 @@ verified stdout/stderr Artifact payloads in manifest order. Canonical exchange
 JSON counts against the text budget. Tool output Artifacts share the existing
 per-artifact and aggregate attachment byte budgets with message attachments;
 all payload sizes are preflighted before any read and bytes are size/hash checked.
-Missing or corrupt output artifacts fail the entire assembly. No live adapter or
-native coordinator consumes these tool-context entries yet.
+Missing or corrupt output artifacts fail the entire assembly. The native
+coordinator adds completed batch exchanges to the next context manifest in
+proposal order. No live adapter consumes these tool-context entries yet.
 
 `WorkspaceFileReadTool` supplies the local `read_file` definition for capability
 `kiln.workspace.read_file`, revision `1`. Explicit path/file byte limits are part
@@ -725,8 +726,24 @@ output. Results above the existing inline ceiling are stored as Artifacts.
 Other platforms fail closed. Explicit cancellation joins started blocking work
 before reporting Cancelled, without a filesystem latency guarantee. Dropping the
 future may detach blocking work and requires reconciliation of the running claim.
-The implementation is not yet activated by the daemon coordinator; generic
-ReadOnly adoption still denies all proposed tools.
+The daemon registers this implementation only when explicit positive path/file
+byte limits are configured. It attaches the catalog before claiming invocations
+that declare tool support. The current deterministic provider declares no tool
+support, so live activation remains pending. Generic ReadOnly adoption still
+denies all proposed tools.
+
+For terminal tool proposals, the coordinator resolves the complete batch before
+adoption, processes calls sequentially under the existing approval policy, and
+executes only fresh claims. Denials become context exchanges without dispatch.
+It waits for approval notifications without holding the commit lock. Run
+cancellation completes ready calls without dispatch and joins running reads
+before recording results. Interrupt input received during a tool batch is
+delivered at the next generation boundary after that batch finishes. Storage or
+ambiguous claim failures stop execution for reconciliation; they never reset a
+claim. Locally invalid or unavailable definitions fail the Run without executing
+the batch; model-visible argument-error results remain pending. Each claim
+consumes its typed batch, so subsequent calls currently reload and resolve the
+immutable batch; this makes no throughput claim.
 
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation

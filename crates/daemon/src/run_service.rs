@@ -20,6 +20,8 @@ use kiln_server::{
 use tokio::sync::{Mutex, Notify, oneshot, watch};
 
 mod native;
+mod native_tools;
+pub(crate) use native_tools::configured_file_read;
 
 struct ActiveRun {
     cancellation: Option<oneshot::Sender<()>>,
@@ -38,6 +40,7 @@ pub(crate) struct RunService {
     executor: DeterministicSubprocessExecutor,
     deterministic_model: bool,
     provider_registry: Arc<ProviderRegistry>,
+    native_file_read: Option<Arc<kiln_core::WorkspaceFileReadTool>>,
     events: EventBroadcaster,
     commit_sequence: Arc<Mutex<()>>,
     active: Arc<ActiveRuns>,
@@ -59,6 +62,7 @@ impl RunService {
             executor,
             deterministic_model: false,
             provider_registry: Arc::new(ProviderRegistry::new()),
+            native_file_read: None,
             events,
             commit_sequence: Arc::new(Mutex::new(())),
             active: Arc::new(ActiveRuns::default()),
@@ -75,6 +79,14 @@ impl RunService {
 
     pub(crate) fn with_provider_registry(mut self, registry: ProviderRegistry) -> Self {
         self.provider_registry = Arc::new(registry);
+        self
+    }
+
+    pub(crate) fn with_native_file_read(
+        mut self,
+        tool: Option<kiln_core::WorkspaceFileReadTool>,
+    ) -> Self {
+        self.native_file_read = tool.map(Arc::new);
         self
     }
 

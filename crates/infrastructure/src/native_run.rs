@@ -21,7 +21,14 @@ impl NativeRunStore for SqliteStore {
                       AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.model_invocation_id = o.model_invocation_id)
                 )))
                AND EXISTS (SELECT 1 FROM model_invocations i WHERE i.run_id = r.run_id AND i.provider = ?)
-               AND NOT EXISTS (SELECT 1 FROM tool_calls t WHERE t.run_id = r.run_id)
+               AND NOT EXISTS (
+                   SELECT 1 FROM tool_calls t WHERE t.run_id = r.run_id
+                   AND NOT EXISTS (
+                       SELECT 1 FROM model_tool_adoptions a
+                       JOIN model_invocations source ON source.model_invocation_id = a.model_invocation_id
+                       WHERE a.tool_call_id = t.tool_call_id AND source.run_id = r.run_id
+                   )
+               )
              ORDER BY r.run_id",
         )
         .bind(provider.as_str())
@@ -37,6 +44,20 @@ impl NativeRunStore for SqliteStore {
                 .iter()
                 .all(|invocation| invocation.settings().provider() == provider)
             {
+                for tool in snapshot
+                    .tool_calls()
+                    .iter()
+                    .filter(|tool| tool.state().is_terminal())
+                {
+                    model_tool_exchange::load_exchange(
+                        &mut transaction,
+                        &run_id,
+                        tool.tool_call_id(),
+                        model_tool_exchange::ExchangeContext::NewManifest,
+                    )
+                    .await
+                    .map_err(|_| RunStoreError::Unavailable)?;
+                }
                 snapshots.push(snapshot);
             }
         }
@@ -71,7 +92,14 @@ impl NativeRunStore for SqliteStore {
             });
         }
         if current.run().state() != RunState::Running
-            || !current.tool_calls().is_empty()
+            || current
+                .tool_calls()
+                .iter()
+                .any(|tool| !tool.state().is_terminal())
+            || current
+                .approvals()
+                .iter()
+                .any(|approval| approval.state() == ApprovalState::Pending)
             || current
                 .model_invocations()
                 .iter()
@@ -83,6 +111,21 @@ impl NativeRunStore for SqliteStore {
             || has_non_terminal_descendants(&mut transaction, run_id).await?
         {
             return Err(RunStoreError::InvalidTransition);
+        }
+        // Terminal native calls are retained as evidence. A fixture or foreign
+        // tool cannot acquire native failure semantics merely by being terminal.
+        for tool in current.tool_calls() {
+            model_tool_exchange::load_exchange(
+                &mut transaction,
+                run_id,
+                tool.tool_call_id(),
+                model_tool_exchange::ExchangeContext::NewManifest,
+            )
+            .await
+            .map_err(|error| match error {
+                kiln_core::ModelToolExchangeError::Unavailable => RunStoreError::Unavailable,
+                _ => RunStoreError::InvalidTransition,
+            })?;
         }
         let failed = current
             .run()

@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kiln_core::{
-    AssistantMessageApplication, AssistantMessageStoreError, CapabilitySupport,
+    ApprovalState, AssistantMessageApplication, AssistantMessageStoreError, CapabilitySupport,
     ContextInstructionProvenance, ContextManifestApplication, ContextManifestEntryInput,
     CreateContextManifest, CreateModelInvocation, GenerationSettings, MessageDeliveryMode,
     MessageDeliveryState, ModelCapabilitySnapshot, ModelId, ModelInvocation,
@@ -58,6 +58,24 @@ impl RunService {
                 continue;
             }
             let run_id = snapshot.run().run_id().clone();
+            if snapshot
+                .tool_calls()
+                .iter()
+                .any(|tool| !tool.state().is_terminal())
+                || snapshot
+                    .approvals()
+                    .iter()
+                    .any(|approval| approval.state() == ApprovalState::Pending)
+            {
+                // No recovery claim can prove whether external tool work ran.
+                // Leave ready/running calls and approval waits for explicit
+                // reconciliation; never reset or redispatch them at startup.
+                eprintln!(
+                    "kilnd: native Run {} requires tool reconciliation",
+                    run_id.as_str()
+                );
+                continue;
+            }
             for invocation in snapshot.model_invocations() {
                 match invocation.state() {
                     ModelInvocationState::Pending => {

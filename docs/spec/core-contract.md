@@ -781,8 +781,11 @@ the store. The lock file is never removed or truncated.
 
 Before readiness, the daemon reconciles stored deterministic native Runs even
 when the current executor setting selects subprocesses. Only the known fixture
-provider, model, and synthetic account qualify; tool Runs and mixed-provider
-histories are excluded. Pending attempts are cancelled without dispatch. In-flight
+provider, model, and synthetic account qualify; fixture-tool Runs and mixed-provider
+histories are excluded. Runs whose ToolCalls all have native adoption links remain
+eligible, and terminal exchanges are validated before recovery. Active tools and
+pending approvals are reported for explicit reconciliation without resetting or
+redispatching work. Pending attempts are cancelled without dispatch. In-flight
 attempts become interrupted with unknown final usage; existing counted quantities
 and final usage are retained. No attempt is dispatched again.
 
@@ -835,8 +838,10 @@ not change the terminal Run state or choose a failure policy. Incomplete Message
 remain visible but cannot be selected for context.
 
 The internal native Run failure boundary moves a running Run to failed only
-when it has no ToolCalls, all invocations and descendants are terminal, and at
-least one generation attempt exists. The failed Run and its state Event commit
+when all ToolCalls, invocations, and descendants are terminal, no approvals are
+pending, and at least one generation attempt exists. Every retained ToolCall
+must be a validated native exchange; fixture and foreign calls are rejected.
+The failed Run and its state Event commit
 together. An already failed Run returns without another Event.
 
 An exact retry returns the existing Message without new Events, including after

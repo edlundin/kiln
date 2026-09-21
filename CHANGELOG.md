@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `fix`
+
+- Allowed native Run failure and recovery after verified terminal ToolCalls, while retaining active tool work for explicit reconciliation without redispatch.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `feat`
 
 - Added a scoped UTF-8 file-read tool with local argument validation, descriptor-based traversal, bounded output, and artifact storage for larger results. Native coordinator activation remains pending.

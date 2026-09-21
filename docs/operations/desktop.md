@@ -70,19 +70,24 @@ together only after checking compatibility.
 After connecting to the daemon, open **Settings** in the global toolbar. Provider
 accounts are independent of the selected Workspace or Session. **Refresh accounts**
 loads the daemon's saved account summaries; **Sign in to Codex** reuses a connecting
-subscription account or creates one through the idempotent account API.
+or disconnected subscription account, or creates one through the idempotent account
+API when neither is available. Retrying after cancellation keeps the account ID.
 
 Use **Open verification page** and **Copy code** to complete device sign-in in your
 browser, then choose **Check sign-in**. Status checks are user-initiated; the daemon
 owns polling OpenAI and credential storage. **Cancel sign-in** addresses only the
 displayed attempt. Expired/replaced attempts require refreshing the account list
 before starting again. A cleanup-required result is shown explicitly and blocks
-another attempt in that view.
+another attempt in that view. The daemon also rejects replacement of an attempt
+with unresolved credential cleanup, preserving its terminal status until shutdown.
+Cleanup recovery across daemon restarts is not yet implemented.
 
 Closing Settings does not cancel sign-in. Reconnecting the desktop discards its
 connection-scoped attempt display; refresh the accounts to recover the durable
-state. An unfinished connecting account can start a replacement attempt. Closing
-the desktop leaves daemon-owned work running. Account recovery after credentials
+state. An unfinished connecting or disconnected account can start a replacement
+attempt. If requesting a replacement fails, the prior terminal attempt remains
+available by its original ID. Closing the desktop leaves daemon-owned work running.
+Account recovery after credentials
 expire, disconnect/revoke controls, browser PKCE, and API-key entry are not yet
 available in the desktop. A connected account does not enable live model Runs.
 

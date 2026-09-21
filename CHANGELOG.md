@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `fix`
+
+- Fixed Codex sign-in retries to reuse disconnected accounts, preserve terminal results and unresolved credential-cleanup failures, and avoid blocking account status during cancellation or replacement.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
 ## 2026-09-21 — `feat`
 
 - Added global desktop Settings for provider accounts with Codex device sign-in, safe account summaries, manual status checks, and exact-attempt cancellation.

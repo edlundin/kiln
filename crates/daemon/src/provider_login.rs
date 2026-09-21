@@ -88,10 +88,21 @@ impl ProviderAccountLoginCoordinator {
         if *control {
             return Err(ProviderAccountLoginError::InvalidState);
         }
-        if let Some(previous) = self.attempts.lock().await.get(&account_id).cloned() {
+        // Release the registry lock before joining. The terminal attempt stays
+        // addressable until a replacement is actually ready to be published.
+        let previous = self.attempts.lock().await.get(&account_id).cloned();
+        if let Some(previous) = previous {
             previous.cancellation.send_replace(true);
-            let _ = join_attempt(&previous).await;
-            self.remove_if_same(&account_id, &previous).await;
+            if let Err(
+                error @ ProviderAccountLoginError::Account(
+                    ProviderAccountError::CredentialCleanupRequired { .. },
+                ),
+            ) = join_attempt(&previous).await
+            {
+                // This result owns the only retained reference to failed cleanup.
+                // A replacement must not erase it or start another credential write.
+                return Err(error);
+            }
         }
         let account = self
             .application
@@ -101,9 +112,21 @@ impl ProviderAccountLoginCoordinator {
         if account.provider_type().as_str() != OPENAI_CODEX_SUBSCRIPTION_PROVIDER_TYPE {
             return Err(ProviderAccountLoginError::InvalidProvider);
         }
-        if account.state() != ProviderAccountState::Connecting || account.secret_ref().is_some() {
+        if !matches!(
+            account.state(),
+            ProviderAccountState::Connecting | ProviderAccountState::Disconnected
+        ) || account.secret_ref().is_some()
+        {
             return Err(ProviderAccountLoginError::InvalidState);
         }
+        self.application
+            .prepare_provider_account_login(
+                account_id.clone(),
+                account.provider_type().clone(),
+                now()?,
+            )
+            .await
+            .map_err(ProviderAccountLoginError::Account)?;
         let authorization = self.client.begin().await.map_err(|error| match error {
             CodexDeviceLoginError::Unavailable | CodexDeviceLoginError::Transport => {
                 ProviderAccountLoginError::DeviceUnavailable
@@ -300,7 +323,11 @@ async fn poll_attempt(
     ProviderAccountLoginState,
     Option<Result<ProviderAccount, ProviderAccountLoginError>>,
 ) {
-    let mut task = attempt.task.lock().await;
+    // Cancellation/replacement can be joining a provider request or vault write.
+    // Status must remain nonblocking while that owner finishes the task.
+    let Ok(mut task) = attempt.task.try_lock() else {
+        return (ProviderAccountLoginState::Pending, None);
+    };
     let outcome = match &mut *task {
         AttemptTask::Complete(outcome) => Some(outcome.clone()),
         AttemptTask::Running(handle) if !handle.is_finished() => None,

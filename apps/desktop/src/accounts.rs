@@ -107,7 +107,8 @@ impl AccountSettings {
             .accounts
             .iter()
             .find(|account| {
-                account.provider_type == CODEX_PROVIDER && account.state == "connecting"
+                account.provider_type == CODEX_PROVIDER
+                    && matches!(account.state.as_str(), "connecting" | "disconnected")
             })
             .cloned()
         {
@@ -214,7 +215,7 @@ impl AccountSettings {
                 self.create_key = ulid::Ulid::generate().to_string();
                 self.upsert(account.clone());
                 // A disconnect may occur while creation is in flight. Do not start new work.
-                if self.online && account.state == "connecting" {
+                if self.online && matches!(account.state.as_str(), "connecting" | "disconnected") {
                     self.begin(account, cx);
                 }
             }

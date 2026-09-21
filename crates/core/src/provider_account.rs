@@ -640,6 +640,40 @@ where
         Ok(next)
     }
 
+    /// Reuses an empty account for device sign-in without replacing credentials.
+    /// Validation and the disconnected-to-connecting transition share the same
+    /// lifecycle lock as credential publication, refresh, and disconnect.
+    pub async fn prepare_provider_account_login(
+        &self,
+        id: ProviderAccountId,
+        expected_provider_type: ProviderType,
+        updated_at_unix_ms: u64,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
+        let _lock = self.lifecycle_lock(&id).await;
+        let current = self.get_provider_account(id).await?;
+        if current.provider_type() != &expected_provider_type {
+            return Err(ProviderAccountError::ProviderTypeMismatch);
+        }
+        if current.secret_ref().is_some()
+            || !matches!(
+                current.state(),
+                ProviderAccountState::Connecting | ProviderAccountState::Disconnected
+            )
+        {
+            return Err(ProviderAccountError::CredentialVersionConflict);
+        }
+        if current.state() == ProviderAccountState::Connecting {
+            return Ok(current);
+        }
+        let next =
+            current.transition(ProviderAccountState::Connecting, updated_at_unix_ms, None)?;
+        self.store
+            .update_provider_account(&current, &next)
+            .await
+            .map_err(map_provider_account_store_error)?;
+        Ok(next)
+    }
+
     pub async fn connect_provider_account<V: SecretStore>(
         &self,
         secret_store: &V,

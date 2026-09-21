@@ -387,6 +387,27 @@ impl<S: crate::ModelToolAdoptionStore, I: crate::RunIdGenerator> ProviderApplica
     }
 }
 
+impl<S: crate::ModelToolCompletionStore, I: crate::RunIdGenerator> ProviderApplication<S, I> {
+    pub async fn finish_tool_call(
+        &self,
+        tool_call_id: &crate::ToolCallId,
+        result: &crate::ToolCallResult,
+    ) -> Result<crate::ModelToolCompletionMutation, crate::ModelToolCompletionError> {
+        result.validate_native_output()?;
+        self.store
+            .finish_model_tool_call(
+                tool_call_id,
+                result,
+                crate::ModelToolCompletionIds {
+                    stdout_event_id: self.ids.event_id(),
+                    stderr_event_id: self.ids.event_id(),
+                    state_event_id: self.ids.event_id(),
+                },
+            )
+            .await
+    }
+}
+
 pub trait ModelProvider: Send + Sync {
     type Operation: ModelProviderOperation;
 

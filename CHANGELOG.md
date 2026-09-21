@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added atomic native ToolCall completion and partial-output cancellation that retain results without ending the Run, with bounded inline output and exact terminal retries.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added durable sequential adoption of model proposals into scoped Kiln ToolCalls and approvals, preventing duplicate adoption, skipped proposals, and accidental dispatch through the subprocess fixture.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

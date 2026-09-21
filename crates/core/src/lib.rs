@@ -9,6 +9,7 @@ mod child_activity;
 mod model_output;
 mod model_tool_adoption;
 mod model_tool_catalog;
+mod model_tool_completion;
 mod model_tool_request;
 mod model_tool_resolution;
 mod native_run;
@@ -22,6 +23,7 @@ pub use child_activity::*;
 pub use model_output::*;
 pub use model_tool_adoption::*;
 pub use model_tool_catalog::*;
+pub use model_tool_completion::*;
 pub use model_tool_request::*;
 pub use model_tool_resolution::*;
 pub use native_run::*;
@@ -3279,6 +3281,24 @@ pub struct ToolCallResult {
 }
 
 impl ToolCallResult {
+    /// Call only after the owning executor has stopped external work. A native
+    /// cancellation may retain partial output without completing the whole Run.
+    pub fn cancelled(output: SubprocessOutput) -> Result<Self, RunError> {
+        if (output.stdout_artifact.is_some() && !output.stdout.is_empty())
+            || (output.stderr_artifact.is_some() && !output.stderr.is_empty())
+        {
+            return Err(RunError::InvalidTransition);
+        }
+        Ok(Self {
+            state: ToolCallState::Cancelled,
+            stdout: output.stdout_artifact.is_none().then_some(output.stdout),
+            stderr: output.stderr_artifact.is_none().then_some(output.stderr),
+            stdout_artifact: output.stdout_artifact,
+            stderr_artifact: output.stderr_artifact,
+            exit_code: output.exit_code,
+        })
+    }
+
     pub fn new(
         state: ToolCallState,
         stdout: String,

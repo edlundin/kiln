@@ -6,6 +6,7 @@ pub use daemon_lock::DaemonStoreLock;
 mod model_output;
 mod model_tool_adoption;
 mod model_tool_catalog;
+mod model_tool_completion;
 mod model_tool_request;
 mod native_run;
 mod provider_account;

@@ -603,8 +603,8 @@ semantic violations without filesystem/network effects, schema-reference
 fetches, dispatch, or policy decisions. Resolution preserves order, provider call
 IDs, invocation identity, and the frozen definitions. A failure reports only
 its position and a typed reason and returns no partial resolved batch. Resolved
-commands carry no ToolCall ID, effective scope, or approval. No concrete native
-resolver or executable adoption path is wired yet.
+commands carry no ToolCall ID, effective scope, or approval. Concrete native
+resolvers and coordinator dispatch are not wired yet.
 
 Locally resolved batches can prepare `AdoptModelToolRequest` commands for one
 position and an explicit requested Workspace scope. The SQLite adoption boundary
@@ -627,11 +627,28 @@ Both invocation creation and claim reject outstanding stored proposals, so a
 next model turn cannot skip their adoption/completion or deadlock adoption by
 creating a competing pending invocation. Invalid proposals currently require
 Run failure/cancellation; model-visible validation-error results remain pending.
-Adoption is an internal operation and does not dispatch. Native ToolCall
-completion, result context, and coordinator integration remain pending. The
+Adoption is an internal operation and does not dispatch. Result context and
+coordinator integration remain pending. The
 deterministic subprocess executor refuses native model Runs and foreign
 capabilities; native approval decisions notify the coordinator without spawning
 the subprocess fixture.
+
+`ProviderApplication::finish_tool_call` records a native adopted ToolCall result
+without changing Run state or starting more work. The executor must have stopped
+external work before calling it. Storage revalidates the adoption link, durable
+proposal/catalog, Run ownership, and capability. Completion requires a running
+tool and a running/cancelling Run with no conflicting active work. Explicit
+cancellation may finish a ready or running tool only while the Run is cancelling;
+partial output is retained. A normal completion racing cancellation also leaves
+the Run cancelling for its coordinator to finalize.
+
+Inline output uses the existing per-stream `INLINE_TOOL_OUTPUT_LIMIT` (4096
+bytes); larger output requires an Artifact already written by the executor.
+Artifact metadata, terminal tool state, and output/state Events commit together.
+Exact terminal retries return no new Events; changed results conflict. Denied
+tools are already terminal and cannot acquire a completion payload. Result bytes
+are not read or uploaded by this operation, and Run/child cancellation and the
+next model turn remain separate decisions.
 
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation

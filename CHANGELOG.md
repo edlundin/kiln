@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added invocation-bound private continuation storage committed atomically with model completion, final usage and tool proposals, with bounded reads and integrity checks.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added bounded Responses output replay data that preserves encrypted reasoning and assistant phase for future native tool continuation; durable binding and live transport remain pending.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

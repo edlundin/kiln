@@ -479,38 +479,11 @@ impl ModelInvocationCompletionStore for SqliteStore {
             .map_err(|_| {
                 ModelInvocationCompletionError::Invocation(ModelInvocationStoreError::Unavailable)
             })?;
-        let usage = record_usage_in_transaction(
-            &mut transaction,
-            &command.usage,
-            ids.usage_observation_id,
-            ids.usage_event_id,
-        )
-        .await
-        .map_err(ModelInvocationCompletionError::Usage)?;
-        let invocation = finish_model_invocation_in_transaction(
-            &mut transaction,
-            &command.invocation,
-            command.outcome,
-            ids.invocation_event_id,
-        )
-        .await
-        .map_err(ModelInvocationCompletionError::Invocation)?;
-        let mut events = usage.events;
-        events.extend(invocation.events);
-        let disposition = if events.is_empty() {
-            ModelInvocationMutationDisposition::Duplicate
-        } else {
-            ModelInvocationMutationDisposition::Applied
-        };
+        let completion = finish_with_usage(&mut transaction, command, ids).await?;
         transaction.commit().await.map_err(|_| {
             ModelInvocationCompletionError::Invocation(ModelInvocationStoreError::Unavailable)
         })?;
-        Ok(ModelInvocationCompletionMutation {
-            invocation: invocation.value,
-            usage: usage.value,
-            events,
-            disposition,
-        })
+        Ok(completion)
     }
 }
 
@@ -631,5 +604,51 @@ pub(super) async fn record_usage_in_transaction(
         value: observation,
         events: vec![stored],
         disposition: UsageMutationDisposition::Applied,
+    })
+}
+
+pub(super) async fn finish_with_usage(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    command: &FinishModelInvocationWithUsage,
+    ids: ModelInvocationCompletionIds,
+) -> Result<ModelInvocationCompletionMutation, ModelInvocationCompletionError> {
+    if command.usage.metadata().model_invocation_id != *command.invocation.invocation_id() {
+        return Err(ModelInvocationCompletionError::Usage(
+            UsageStoreError::AttributionMismatch,
+        ));
+    }
+    if command.usage.metadata().finality != UsageFinality::Final {
+        return Err(ModelInvocationCompletionError::Usage(
+            UsageStoreError::InvalidUpdate,
+        ));
+    }
+    let usage = record_usage_in_transaction(
+        transaction,
+        &command.usage,
+        ids.usage_observation_id,
+        ids.usage_event_id,
+    )
+    .await
+    .map_err(ModelInvocationCompletionError::Usage)?;
+    let invocation = finish_model_invocation_in_transaction(
+        transaction,
+        &command.invocation,
+        command.outcome,
+        ids.invocation_event_id,
+    )
+    .await
+    .map_err(ModelInvocationCompletionError::Invocation)?;
+    let mut events = usage.events;
+    events.extend(invocation.events);
+    let disposition = if events.is_empty() {
+        ModelInvocationMutationDisposition::Duplicate
+    } else {
+        ModelInvocationMutationDisposition::Applied
+    };
+    Ok(ModelInvocationCompletionMutation {
+        invocation: invocation.value,
+        usage: usage.value,
+        events,
+        disposition,
     })
 }

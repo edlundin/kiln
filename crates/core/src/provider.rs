@@ -159,6 +159,25 @@ pub enum ProviderError {
     ProviderResponseInvalid,
 }
 
+impl<S: crate::ModelContinuationStore, I: UsageIdGenerator> ProviderApplication<S, I> {
+    pub async fn finish_with_continuation(
+        &self,
+        command: crate::FinishModelInvocationWithContinuation,
+    ) -> Result<ModelInvocationCompletionMutation, crate::ModelContinuationError> {
+        command.validate()?;
+        self.store
+            .finish_model_invocation_with_continuation(
+                &command,
+                ModelInvocationCompletionIds {
+                    usage_observation_id: self.ids.usage_observation_id(),
+                    usage_event_id: self.ids.event_id(),
+                    invocation_event_id: self.ids.event_id(),
+                },
+            )
+            .await
+    }
+}
+
 pub enum ProviderUpdate {
     Output(RecordModelOutput),
     Usage(ProviderUsageUpdate),

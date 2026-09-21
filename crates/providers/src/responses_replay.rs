@@ -95,6 +95,25 @@ impl ResponsesReplay {
     pub fn item_count(&self) -> usize {
         self.item_count
     }
+
+    pub fn into_continuation(
+        self,
+        invocation: &kiln_core::ModelInvocation,
+        limits: kiln_core::ModelContinuationLimits,
+    ) -> Result<kiln_core::ModelInvocationContinuation, kiln_core::ModelContinuationError> {
+        if !matches!(
+            invocation.settings().provider().as_str(),
+            crate::OPENAI_CODEX_SUBSCRIPTION_PROVIDER_TYPE | crate::OPENAI_API_PROVIDER_TYPE
+        ) {
+            return Err(kiln_core::ModelContinuationError::InvalidBinding);
+        }
+        kiln_core::ModelInvocationContinuation::new(
+            invocation,
+            "openai.responses.output.v1".into(),
+            self.json,
+            limits,
+        )
+    }
 }
 
 fn validate_item(item: &Value, position: usize) -> Result<(), ResponsesReplayError> {

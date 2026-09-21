@@ -4,6 +4,7 @@ mod assistant_message;
 mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
 mod model_output;
+mod model_continuation;
 mod model_tool_adoption;
 mod model_tool_catalog;
 mod model_tool_completion;

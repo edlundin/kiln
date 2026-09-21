@@ -25,89 +25,13 @@ impl ModelToolRequestStore for SqliteStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|_| ModelToolRequestError::Unavailable)?;
-        let current = load_model_invocation(&mut transaction, invocation.invocation_id())
-            .await
-            .map_err(ModelToolRequestError::Invocation)?
-            .ok_or(ModelToolRequestError::InvalidInvocation)?;
-        requests.validate_completion(&current, update)?;
-        let previous = load_requests(&mut transaction, &current).await?;
-        if let Some(previous) = previous {
-            if previous != *requests {
-                return Err(ModelToolRequestError::IdempotencyConflict);
-            }
-        } else {
-            // Never graft proposals onto a completed/cancelled invocation. The
-            // initial batch, final usage, and completion must share one commit.
-            if current.state() != ModelInvocationState::InFlight {
-                return Err(ModelToolRequestError::InvalidInvocation);
-            }
-            let count = i64::try_from(requests.requests().len())
-                .map_err(|_| ModelToolRequestError::RequestLimitExceeded)?;
-            sqlx::query(
-                "INSERT INTO model_tool_request_batches
-                    (model_invocation_id, content_hash, request_count) VALUES (?, ?, ?)",
-            )
-            .bind(invocation.invocation_id().as_str())
-            .bind(hash_bytes(&requests.canonical_bytes()).as_str())
-            .bind(count)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| ModelToolRequestError::Unavailable)?;
-            for (position, request) in requests.requests().iter().enumerate() {
-                sqlx::query(
-                    "INSERT INTO model_tool_requests
-                        (model_invocation_id, position, provider_call_id, name, arguments_json)
-                     VALUES (?, ?, ?, ?, ?)",
-                )
-                .bind(invocation.invocation_id().as_str())
-                .bind(
-                    i64::try_from(position)
-                        .map_err(|_| ModelToolRequestError::RequestLimitExceeded)?,
-                )
-                .bind(request.provider_call_id())
-                .bind(request.name())
-                .bind(request.arguments_json())
-                .execute(&mut *transaction)
-                .await
-                .map_err(|_| ModelToolRequestError::Unavailable)?;
-            }
-        }
-        let usage = usage::record_usage_in_transaction(
-            &mut transaction,
-            update,
-            ids.usage_observation_id,
-            ids.usage_event_id,
-        )
-        .await
-        .map_err(ModelToolRequestError::Usage)?;
-        let completed = finish_model_invocation_in_transaction(
-            &mut transaction,
-            invocation,
-            ModelInvocationOutcome::completed(ModelInvocationCompletionKind::ToolRequests),
-            ids.invocation_event_id,
-        )
-        .await
-        .map_err(ModelToolRequestError::Invocation)?;
-        let mut events = usage.events;
-        events.extend(completed.events);
-        let disposition = if events.is_empty() {
-            ModelInvocationMutationDisposition::Duplicate
-        } else {
-            ModelInvocationMutationDisposition::Applied
-        };
+        let completion =
+            finish_with_requests(&mut transaction, invocation, requests, update, ids).await?;
         transaction
             .commit()
             .await
             .map_err(|_| ModelToolRequestError::Unavailable)?;
-        Ok(ModelToolRequestCompletion {
-            completion: ModelInvocationCompletionMutation {
-                invocation: completed.value,
-                usage: usage.value,
-                events,
-                disposition,
-            },
-            requests: requests.clone(),
-        })
+        Ok(completion)
     }
 
     async fn get_model_tool_requests(
@@ -228,4 +152,90 @@ pub(super) async fn load_requests(
         return Err(ModelToolRequestError::IntegrityViolation);
     }
     Ok(Some(requests))
+}
+
+pub(super) async fn finish_with_requests(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    invocation: &ModelInvocation,
+    requests: &ModelToolRequestBatch,
+    update: &ProviderUsageUpdate,
+    ids: ModelInvocationCompletionIds,
+) -> Result<ModelToolRequestCompletion, ModelToolRequestError> {
+    requests.validate_completion(invocation, update)?;
+    let current = load_model_invocation(transaction, invocation.invocation_id())
+        .await
+        .map_err(ModelToolRequestError::Invocation)?
+        .ok_or(ModelToolRequestError::InvalidInvocation)?;
+    requests.validate_completion(&current, update)?;
+    let previous = load_requests(transaction, &current).await?;
+    if let Some(previous) = previous {
+        if previous != *requests {
+            return Err(ModelToolRequestError::IdempotencyConflict);
+        }
+    } else {
+        // Never graft proposals onto a completed/cancelled invocation. The
+        // initial batch, final usage, and completion must share one commit.
+        if current.state() != ModelInvocationState::InFlight {
+            return Err(ModelToolRequestError::InvalidInvocation);
+        }
+        let count = i64::try_from(requests.requests().len())
+            .map_err(|_| ModelToolRequestError::RequestLimitExceeded)?;
+        sqlx::query(
+            "INSERT INTO model_tool_request_batches
+                    (model_invocation_id, content_hash, request_count) VALUES (?, ?, ?)",
+        )
+        .bind(invocation.invocation_id().as_str())
+        .bind(hash_bytes(&requests.canonical_bytes()).as_str())
+        .bind(count)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| ModelToolRequestError::Unavailable)?;
+        for (position, request) in requests.requests().iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO model_tool_requests
+                        (model_invocation_id, position, provider_call_id, name, arguments_json)
+                     VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(invocation.invocation_id().as_str())
+            .bind(i64::try_from(position).map_err(|_| ModelToolRequestError::RequestLimitExceeded)?)
+            .bind(request.provider_call_id())
+            .bind(request.name())
+            .bind(request.arguments_json())
+            .execute(&mut **transaction)
+            .await
+            .map_err(|_| ModelToolRequestError::Unavailable)?;
+        }
+    }
+    let usage = usage::record_usage_in_transaction(
+        transaction,
+        update,
+        ids.usage_observation_id,
+        ids.usage_event_id,
+    )
+    .await
+    .map_err(ModelToolRequestError::Usage)?;
+    let completed = finish_model_invocation_in_transaction(
+        transaction,
+        invocation,
+        ModelInvocationOutcome::completed(ModelInvocationCompletionKind::ToolRequests),
+        ids.invocation_event_id,
+    )
+    .await
+    .map_err(ModelToolRequestError::Invocation)?;
+    let mut events = usage.events;
+    events.extend(completed.events);
+    let disposition = if events.is_empty() {
+        ModelInvocationMutationDisposition::Duplicate
+    } else {
+        ModelInvocationMutationDisposition::Applied
+    };
+    Ok(ModelToolRequestCompletion {
+        completion: ModelInvocationCompletionMutation {
+            invocation: completed.value,
+            usage: usage.value,
+            events,
+            disposition,
+        },
+        requests: requests.clone(),
+    })
 }

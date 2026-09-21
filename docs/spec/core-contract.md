@@ -766,12 +766,36 @@ IDs fail closed. Input/output byte, per-item byte, and item-count limits are
 caller-supplied; these are wire ceilings, not memory or token-window estimates.
 Debug exposes counts only. No item grants authority or executes a tool.
 
-This provider-only representation is not yet stored, bound to an account/model,
-or sent to a live endpoint. It does not replace full response-envelope validation.
-Before live reasoning-model activation, replay must be bound to the originating
-invocation/account and committed with terminal output/usage, then included in
-the subsequent request without duplication or promotion to instructions. Tool
-exchange snapshots alone are insufficient for that continuation.
+`ResponsesReplay::into_continuation` binds the accepted output to one OpenAI
+provider invocation, Run, account, and requested model using the versioned format
+`openai.responses.output.v1`. Core represents the bytes generically as
+`ModelInvocationContinuation`; its length-framed hash covers the binding,
+format, and payload. Debug omits the format and content. Caller-selected limits
+bound the format and payload; provider envelope validation remains separate.
+
+Migration `0031` adds private continuation storage. The internal
+`ProviderApplication::finish_with_continuation` operation commits continuation
+bytes, optional inert tool proposals, final usage, completion, and existing
+Events in one transaction. Only successful generation completions qualify.
+Exact retries reuse the stored payload; changed payloads/bindings conflict, and
+already terminal historical invocations cannot acquire a new continuation.
+Usage and proposal retries retain their existing rules. A failed transaction
+publishes none of these changes.
+
+Reads preflight format/BLOB lengths before loading their bytes, validate binding
+against the source invocation, check the versioned content hash, require terminal
+usage, and validate stored proposals for tool-request completions. Missing
+historical state returns None; consumers requiring replay must fail closed.
+Private payloads are never emitted in Events or registered as downloadable
+Artifacts. Surrounding replay JSON uses ordinary database storage; encrypted
+reasoning remains opaque provider ciphertext. This adds no encryption-at-rest
+claim and stores no credential envelope.
+
+The internal storage operation is not yet called by a live adapter or exposed in
+the provider stream. Subsequent request assembly must select verified earlier
+continuations from the same Run/account/model without duplication or promotion
+to instructions. Tool exchange snapshots alone are insufficient for that
+continuation. Live transport and subscription compatibility remain pending.
 
 Source: official [function-calling guidance](https://developers.openai.com/api/docs/guides/function-calling),
 [stateless encrypted reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses),

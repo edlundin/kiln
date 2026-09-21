@@ -536,6 +536,29 @@ invocation completion store. It returns the committed mutation and Events.
 The caller publishes only those Events. Exact retries retain the storage
 boundaries' duplicate behavior, including after invocation completion.
 
+`ProviderApplication::record_tool_requests` records a separate, inert batch of
+finalized model proposals. Each ordered request binds a unique provider call ID,
+an untrusted tool name, and a complete JSON argument object. Caller-supplied
+count, identifier, per-object, and aggregate byte limits are mandatory. Objects
+are recursively key-sorted and serialized within their byte budgets; JSON
+round-trip validation preserves numeric values and rejects unreadable nesting.
+Arguments and names have no content-bearing automatic debug representation.
+
+Migration `0027` stores the ordered batch and its versioned canonical hash.
+The SQLite boundary atomically records proposals, final usage, invocation
+completion as `tool_requests`, and their Events. Only generation invocations
+with explicit tool support may submit a batch. Exact retries reuse the stored
+batch and usage without additional Events; changed batches conflict. A new batch
+cannot be attached to an already terminal invocation. Reads validate terminal
+kind, capability, count, positions, argument structure, and the batch hash.
+Historical records may have no batch; consumers must fail closed when proposals
+are absent. The hash detects corruption, not an actor able to rewrite the database.
+
+Recording proposals does not resolve names, validate tool-specific schemas,
+create executable ToolCalls, grant scope, approve, or dispatch. Those operations
+remain owned by Kiln. The generic provider stream still rejects payload-free
+tool completions; stream integration and tool adoption remain pending.
+
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation
 on the active provider operation. Successful cancellation must stop external

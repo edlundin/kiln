@@ -4,6 +4,7 @@ mod assistant_message;
 mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
 mod model_output;
+mod model_tool_request;
 mod native_run;
 mod provider_account;
 mod provider_context;

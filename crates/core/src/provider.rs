@@ -258,6 +258,31 @@ where
     }
 }
 
+impl<S: crate::ModelToolRequestStore, I: UsageIdGenerator> ProviderApplication<S, I> {
+    /// Record finalized proposals and terminal usage atomically. This operation
+    /// does not create executable ToolCalls or grant any tool authority.
+    pub async fn record_tool_requests(
+        &self,
+        invocation: &ModelInvocation,
+        requests: &crate::ModelToolRequestBatch,
+        usage: &ProviderUsageUpdate,
+    ) -> Result<crate::ModelToolRequestCompletion, crate::ModelToolRequestError> {
+        requests.validate_completion(invocation, usage)?;
+        self.store
+            .finish_model_invocation_with_tool_requests(
+                invocation,
+                requests,
+                usage,
+                ModelInvocationCompletionIds {
+                    usage_observation_id: self.ids.usage_observation_id(),
+                    usage_event_id: self.ids.event_id(),
+                    invocation_event_id: self.ids.event_id(),
+                },
+            )
+            .await
+    }
+}
+
 pub trait ModelProvider: Send + Sync {
     type Operation: ModelProviderOperation;
 

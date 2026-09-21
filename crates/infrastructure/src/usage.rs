@@ -514,7 +514,7 @@ impl ModelInvocationCompletionStore for SqliteStore {
     }
 }
 
-async fn record_usage_in_transaction(
+pub(super) async fn record_usage_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     update: &ProviderUsageUpdate,
     observation_id: UsageObservationId,

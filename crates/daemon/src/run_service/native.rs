@@ -369,6 +369,24 @@ impl RunService {
             };
             match next {
                 Ok(Some(update)) => {
+                    if let Err(error) = update.validate_for(invocation) {
+                        let outcome = failure_outcome(error);
+                        self.stop_native_after_error(invocation, operation, outcome)
+                            .await?;
+                        return Ok((outcome, false));
+                    }
+                    let update = match update {
+                        ProviderUpdate::ToolRequests { usage, .. } if stopped => {
+                            // A terminal proposal may already be buffered when
+                            // cancellation completes. Retain its usage, but do
+                            // not strand unadopted work on a steered invocation.
+                            ProviderUpdate::Finished {
+                                outcome: ModelInvocationOutcome::cancelled(),
+                                usage,
+                            }
+                        }
+                        update => update,
+                    };
                     let outcome = match &update {
                         ProviderUpdate::Finished { outcome, .. } => Some(*outcome),
                         ProviderUpdate::ToolRequests { .. } => {
@@ -378,12 +396,6 @@ impl RunService {
                         }
                         _ => None,
                     };
-                    if let Err(error) = update.validate_for(invocation) {
-                        let outcome = failure_outcome(error);
-                        self.stop_native_after_error(invocation, operation, outcome)
-                            .await?;
-                        return Ok((outcome, false));
-                    }
                     if let Err(error) = self
                         .persist_native_update(invocation.invocation_id(), update)
                         .await

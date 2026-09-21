@@ -1,3 +1,7 @@
+- EDL-311 stopped-stream continuation: after successful cancellation or interrupt stop, the native driver validates a buffered terminal tool update, preserves its final usage with a cancelled invocation outcome, and discards proposals. This prevents unadopted stopped work from blocking a subsequent steered generation. Invalid updates still take the existing error-stop path.
+
+  Validation: daemon cargo check, focused formatting and diff checks; no tests or runtime provider cancellation/steering flow ran. The deterministic fixture still does not emit tool requests. This handles proposals received after a recorded stop, not every possible steering/terminal race; coordinator scheduling remains pending.
+
 - EDL-311 lifecycle continuation: native failure finalization now permits terminal adopted ToolCalls after validating each durable exchange, while retaining the no-active-work/no-pending-approval boundary and rejecting foreign/fixture tools. Recovery discovery includes native-adopted tool histories, verifies terminal exchange sources, and continues excluding mixed providers and fixture tools. The deterministic coordinator reports active tools or pending approvals for explicit reconciliation before changing invocations; it never resets or redispatches them.
 
   Validation: after adding a missing ApprovalState import, workspace cargo check, focused rustfmt, and diff checks passed; the existing block v0.1.6 warning remains. No tests or restart/tool runtime exercise ran. Concrete tool activation and explicit running-tool recovery remain pending.

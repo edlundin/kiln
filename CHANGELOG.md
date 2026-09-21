@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `fix`
 
+- Discarded buffered tool proposals after native provider cancellation while retaining final usage, preventing stopped work from blocking a steered generation.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `fix`
+
 - Allowed native Run failure and recovery after verified terminal ToolCalls, while retaining active tool work for explicit reconciliation without redispatch.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

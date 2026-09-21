@@ -586,8 +586,12 @@ batch and final usage and routes through the same atomic proposal store.
 The daemon publishes the committed Events and stops reading after that terminal
 update. When draining an invalid stream after cancellation, it retains validated
 final usage under the failure outcome and discards any proposals. No proposal
-from that error path is persisted or executed. The deterministic native loop
-still advertises tools as unsupported; executable tool adoption remains pending.
+from that error path is persisted or executed. After a successful cancellation
+or interrupt stop, a valid buffered terminal tool batch is likewise discarded;
+its final usage is retained with a cancelled invocation outcome. This prevents
+unadopted proposals from blocking the next steered generation. Original updates
+are validated before normalization. The deterministic native loop still
+advertises tools as unsupported; coordinator activation remains pending.
 
 `ProviderApplication::resolve_tool_requests` loads the terminal invocation,
 durable batch, and frozen catalog before resolving any proposal. Missing

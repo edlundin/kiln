@@ -327,7 +327,20 @@ snapshot. Successful disconnect invalidates that login attempt. Deletion failure
 returns `provider_account_cleanup_required` without exposing credential references.
 Already-disconnected accounts are idempotent, but a new disconnect request also
 affects a subsequently reconnected account; clients do not automatically retry.
-Provider-side revocation is not performed. Account creation requires a non-empty `Idempotency-Key`;
+Provider-side revocation is not performed.
+
+The separate `openai_api` provider uses a versioned, account-bound vault envelope.
+Its key wrapper and errors are redacted; syntax validation does not establish
+OpenAI authentication, billing, model access, or entitlement. Explicit local
+`kilnd import-openai-api-key --stdin` import requires an exclusive daemon-store
+lock, refuses active-account replacement, and reuses an empty account through the
+guarded lifecycle/journal path. It accepts no key argument or implicit environment
+credential and refuses terminal stdin to avoid echo. No API-key input is added to
+the renderer, HTTP/WebSocket protocol, Events, or artifacts. Provider transport
+can decode only an envelope bound to the requested OpenAI API account; Codex
+subscription envelopes remain separate. Live API transport is not implemented.
+
+Account creation requires a non-empty `Idempotency-Key`;
 an exact retry returns the original account and changed payload reuse is a
 typed conflict. Account responses omit secret references, provider subjects,
 arbitrary metadata, and credential material. Login attempt IDs are

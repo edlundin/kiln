@@ -29,6 +29,7 @@ use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
 
 use crate::run_service::RunService;
 
+mod account_import;
 mod provider_login;
 mod run_service;
 
@@ -38,6 +39,12 @@ const DETERMINISTIC_BLOCKING_CHILD_ARGUMENT: &str = "blocking-child";
 async fn main() -> ExitCode {
     if let Some(status) = deterministic_subprocess_fixture() {
         return status;
+    }
+    if env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "import-openai-api-key")
+    {
+        return account_import::run().await;
     }
 
     let deterministic_model = match env::var("KILN_RUN_EXECUTOR") {

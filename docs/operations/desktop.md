@@ -98,7 +98,8 @@ state. An unfinished connecting or disconnected account can start a replacement
 attempt. If requesting a replacement fails, the prior terminal attempt remains
 available by its original ID. Closing the desktop leaves daemon-owned work running.
 Provider-side revocation, browser PKCE, and API-key entry are not yet available in
-the desktop. A connected account does not enable live model Runs.
+the desktop. OpenAI API credentials can be imported locally as described below.
+A connected account does not enable live model Runs.
 
 Only public account metadata, the device user code, and the verification address
 enter the view. Tokens and vault references stay in the daemon. The desktop opens
@@ -113,6 +114,30 @@ The local disconnect continuation was also inspected against an isolated daemon
 with an empty account: confirmation, Keep account, and successful disconnect with
 account refresh were observed. Credential deletion, concurrent cancellation, and
 failure/retry layouts were not exercised at runtime.
+
+## Import an OpenAI API key locally
+
+OpenAI API billing and credentials are separate from Codex subscription access.
+The renderer and public daemon API never receive an API key. To explicitly save
+one in the OS vault, stop the daemon for that data directory and use the local
+import command. In Nushell, a hidden prompt can feed it without putting the key
+in command arguments or shell history:
+
+```nu
+input --suppress-output "OpenAI API key: " | ^target/debug/kilnd import-openai-api-key --stdin
+```
+
+Use the same `KILN_DATA_DIR` as the daemon if it was set. The command reads stdin
+to EOF, permits one trailing newline, and refuses terminal input or an active
+OpenAI API account. It never imports environment credentials implicitly. For
+replacement, first disconnect the API account in Settings, stop the daemon, and
+run the import again. Pending cleanup must also be resolved before import.
+
+Restart the daemon and refresh Settings after success. The API account appears as
+**Credentials saved — provider access not verified**. Saving does not contact
+OpenAI or validate authentication, billing, models, or entitlement. Live API model
+execution remains pending. The command's help is available with
+`kilnd import-openai-api-key --help`; it does not open the vault or account store.
 
 ## Start or resume a session
 

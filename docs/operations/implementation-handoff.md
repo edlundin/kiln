@@ -10,6 +10,10 @@ attachment persistence repair in the Kiln Linear tracker.
 
 ## Status
 
+- The EDL-309 local OpenAI API import continuation adds a redacted, versioned account-bound vault envelope and `kilnd import-openai-api-key --stdin`. It requires the daemon to be stopped, accepts no key through arguments/environment/terminal stdin, refuses active-account replacement, and uses the guarded account lifecycle and cleanup journal. Settings distinguishes saved API credentials from verified provider access. No API key is sent through the renderer/public protocol; no OpenAI request is made. Browser PKCE, applicable provider revoke, live transports, and runtime auth acceptance remain pending.
+
+  Validation: daemon/desktop cargo check, daemon build, targeted formatting, and diff checks passed. The built command's `--help` output was inspected without opening an account store or vault. No tests, actual key import, OpenAI request, or native API-account visual inspection ran; credential persistence and replacement behavior have source-review evidence only.
+
 - The EDL-309 credential-cleanup journal continuation adds migration `0025`, durable reservation before vault writes, atomic new-reference publication/retired-reference journaling, and recovery during disconnect (including disconnected accounts). Sign-in preparation blocks pending cleanup, and cleanup cannot delete a current account reference. The OS adapter serializes per-entry writes/deletes through caller cancellation. Historical orphan entries created before journaling cannot be recovered automatically. Migration and live vault/cancellation recovery remain runtime-unverified; compilation/source review only so far.
 
   Validation: `rtk cargo check --workspace`, focused Rust formatting checks, `git diff --check`, and protocol generation passed. No tests or real vault operations ran. The existing `block v0.1.6` future-incompatibility warning remains. Source review covered reservation/publication atomicity, ambiguous database failures, current-reference deletion guards, and caller cancellation; it does not establish runtime migration or crash-recovery behavior.

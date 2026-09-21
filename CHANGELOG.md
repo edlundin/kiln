@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `feat`
+
+- Added explicit local stdin-only OpenAI API credential import with an account-bound vault envelope, active-account replacement protection, and a saved-but-unverified account label in Settings.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
 ## 2026-09-21 — `fix`
 
 - Journaled provider credential cleanup before vault writes and atomically with credential replacement, allowing disconnect to recover unpublished or retired entries after restart without deleting the current credential.

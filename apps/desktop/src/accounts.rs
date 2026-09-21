@@ -397,6 +397,9 @@ impl Render for AccountSettings {
             };
             let state = match account.state.as_str() {
                 "connecting" => "Not signed in",
+                "connected" if account.provider_type == "openai_api" => {
+                    "Credentials saved — provider access not verified"
+                }
                 "connected" => "Connected",
                 "reauth_required" => {
                     "Sign-in expired or disconnect incomplete — disconnect, then sign in again"

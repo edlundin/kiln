@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Validate bounded portable global skill packages and canonical content hashes before synchronization or filesystem materialization.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Persist stable Kiln instance identity, explicit configuration roles, and master revision history with stale-enrollment protection.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

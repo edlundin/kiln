@@ -119,3 +119,32 @@ This storage does not yet contain snapshot payloads, applied revisions, enrollme
 credentials or remote endpoints. It exposes no network routes and grants no
 transport authentication. Schema/content verification, active snapshot storage,
 public status projection and administrative enrollment UI remain subsequent work.
+
+## Portable skill package validation
+
+The initial core package validator accepts explicitly supplied regular-file bytes
+with expected SHA-256 hashes. It checks every file before producing a validated
+package, requires a nonempty UTF-8 root `SKILL.md`, and rejects duplicate/self skill
+dependencies. Package IDs are lowercase ASCII letters, digits, hyphens, and
+underscores. Versions are opaque nonempty ASCII graphic strings, not interpreted
+as semantic versions or paths. Caller-supplied limits bound IDs, versions,
+dependencies, file count, each path, each file and combined file bytes; no default
+package or host-memory budget is inferred.
+
+For this first portable format, each path segment uses only ASCII letters, digits,
+periods, hyphens, and underscores, separated by forward slashes. Empty, dot and
+dot-dot segments, trailing periods, absolute/drive paths and reserved Windows
+device stems are rejected. Case-insensitive duplicate files, inconsistent directory
+spelling, and file/directory conflicts are rejected on every host. Unicode and
+space-containing filenames are outside this initial format. Host-specific length
+limits still need validation before materialization.
+
+Canonical package hashes bind ID, version, enabled state, sorted dependencies and
+sorted file paths, sizes and hashes using length-delimited fields and a versioned
+domain separator. Input order does not change the package hash. Debug output
+reports counts and sizes without file content or paths. Hash equality proves
+content correspondence, not publisher trust or the absence of secrets in supplied
+bytes. Filesystem importers must separately refuse symlinks/special entries and
+limit what the user selected for sharing; this pure validator never reads the
+filesystem, scans the vault, extracts files, executes scripts, or installs a skill.
+Cross-package dependency checks and snapshot persistence/application remain open.

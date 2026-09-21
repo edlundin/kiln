@@ -166,6 +166,11 @@ fn validate_item(item: &Value, position: usize) -> Result<(), ResponsesReplayErr
         Some("function_call") => {
             if !nonempty_string(&item["call_id"])
                 || !nonempty_string(&item["name"])
+                // Current Kiln function catalogs have no namespace, asynchronous,
+                // or programmatic execution semantics.
+                || item.get("namespace").is_some_and(|v| !v.is_null())
+                || item.get("async").is_some_and(|v| !v.is_null() && v != false)
+                || item.get("caller").is_some_and(|v| !v.is_null() && v != &serde_json::json!({"type": "direct"}))
                 || !item["arguments"].as_str().is_some_and(|arguments| {
                     serde_json::from_str::<serde_json::Map<String, Value>>(arguments).is_ok()
                 })

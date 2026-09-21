@@ -858,8 +858,35 @@ and replay bytes/items. Attachments serialize individually. No input is trimmed,
 and no partial request is returned after failure. Debug exposes only byte count.
 The body contains no credential fields and is not exposed in Events. Compilation
 and source review do not establish live API acceptance. Model-specific capability
-validation, transport, credential-generation binding, output/usage normalization,
+validation, transport, credential-generation binding, streaming normalization,
 compaction, and subscription endpoint compatibility remain pending.
+
+`ResponsesCompletion::from_response_json` normalizes a successful public Responses
+envelope within the supported subset. It requires `object:response`, completed
+status, no error/incomplete details, and bounded response/model/tier identifiers.
+Explicit ceilings cover raw response bytes, visible output, replay, proposals and
+continuation. Failed, incomplete and nonterminal responses return `NotCompleted`;
+they cannot manufacture a successful continuation through this interface.
+
+Assistant text/refusals and safe reasoning summaries produce ordered nonempty
+output chunks. Encrypted reasoning remains only in private replay. Function
+proposals come from the same validated output array, must name frozen catalog
+definitions, and pass core batch validation; local argument resolution and
+policy still control adoption. A response with neither assistant text nor tool
+proposals is rejected. Shared replay validation rejects namespaced, asynchronous
+and programmatic calls before either normalization or request serialization.
+
+Usage maps input/output tokens to additive counts and cached input, cache-write
+input, and reasoning output to subsets. Total tokens must equal input + output
+without overflow; core checks each known subset against its parent. Missing
+usage is Unknown, never invented zero. Missing details or unknown usage fields
+make completeness Partial. Provider response ID, resolved model and service tier
+are retained alongside invocation/account/work attribution. Complete output,
+inert proposals, final usage and bound continuation must validate before any
+updates are returned. Transport must persist the output before the terminal
+update and reconcile any already-emitted streaming deltas with final output to
+avoid duplication. SSE parsing, failed/incomplete usage accounting, and that
+stream reconciliation remain unimplemented; no live adapter calls this helper.
 
 Source: official [function-calling guidance](https://developers.openai.com/api/docs/guides/function-calling),
 [stateless encrypted reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses),

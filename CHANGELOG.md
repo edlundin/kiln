@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added bounded successful Responses normalization that derives output, inert tool proposals, final usage, and private replay from one validated envelope.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added bounded public Responses request serialization with ordered replay, matched tool results, preserved provenance, and explicit attachment support.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

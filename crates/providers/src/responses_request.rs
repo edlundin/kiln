@@ -167,18 +167,6 @@ impl ResponsesRequestBody {
                         .map_err(|_| Error::InvalidReplay)?;
                     for item in items {
                         if item["type"] == "function_call" {
-                            // Kiln's current catalog describes direct, synchronous,
-                            // unnamespaced functions only. Extra routing is not a grant.
-                            if item.get("namespace").is_some_and(|v| !v.is_null())
-                                || item
-                                    .get("async")
-                                    .is_some_and(|v| !v.is_null() && v != false)
-                                || item.get("caller").is_some_and(|v| {
-                                    !v.is_null() && v != &json!({"type": "direct"})
-                                })
-                            {
-                                return Err(Error::InvalidToolHistory);
-                            }
                             let call_id = item["call_id"].as_str().ok_or(Error::InvalidReplay)?;
                             if !seen_calls.insert(call_id.to_owned()) {
                                 return Err(Error::InvalidToolHistory);

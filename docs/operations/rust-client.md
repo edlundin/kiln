@@ -127,6 +127,15 @@ problem requires an explicit retry after checking current account state. The cli
 does not retry automatically: another disconnect would also affect a newly signed-in
 account with the same ID.
 
+Protocol `0.25.0` adds `start_provider_account_browser_login`. Its authenticated
+`POST /v1/provider-accounts/{provider_account_id}/login/browser` response contains
+an attempt ID, safe account summary, and short-lived authorization URL with
+`Cache-Control: no-store`. Debug formatting redacts that URL. The callback code
+and verifier are never part of the public protocol. Use the existing status and
+cancel methods for either login method. Open browser authorization on the daemon
+host; choose device sign-in for remote hosts or unavailable localhost callback ports.
+A browser-start failure does not automatically initiate device sign-in.
+
 This crate supplies transport for the native client. The separate
 `kiln-desktop` crate implements the GPUI window, transcript state, and desktop
 connection flow. Neither crate discovers or launches the daemon, and the

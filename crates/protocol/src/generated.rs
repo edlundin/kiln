@@ -29,25 +29,26 @@ use crate::{
     ModelInvocationCompletionKind, ModelInvocationEventResponse, ModelInvocationFailureReason,
     ModelInvocationPurpose, ModelInvocationStatus, ModelOutputRecordedResponse, ModelOutputStream,
     NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    PROVIDER_ACCOUNT_DISCONNECT_PATH, PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
-    PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails,
-    ProviderAccountLoginResponse, ProviderAccountLoginState, ProviderAccountResponse,
-    REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
-    RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
-    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
-    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH, PROVIDER_ACCOUNT_DISCONNECT_PATH,
+    PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH,
+    PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse,
+    ProviderAccountLoginState, ProviderAccountResponse, REACT_TO_RUN_ACTIVITY_OPERATION_ID,
+    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH,
+    ReactToRunActivityRequest, RunInputMode, RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID,
+    SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
+    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
+    START_PROVIDER_ACCOUNT_BROWSER_LOGIN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
     START_RUN_OPERATION_ID, SendRunInputRequest, SessionChangeDiffContent,
     SessionChangeDiffResponse, SessionChangeDiffUnavailableReason, SessionChangesResponse,
     SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    SessionRunsResponse, StartChildRunRequest, StartProviderAccountLoginResponse, StartRunRequest,
-    StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
-    TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
-    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID,
-    UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UpdateTaskRequest, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
-    UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse, UsageSource,
-    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
+    SessionRunsResponse, StartChildRunRequest, StartProviderAccountBrowserLoginResponse,
+    StartProviderAccountLoginResponse, StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH,
+    TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID,
+    TaskResponse, TaskState, ToolCallResponse, ToolCallState, ToolOutputStream,
+    TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH,
+    UpdateTaskRequest, UsageAccounting, UsageCompleteness, UsageFinality, UsageLedgerEntryResponse,
+    UsageLedgerResponse, UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse,
+    UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
     WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
     error_code,
 };
@@ -260,6 +261,10 @@ fn schema() -> String {
             schema_for!(StartProviderAccountLoginResponse),
         ),
         (
+            "StartProviderAccountBrowserLoginResponse",
+            schema_for!(StartProviderAccountBrowserLoginResponse),
+        ),
+        (
             "ProviderAccountLoginState",
             schema_for!(ProviderAccountLoginState),
         ),
@@ -412,6 +417,7 @@ fn typescript() -> String {
         ProviderAccountResponse::decl(&config),
         ListProviderAccountsResponse::decl(&config),
         StartProviderAccountLoginResponse::decl(&config),
+        StartProviderAccountBrowserLoginResponse::decl(&config),
         ProviderAccountLoginState::decl(&config),
         ProviderAccountLoginResponse::decl(&config),
         AppendMessageRequest::decl(&config),
@@ -522,6 +528,10 @@ fn catalogue() -> String {
             "method": "POST",
             "path": PROVIDER_ACCOUNT_LOGIN_PATH,
             "operation": START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH,
+            "operation": START_PROVIDER_ACCOUNT_BROWSER_LOGIN_OPERATION_ID
         }, {
             "method": "GET",
             "path": PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
@@ -1309,6 +1319,31 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  {PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH}:
+    post:
+      operationId: {START_PROVIDER_ACCOUNT_BROWSER_LOGIN_OPERATION_ID}
+      parameters:
+        - name: provider_account_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '201':
+          description: Started browser PKCE login. Open the URL on the daemon host; use device login for remote hosts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartProviderAccountBrowserLoginResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '502':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}:
     get:
       operationId: {GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID}
@@ -2072,6 +2107,10 @@ components:
         (
             "StartProviderAccountLoginResponse",
             openapi_schema::<StartProviderAccountLoginResponse>(),
+        ),
+        (
+            "StartProviderAccountBrowserLoginResponse",
+            openapi_schema::<StartProviderAccountBrowserLoginResponse>(),
         ),
         (
             "ProviderAccountLoginState",

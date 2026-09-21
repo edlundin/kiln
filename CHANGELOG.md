@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added browser PKCE sign-in to the authenticated daemon API, Rust client, and desktop Settings, sharing cancellation and credential lifecycle with device sign-in and retaining an explicit device fallback.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added the native ChatGPT browser PKCE adapter with an expiring loopback callback, state validation, cancellation, and private one-shot credential exchange.
 
 EDL-309: https://linear.app/edlundin/issue/EDL-309

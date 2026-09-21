@@ -293,6 +293,23 @@ impl Client {
         .await
     }
 
+    pub async fn start_provider_account_browser_login(
+        &self,
+        provider_account_id: &str,
+    ) -> Result<kiln_protocol::StartProviderAccountBrowserLoginResponse, Error> {
+        let path = path_with_segment(
+            kiln_protocol::PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH,
+            "{provider_account_id}",
+            "provider_account_id",
+            provider_account_id,
+        )?;
+        self.send_json(
+            kiln_protocol::START_PROVIDER_ACCOUNT_BROWSER_LOGIN_OPERATION_ID,
+            self.http.post(self.http_url(&path)),
+        )
+        .await
+    }
+
     pub async fn get_provider_account_login(
         &self,
         provider_account_id: &str,

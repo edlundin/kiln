@@ -384,8 +384,13 @@ before a single token exchange, with redirects and automatic HTTP retries disabl
 The browser response contains only static text and asks the user to check Kiln;
 it does not claim vault publication succeeded. Codes/verifiers remain private.
 Only identity/offline scopes are requested; connector scopes are not needed here.
-Daemon, protocol, and desktop integration are the next slice. Live OAuth,
-callback, cancellation, and vault behavior remain runtime-unverified.
+Protocol `0.25.0` exposes a separate authenticated browser-start route with a
+no-store response and redacted Debug representation. Both login methods use the
+same daemon-owned attempt, cancellation, disconnect, and journaled publication
+lifecycle. Settings validates the authorization URL and exposes device sign-in
+as an explicit remote-host/callback fallback. Native inspection observed browser
+preparation/cancellation and listener closure. Live OAuth, callback parsing,
+token exchange, and vault publication remain runtime-unverified.
 
 The native device-code slice follows the Codex service contract rather than a
 generic RFC device flow. It polls immediately, treats only `403` and `404` as

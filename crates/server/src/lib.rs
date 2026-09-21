@@ -131,6 +131,12 @@ pub struct ProviderAccountLoginStart {
     pub account: ProviderAccount,
 }
 
+pub struct ProviderAccountBrowserLoginStart {
+    pub attempt_id: String,
+    pub authorization_url: String,
+    pub account: ProviderAccount,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderAccountLoginStatus {
     pub attempt_id: String,
@@ -248,6 +254,23 @@ pub trait ProviderAccountOperations: Send + Sync {
                 + '_,
         >,
     >;
+
+    fn start_provider_account_browser_login(
+        &self,
+        _account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ProviderAccountBrowserLoginStart,
+                        ProviderAccountOperationError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::LoginUnavailable) })
+    }
 
     fn get_provider_account_login(
         &self,
@@ -765,6 +788,10 @@ where
             post(start_provider_account_login),
         )
         .route(
+            kiln_protocol::PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH,
+            post(start_provider_account_browser_login),
+        )
+        .route(
             PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
             get(get_provider_account_login).post(cancel_provider_account_login),
         )
@@ -1089,6 +1116,34 @@ where
             attempt_id: login.attempt_id,
             verification_url: login.verification_url,
             user_code: login.user_code,
+            account: provider_account_response(&login.account),
+        }),
+    ))
+}
+
+async fn start_provider_account_browser_login<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(provider_account_id): Path<String>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let account_id = ProviderAccountId::parse(provider_account_id)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let login = state
+        .provider_account_operations
+        .start_provider_account_browser_login(account_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok((
+        StatusCode::CREATED,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(kiln_protocol::StartProviderAccountBrowserLoginResponse {
+            attempt_id: login.attempt_id,
+            authorization_url: login.authorization_url,
             account: provider_account_response(&login.account),
         }),
     ))

@@ -28,7 +28,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.24.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.25.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.
@@ -69,13 +69,20 @@ together only after checking compatibility.
 
 After connecting to the daemon, open **Settings** in the global toolbar. Provider
 accounts are independent of the selected Workspace or Session. **Refresh accounts**
-loads the daemon's saved account summaries; **Sign in to Codex** reuses a connecting
+loads the daemon's saved account summaries; **Sign in with browser** reuses a connecting
 or disconnected subscription account, or creates one through the idempotent account
 API when neither is available. Retrying after cancellation keeps the account ID.
 
-Use **Open verification page** and **Copy code** to complete device sign-in in your
-browser, then choose **Check sign-in**. Status checks are user-initiated; the daemon
-owns polling OpenAI and credential storage. **Cancel sign-in** addresses only the
+Choose **Open browser sign-in** to finish PKCE authentication on the same host as
+the daemon, then **Check sign-in**. Kiln prepares a short-lived localhost callback
+on port 1455 or 1457; it does not stop another application using either port.
+If both are unavailable, use **Use device sign-in**. Remote daemon users should
+also choose device sign-in because localhost in the browser must reach the daemon.
+Cancel a pending browser attempt before choosing the device alternative.
+
+For device sign-in, use **Open verification page** and **Copy code**, then
+**Check sign-in**. Status checks are user-initiated; the daemon owns callback
+handling/device polling and credential storage. **Cancel sign-in** addresses only the
 displayed attempt. Expired/replaced attempts require refreshing the account list
 before starting again. A cleanup-required result is shown explicitly and blocks
 another attempt in that view. Choose **Disconnect** on the account to retry local
@@ -83,7 +90,7 @@ cleanup. The daemon rejects replacement while a retained cleanup failure remains
 
 **Disconnect** asks for confirmation, cancels active sign-in, and removes credentials
 from this Kiln instance. It does not revoke access at OpenAI. After success, the
-account list refreshes and **Sign in to Codex** can reuse the same account. For
+account list refreshes and **Sign in with browser** can reuse the same account. For
 expired sign-in or an incomplete disconnect, disconnect first, then sign in again.
 If deletion fails, the account is disabled and its saved reference remains available
 for retry, including after restart. New connection/rotation writes also journal
@@ -97,18 +104,24 @@ connection-scoped attempt display; refresh the accounts to recover the durable
 state. An unfinished connecting or disconnected account can start a replacement
 attempt. If requesting a replacement fails, the prior terminal attempt remains
 available by its original ID. Closing the desktop leaves daemon-owned work running.
-Provider-side revocation, browser PKCE, and API-key entry are not yet available in
-the desktop. OpenAI API credentials can be imported locally as described below.
+Provider-side revocation and API-key entry are not available in the desktop. OpenAI API credentials can be imported locally as described below.
 A connected account does not enable live model Runs.
 
-Only public account metadata, the device user code, and the verification address
-enter the view. Tokens and vault references stay in the daemon. The desktop opens
-only the Codex verification address and never auto-opens a URL returned by a daemon.
+Only public account metadata and short-lived login presentation enter the view.
+Tokens, callback codes, PKCE verifiers, and vault references stay in the daemon.
+The desktop validates the fixed device address or the browser issuer, path, client,
+redirect, S256, state/challenge shape, and expected scope/parameters before opening
+a link. It never opens a returned URL automatically or prints the browser query.
+The protocol Debug representation redacts browser authorization URLs.
 
 Compilation and source checks passed, and the global Settings layout/account-list
 empty state was inspected in the native app against an isolated local daemon.
-Live OAuth, credential-vault operations, sign-in terminal states, and minimum-window
-layout remain unverified at runtime.
+Browser preparation and cancellation were also inspected in the native app:
+the pending layout displayed correctly, cancellation feedback appeared, and
+sign-in controls became available again. Process inspection observed the loopback
+listener during the attempt and its closure after cancellation. No browser
+authorization page was opened. Live OAuth, credential-vault operations, other
+terminal states, callback parsing, and minimum-window layout remain runtime-unverified.
 
 The local disconnect continuation was also inspected against an isolated daemon
 with an empty account: confirmation, Keep account, and successful disconnect with

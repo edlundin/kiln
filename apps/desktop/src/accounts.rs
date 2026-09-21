@@ -10,22 +10,94 @@ use gpui_component::{
 use kiln_client::Client;
 use kiln_protocol::{
     CreateProviderAccountRequest, ProviderAccountLoginResponse, ProviderAccountLoginState,
-    ProviderAccountResponse, StartProviderAccountLoginResponse,
+    ProviderAccountResponse,
 };
 use tokio::{runtime::Runtime, sync::mpsc};
 
 use crate::{connection, theme};
 
 const CODEX_PROVIDER: &str = "openai_codex_subscription";
-// The desktop opens only the device verification page defined by the Codex contract.
+// Browser and device destinations are validated before opening.
 const VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
+
+// No Debug: browser URLs contain short-lived OAuth state.
+struct Login {
+    attempt_id: String,
+    account: ProviderAccountResponse,
+    url: String,
+    user_code: Option<String>,
+}
+
+impl Login {
+    fn url_allowed(&self) -> bool {
+        if self.user_code.is_some() {
+            return self.url == VERIFICATION_URL;
+        }
+        browser_url_allowed(&self.url)
+    }
+}
+
+fn browser_url_allowed(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("auth.openai.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/oauth/authorize"
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    let mut pairs = std::collections::HashMap::new();
+    for (key, value) in url.query_pairs() {
+        if pairs.insert(key.into_owned(), value.into_owned()).is_some() {
+            return false;
+        }
+    }
+    let expected = [
+        ("response_type", "code"),
+        ("client_id", "app_EMoamEEZ73f0CkXaXp7hrann"),
+        ("code_challenge_method", "S256"),
+        ("scope", "openid profile email offline_access"),
+        ("id_token_add_organizations", "true"),
+        ("codex_cli_simplified_flow", "true"),
+        ("originator", "kiln"),
+    ];
+    for (key, value) in expected {
+        if pairs.remove(key).as_deref() != Some(value) {
+            return false;
+        }
+    }
+    if !matches!(
+        pairs.remove("redirect_uri").as_deref(),
+        Some("http://localhost:1455/auth/callback" | "http://localhost:1457/auth/callback")
+    ) {
+        return false;
+    }
+    for key in ["state", "code_challenge"] {
+        let Some(value) = pairs.remove(key) else {
+            return false;
+        };
+        if value.len() != 43
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return false;
+        }
+    }
+    pairs.is_empty()
+}
 
 enum Update {
     Listed(Result<Vec<ProviderAccountResponse>, String>),
-    Created(Result<ProviderAccountResponse, String>),
+    Created(Result<ProviderAccountResponse, String>, bool),
     Started {
         account_id: String,
-        result: Result<StartProviderAccountLoginResponse, String>,
+        result: Result<Login, String>,
         cleanup_required: bool,
     },
     Disconnected {
@@ -49,7 +121,7 @@ pub struct AccountSettings {
     error: Option<String>,
     // Retained across failed requests so a lost create response cannot create another account.
     create_key: String,
-    login: Option<StartProviderAccountLoginResponse>,
+    login: Option<Login>,
     login_state: Option<ProviderAccountLoginState>,
     copied: bool,
     confirm_disconnect: Option<String>,
@@ -115,7 +187,7 @@ impl AccountSettings {
         cx.notify();
     }
 
-    fn sign_in(&mut self, cx: &mut Context<Self>) {
+    fn sign_in(&mut self, browser: bool, cx: &mut Context<Self>) {
         if self.busy
             || !self.online
             || !self.loaded
@@ -134,7 +206,7 @@ impl AccountSettings {
             .min_by_key(|account| account.state != "connecting")
             .cloned()
         {
-            self.begin(account, cx);
+            self.begin(account, browser, cx);
             return;
         }
         self.busy = true;
@@ -154,24 +226,50 @@ impl AccountSettings {
                 )
                 .await
                 .map_err(|error| connection::error_message("Create Codex account", &error));
-            let _ = updates.send(Update::Created(result));
+            let _ = updates.send(Update::Created(result, browser));
         });
         cx.notify();
     }
 
-    fn begin(&mut self, account: ProviderAccountResponse, cx: &mut Context<Self>) {
+    fn begin(&mut self, account: ProviderAccountResponse, browser: bool, cx: &mut Context<Self>) {
         self.busy = true;
         self.error = None;
         let client = self.client.clone();
         let updates = self.updates.clone();
         self.runtime.spawn(async move {
-            let response = client
-                .start_provider_account_login(&account.provider_account_id)
-                .await;
+            let response = if browser {
+                client
+                    .start_provider_account_browser_login(&account.provider_account_id)
+                    .await
+                    .map(|login| Login {
+                        attempt_id: login.attempt_id,
+                        account: login.account,
+                        url: login.authorization_url,
+                        user_code: None,
+                    })
+            } else {
+                client
+                    .start_provider_account_login(&account.provider_account_id)
+                    .await
+                    .map(|login| Login {
+                        attempt_id: login.attempt_id,
+                        account: login.account,
+                        url: login.verification_url,
+                        user_code: Some(login.user_code),
+                    })
+            };
             let cleanup_required = matches!(&response, Err(kiln_client::Error::Api { problem, .. })
                 if problem.code == kiln_protocol::error_code::PROVIDER_ACCOUNT_CLEANUP_REQUIRED);
-            let result =
-                response.map_err(|error| connection::error_message("Start Codex sign-in", &error));
+            let result = response.map_err(|error| {
+                let message = connection::error_message("Start Codex sign-in", &error);
+                if browser {
+                    format!(
+                        "{message} You can use device sign-in if the local callback is unavailable."
+                    )
+                } else {
+                    message
+                }
+            });
             let _ = updates.send(Update::Started {
                 account_id: account.provider_account_id,
                 result,
@@ -288,12 +386,12 @@ impl AccountSettings {
                 self.accounts = accounts;
                 self.loaded = true;
             }
-            Update::Created(Ok(account)) => {
+            Update::Created(Ok(account), browser) => {
                 self.create_key = ulid::Ulid::generate().to_string();
                 self.upsert(account.clone());
                 // A disconnect may occur while creation is in flight. Do not start new work.
                 if self.online && matches!(account.state.as_str(), "connecting" | "disconnected") {
-                    self.begin(account, cx);
+                    self.begin(account, browser, cx);
                 }
             }
             Update::Started {
@@ -302,7 +400,7 @@ impl AccountSettings {
                 self.upsert(login.account.clone());
                 self.login_state = Some(ProviderAccountLoginState::Pending);
                 self.copied = false;
-                if login.verification_url != VERIFICATION_URL {
+                if !login.url_allowed() {
                     self.error = Some("The daemon returned an unexpected sign-in address. Cancel this attempt and reconnect.".to_owned());
                 }
                 self.login = Some(login);
@@ -339,7 +437,7 @@ impl AccountSettings {
                 self.error = Some("This sign-in attempt is no longer active. Refresh accounts before starting another attempt.".to_owned());
             }
             Update::Listed(Err(error))
-            | Update::Created(Err(error))
+            | Update::Created(Err(error), _)
             | Update::Status {
                 result: Err(error), ..
             } => {
@@ -367,7 +465,7 @@ impl Render for AccountSettings {
         let mut content = div().flex().flex_col().gap_4().w_full().min_w_0().max_w(theme::TRANSCRIPT_WIDTH)
             .child(div().text_lg().child("Provider accounts"))
             .child(div().text_sm().text_color(theme::MUTED)
-                .child("Connect your Codex subscription using device sign-in. OpenAI account terms and data controls apply."))
+                .child("Connect your Codex subscription in a browser on this daemon’s host. Use device sign-in for a remote host or if the callback is unavailable. OpenAI account terms and data controls apply."))
             .child(div().text_sm().text_color(theme::MUTED)
                 .child("Account connection is available. Runs still use the deterministic executor; live model execution is not yet available."))
             .when(!self.online, |view| view.child(div().text_sm().text_color(theme::ATTENTION)
@@ -378,9 +476,12 @@ impl Render for AccountSettings {
             .child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("refresh-accounts").label(if self.busy { "Working…" } else { "Refresh accounts" })
                     .disabled(disabled).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
-                .child(Button::new("connect-codex").label("Sign in to Codex").primary()
+                .child(Button::new("connect-codex").label("Sign in with browser").primary()
                     .disabled(disabled || !self.loaded || self.sign_in_blocked() || self.confirm_disconnect.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.sign_in(cx)))));
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_in(true, cx))))
+                .child(Button::new("connect-codex-device").label("Use device sign-in")
+                    .disabled(disabled || !self.loaded || self.sign_in_blocked() || self.confirm_disconnect.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_in(false, cx)))));
         if self.loaded && self.accounts.is_empty() {
             content = content.child(
                 div()
@@ -465,6 +566,9 @@ impl Render for AccountSettings {
                 Some(ProviderAccountLoginState::CleanupRequired) => {
                     "Credential cleanup is required. Choose Disconnect on this account to retry local cleanup before signing in again."
                 }
+                _ if login.user_code.is_none() => {
+                    "Open browser sign-in on the daemon’s host, finish signing in, then check status here."
+                }
                 _ => "Open the verification page, enter this code, then check sign-in status.",
             };
             let mut progress = div()
@@ -474,20 +578,19 @@ impl Render for AccountSettings {
                 .py_3()
                 .child(div().text_sm().child(message));
             if self.login_state == Some(ProviderAccountLoginState::Pending) {
-                let url_allowed = login.verification_url == VERIFICATION_URL;
+                let url_allowed = login.url_allowed();
+                let url = login.url.clone();
                 progress = progress
-                    .child(
-                        div()
-                            .font_family(theme::MONO_FONT)
-                            .text_lg()
-                            .child(login.user_code.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme::MUTED)
-                            .child(VERIFICATION_URL),
-                    )
+                    .when_some(login.user_code.clone(), |view, code| {
+                        view.child(div().font_family(theme::MONO_FONT).text_lg().child(code))
+                    })
+                    .child(div().text_sm().text_color(theme::MUTED).child(
+                        if login.user_code.is_some() {
+                            VERIFICATION_URL
+                        } else {
+                            "auth.openai.com"
+                        },
+                    ))
                     .child(
                         div()
                             .flex()
@@ -495,30 +598,47 @@ impl Render for AccountSettings {
                             .gap_2()
                             .child(
                                 Button::new("open-codex-login")
-                                    .label("Open verification page")
-                                    .disabled(!self.online || !url_allowed)
-                                    .on_click(
-                                        cx.listener(|_, _, _, cx| cx.open_url(VERIFICATION_URL)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("copy-codex-code")
-                                    .label(if self.copied {
-                                        "Code copied"
+                                    .label(if login.user_code.is_some() {
+                                        "Open verification page"
                                     } else {
-                                        "Copy code"
+                                        "Open browser sign-in"
                                     })
                                     .disabled(!self.online || !url_allowed)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(login) = &this.login {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                login.user_code.clone(),
-                                            ));
-                                            this.copied = true;
-                                            cx.notify();
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.online
+                                            && this.login.as_ref().is_some_and(|login| {
+                                                login.url_allowed() && login.url == url
+                                            })
+                                        {
+                                            cx.open_url(&url);
                                         }
                                     })),
                             )
+                            .when_some(login.user_code.clone(), |view, code| {
+                                view.child(
+                                    Button::new("copy-codex-code")
+                                        .label(if self.copied {
+                                            "Code copied"
+                                        } else {
+                                            "Copy code"
+                                        })
+                                        .disabled(!self.online || !url_allowed)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.online
+                                                && this.login.as_ref().is_some_and(|login| {
+                                                    login.url_allowed()
+                                                        && login.user_code.as_ref() == Some(&code)
+                                                })
+                                            {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    code.clone(),
+                                                ));
+                                                this.copied = true;
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("check-codex-login")
                                     .label("Check sign-in")

@@ -12,3 +12,4 @@ kiln-client = { path = "../../crates/client" }
 kiln-protocol = { path = "../../crates/protocol" }
 tokio.workspace = true
 ulid.workspace = true
+url = "2.5.8"

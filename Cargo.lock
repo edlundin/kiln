@@ -3710,6 +3710,7 @@ dependencies = [
  "kiln-protocol",
  "tokio",
  "ulid",
+ "url",
 ]
 
 [[package]]

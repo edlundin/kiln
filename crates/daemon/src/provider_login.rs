@@ -12,6 +12,7 @@ use kiln_core::{
 use kiln_infrastructure::{OsSecretStore, SqliteStore, UlidIdGenerator};
 use kiln_protocol::ProviderAccountLoginState;
 use kiln_providers::{
+    CodexBrowserAuthorization, CodexBrowserLoginClient, CodexBrowserLoginError,
     CodexDeviceAuthorization, CodexDeviceLoginClient, CodexDeviceLoginError,
     OPENAI_CODEX_SUBSCRIPTION_PROVIDER_TYPE,
 };
@@ -29,8 +30,14 @@ pub(crate) struct ProviderAccountLoginCoordinator {
     application: Arc<ProviderAccountApplication<SqliteStore, UlidIdGenerator>>,
     secret_store: OsSecretStore,
     client: Arc<CodexDeviceLoginClient>,
+    browser_client: Arc<CodexBrowserLoginClient>,
     control: Mutex<bool>,
     attempts: Mutex<HashMap<ProviderAccountId, Arc<LoginAttempt>>>,
+}
+
+enum LoginAuthorization {
+    Device(Arc<CodexDeviceLoginClient>, CodexDeviceAuthorization),
+    Browser(Arc<CodexBrowserLoginClient>, CodexBrowserAuthorization),
 }
 
 struct LoginAttempt {
@@ -75,6 +82,10 @@ impl ProviderAccountLoginCoordinator {
                 CodexDeviceLoginClient::new()
                     .map_err(|_| ProviderAccountLoginError::DeviceFailed)?,
             ),
+            browser_client: Arc::new(
+                CodexBrowserLoginClient::new()
+                    .map_err(|_| ProviderAccountLoginError::DeviceFailed)?,
+            ),
             control: Mutex::new(false),
             attempts: Mutex::new(HashMap::new()),
         })
@@ -83,6 +94,7 @@ impl ProviderAccountLoginCoordinator {
     pub(crate) async fn begin(
         &self,
         account_id: ProviderAccountId,
+        browser: bool,
     ) -> Result<ProviderAccountLoginDisplay, ProviderAccountLoginError> {
         let control = self.control.lock().await;
         if *control {
@@ -127,35 +139,42 @@ impl ProviderAccountLoginCoordinator {
             )
             .await
             .map_err(ProviderAccountLoginError::Account)?;
-        let authorization = self.client.begin().await.map_err(|error| match error {
-            CodexDeviceLoginError::Unavailable | CodexDeviceLoginError::Transport => {
-                ProviderAccountLoginError::DeviceUnavailable
-            }
-            CodexDeviceLoginError::Rejected
-            | CodexDeviceLoginError::InvalidResponse
-            | CodexDeviceLoginError::Cancelled
-            | CodexDeviceLoginError::Expired
-            | CodexDeviceLoginError::InvalidAccountBinding
-            | CodexDeviceLoginError::InvalidTransportLimits => {
-                ProviderAccountLoginError::DeviceFailed
-            }
-        })?;
+        let (authorization, verification_url, user_code) = if browser {
+            let authorization = self
+                .browser_client
+                .begin()
+                .await
+                .map_err(map_browser_error)?;
+            let url = authorization.authorization_url().to_owned();
+            (
+                LoginAuthorization::Browser(Arc::clone(&self.browser_client), authorization),
+                url,
+                String::new(),
+            )
+        } else {
+            let authorization = self.client.begin().await.map_err(map_device_error)?;
+            let url = authorization.verification_url().to_owned();
+            let code = authorization.user_code().to_owned();
+            (
+                LoginAuthorization::Device(Arc::clone(&self.client), authorization),
+                url,
+                code,
+            )
+        };
         let display = ProviderAccountLoginDisplay {
             attempt_id: format!("pla_{}", Ulid::generate()),
-            verification_url: authorization.verification_url().to_owned(),
-            user_code: authorization.user_code().to_owned(),
+            verification_url,
+            user_code,
         };
         let mut attempts = self.attempts.lock().await;
         let (cancellation, receiver) = watch::channel(false);
         let application = Arc::clone(&self.application);
         let secret_store = self.secret_store.clone();
-        let client = Arc::clone(&self.client);
         let task_account_id = account_id.clone();
         let task = tokio::spawn(async move {
             run_attempt(
                 application,
                 secret_store,
-                client,
                 task_account_id,
                 authorization,
                 receiver,
@@ -404,27 +423,20 @@ async fn poll_attempt(
 async fn run_attempt(
     application: Arc<ProviderAccountApplication<SqliteStore, UlidIdGenerator>>,
     secret_store: OsSecretStore,
-    client: Arc<CodexDeviceLoginClient>,
     account_id: ProviderAccountId,
-    authorization: CodexDeviceAuthorization,
+    authorization: LoginAuthorization,
     cancellation: watch::Receiver<bool>,
 ) -> Result<ProviderAccount, ProviderAccountLoginError> {
-    let result = client
-        .complete(authorization, cancellation.clone())
-        .await
-        .map_err(|error| match error {
-            CodexDeviceLoginError::Cancelled => ProviderAccountLoginError::Cancelled,
-            CodexDeviceLoginError::Unavailable | CodexDeviceLoginError::Transport => {
-                ProviderAccountLoginError::DeviceUnavailable
-            }
-            CodexDeviceLoginError::Expired
-            | CodexDeviceLoginError::Rejected
-            | CodexDeviceLoginError::InvalidResponse
-            | CodexDeviceLoginError::InvalidAccountBinding
-            | CodexDeviceLoginError::InvalidTransportLimits => {
-                ProviderAccountLoginError::DeviceFailed
-            }
-        })?;
+    let result = match authorization {
+        LoginAuthorization::Device(client, authorization) => client
+            .complete(authorization, cancellation.clone())
+            .await
+            .map_err(map_device_error),
+        LoginAuthorization::Browser(client, authorization) => client
+            .complete(authorization, cancellation.clone())
+            .await
+            .map_err(map_browser_error),
+    }?;
     if *cancellation.borrow() {
         return Err(ProviderAccountLoginError::Cancelled);
     }
@@ -452,6 +464,24 @@ async fn run_attempt(
         return Err(ProviderAccountLoginError::Cancelled);
     }
     Ok(connected)
+}
+
+fn map_device_error(error: CodexDeviceLoginError) -> ProviderAccountLoginError {
+    match error {
+        CodexDeviceLoginError::Cancelled => ProviderAccountLoginError::Cancelled,
+        CodexDeviceLoginError::Unavailable | CodexDeviceLoginError::Transport => {
+            ProviderAccountLoginError::DeviceUnavailable
+        }
+        _ => ProviderAccountLoginError::DeviceFailed,
+    }
+}
+
+fn map_browser_error(error: CodexBrowserLoginError) -> ProviderAccountLoginError {
+    match error {
+        CodexBrowserLoginError::Login(error) => map_device_error(error),
+        CodexBrowserLoginError::CallbackUnavailable => ProviderAccountLoginError::DeviceUnavailable,
+        CodexBrowserLoginError::RandomUnavailable => ProviderAccountLoginError::DeviceFailed,
+    }
 }
 
 fn now() -> Result<u64, ProviderAccountLoginError> {
@@ -548,7 +578,7 @@ impl ProviderAccountOperations for ProviderAccountLoginCoordinator {
     > {
         Box::pin(async move {
             let display = self
-                .begin(account_id.clone())
+                .begin(account_id.clone(), false)
                 .await
                 .map_err(ProviderAccountOperationError::from)?;
             let account = self
@@ -559,6 +589,37 @@ impl ProviderAccountOperations for ProviderAccountLoginCoordinator {
                 attempt_id: display.attempt_id,
                 verification_url: display.verification_url,
                 user_code: display.user_code,
+                account,
+            })
+        })
+    }
+
+    fn start_provider_account_browser_login(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        kiln_server::ProviderAccountBrowserLoginStart,
+                        ProviderAccountOperationError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let display = self
+                .begin(account_id.clone(), true)
+                .await
+                .map_err(ProviderAccountOperationError::from)?;
+            let account = self
+                .get_account(account_id)
+                .await
+                .map_err(ProviderAccountOperationError::from)?;
+            Ok(kiln_server::ProviderAccountBrowserLoginStart {
+                attempt_id: display.attempt_id,
+                authorization_url: display.verification_url,
                 account,
             })
         })

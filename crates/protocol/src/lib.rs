@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.24.0";
+pub const PROTOCOL_VERSION: &str = "0.25.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -23,6 +23,10 @@ pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
 pub const PROVIDER_ACCOUNT_PATH: &str = "/v1/provider-accounts/{provider_account_id}";
 pub const PROVIDER_ACCOUNT_LOGIN_PATH: &str = "/v1/provider-accounts/{provider_account_id}/login";
+pub const PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH: &str =
+    "/v1/provider-accounts/{provider_account_id}/login/browser";
+pub const START_PROVIDER_ACCOUNT_BROWSER_LOGIN_OPERATION_ID: &str =
+    "start_provider_account_browser_login";
 pub const PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH: &str =
     "/v1/provider-accounts/{provider_account_id}/login/{attempt_id}";
 pub const WORKSPACE_SESSIONS_PATH: &str = "/v1/workspaces/{workspace_id}/sessions";
@@ -374,6 +378,25 @@ pub struct StartProviderAccountLoginResponse {
     pub verification_url: String,
     pub user_code: String,
     pub account: ProviderAccountResponse,
+}
+
+/// The authorization URL contains short-lived login state; keep it out of logs.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct StartProviderAccountBrowserLoginResponse {
+    pub attempt_id: String,
+    pub authorization_url: String,
+    pub account: ProviderAccountResponse,
+}
+
+impl std::fmt::Debug for StartProviderAccountBrowserLoginResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StartProviderAccountBrowserLoginResponse")
+            .field("attempt_id", &self.attempt_id)
+            .field("authorization_url", &"[REDACTED]")
+            .field("account", &self.account)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

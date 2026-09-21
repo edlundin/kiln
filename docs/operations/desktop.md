@@ -86,8 +86,10 @@ from this Kiln instance. It does not revoke access at OpenAI. After success, the
 account list refreshes and **Sign in to Codex** can reuse the same account. For
 expired sign-in or an incomplete disconnect, disconnect first, then sign in again.
 If deletion fails, the account is disabled and its saved reference remains available
-for retry, including after restart. Unpublished or retired credentials from failed
-connection or rotation still lack durable cleanup recovery. Refresh after an error to
+for retry, including after restart. New connection/rotation writes also journal
+opaque cleanup references, allowing Disconnect to recover unpublished or retired
+entries after restart. The migration cannot recover entries orphaned by earlier
+versions. Refresh after an error to
 check the current account state; disconnect requests are never automatically retried.
 
 Closing Settings does not cancel sign-in. Reconnecting the desktop discards its

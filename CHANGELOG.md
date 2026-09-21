@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `fix`
+
+- Journaled provider credential cleanup before vault writes and atomically with credential replacement, allowing disconnect to recover unpublished or retired entries after restart without deleting the current credential.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
 ## 2026-09-21 — `feat`
 
 - Added authenticated local provider-account disconnect through protocol `0.24.0`, the Rust client, and confirmed desktop Settings controls, including explicit cleanup retry and disconnect-then-sign-in recovery.

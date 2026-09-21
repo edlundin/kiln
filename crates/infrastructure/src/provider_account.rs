@@ -9,6 +9,68 @@ use sqlx::{Row, SqliteConnection};
 use super::SqliteStore;
 
 impl ProviderAccountStore for SqliteStore {
+    async fn reserve_provider_account_secret(
+        &self,
+        expected: &ProviderAccount,
+        secret_ref: &SecretRef,
+    ) -> Result<(), ProviderAccountStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = sqlx::Connection::begin(&mut *connection)
+            .await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+        let current = load_provider_account(&mut transaction, expected.id())
+            .await?
+            .ok_or(ProviderAccountStoreError::AccountNotFound)?;
+        if current != *expected || current.secret_ref() == Some(secret_ref) {
+            return Err(ProviderAccountStoreError::IntegrityViolation);
+        }
+        sqlx::query("INSERT INTO provider_account_secret_cleanup (secret_ref, provider_account_id) VALUES (?, ?)")
+            .bind(secret_ref.as_str()).bind(expected.id().as_str())
+            .execute(&mut *transaction).await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)
+    }
+
+    async fn pending_provider_account_secret_cleanup(
+        &self,
+        id: &ProviderAccountId,
+    ) -> Result<Vec<SecretRef>, ProviderAccountStoreError> {
+        let mut connection = self.connection.lock().await;
+        sqlx::query_scalar::<_, String>(
+            "SELECT secret_ref FROM provider_account_secret_cleanup WHERE provider_account_id = ? ORDER BY secret_ref",
+        ).bind(id.as_str()).fetch_all(&mut *connection).await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?
+            .into_iter().map(|value| SecretRef::parse(value)
+                .map_err(|_| ProviderAccountStoreError::IntegrityViolation)).collect()
+    }
+
+    async fn finish_provider_account_secret_cleanup(
+        &self,
+        id: &ProviderAccountId,
+        secret_ref: &SecretRef,
+    ) -> Result<(), ProviderAccountStoreError> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = sqlx::Connection::begin(&mut *connection)
+            .await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+        let current = load_provider_account(&mut transaction, id)
+            .await?
+            .ok_or(ProviderAccountStoreError::AccountNotFound)?;
+        if current.secret_ref() == Some(secret_ref) {
+            return Err(ProviderAccountStoreError::IntegrityViolation);
+        }
+        sqlx::query("DELETE FROM provider_account_secret_cleanup WHERE provider_account_id = ? AND secret_ref = ?")
+            .bind(id.as_str()).bind(secret_ref.as_str()).execute(&mut *transaction).await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ProviderAccountStoreError::Unavailable)
+    }
+
     async fn create_provider_account(
         &self,
         account: &ProviderAccount,
@@ -156,7 +218,7 @@ impl ProviderAccountStore for SqliteStore {
         expected: &ProviderAccount,
         account: &ProviderAccount,
     ) -> Result<(), ProviderAccountStoreError> {
-        if expected.id() != account.id() {
+        if expected.id() != account.id() || expected.provider_type() != account.provider_type() {
             return Err(ProviderAccountStoreError::IntegrityViolation);
         }
         let metadata_json = serde_json::to_string(account.metadata())
@@ -239,6 +301,25 @@ impl ProviderAccountStore for SqliteStore {
         };
         if updated.rows_affected() != 1 {
             return Err(ProviderAccountStoreError::IntegrityViolation);
+        }
+        if current.secret_ref() != account.secret_ref() {
+            if let Some(secret_ref) = account.secret_ref() {
+                let consumed = sqlx::query(
+                    "DELETE FROM provider_account_secret_cleanup WHERE provider_account_id = ? AND secret_ref = ?",
+                ).bind(account.id().as_str()).bind(secret_ref.as_str())
+                    .execute(&mut *transaction).await
+                    .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+                if consumed.rows_affected() != 1 {
+                    return Err(ProviderAccountStoreError::IntegrityViolation);
+                }
+            }
+            if let Some(secret_ref) = current.secret_ref() {
+                sqlx::query(
+                    "INSERT INTO provider_account_secret_cleanup (secret_ref, provider_account_id) VALUES (?, ?)",
+                ).bind(secret_ref.as_str()).bind(account.id().as_str())
+                    .execute(&mut *transaction).await
+                    .map_err(|_| ProviderAccountStoreError::Unavailable)?;
+            }
         }
         transaction
             .commit()

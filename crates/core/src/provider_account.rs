@@ -404,12 +404,15 @@ pub enum SecretStoreError {
 }
 
 pub trait SecretStore: Send + Sync {
-    fn put(
+    /// Writes to a fresh reference already reserved in durable metadata. The
+    /// adapter must serialize deletion with any write that outlives its caller.
+    fn put_at(
         &self,
         provider_type: &ProviderType,
         account_id: &ProviderAccountId,
+        secret_ref: &SecretRef,
         value: SecretValue,
-    ) -> impl Future<Output = Result<SecretRef, SecretStoreError>> + Send;
+    ) -> impl Future<Output = Result<(), SecretStoreError>> + Send;
     fn get(
         &self,
         provider_type: &ProviderType,
@@ -462,6 +465,23 @@ pub struct CreateProviderAccount {
 }
 
 pub trait ProviderAccountStore: Send + Sync {
+    /// Records cleanup intent before a vault write, conditional on the observed
+    /// account. Publishing a new reference consumes its reservation atomically
+    /// and journals any retired reference in the same account update.
+    fn reserve_provider_account_secret(
+        &self,
+        expected: &ProviderAccount,
+        secret_ref: &SecretRef,
+    ) -> impl Future<Output = Result<(), ProviderAccountStoreError>> + Send;
+    fn pending_provider_account_secret_cleanup(
+        &self,
+        id: &ProviderAccountId,
+    ) -> impl Future<Output = Result<Vec<SecretRef>, ProviderAccountStoreError>> + Send;
+    fn finish_provider_account_secret_cleanup(
+        &self,
+        id: &ProviderAccountId,
+        secret_ref: &SecretRef,
+    ) -> impl Future<Output = Result<(), ProviderAccountStoreError>> + Send;
     fn create_provider_account(
         &self,
         account: &ProviderAccount,
@@ -662,6 +682,16 @@ where
         {
             return Err(ProviderAccountError::CredentialVersionConflict);
         }
+        if let Some(secret_ref) = self
+            .store
+            .pending_provider_account_secret_cleanup(current.id())
+            .await
+            .map_err(map_provider_account_store_error)?
+            .into_iter()
+            .next()
+        {
+            return Err(ProviderAccountError::CredentialCleanupRequired { secret_ref });
+        }
         if current.state() == ProviderAccountState::Connecting {
             return Ok(current);
         }
@@ -755,57 +785,36 @@ where
                 .map_err(map_provider_account_store_error)?;
             current = connecting;
         }
-        let old_secret_ref = current.secret_ref().cloned();
-        let new_secret_ref = secret_store
-            .put(&expected_provider_type, &id, secret)
-            .await
-            .map_err(ProviderAccountError::CredentialStore)?;
-        let next = match current.transition(
+        self.cleanup_pending_secrets_locked(secret_store, &current)
+            .await?;
+        let new_secret_ref = SecretRef::from_ulid(Ulid::generate());
+        let next = current.transition(
             ProviderAccountState::Connected,
             updated_at_unix_ms,
             Some(new_secret_ref.clone()),
-        ) {
-            Ok(next) => next,
-            Err(error) => {
-                let cleanup = secret_store
-                    .delete(&expected_provider_type, &id, &new_secret_ref)
-                    .await;
-                return Err(match cleanup {
-                    Ok(()) | Err(SecretStoreError::NotFound) => error,
-                    Err(_) => ProviderAccountError::CredentialCleanupRequired {
-                        secret_ref: new_secret_ref.clone(),
-                    },
-                });
-            }
-        };
-        if let Err(error) = self
-            .store
+        )?;
+        self.store
+            .reserve_provider_account_secret(&current, &new_secret_ref)
+            .await
+            .map_err(map_provider_account_store_error)?;
+        if let Err(error) = secret_store
+            .put_at(&expected_provider_type, &id, &new_secret_ref, secret)
+            .await
+        {
+            self.cleanup_pending_secrets_locked(secret_store, &current)
+                .await?;
+            return Err(ProviderAccountError::CredentialStore(error));
+        }
+        // Publication consumes the new reservation and journals the retired
+        // reference in one transaction. On an ambiguous database error, leave
+        // reconciliation to the durable journal; never delete a possibly
+        // committed credential based only on the failed call's return value.
+        self.store
             .update_provider_account(&current, &next)
             .await
-            .map_err(map_provider_account_store_error)
-        {
-            let cleanup = secret_store
-                .delete(&expected_provider_type, &id, &new_secret_ref)
-                .await;
-            return Err(match cleanup {
-                Ok(()) | Err(SecretStoreError::NotFound) => error,
-                Err(_) => ProviderAccountError::CredentialCleanupRequired {
-                    secret_ref: new_secret_ref.clone(),
-                },
-            });
-        }
-        if let Some(old_secret_ref) = old_secret_ref {
-            if old_secret_ref != new_secret_ref
-                && secret_store
-                    .delete(&expected_provider_type, &id, &old_secret_ref)
-                    .await
-                    .is_err_and(|error| error != SecretStoreError::NotFound)
-            {
-                return Err(ProviderAccountError::CredentialCleanupRequired {
-                    secret_ref: old_secret_ref,
-                });
-            }
-        }
+            .map_err(map_provider_account_store_error)?;
+        self.cleanup_pending_secrets_locked(secret_store, &next)
+            .await?;
         Ok(next)
     }
 
@@ -939,12 +948,46 @@ where
         if account.provider_type() != &expected_provider_type {
             return Err(ProviderAccountError::ProviderTypeMismatch);
         }
+        self.cleanup_unreferenced_secret_locked(secret_store, &account, secret_ref)
+            .await
+    }
+
+    async fn cleanup_pending_secrets_locked<V: SecretStore>(
+        &self,
+        secret_store: &V,
+        account: &ProviderAccount,
+    ) -> Result<(), ProviderAccountError> {
+        let pending = self
+            .store
+            .pending_provider_account_secret_cleanup(account.id())
+            .await
+            .map_err(map_provider_account_store_error)?;
+        for secret_ref in pending {
+            self.cleanup_unreferenced_secret_locked(secret_store, account, secret_ref)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn cleanup_unreferenced_secret_locked<V: SecretStore>(
+        &self,
+        secret_store: &V,
+        account: &ProviderAccount,
+        secret_ref: SecretRef,
+    ) -> Result<(), ProviderAccountError> {
+        if account.secret_ref() == Some(&secret_ref) {
+            return Err(ProviderAccountError::CredentialVersionConflict);
+        }
         match secret_store
-            .delete(&expected_provider_type, &id, &secret_ref)
+            .delete(account.provider_type(), account.id(), &secret_ref)
             .await
         {
-            Ok(()) | Err(SecretStoreError::NotFound) => Ok(()),
-            Err(error) => Err(ProviderAccountError::CredentialStore(error)),
+            Ok(()) | Err(SecretStoreError::NotFound) => self
+                .store
+                .finish_provider_account_secret_cleanup(account.id(), &secret_ref)
+                .await
+                .map_err(map_provider_account_store_error),
+            Err(_) => Err(ProviderAccountError::CredentialCleanupRequired { secret_ref }),
         }
     }
 
@@ -988,6 +1031,8 @@ where
         updated_at_unix_ms: u64,
     ) -> Result<ProviderAccount, ProviderAccountError> {
         if current.state() == ProviderAccountState::Disconnected {
+            self.cleanup_pending_secrets_locked(secret_store, &current)
+                .await?;
             return Ok(current);
         }
         if let Some(secret_ref) = current.secret_ref().cloned() {
@@ -1021,6 +1066,14 @@ where
             .update_provider_account(&current, &next)
             .await
             .map_err(map_provider_account_store_error)?;
+        if let Some(secret_ref) = current.secret_ref() {
+            self.store
+                .finish_provider_account_secret_cleanup(current.id(), secret_ref)
+                .await
+                .map_err(map_provider_account_store_error)?;
+        }
+        self.cleanup_pending_secrets_locked(secret_store, &next)
+            .await?;
         Ok(next)
     }
 

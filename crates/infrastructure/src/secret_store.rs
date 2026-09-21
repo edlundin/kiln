@@ -1,9 +1,13 @@
 use kiln_core::{
     ProviderAccountId, ProviderType, SecretRef, SecretStore, SecretStoreError, SecretValue,
 };
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 #[cfg(target_os = "linux")]
 use tokio::{io::AsyncWriteExt, process::Command};
-use ulid::Ulid;
 
 #[cfg(target_os = "macos")]
 use tokio::task::spawn_blocking;
@@ -13,15 +17,26 @@ const DEFAULT_SERVICE: &str = "dev.kiln.provider-account";
 /// OS-backed storage for provider credentials. The database receives only the
 /// generated SecretRef; the secret value is passed directly to the native
 /// Keychain API on macOS or over stdin to Secret Service on Linux.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OsSecretStore {
     service: String,
+    entry_locks: Arc<Mutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
+}
+
+impl std::fmt::Debug for OsSecretStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OsSecretStore")
+            .field("service", &self.service)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OsSecretStore {
     pub fn open_default() -> Self {
         Self {
             service: DEFAULT_SERVICE.to_owned(),
+            entry_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -38,6 +53,24 @@ impl OsSecretStore {
             secret_ref.as_str()
         )
     }
+
+    async fn entry_lock(&self, key: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .entry_locks
+                .lock()
+                .expect("vault entry locks are not poisoned");
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(key.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
+    }
 }
 
 impl Default for OsSecretStore {
@@ -47,23 +80,31 @@ impl Default for OsSecretStore {
 }
 
 impl SecretStore for OsSecretStore {
-    async fn put(
+    async fn put_at(
         &self,
         provider_type: &ProviderType,
         account_id: &ProviderAccountId,
+        secret_ref: &SecretRef,
         value: SecretValue,
-    ) -> Result<SecretRef, SecretStoreError> {
-        let secret_ref = SecretRef::from_ulid(Ulid::generate());
-        let key = self.key(provider_type, account_id, &secret_ref);
-        #[cfg(target_os = "macos")]
-        let result = self.store_keychain(&key, value).await;
-        #[cfg(not(target_os = "macos"))]
-        let result = {
-            let result = self.store_value(&key, value.as_bytes()).await;
-            drop(value);
-            result
-        };
-        result.map(|()| secret_ref)
+    ) -> Result<(), SecretStoreError> {
+        let key = self.key(provider_type, account_id, secret_ref);
+        let guard = self.entry_lock(&key).await;
+        let store = self.clone();
+        // Keep the lock until the OS effect finishes even if the caller drops
+        // its future. Journal recovery must not delete before a late write.
+        tokio::spawn(async move {
+            let _guard = guard;
+            #[cfg(target_os = "macos")]
+            {
+                store.store_keychain(&key, value).await
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                store.store_value(&key, value.as_bytes()).await
+            }
+        })
+        .await
+        .map_err(|_| SecretStoreError::Unavailable)?
     }
 
     async fn get(
@@ -84,7 +125,14 @@ impl SecretStore for OsSecretStore {
         secret_ref: &SecretRef,
     ) -> Result<(), SecretStoreError> {
         let key = self.key(provider_type, account_id, secret_ref);
-        self.delete_value(&key).await
+        let guard = self.entry_lock(&key).await;
+        let store = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            store.delete_value(&key).await
+        })
+        .await
+        .map_err(|_| SecretStoreError::Unavailable)?
     }
 }
 

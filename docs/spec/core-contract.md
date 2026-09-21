@@ -287,16 +287,25 @@ Account connection and entitlement validation remain part of the later
 provider boundary. EDL-309's secret-store slice keeps secret bytes in an
 OS-backed vault adapter and carries only the opaque `SecretRef` through core,
 SQLite, events, and protocol boundaries. Secret wrappers are redacted and
-non-serializable. Connect and rotate write the new vault entry before
-publishing its durable connected reference; a failed metadata write cleans up
-the new entry, and an uncleanable entry is returned as an explicit recoverable
-cleanup error. Disconnect first disables credential use with `reauth_required`,
+non-serializable. Before connect/rotate writes a vault entry, migration `0025`'s
+cleanup journal reserves its opaque reference against the observed account.
+Publishing the connected reference consumes the reservation and journals any
+retired reference in the same SQLite transaction. A failed or interrupted write
+leaves its reservation for cleanup; an ambiguous publication failure never causes
+the application to delete a possibly committed credential. Cleanup refuses the
+account's current reference and clears a journal entry only after confirmed vault
+deletion (including an already missing entry). Disconnect first disables credential use with `reauth_required`,
 retaining the durable reference until vault deletion succeeds (an already missing
 entry also counts as deleted). Only then does it clear the reference and publish
 `disconnected`. Failed or interrupted deletion can be retried after restart; a
 failure to publish the final state leaves the disabled reference available for
-the same retry. This does not recover orphan entries from interrupted connection
-or rotation. Account lifecycle operations serialize
+the same retry. Disconnect also drains the journal, including for already
+disconnected accounts, so new connection/rotation cleanup survives restart.
+Pre-journal orphan entries cannot be reconstructed by the migration. Sign-in
+preparation blocks on pending cleanup until disconnect resolves it. The OS adapter
+retains a per-entry lock through writes/deletes that outlive their caller within
+the shared adapter instance; this is not a cross-store transaction or a claim
+about recovery from OS-vault corruption. Account lifecycle operations serialize
 per account and reject provider/account mismatches.
 Rotation accepts the expected current `SecretRef` and rejects a stale caller
 before writing a replacement. Provider-owned refresh consumes the redacted

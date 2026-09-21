@@ -978,9 +978,11 @@ Successful responses must be SSE. HTTP failures map to content-free provider
 errors without reading/logging provider error bodies (401 authentication,
 403 unavailable model, 429 rate limit, 5xx provider unavailable, redirects
 protocol change). SSE/terminal validation remains bounded and releases ordered
-output followed by the terminal update only after clean EOF. A taken request
-is never restored after a dropped send future; ambiguous execution cannot
-automatically dispatch again.
+output followed by the terminal update only after clean EOF. The operation owns
+its pending send future: dropping `next_update` for a daemon notification only
+pauses polling, and the next call resumes the same send. Explicit cancellation
+or operation drop aborts the locally owned future. A taken request is never
+restored; ambiguous execution cannot automatically dispatch again.
 
 Cancellation drops local request/response handles and discards buffered
 output/proposals/replay. It preserves already validated final usage from a

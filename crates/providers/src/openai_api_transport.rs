@@ -1,5 +1,7 @@
 use std::{
     collections::VecDeque,
+    future::Future,
+    pin::Pin,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,6 +22,7 @@ use crate::{
 };
 
 const RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+type SendFuture = Pin<Box<dyn Future<Output = Result<reqwest::Response, reqwest::Error>> + Send>>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct OpenAiApiTransportLimits {
@@ -124,6 +127,7 @@ impl OpenAiApiTransport {
         Ok(OpenAiApiOperation {
             client: self.client.clone(),
             request: Some(http_request),
+            sending: None,
             response: None,
             stream: Some(stream),
             invocation,
@@ -141,6 +145,7 @@ impl OpenAiApiTransport {
 pub struct OpenAiApiOperation {
     client: Client,
     request: Option<reqwest::Request>,
+    sending: Option<SendFuture>,
     response: Option<reqwest::Response>,
     stream: Option<ResponsesStream>,
     invocation: ModelInvocation,
@@ -153,17 +158,24 @@ pub struct OpenAiApiOperation {
 impl OpenAiApiOperation {
     async fn collect(&mut self) -> Result<(), ProviderError> {
         if self.response.is_none() {
-            // Taking once prevents a dropped execute future from causing a resend
-            // if a caller later polls the same operation again.
-            let request = self
-                .request
-                .take()
-                .ok_or(ProviderError::ProviderStreamInterrupted)?;
-            let response = self
-                .client
-                .execute(request)
-                .await
-                .map_err(|_| ProviderError::ProviderUnavailable)?;
+            // Daemon notifications may drop next_update without cancelling the
+            // operation. Retain the send future so the next poll resumes it;
+            // only explicit cancellation/drop aborts the single dispatch.
+            if self.sending.is_none() {
+                let request = self
+                    .request
+                    .take()
+                    .ok_or(ProviderError::ProviderStreamInterrupted)?;
+                let client = self.client.clone();
+                self.sending = Some(Box::pin(async move { client.execute(request).await }));
+            }
+            let result = self
+                .sending
+                .as_mut()
+                .ok_or(ProviderError::ProviderStreamInterrupted)?
+                .await;
+            self.sending = None;
+            let response = result.map_err(|_| ProviderError::ProviderUnavailable)?;
             if !response.status().is_success() {
                 return Err(http_error(response.status()));
             }
@@ -246,6 +258,7 @@ impl ModelProviderOperation for OpenAiApiOperation {
         }
         // Drop local network handles before synthesizing a terminal update.
         self.request = None;
+        self.sending = None;
         self.response = None;
         let mut usage = self
             .stream

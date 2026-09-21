@@ -570,6 +570,9 @@ pub trait ModelProviderOperation: Send {
         &mut self,
     ) -> impl Future<Output = Result<Option<ProviderUpdate>, ProviderError>> + Send;
 
-    /// Stop external work before returning success; the caller must still consume terminal usage.
+    /// Stop locally owned provider I/O before returning success; the caller must
+    /// still consume terminal usage. This does not establish that remote inference
+    /// or billing stopped unless the provider explicitly confirms it. No further
+    /// output or tool proposals may escape the operation after this local stop.
     fn cancel(&mut self) -> impl Future<Output = Result<(), ProviderError>> + Send;
 }

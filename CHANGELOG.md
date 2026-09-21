@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-22 — `fix`
+
+- Preserve the pending Responses HTTP send across daemon notification polls so dropping an update future neither interrupts nor resends the request.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `feat`
 
 - Added a fixed-endpoint public Responses HTTP operation using pinned credentials, bounded streaming, explicit deadlines, and cancellation that preserves known usage without resending requests.

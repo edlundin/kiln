@@ -916,11 +916,17 @@ where
         .map(ProviderAccountRefresh::Rotated)
     }
 
+    /// Resolve only the credential version captured by the caller. A reconnect
+    /// or refresh may keep the account ID while changing the secret reference;
+    /// never silently dispatch an existing invocation with that replacement.
+    /// Workspace access and connected state are rechecked under the lifecycle
+    /// lock, which remains held through the vault read.
     pub async fn read_provider_account_secret<V: SecretStore>(
         &self,
         secret_store: &V,
         id: ProviderAccountId,
         expected_provider_type: ProviderType,
+        expected_secret_ref: SecretRef,
         workspace_id: WorkspaceId,
     ) -> Result<SecretValue, ProviderAccountError> {
         let _lock = self.lifecycle_lock(&id).await;
@@ -930,6 +936,9 @@ where
         let secret_ref = account
             .secret_ref()
             .ok_or(ProviderAccountError::SecretRefRequired)?;
+        if secret_ref != &expected_secret_ref {
+            return Err(ProviderAccountError::CredentialVersionConflict);
+        }
         secret_store
             .get(&expected_provider_type, &id, secret_ref)
             .await

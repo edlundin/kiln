@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `fix`
+
+- Require the expected credential version during provider vault lookup so reconnect or refresh cannot silently substitute credentials.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `feat`
 
 - Reconcile Responses stream identities, deltas, completed items, and terminal output before releasing buffered generation results at clean EOF.

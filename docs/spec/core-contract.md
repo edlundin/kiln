@@ -359,6 +359,16 @@ to `reauth_required`, while transient rejection leaves it connected and does
 not cache the failure. This is serialized refresh with successful-version
 coalescing, not general single-flight for transient failures.
 
+Vault lookup for model dispatch requires an expected `SecretRef` as well as the
+account/provider/workspace binding. `read_provider_account_secret` rechecks
+connected state and workspace access under the account lifecycle lock, rejects
+a different current reference with `CredentialVersionConflict`, and holds the
+lock through the vault read. It never falls back to newly connected/refreshed
+credentials. This guard does not yet persist a version per ModelInvocation or
+prove upstream-principal continuity across rotation. Pinning invocation/replay
+history and wiring the live adapter remain required; the guard does not revoke
+a credential value already returned to an in-flight caller.
+
 The authenticated protocol now exposes safe provider-account create, list, and
 get snapshots plus the Codex device-code login start, nonblocking status,
 cancellation, and local disconnect routes. Protocol `0.24.0` adds authenticated

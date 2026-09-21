@@ -290,9 +290,13 @@ SQLite, events, and protocol boundaries. Secret wrappers are redacted and
 non-serializable. Connect and rotate write the new vault entry before
 publishing its durable connected reference; a failed metadata write cleans up
 the new entry, and an uncleanable entry is returned as an explicit recoverable
-cleanup error. Disconnect clears the durable reference before deleting the
-old vault entry, so a failed deletion leaves an observable orphan rather than
-metadata that points at missing bytes. Account lifecycle operations serialize
+cleanup error. Disconnect first disables credential use with `reauth_required`,
+retaining the durable reference until vault deletion succeeds (an already missing
+entry also counts as deleted). Only then does it clear the reference and publish
+`disconnected`. Failed or interrupted deletion can be retried after restart; a
+failure to publish the final state leaves the disabled reference available for
+the same retry. This does not recover orphan entries from interrupted connection
+or rotation. Account lifecycle operations serialize
 per account and reject provider/account mismatches.
 Rotation accepts the expected current `SecretRef` and rejects a stale caller
 before writing a replacement. Provider-owned refresh consumes the redacted

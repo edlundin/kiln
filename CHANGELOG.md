@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `fix`
 
+- Made provider-account disconnect disable credential use before vault deletion and retain its durable reference until cleanup succeeds, so interrupted disconnects can be retried after restart.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+## 2026-09-21 — `fix`
+
 - Fixed Codex sign-in retries to reuse disconnected accounts, preserve terminal results and unresolved credential-cleanup failures, and avoid blocking account status during cancellation or replacement.
 
 EDL-309: https://linear.app/edlundin/issue/EDL-309

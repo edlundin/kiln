@@ -956,23 +956,8 @@ where
     ) -> Result<ProviderAccount, ProviderAccountError> {
         let _lock = self.lifecycle_lock(&id).await;
         let current = self.get_provider_account(id).await?;
-        let provider_type = current.provider_type().clone();
-        let old_secret_ref = current.secret_ref().cloned();
-        let next = current.disconnect(updated_at_unix_ms)?;
-        self.store
-            .update_provider_account(&current, &next)
+        self.disconnect_provider_account_locked(secret_store, current, updated_at_unix_ms)
             .await
-            .map_err(map_provider_account_store_error)?;
-        if let Some(secret_ref) = old_secret_ref {
-            if secret_store
-                .delete(&provider_type, next.id(), &secret_ref)
-                .await
-                .is_err_and(|error| error != SecretStoreError::NotFound)
-            {
-                return Err(ProviderAccountError::CredentialCleanupRequired { secret_ref });
-            }
-        }
-        Ok(next)
     }
 
     /// Disconnects only when the durable credential reference is still owned
@@ -992,21 +977,50 @@ where
         {
             return Err(ProviderAccountError::CredentialVersionConflict);
         }
-        let provider_type = current.provider_type().clone();
+        self.disconnect_provider_account_locked(secret_store, current, updated_at_unix_ms)
+            .await
+    }
+
+    async fn disconnect_provider_account_locked<V: SecretStore>(
+        &self,
+        secret_store: &V,
+        mut current: ProviderAccount,
+        updated_at_unix_ms: u64,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
+        if current.state() == ProviderAccountState::Disconnected {
+            return Ok(current);
+        }
+        if let Some(secret_ref) = current.secret_ref().cloned() {
+            // Disable credential use before deletion, retaining its durable
+            // reference until the vault confirms removal. Interrupted/failed
+            // disconnects can then be retried, including after daemon restart.
+            if current.state() != ProviderAccountState::ReauthRequired {
+                let disabled = current.transition(
+                    ProviderAccountState::ReauthRequired,
+                    updated_at_unix_ms,
+                    None,
+                )?;
+                self.store
+                    .update_provider_account(&current, &disabled)
+                    .await
+                    .map_err(map_provider_account_store_error)?;
+                current = disabled;
+            }
+            // Validate the final transition before any destructive vault effect.
+            current.disconnect(updated_at_unix_ms)?;
+            if secret_store
+                .delete(current.provider_type(), current.id(), &secret_ref)
+                .await
+                .is_err_and(|error| error != SecretStoreError::NotFound)
+            {
+                return Err(ProviderAccountError::CredentialCleanupRequired { secret_ref });
+            }
+        }
         let next = current.disconnect(updated_at_unix_ms)?;
         self.store
             .update_provider_account(&current, &next)
             .await
             .map_err(map_provider_account_store_error)?;
-        if secret_store
-            .delete(&provider_type, next.id(), &expected_secret_ref)
-            .await
-            .is_err_and(|error| error != SecretStoreError::NotFound)
-        {
-            return Err(ProviderAccountError::CredentialCleanupRequired {
-                secret_ref: expected_secret_ref,
-            });
-        }
         Ok(next)
     }
 

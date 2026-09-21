@@ -10,6 +10,10 @@ attachment persistence repair in the Kiln Linear tracker.
 
 ## Status
 
+- The EDL-309 disconnect safety continuation now disables accounts before deleting vault entries and retains the durable reference until deletion is confirmed. Both ordinary and exact-reference disconnect use the same serialized helper. A failed deletion or interrupted final metadata update remains retryable through the ordinary disconnect operation after restart; already-disconnected accounts are idempotent. Unpublished/retired credentials from connection and rotation still lack durable cleanup recovery. Public disconnect controls are the next continuation.
+
+  Validation: `rtk cargo check -p kiln-daemon -p kiln-desktop` and `git diff --check` passed; the touched Rust source was formatted. The existing `block v0.1.6` future-incompatibility warning remains. No tests or vault operations were run; restart/failure behavior was reviewed in source only.
+
 - The EDL-309 sign-in retry continuation reuses disconnected Codex accounts through a guarded core lifecycle transition. Attempt replacement retains the prior terminal result until a new attempt is ready and refuses to discard credential-cleanup failures. Registry locks are released before joining prior work, and status reads report pending while cancellation/replacement owns the task join instead of waiting for provider or vault I/O. Desktop sign-in reuses connecting/disconnected accounts. This continuation does not add reauthentication, disconnect controls, or durable cleanup recovery across daemon restart.
 
   Validation: `rtk cargo check -p kiln-daemon -p kiln-desktop`, focused `rustfmt --check`, and `git diff --check` passed. `rtk cargo run -p kiln-protocol --bin generate-contract` regenerated the ignored contract bundle from its maintained source. The existing `block v0.1.6` future-incompatibility warning remains. No tests or live OAuth/vault operations were run; retry, cleanup-failure, and concurrent cancellation behavior have source-review evidence only.

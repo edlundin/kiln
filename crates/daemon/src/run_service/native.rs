@@ -3,14 +3,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kiln_core::{
     ApprovalState, AssistantMessageApplication, AssistantMessageStoreError, CapabilitySupport,
     ContextInstructionProvenance, ContextManifestApplication, ContextManifestEntryInput,
-    CreateContextManifest, CreateModelInvocation, GenerationSettings, MessageDeliveryMode,
-    MessageDeliveryState, ModelCapabilitySnapshot, ModelId, ModelInvocation,
-    ModelInvocationCompletionKind, ModelInvocationFailureReason, ModelInvocationId,
-    ModelInvocationPurpose, ModelInvocationSettings, ModelProviderOperation, ModelToolCatalogStore,
-    NativeRunApplication, ProviderAccountId, ProviderApplication, ProviderClaim, ProviderError,
-    ProviderType, ProviderUpdate, ProviderUpdateMutation, ProviderUsageMetadata,
-    ProviderUsageUpdate, ReasoningSettings, RecordRunInputDelivery, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageSource,
+    CreateContextManifest, CreateModelInvocation, MessageDeliveryMode, MessageDeliveryState,
+    ModelInvocation, ModelInvocationCompletionKind, ModelInvocationFailureReason,
+    ModelInvocationId, ModelInvocationPurpose, ModelProviderOperation, ModelToolCatalogStore,
+    NativeRunApplication, ProviderApplication, ProviderClaim, ProviderError, ProviderType,
+    ProviderUpdate, ProviderUpdateMutation, ProviderUsageMetadata, ProviderUsageUpdate,
+    RecordRunInputDelivery, UsageAccounting, UsageCompleteness, UsageFinality, UsageSource,
 };
 use kiln_providers::{
     DETERMINISTIC_MODEL_ID, DETERMINISTIC_PROVIDER_ACCOUNT_ID, DETERMINISTIC_PROVIDER_TYPE,
@@ -174,10 +172,11 @@ impl RunService {
         &self,
         run_id: RunId,
         mut cancellation: oneshot::Receiver<()>,
+        selection: &crate::native_model::NativeModelSelection,
     ) -> Result<RunSnapshot, RunError> {
         let mut entries = vec![ContextManifestEntryInput::Instruction {
             provenance: ContextInstructionProvenance::Runtime,
-            content: "Execute the deterministic native model fixture.".to_owned(),
+            content: selection.instruction.to_owned(),
         }];
         loop {
             let claim = {
@@ -220,18 +219,9 @@ impl RunService {
                                 run_id: run_id.clone(),
                                 context_manifest_id: manifest.value.context_manifest_id().clone(),
                                 context_manifest_hash: manifest.value.content_hash().clone(),
-                                provider_account_id: ProviderAccountId::parse(
-                                    DETERMINISTIC_PROVIDER_ACCOUNT_ID,
-                                )
-                                .map_err(|_| RunError::InvalidTransition)?,
-                                settings: deterministic_settings()?,
-                                capabilities: ModelCapabilitySnapshot::new(
-                                    "deterministic-v1",
-                                    CapabilitySupport::Unsupported,
-                                    CapabilitySupport::Unsupported,
-                                    CapabilitySupport::Unsupported,
-                                )
-                                .map_err(|_| RunError::InvalidTransition)?,
+                                provider_account_id: selection.account_id.clone(),
+                                settings: selection.settings.clone(),
+                                capabilities: selection.capabilities.clone(),
                                 purpose: ModelInvocationPurpose::Generation,
                                 retry_of: None,
                                 idempotency_key: turn_key,
@@ -627,16 +617,6 @@ impl RunService {
         }
         Ok(())
     }
-}
-
-fn deterministic_settings() -> Result<ModelInvocationSettings, RunError> {
-    Ok(ModelInvocationSettings::new(
-        ProviderType::parse(DETERMINISTIC_PROVIDER_TYPE)
-            .map_err(|_| RunError::InvalidTransition)?,
-        ModelId::parse(DETERMINISTIC_MODEL_ID).map_err(|_| RunError::InvalidTransition)?,
-        GenerationSettings::new(None).map_err(|_| RunError::InvalidTransition)?,
-        ReasoningSettings::new(None).map_err(|_| RunError::InvalidTransition)?,
-    ))
 }
 
 fn observed_at() -> Result<u64, RunError> {

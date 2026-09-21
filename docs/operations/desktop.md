@@ -4,6 +4,8 @@ Kiln Desktop is a native GPUI client for the local `kilnd` daemon. The daemon
 is a separate process and continues to run if the window closes. The current
 desktop run path uses the deterministic model fixture. Settings can connect
 a Codex subscription account, but Runs do not yet use that live provider.
+An explicit [native public API mode](native-public-api.md) is also available for
+separately imported public API accounts; live acceptance remains unverified.
 
 The native coordinator includes an optional scoped `read_file` implementation.
 It remains disabled unless both `KILN_NATIVE_READ_FILE_MAX_PATH_BYTES` and
@@ -12,7 +14,8 @@ Choose the file ceiling for the host's memory budget: a read buffers the complet
 file and may copy it into artifact storage. Missing, invalid, or overflowing
 limits prevent startup when either setting is supplied. These settings register
 the local implementation; the deterministic model still advertises no tool
-support and cannot invoke it. Live provider activation remains pending.
+support and cannot invoke it. Public API models must explicitly declare tool
+support before the coordinator supplies this catalog.
 
 The desktop has only been verified on macOS. It requests the host fonts `Inter`
 and `IBM Plex Mono`; the application bundle does not include font files.

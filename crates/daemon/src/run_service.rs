@@ -38,7 +38,7 @@ struct ActiveRuns {
 pub(crate) struct RunService {
     runs: Arc<RunApplication<SqliteStore, UlidIdGenerator>>,
     executor: DeterministicSubprocessExecutor,
-    deterministic_model: bool,
+    native_model: Option<crate::native_model::NativeModelSelection>,
     provider_registry: Arc<ProviderRegistry>,
     native_file_read: Option<Arc<kiln_core::WorkspaceFileReadTool>>,
     events: EventBroadcaster,
@@ -60,7 +60,7 @@ impl RunService {
         Self {
             runs: Arc::new(runs),
             executor,
-            deterministic_model: false,
+            native_model: None,
             provider_registry: Arc::new(ProviderRegistry::new()),
             native_file_read: None,
             events,
@@ -72,8 +72,11 @@ impl RunService {
         }
     }
 
-    pub(crate) fn with_deterministic_model(mut self, enabled: bool) -> Self {
-        self.deterministic_model = enabled;
+    pub(crate) fn with_native_model(
+        mut self,
+        selection: Option<crate::native_model::NativeModelSelection>,
+    ) -> Self {
+        self.native_model = selection;
         self
     }
 
@@ -268,8 +271,10 @@ impl RunService {
         mut approval_revision: watch::Receiver<u64>,
         initialize: bool,
     ) -> Result<RunSnapshot, RunError> {
-        if self.deterministic_model && initialize {
-            return self.execute_native(run_id, cancellation).await;
+        if initialize {
+            if let Some(selection) = &self.native_model {
+                return self.execute_native(run_id, cancellation, selection).await;
+            }
         }
         if cancellation.try_recv().is_ok() {
             return self.wait_for_cancelled_run(run_id).await;

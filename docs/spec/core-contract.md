@@ -549,6 +549,20 @@ remain pending. The usage contract in
 [EDL-268](https://linear.app/edlundin/issue/EDL-268) records each physical
 attempt separately while retaining its logical work identity.
 
+### Explicit native provider selection
+
+The daemon supports opt-in `KILN_RUN_EXECUTOR=openai-api` with an operator-owned
+`KILN_OPENAI_API_CONFIG` JSON file. The selected account must already exist as an
+`openai_api` account. Every new Run uses the immutable configured account, exact
+model/settings and capability snapshot throughout its generations. The public
+provider shares account lifecycle and vault entry locks with account management.
+All context, request, response, replay, proposal and timeout budgets are explicit;
+unknown configuration fields fail startup. Construction sends no model request and
+reads no vault credential. The default executor and deterministic recovery scope
+remain unchanged; real in-flight work is never inferred safe to redispatch.
+See [native public API operations](../operations/native-public-api.md) for the
+configuration contract and remaining live-acceptance limitations.
+
 ### Native provider port
 
 The internal `ProviderApplication::claim` operation creates a provider request

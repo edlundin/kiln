@@ -30,6 +30,7 @@ use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
 use crate::run_service::RunService;
 
 mod account_import;
+mod native_model;
 mod provider_login;
 mod run_service;
 
@@ -47,13 +48,30 @@ async fn main() -> ExitCode {
         return account_import::run().await;
     }
 
-    let deterministic_model = match env::var("KILN_RUN_EXECUTOR") {
-        Ok(value) if value == "deterministic-model" => true,
-        Ok(value) if value == "deterministic-subprocess" => false,
-        Err(env::VarError::NotPresent) => false,
+    let (native_selection, public_api_config) = match env::var("KILN_RUN_EXECUTOR") {
+        Ok(value) if value == "deterministic-model" => {
+            match native_model::NativeModelSelection::deterministic() {
+                Ok(selection) => (Some(selection), None),
+                Err(error) => {
+                    eprintln!("kilnd: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        Ok(value) if value == "openai-api" => {
+            match native_model::OpenAiApiConfig::from_environment() {
+                Ok(config) => (Some(config.selection.clone()), Some(config)),
+                Err(error) => {
+                    eprintln!("kilnd: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        Ok(value) if value == "deterministic-subprocess" => (None, None),
+        Err(env::VarError::NotPresent) => (None, None),
         _ => {
             eprintln!(
-                "kilnd: KILN_RUN_EXECUTOR must be deterministic-subprocess or deterministic-model"
+                "kilnd: KILN_RUN_EXECUTOR must be deterministic-subprocess, deterministic-model or openai-api"
             );
             return ExitCode::FAILURE;
         }
@@ -64,17 +82,6 @@ async fn main() -> ExitCode {
             eprintln!("kilnd: {error}");
             return ExitCode::FAILURE;
         }
-    };
-    let provider_registry = if deterministic_model {
-        match deterministic_provider_registry() {
-            Ok(registry) => registry,
-            Err(error) => {
-                eprintln!("kilnd: cannot configure deterministic provider: {error}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        ProviderRegistry::new()
     };
     let subprocess_outcome = match configured_subprocess_outcome() {
         Ok(outcome) => outcome,
@@ -150,9 +157,63 @@ async fn main() -> ExitCode {
         store.clone(),
         UlidIdGenerator,
     ));
+    let vault = kiln_infrastructure::OsSecretStore::open_default();
+    let provider_registry = if let Some(config) = public_api_config {
+        match provider_accounts
+            .get_provider_account(config.selection.account_id.clone())
+            .await
+        {
+            Ok(account) if account.provider_type() == config.selection.settings.provider() => {}
+            _ => {
+                eprintln!(
+                    "kilnd: configured public API account is missing or belongs to another provider"
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        // Cloning OsSecretStore shares its entry locks. The application Arc also
+        // shares the lifecycle lock with all account-management operations.
+        let provider = match kiln_providers::OpenAiApiModelProvider::new(
+            Arc::clone(&provider_accounts),
+            Arc::new(vault.clone()),
+            kiln_infrastructure::StoredProviderContextReader::new(store.clone(), artifacts.clone()),
+            config.context,
+            config.transport,
+        ) {
+            Ok(provider) => provider,
+            Err(_) => {
+                eprintln!("kilnd: invalid public API transport configuration");
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut registry = ProviderRegistry::new();
+        if registry
+            .register(
+                config.selection.settings.provider().clone(),
+                config.selection.settings.model().clone(),
+                config.selection.account_id.clone(),
+                provider,
+            )
+            .is_err()
+        {
+            eprintln!("kilnd: cannot register public API provider");
+            return ExitCode::FAILURE;
+        }
+        registry
+    } else if native_selection.is_some() {
+        match deterministic_provider_registry() {
+            Ok(registry) => registry,
+            Err(error) => {
+                eprintln!("kilnd: cannot configure deterministic provider: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        ProviderRegistry::new()
+    };
     let provider_logins = match provider_login::ProviderAccountLoginCoordinator::new(
         Arc::clone(&provider_accounts),
-        kiln_infrastructure::OsSecretStore::open_default(),
+        vault,
     ) {
         Ok(logins) => Arc::new(logins),
         Err(_) => {
@@ -168,7 +229,7 @@ async fn main() -> ExitCode {
         store,
         artifacts,
     )
-    .with_deterministic_model(deterministic_model)
+    .with_native_model(native_selection)
     .with_native_file_read(native_file_read)
     .with_provider_registry(provider_registry);
 

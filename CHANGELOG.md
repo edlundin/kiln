@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added bounded incremental Responses SSE framing with payload-safe diagnostics and explicit malformed/truncated stream failures.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added bounded successful Responses normalization that derives output, inert tool proposals, final usage, and private replay from one validated envelope.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

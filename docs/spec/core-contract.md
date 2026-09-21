@@ -885,8 +885,24 @@ are retained alongside invocation/account/work attribution. Complete output,
 inert proposals, final usage and bound continuation must validate before any
 updates are returned. Transport must persist the output before the terminal
 update and reconcile any already-emitted streaming deltas with final output to
-avoid duplication. SSE parsing, failed/incomplete usage accounting, and that
-stream reconciliation remain unimplemented; no live adapter calls this helper.
+avoid duplication. Failed/incomplete usage accounting and stream reconciliation
+remain unimplemented; no live adapter calls this helper.
+
+`ResponsesSseDecoder` incrementally frames provider-private JSON events across
+arbitrary byte/UTF-8 boundaries, accepts LF/CRLF/CR, one initial BOM, comments and
+multiline data, and checks explicit frame/stream/event-count ceilings. Frame
+accounting normalizes CRLF to one terminator; stream accounting counts every
+wire byte. Event labels must agree with the JSON type (or use the default
+message label). Invalid JSON/UTF-8/types, excess limits, post-DONE events or
+truncated EOF permanently close the decoder. `[DONE]` is only an optional
+transport marker and never establishes successful model completion. SSE `id`
+and `retry` fields do not enable reconnect or redispatch. Debug hides payloads.
+This framing layer does not validate lifecycle, sequence numbers, response/item
+identity, delta consistency or terminal semantics; that layer and actual HTTP
+transport remain pending.
+
+Source: official [Responses streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses),
+consulted 2026-09-21. No live streaming acceptance is claimed.
 
 Source: official [function-calling guidance](https://developers.openai.com/api/docs/guides/function-calling),
 [stateless encrypted reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses),

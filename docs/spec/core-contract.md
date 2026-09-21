@@ -791,8 +791,15 @@ Artifacts. Surrounding replay JSON uses ordinary database storage; encrypted
 reasoning remains opaque provider ciphertext. This adds no encryption-at-rest
 claim and stores no credential envelope.
 
-The internal storage operation is not yet called by a live adapter or exposed in
-the provider stream. Subsequent request assembly must select verified earlier
+`ProviderUpdate::CompletedWithContinuation` carries successful terminal output,
+optional proposals, final usage, and bound replay through the same atomic store.
+Validation rejects mismatched attribution or completion kinds before persistence.
+The daemon publishes only committed completion/usage Events and recognizes this
+as terminal output. After a successful stop or while draining an invalid stream,
+it discards both replay and proposals while retaining valid terminal usage under
+the cancelled/failure outcome. No live adapter emits this variant yet.
+
+Subsequent request assembly must select verified earlier
 continuations from the same Run/account/model without duplication or promotion
 to instructions. Tool exchange snapshots alone are insufficient for that
 continuation. Live transport and subscription compatibility remain pending.

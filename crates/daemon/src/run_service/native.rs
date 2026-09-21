@@ -407,10 +407,14 @@ impl RunService {
                         return Ok((outcome, false));
                     }
                     let update = match update {
-                        ProviderUpdate::ToolRequests { usage, .. } if stopped => {
+                        ProviderUpdate::ToolRequests { usage, .. }
+                        | ProviderUpdate::CompletedWithContinuation { usage, .. }
+                            if stopped =>
+                        {
                             // A terminal proposal may already be buffered when
                             // cancellation completes. Retain its usage, but do
-                            // not strand unadopted work on a steered invocation.
+                            // not strand unadopted work on a steered invocation
+                            // or retain continuation from the stopped response.
                             ProviderUpdate::Finished {
                                 outcome: ModelInvocationOutcome::cancelled(),
                                 usage,
@@ -419,7 +423,10 @@ impl RunService {
                         update => update,
                     };
                     let outcome = match &update {
-                        ProviderUpdate::Finished { outcome, .. } => Some(*outcome),
+                        ProviderUpdate::Finished { outcome, .. }
+                        | ProviderUpdate::CompletedWithContinuation { outcome, .. } => {
+                            Some(*outcome)
+                        }
                         ProviderUpdate::ToolRequests { .. } => {
                             Some(ModelInvocationOutcome::completed(
                                 ModelInvocationCompletionKind::ToolRequests,
@@ -471,7 +478,8 @@ impl RunService {
             }
             match update {
                 ProviderUpdate::Finished { usage, .. }
-                | ProviderUpdate::ToolRequests { usage, .. } => {
+                | ProviderUpdate::ToolRequests { usage, .. }
+                | ProviderUpdate::CompletedWithContinuation { usage, .. } => {
                     // After a stream error, retain final usage but do not adopt
                     // proposals emitted while stopping the invalid operation.
                     return self
@@ -509,6 +517,7 @@ impl RunService {
             ProviderUpdateMutation::Usage(mutation) => mutation.events,
             ProviderUpdateMutation::Finished(mutation) => mutation.events,
             ProviderUpdateMutation::ToolRequests(mutation) => mutation.completion.events,
+            ProviderUpdateMutation::Continuation(mutation) => mutation.events,
         };
         self.events.publish(events);
         Ok(())

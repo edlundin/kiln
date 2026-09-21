@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Routed provider continuation updates through atomic terminal storage and native cancellation/error handling while keeping replay payloads private.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added invocation-bound private continuation storage committed atomically with model completion, final usage and tool proposals, with bounded reads and integrity checks.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

@@ -190,6 +190,14 @@ pub enum ProviderUpdate {
         requests: ModelToolRequestBatch,
         usage: ProviderUsageUpdate,
     },
+    /// Successful terminal output with provider-private replay data. The
+    /// continuation, proposals, usage and completion share one transaction.
+    CompletedWithContinuation {
+        outcome: ModelInvocationOutcome,
+        usage: ProviderUsageUpdate,
+        requests: Option<ModelToolRequestBatch>,
+        continuation: crate::ModelInvocationContinuation,
+    },
 }
 
 impl ProviderUpdate {
@@ -203,6 +211,17 @@ impl ProviderUpdate {
                 };
             }
             Self::Usage(usage) => (usage, UsageFinality::Partial),
+            Self::CompletedWithContinuation {
+                outcome,
+                usage,
+                requests,
+                continuation,
+            } => {
+                continuation
+                    .validate_completion(invocation, *outcome, usage, requests.as_ref())
+                    .map_err(|_| ProviderError::ProviderResponseInvalid)?;
+                (usage, UsageFinality::Final)
+            }
             Self::ToolRequests { requests, usage } => {
                 requests
                     .validate_completion(invocation, usage)
@@ -233,6 +252,7 @@ pub enum ProviderUpdateMutation {
     Usage(UsageMutation),
     Finished(ModelInvocationCompletionMutation),
     ToolRequests(ModelToolRequestCompletion),
+    Continuation(ModelInvocationCompletionMutation),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +263,7 @@ pub enum ProviderUpdateError {
     Usage(UsageStoreError),
     Completion(ModelInvocationCompletionError),
     ToolRequests(ModelToolRequestError),
+    Continuation(crate::ModelContinuationError),
     IntegrityViolation,
 }
 
@@ -252,7 +273,8 @@ where
         + ModelOutputStore
         + UsageStore
         + ModelInvocationCompletionStore
-        + ModelToolRequestStore,
+        + ModelToolRequestStore
+        + crate::ModelContinuationStore,
     I: ModelOutputIdGenerator + UsageIdGenerator,
 {
     pub async fn record_update(
@@ -275,6 +297,24 @@ where
             .validate_for(&invocation)
             .map_err(ProviderUpdateError::Provider)?;
         match update {
+            ProviderUpdate::CompletedWithContinuation {
+                outcome,
+                usage,
+                requests,
+                continuation,
+            } => self
+                .finish_with_continuation(crate::FinishModelInvocationWithContinuation {
+                    completion: FinishModelInvocationWithUsage {
+                        invocation,
+                        outcome,
+                        usage,
+                    },
+                    requests,
+                    continuation,
+                })
+                .await
+                .map(ProviderUpdateMutation::Continuation)
+                .map_err(ProviderUpdateError::Continuation),
             ProviderUpdate::ToolRequests { requests, usage } => self
                 .record_tool_requests(&invocation, &requests, &usage)
                 .await

@@ -122,19 +122,35 @@ pub struct FinishModelInvocationWithContinuation {
 
 impl FinishModelInvocationWithContinuation {
     pub fn validate(&self) -> Result<(), ModelContinuationError> {
-        let invocation = &self.completion.invocation;
-        self.continuation.validate_for(invocation)?;
-        let expected = match &self.requests {
+        self.continuation.validate_completion(
+            &self.completion.invocation,
+            self.completion.outcome,
+            &self.completion.usage,
+            self.requests.as_ref(),
+        )
+    }
+}
+
+impl ModelInvocationContinuation {
+    pub fn validate_completion(
+        &self,
+        invocation: &ModelInvocation,
+        outcome: crate::ModelInvocationOutcome,
+        usage: &crate::ProviderUsageUpdate,
+        requests: Option<&ModelToolRequestBatch>,
+    ) -> Result<(), ModelContinuationError> {
+        self.validate_for(invocation)?;
+        let expected = match requests {
             Some(requests) => {
                 requests
-                    .validate_completion(invocation, &self.completion.usage)
+                    .validate_completion(invocation, usage)
                     .map_err(ModelContinuationError::Requests)?;
                 ModelInvocationCompletionKind::ToolRequests
             }
             None => ModelInvocationCompletionKind::AssistantOutput,
         };
-        let metadata = self.completion.usage.metadata();
-        if self.completion.outcome.completion_kind() != Some(expected)
+        let metadata = usage.metadata();
+        if outcome.completion_kind() != Some(expected)
             || metadata.finality != UsageFinality::Final
             || metadata.model_invocation_id != *invocation.invocation_id()
             || metadata.work_id != *invocation.work_id()

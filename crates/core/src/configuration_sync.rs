@@ -222,3 +222,157 @@ impl ConfigurationFollowerCursor {
         Ok(())
     }
 }
+
+/// Role changes are local administrative decisions, never inferred from a
+/// snapshot or connectivity failure. Transport/enrollment authorization belongs
+/// to the caller of the internal storage boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigurationRole {
+    Unassigned,
+    Master(ConfigurationAuthority),
+    Follower(ConfigurationAuthority),
+}
+impl ConfigurationRole {
+    pub fn authority(&self) -> Option<&ConfigurationAuthority> {
+        match self {
+            Self::Unassigned => None,
+            Self::Master(value) | Self::Follower(value) => Some(value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationInstanceState {
+    instance_id: KilnInstanceId,
+    version: u64,
+    role: ConfigurationRole,
+    observed: Option<ConfigurationRevision>,
+}
+impl ConfigurationInstanceState {
+    pub fn from_persisted(
+        instance_id: KilnInstanceId,
+        version: u64,
+        role: ConfigurationRole,
+        observed: Option<ConfigurationRevision>,
+    ) -> Result<Self, ConfigurationStateError> {
+        if version == 0 || version > i64::MAX as u64 {
+            return Err(ConfigurationStateError::IntegrityViolation);
+        }
+        match &role {
+            ConfigurationRole::Unassigned if observed.is_none() => {}
+            ConfigurationRole::Master(authority)
+                if authority.master_id() == &instance_id && observed.is_none() => {}
+            ConfigurationRole::Follower(authority) => {
+                ConfigurationFollowerCursor::from_persisted(
+                    instance_id.clone(),
+                    authority.clone(),
+                    None,
+                    observed.clone(),
+                )
+                .map_err(ConfigurationStateError::Revision)?;
+            }
+            _ => return Err(ConfigurationStateError::InvalidRole),
+        }
+        Ok(Self {
+            instance_id,
+            version,
+            role,
+            observed,
+        })
+    }
+    pub fn instance_id(&self) -> &KilnInstanceId {
+        &self.instance_id
+    }
+    /// Compare-and-swap version, also fencing asynchronous work after reenrollment.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+    pub fn role(&self) -> &ConfigurationRole {
+        &self.role
+    }
+    pub fn observed(&self) -> Option<&ConfigurationRevision> {
+        self.observed.as_ref()
+    }
+
+    pub fn change_role(&self, role: ConfigurationRole) -> Result<Self, ConfigurationStateError> {
+        if role == self.role {
+            return Ok(self.clone());
+        }
+        Self::from_persisted(self.instance_id.clone(), self.next_version()?, role, None)
+    }
+    pub fn observe(
+        &self,
+        revision: ConfigurationRevision,
+    ) -> Result<Self, ConfigurationStateError> {
+        let ConfigurationRole::Follower(authority) = &self.role else {
+            return Err(ConfigurationStateError::InvalidRole);
+        };
+        let cursor = ConfigurationFollowerCursor::from_persisted(
+            self.instance_id.clone(),
+            authority.clone(),
+            None,
+            self.observed.clone(),
+        )
+        .map_err(ConfigurationStateError::Revision)?;
+        cursor
+            .observe(revision.clone())
+            .map_err(ConfigurationStateError::Revision)?;
+        if self.observed.as_ref() == Some(&revision) {
+            return Ok(self.clone());
+        }
+        Self::from_persisted(
+            self.instance_id.clone(),
+            self.next_version()?,
+            self.role.clone(),
+            Some(revision),
+        )
+    }
+    fn next_version(&self) -> Result<u64, ConfigurationStateError> {
+        self.version
+            .checked_add(1)
+            .filter(|value| *value <= i64::MAX as u64)
+            .ok_or(ConfigurationStateError::VersionExhausted)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationStateError {
+    Uninitialized,
+    InvalidRole,
+    Conflict,
+    AuthorityConflict,
+    VersionExhausted,
+    IntegrityViolation,
+    Revision(ConfigurationSyncError),
+    Unavailable,
+}
+
+/// Internal administrative storage, not an enrollment or public network API.
+/// No method here proves peer identity or grants access to snapshot data.
+pub trait ConfigurationStateStore: Send + Sync {
+    fn initialize_configuration_instance(
+        &self,
+        proposed_id: KilnInstanceId,
+    ) -> impl std::future::Future<
+        Output = Result<ConfigurationInstanceState, ConfigurationStateError>,
+    > + Send;
+    fn get_configuration_instance(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<Option<ConfigurationInstanceState>, ConfigurationStateError>,
+    > + Send;
+    fn change_configuration_role(
+        &self,
+        expected: &ConfigurationInstanceState,
+        role: ConfigurationRole,
+    ) -> impl std::future::Future<
+        Output = Result<ConfigurationInstanceState, ConfigurationStateError>,
+    > + Send;
+    fn observe_configuration_revision(
+        &self,
+        expected: &ConfigurationInstanceState,
+        revision: ConfigurationRevision,
+    ) -> impl std::future::Future<
+        Output = Result<ConfigurationInstanceState, ConfigurationStateError>,
+    > + Send;
+}

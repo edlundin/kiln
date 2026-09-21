@@ -9,9 +9,10 @@ use std::{
 };
 
 use kiln_core::{
-    ModelId, ModelInvocationCompletionKind, ModelInvocationOutcome, ProviderAccountApplication,
-    ProviderAccountId, ProviderType, RunApplication, SessionApplication, StoreMetadata,
-    UsageApplication, UsageCompleteness, WorkspaceApplication,
+    ConfigurationStateStore, KilnInstanceId, ModelId, ModelInvocationCompletionKind,
+    ModelInvocationOutcome, ProviderAccountApplication, ProviderAccountId, ProviderType,
+    RunApplication, SessionApplication, StoreMetadata, UsageApplication, UsageCompleteness,
+    WorkspaceApplication,
 };
 use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
@@ -142,6 +143,16 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Identity creation is idempotent. Startup never designates a master or enrolls
+    // a follower implicitly, including after configuration/network failures.
+    if store
+        .initialize_configuration_instance(KilnInstanceId::from_ulid(ulid::Ulid::generate()))
+        .await
+        .is_err()
+    {
+        eprintln!("kilnd: cannot initialize configuration instance identity");
+        return ExitCode::FAILURE;
+    }
     let artifacts = match FileArtifactStore::open_default() {
         Ok(artifacts) => artifacts,
         Err(_) => {

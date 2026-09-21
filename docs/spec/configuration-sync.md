@@ -65,7 +65,8 @@ Within a group the master publishes immutable, monotonically increasing positive
 revisions. A revision identifies a complete canonical snapshot with a content
 hash covering all categories, schema metadata, enable/disable state, and file
 manifests. Revision zero means no snapshot has been applied; it is never published.
-A previously observed revision cannot change its hash. Rollback is a new revision
+A previously observed revision cannot change its hash. The local authority history
+and highest observed revision survive leaving and rejoining the same group. Rollback is a new revision
 with the desired older content, never a decrement or rewrite.
 
 Followers can skip revisions because each snapshot is complete. They reject the
@@ -101,3 +102,20 @@ single-master direction and secret boundary. End-to-end acceptance includes
 initial enrollment, additions/updates/removals, disabled state, offline/reconnect,
 rejected/partial updates, explicit master reassignment, and host-binding failures.
 No runtime delivery is complete until those paths exist and are verified.
+
+## Current persistence boundary
+
+Migration 34 stores one durable instance ID, an initially unassigned role, and a
+compare-and-swap version. Master/follower assignments are internal administrative
+operations; daemon startup never chooses a role. Authority history binds every
+seen group to its original master and retains follower observation metadata.
+Role changes and observations commit atomically with the instance state version.
+Stale expected state fails instead of changing a newer enrollment. An identical
+observation or unchanged role is a no-op. Leaving a group preserves its history;
+rejoining restores its highest observed revision. Integer storage uses SQLite's
+signed 64-bit positive range and rejects exhaustion/overflow.
+
+This storage does not yet contain snapshot payloads, applied revisions, enrollment
+credentials or remote endpoints. It exposes no network routes and grants no
+transport authentication. Schema/content verification, active snapshot storage,
+public status projection and administrative enrollment UI remain subsequent work.

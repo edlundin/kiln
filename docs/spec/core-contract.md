@@ -541,7 +541,7 @@ preventing a race with pending catalog attachment. A failed post-claim read
 returns no dispatch request; the durable in-flight invocation remains for
 reconciliation. The catalog snapshot is separate from the context-manifest
 hash and is validated independently. It grants no policy scope or approval and
-contains no executor, host path, or credential.
+has no executor handle, host-path binding, or credential field.
 
 The first port supports assistant-text and exposed reasoning-summary chunks,
 partial usage updates, and a terminal outcome paired with final usage. Output
@@ -588,6 +588,23 @@ update. When draining an invalid stream after cancellation, it retains validated
 final usage under the failure outcome and discards any proposals. No proposal
 from that error path is persisted or executed. The deterministic native loop
 still advertises tools as unsupported; executable tool adoption remains pending.
+
+`ProviderApplication::resolve_tool_requests` loads the terminal invocation,
+durable batch, and frozen catalog before resolving any proposal. Missing
+historical proposals/catalogs fail closed. Every requested name must have been
+offered. The local `ModelToolArgumentResolver` must supply the exact registered
+capability/revision definition, including its schema and description. Missing
+implementations or changed definitions reject the entire batch before argument
+parsing. Names from model output are never interpreted as capability IDs.
+
+The local resolver parses complete canonical arguments into typed command data
+under the registered tool's contract. It must reject invalid/unknown fields and
+semantic violations without filesystem/network effects, schema-reference
+fetches, dispatch, or policy decisions. Resolution preserves order, provider call
+IDs, invocation identity, and the frozen definitions. A failure reports only
+its position and a typed reason and returns no partial resolved batch. Resolved
+commands carry no ToolCall ID, effective scope, or approval. No concrete native
+resolver or executable adoption path is wired yet.
 
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation

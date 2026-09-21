@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added whole-batch model tool resolution against frozen offered definitions and exact local capability revisions, with typed argument validation and no execution authority.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Froze bounded, ordered tool descriptions and schema documents per model invocation, preserving tool definitions across retries and exposing the snapshot at the provider boundary.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

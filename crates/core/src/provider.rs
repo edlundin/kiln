@@ -327,6 +327,45 @@ impl<S: ModelToolRequestStore, I: UsageIdGenerator> ProviderApplication<S, I> {
     }
 }
 
+impl<S: ModelInvocationStore + ModelToolRequestStore + ModelToolCatalogStore, I>
+    ProviderApplication<S, I>
+{
+    /// Load immutable durable proposals and definitions, then normalize through
+    /// Kiln's local registry. No policy decision or executable ToolCall is made.
+    pub async fn resolve_tool_requests<R: crate::ModelToolArgumentResolver>(
+        &self,
+        invocation_id: ModelInvocationId,
+        resolver: &R,
+    ) -> Result<crate::ResolvedModelToolBatch<R::Command>, crate::ModelToolResolutionError> {
+        use crate::ModelToolResolutionError as Error;
+
+        let invocation = self
+            .store
+            .get_model_invocation(&invocation_id)
+            .await
+            .map_err(Error::Invocation)?
+            .ok_or(Error::InvocationNotComplete)?;
+        if invocation.invocation_id() != &invocation_id {
+            return Err(Error::IntegrityViolation);
+        }
+        let requests = self
+            .store
+            .get_model_tool_requests(&invocation_id)
+            .await
+            .map_err(Error::Requests)?
+            .ok_or(Error::RequestsMissing)?;
+        let catalog = self
+            .store
+            .get_model_tool_catalog(&invocation_id)
+            .await
+            .map_err(Error::Catalog)?
+            .ok_or(Error::CatalogMissing)?;
+        crate::model_tool_resolution::resolve_model_tool_requests(
+            invocation, requests, catalog, resolver,
+        )
+    }
+}
+
 pub trait ModelProvider: Send + Sync {
     type Operation: ModelProviderOperation;
 

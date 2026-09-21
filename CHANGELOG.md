@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `feat`
+
+- Added bounded Responses output replay data that preserves encrypted reasoning and assistant phase for future native tool continuation; durable binding and live transport remain pending.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `fix`
 
 - Registered daemon shutdown signals before readiness, closing a startup race that could bypass graceful cleanup on immediate SIGTERM.

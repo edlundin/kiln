@@ -607,8 +607,8 @@ semantic violations without filesystem/network effects, schema-reference
 fetches, dispatch, or policy decisions. Resolution preserves order, provider call
 IDs, invocation identity, and the frozen definitions. A failure reports only
 its position and a typed reason and returns no partial resolved batch. Resolved
-commands carry no ToolCall ID, effective scope, or approval. Concrete native
-resolvers and coordinator dispatch are not wired yet.
+commands carry no ToolCall ID, effective scope, or approval. The optional native
+file-read resolver and coordinator consume this boundary as described below.
 
 Locally resolved batches can prepare `AdoptModelToolRequest` commands for one
 position and an explicit requested Workspace scope. The SQLite adoption boundary
@@ -752,9 +752,32 @@ work before the caller records a cancelled outcome. The port has no clock,
 network, secret store, tool executor, or retry policy.
 
 EDL-251 settles `openai_codex_subscription` as the primary native provider and
-`openai_api` as a separate BYOK provider type. Tool-request payloads, provider
-accounts, authentication, and live provider adapters remain pending
-implementation.
+`openai_api` as a separate BYOK provider type. Account/authentication and inert
+tool-request infrastructure exist; live provider transport and activation remain
+pending.
+
+`kiln-providers::ResponsesReplay` retains a complete Responses output array as
+bounded normalized JSON. It preserves item order and fields, including assistant
+phase, IDs, annotations, and encrypted reasoning. It accepts only assistant text
+or refusal Messages, encrypted reasoning with safe summaries, and function calls
+with object arguments. Unknown item/content types, unfinished item states,
+missing encrypted reasoning, raw reasoning-content fields, and duplicate call
+IDs fail closed. Input/output byte, per-item byte, and item-count limits are
+caller-supplied; these are wire ceilings, not memory or token-window estimates.
+Debug exposes counts only. No item grants authority or executes a tool.
+
+This provider-only representation is not yet stored, bound to an account/model,
+or sent to a live endpoint. It does not replace full response-envelope validation.
+Before live reasoning-model activation, replay must be bound to the originating
+invocation/account and committed with terminal output/usage, then included in
+the subsequent request without duplication or promotion to instructions. Tool
+exchange snapshots alone are insufficient for that continuation.
+
+Source: official [function-calling guidance](https://developers.openai.com/api/docs/guides/function-calling),
+[stateless encrypted reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses),
+and [assistant phase preservation](https://developers.openai.com/api/docs/guides/reasoning#phase-parameter),
+consulted 2026-09-21. This establishes the Responses wire requirement, not
+subscription endpoint compatibility or live acceptance.
 
 The `kiln-providers` crate supplies an explicit deterministic adapter for this
 port. It accepts only provider `kiln_deterministic` and model

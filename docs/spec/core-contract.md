@@ -295,12 +295,17 @@ old vault entry, so a failed deletion leaves an observable orphan rather than
 metadata that points at missing bytes. Account lifecycle operations serialize
 per account and reject provider/account mismatches.
 Rotation accepts the expected current `SecretRef` and rejects a stale caller
-before writing a replacement. This per-account serialization is lifecycle
-coordination only; OAuth refresh single-flight and token-version policy remain
-part of the pending provider adapter.
+before writing a replacement. Provider-owned refresh consumes the redacted
+vault value under the same per-account lock. A successful replacement is
+vaulted and durably rotated before waiters return; a waiter carrying the old
+reference then reuses that committed account version without another provider
+request. Permanent provider rejection durably moves the still-current account
+to `reauth_required`, while transient rejection leaves it connected and does
+not cache the failure. This is serialized refresh with successful-version
+coalescing, not general single-flight for transient failures.
 
-OAuth PKCE/device-code flows, credential refresh and revocation, protocol
-routes, and live provider transport remain pending. The deterministic fixture
+OAuth PKCE/device-code flows, provider-specific refresh transport and token
+envelopes, revocation, protocol routes, and live provider transport remain pending. The deterministic fixture
 continues to use its explicit registry-only account identity and does not
 require a persisted account or secret.
 

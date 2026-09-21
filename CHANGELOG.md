@@ -2,6 +2,15 @@
 
 ## 2026-09-21 — `feat`
 
+- Added serialized provider credential refresh with successful-version coalescing, durable rotation before waiter release, and explicit reauthentication state after permanent rejection.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+
+## 2026-09-21 — `feat`
+
 - Added bounded composer attachment upload and durable attachment references across the desktop, protocol, client, server, core, infrastructure, and storage migration.
 - Repaired attachment-only persistence and replay across append, targeted run input, child reactions, and context manifests; empty content without attachments remains rejected, and artifact uploads remain capped at 64 MiB.
 - Added the provider registry slice and deterministic native provider wiring with explicit provider and model metadata.

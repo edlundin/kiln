@@ -388,6 +388,7 @@ pub enum ProviderAccountError {
     StoreUnavailable,
     CredentialStoreRequired,
     CredentialStore(SecretStoreError),
+    CredentialRefresh(ProviderCredentialRefreshError),
     CredentialVersionConflict,
     CredentialCleanupRequired { secret_ref: SecretRef },
 }
@@ -421,6 +422,31 @@ pub trait SecretStore: Send + Sync {
         account_id: &ProviderAccountId,
         secret_ref: &SecretRef,
     ) -> impl Future<Output = Result<(), SecretStoreError>> + Send;
+}
+
+/// Provider-owned credential renewal behind the redacted secret boundary.
+///
+/// Implementations may decode provider-specific credential envelopes, but
+/// neither their inputs nor outputs can be formatted or serialized by core.
+pub trait ProviderCredentialRefresher: Send + Sync {
+    fn refresh(
+        &self,
+        provider_type: &ProviderType,
+        account_id: &ProviderAccountId,
+        current: SecretValue,
+    ) -> impl Future<Output = Result<SecretValue, ProviderCredentialRefreshError>> + Send;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCredentialRefreshError {
+    Transient,
+    Permanent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderAccountRefresh {
+    Rotated(ProviderAccount),
+    ReusedCommittedRotation(ProviderAccount),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -702,6 +728,81 @@ where
             Some(&expected_secret_ref),
         )
         .await
+    }
+
+    /// Refreshes one expected credential version while holding the account's
+    /// lifecycle lock. A waiter carrying a stale reference reuses the rotation
+    /// already committed by its predecessor without contacting the provider.
+    /// Transient failures are serialized but are not cached for later callers.
+    pub async fn refresh_provider_account<V, R>(
+        &self,
+        secret_store: &V,
+        refresher: &R,
+        id: ProviderAccountId,
+        expected_provider_type: ProviderType,
+        expected_secret_ref: SecretRef,
+        updated_at_unix_ms: u64,
+    ) -> Result<ProviderAccountRefresh, ProviderAccountError>
+    where
+        V: SecretStore,
+        R: ProviderCredentialRefresher,
+    {
+        let _lock = self.lifecycle_lock(&id).await;
+        let current = self.get_provider_account(id.clone()).await?;
+        if current.provider_type() != &expected_provider_type {
+            return Err(ProviderAccountError::ProviderTypeMismatch);
+        }
+        if current.state() != ProviderAccountState::Connected {
+            return Err(ProviderAccountError::AccountNotConnected);
+        }
+        let current_secret_ref = current
+            .secret_ref()
+            .ok_or(ProviderAccountError::SecretRefRequired)?;
+        if current_secret_ref != &expected_secret_ref {
+            return Ok(ProviderAccountRefresh::ReusedCommittedRotation(current));
+        }
+
+        let current_secret = secret_store
+            .get(&expected_provider_type, &id, &expected_secret_ref)
+            .await
+            .map_err(ProviderAccountError::CredentialStore)?;
+        let replacement = match refresher
+            .refresh(&expected_provider_type, &id, current_secret)
+            .await
+        {
+            Ok(replacement) => replacement,
+            Err(ProviderCredentialRefreshError::Transient) => {
+                return Err(ProviderAccountError::CredentialRefresh(
+                    ProviderCredentialRefreshError::Transient,
+                ));
+            }
+            Err(ProviderCredentialRefreshError::Permanent) => {
+                let next = current.transition(
+                    ProviderAccountState::ReauthRequired,
+                    updated_at_unix_ms,
+                    None,
+                )?;
+                self.store
+                    .update_provider_account(&current, &next)
+                    .await
+                    .map_err(map_provider_account_store_error)?;
+                return Err(ProviderAccountError::CredentialRefresh(
+                    ProviderCredentialRefreshError::Permanent,
+                ));
+            }
+        };
+
+        self.connect_provider_account_locked(
+            secret_store,
+            id,
+            expected_provider_type,
+            replacement,
+            updated_at_unix_ms,
+            current,
+            Some(&expected_secret_ref),
+        )
+        .await
+        .map(ProviderAccountRefresh::Rotated)
     }
 
     pub async fn read_provider_account_secret<V: SecretStore>(

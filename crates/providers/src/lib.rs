@@ -5,12 +5,14 @@ mod codex_subscription_auth;
 mod device_code_auth;
 mod openai_api_auth;
 mod responses_replay;
+mod responses_request;
 
 pub use browser_auth::*;
 pub use codex_subscription_auth::*;
 pub use device_code_auth::*;
 pub use openai_api_auth::*;
 pub use responses_replay::*;
+pub use responses_request::*;
 
 use std::{collections::VecDeque, future::Future, pin::Pin};
 

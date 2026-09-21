@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added bounded public Responses request serialization with ordered replay, matched tool results, preserved provenance, and explicit attachment support.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Bound private provider replay into context manifests and added verified, bounded continuation loading with same-Run/account/model checks.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

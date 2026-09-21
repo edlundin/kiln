@@ -820,15 +820,58 @@ filesystem artifact reads. The store verifies actual bytes, and core assembly
 independently matches the returned binding/format/size/hash to its snapshot.
 Missing, corrupt, or over-budget replay fails the full assembly. The resulting
 `ProviderContextEntry::Continuation` remains typed private data; it is never
-promoted to an instruction. It must be serialized once, alongside the matching
-function outputs, by the future live adapter. Live transport, model-specific
-serialization and subscription compatibility remain pending.
+promoted to an instruction.
+
+`ResponsesRequestBody::from_context` serializes a verified context for the public
+`openai_api` provider only. It checks manifest identity/hash/Run/Session and
+generation purpose, retains the requested model/output limit/reasoning effort,
+and emits `store:false`, streaming, disabled truncation, and sequential tool
+preference. Output caps below the public schema minimum of 16 and unknown
+reasoning-effort values are rejected rather than substituted. Frozen function
+schemas use explicit `strict:false`; provider schema
+normalization must not silently change Kiln's local argument contract. This is
+request data, not execution authority or an active transport.
+
+Each continuation is revalidated and included once in manifest order, preserving
+all accepted fields including encrypted reasoning and assistant phase. Each
+function output must match a preceding replay call's source invocation, call ID,
+name, and argument object. Duplicate IDs, missing replay, duplicate results, and
+unanswered calls fail serialization; function-call items are never synthesized
+again from tool exchanges. Namespaced, asynchronous, or programmatic calls are
+rejected because the current local catalog only describes direct synchronous
+functions. Result JSON preserves terminal state, exit code,
+null versus empty output, and provenance. Verified UTF-8 tool-output artifacts
+populate the corresponding stream while retaining artifact metadata.
+
+Only Runtime instructions become developer messages. User, Workspace, Run, and
+child-activity inputs remain user-level content with explicit provenance.
+Attachments are included or rejected: strict UTF-8 plain text/Markdown/JSON is
+embedded with hash/media/size metadata; PNG/JPEG/WebP images and PDFs use base64
+data URLs and require supported vision capability. PDF filenames derive from
+the content hash because original filenames are not part of the core snapshot.
+GIF and other formats are rejected. Public file/image ceilings are enforced
+(each PDF <50 MB, combined PDFs <=50 MB, <=1,500 images, image requests <=512 MB,
+using decimal MB). These are wire acceptance limits, not measured workloads.
+
+Explicit caller budgets additionally bound final serialized bytes, input items,
+and replay bytes/items. Attachments serialize individually. No input is trimmed,
+and no partial request is returned after failure. Debug exposes only byte count.
+The body contains no credential fields and is not exposed in Events. Compilation
+and source review do not establish live API acceptance. Model-specific capability
+validation, transport, credential-generation binding, output/usage normalization,
+compaction, and subscription endpoint compatibility remain pending.
 
 Source: official [function-calling guidance](https://developers.openai.com/api/docs/guides/function-calling),
 [stateless encrypted reasoning](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses),
 and [assistant phase preservation](https://developers.openai.com/api/docs/guides/reasoning#phase-parameter),
 consulted 2026-09-21. This establishes the Responses wire requirement, not
 subscription endpoint compatibility or live acceptance.
+
+Attachment sources: official [file-input guidance](https://developers.openai.com/api/docs/guides/file-inputs)
+and [image-input guidance](https://developers.openai.com/api/docs/guides/images-vision),
+and the [Responses create reference](https://developers.openai.com/api/reference/resources/responses/methods/create),
+consulted 2026-09-21 (the reference required fetching the HTML; the documentation
+connector returned only a stub).
 
 The `kiln-providers` crate supplies an explicit deterministic adapter for this
 port. It accepts only provider `kiln_deterministic` and model

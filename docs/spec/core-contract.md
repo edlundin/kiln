@@ -679,9 +679,34 @@ The resulting `ModelToolExchange` retains the local ToolCall and provider call
 IDs, source invocation, tool name/capability/revision, canonical arguments,
 terminal state, inline stdout/stderr, Artifact metadata, and exit code. Its
 versioned canonical JSON preserves null versus empty output and denial versus
-cancellation; its Debug representation omits payload content. This projection
-is the source for future context snapshots; it is not yet included in context
-manifests or serialized by a live adapter.
+cancellation; its Debug representation omits payload content.
+
+`ContextManifestEntryInput::ToolExchange` selects a terminal adopted ToolCall
+from the same Run. Migration `0030` adds a distinct `tool_exchange` entry kind,
+source Run/ToolCall references, and a canonical exchange-content snapshot. The
+migration preserves historical message/instruction/child-activity entries,
+including their source Event references. Version-2 manifests bind exchange
+content and order into their existing hash through a new unambiguous entry tag;
+historical entry encodings and hashes remain unchanged. Version-1 construction
+rejects tool exchanges, and older readers reject the unknown entry kind.
+Duplicate ToolCalls and foreign Run/Session sources are invalid.
+
+Snapshot reads reconstruct terminal exchanges from their immutable proposals,
+catalogs, and current terminal ToolCalls and require exact stored-content
+equality. Source validation checks invocation retry metadata and the source
+manifest header's ownership/hash; the source manifest must precede the containing
+manifest. It does not recursively reload all historical manifest content. Each
+loaded manifest independently validates its own entries and hash, while the
+standalone exchange reader also invokes normal source-invocation integrity
+validation. This separation prevents recursive historical context expansion.
+
+`ProviderContextEntry::ToolExchange` retains the typed exchange and separately
+verified stdout/stderr Artifact payloads in manifest order. Canonical exchange
+JSON counts against the text budget. Tool output Artifacts share the existing
+per-artifact and aggregate attachment byte budgets with message attachments;
+all payload sizes are preflighted before any read and bytes are size/hash checked.
+Missing or corrupt output artifacts fail the entire assembly. No live adapter or
+native coordinator consumes these tool-context entries yet.
 
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation

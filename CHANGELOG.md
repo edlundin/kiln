@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added durable tool-exchange context snapshots and ordered provider projection with source validation, bounded output-artifact loading, and preserved historical manifest hashes.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added verified terminal tool-exchange projections that retain call provenance, canonical arguments, outcomes, and output metadata for subsequent model context.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

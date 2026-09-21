@@ -3986,6 +3986,22 @@ async fn resolve_context_manifest_entries(
     let mut message_ids = std::collections::HashSet::new();
     for input in inputs {
         match input {
+            ContextManifestEntryInput::ToolExchange { tool_call_id } => {
+                let exchange = model_tool_exchange::load_exchange(
+                    transaction,
+                    run.run_id(),
+                    tool_call_id,
+                    model_tool_exchange::ExchangeContext::NewManifest,
+                )
+                .await
+                .map_err(|error| match error {
+                    kiln_core::ModelToolExchangeError::Unavailable => {
+                        ContextManifestStoreError::Unavailable
+                    }
+                    _ => ContextManifestStoreError::IntegrityViolation,
+                })?;
+                entries.push(ContextManifestEntry::ToolExchangeSnapshot { exchange });
+            }
             ContextManifestEntryInput::Instruction {
                 provenance,
                 content,
@@ -4171,6 +4187,7 @@ async fn persist_context_manifest_entries(
             workspace_root_id,
             source_run_id,
             source_event_id,
+            source_tool_call_id,
             message_id,
             role,
             content,
@@ -4186,6 +4203,7 @@ async fn persist_context_manifest_entries(
                 None,
                 None,
                 None,
+                None,
                 content.as_str(),
             ),
             ContextManifestEntry::MessageSnapshot {
@@ -4195,6 +4213,7 @@ async fn persist_context_manifest_entries(
             } => (
                 "message",
                 "session_message",
+                None,
                 None,
                 None,
                 None,
@@ -4212,17 +4231,29 @@ async fn persist_context_manifest_entries(
                 None,
                 Some(reference.run_id.as_str()),
                 Some(reference.event_id.as_str()),
+                None,
                 Some(reaction_message_id.as_str()),
                 None,
                 content.as_str(),
+            ),
+            ContextManifestEntry::ToolExchangeSnapshot { exchange } => (
+                "tool_exchange",
+                "tool_exchange",
+                None,
+                Some(exchange.run_id().as_str()),
+                None,
+                Some(exchange.tool_call().tool_call_id().as_str()),
+                None,
+                None,
+                exchange.content_json(),
             ),
         };
         sqlx::query(
             "INSERT INTO context_manifest_entries (
                  context_manifest_id, position, entry_kind, provenance,
-                 workspace_root_id, source_run_id, source_event_id,
+                 workspace_root_id, source_run_id, source_event_id, source_tool_call_id,
                  message_id, message_role, content
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(manifest.context_manifest_id().as_str())
         .bind(position)
@@ -4231,6 +4262,7 @@ async fn persist_context_manifest_entries(
         .bind(workspace_root_id)
         .bind(source_run_id)
         .bind(source_event_id)
+        .bind(source_tool_call_id)
         .bind(message_id)
         .bind(role)
         .bind(content)
@@ -4297,7 +4329,7 @@ async fn load_context_manifest(
     context_manifest_id: &ContextManifestId,
 ) -> Result<Option<ContextManifest>, ContextManifestStoreError> {
     let Some(row) = sqlx::query(
-        "SELECT session_id, run_id, content_hash, entry_count, encoding_version
+        "SELECT sequence, session_id, run_id, content_hash, entry_count, encoding_version
          FROM context_manifests WHERE context_manifest_id = ?",
     )
     .bind(context_manifest_id.as_str())
@@ -4307,6 +4339,9 @@ async fn load_context_manifest(
     else {
         return Ok(None);
     };
+    let manifest_sequence: i64 = row
+        .try_get("sequence")
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
     let encoding_version = row
         .try_get::<i64, _>("encoding_version")
         .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
@@ -4338,7 +4373,7 @@ async fn load_context_manifest(
         return Err(ContextManifestStoreError::IntegrityViolation);
     }
     let rows = sqlx::query(
-        "SELECT position, entry_kind, provenance, workspace_root_id, source_run_id, source_event_id,
+        "SELECT position, entry_kind, provenance, workspace_root_id, source_run_id, source_event_id, source_tool_call_id,
                 message_id, message_role, content
          FROM context_manifest_entries WHERE context_manifest_id = ? ORDER BY position ASC",
     )
@@ -4372,6 +4407,12 @@ async fn load_context_manifest(
         let source_event_id = row
             .try_get::<Option<String>, _>("source_event_id")
             .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let source_tool_call_id = row
+            .try_get::<Option<String>, _>("source_tool_call_id")
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        if entry_kind != "tool_exchange" && source_tool_call_id.is_some() {
+            return Err(ContextManifestStoreError::IntegrityViolation);
+        }
         let entry = if entry_kind == "instruction" {
             if source_event_id.is_some() {
                 return Err(ContextManifestStoreError::IntegrityViolation);
@@ -4489,6 +4530,45 @@ async fn load_context_manifest(
                 })?;
             ContextManifestEntry::child_activity_snapshot(reaction_message_id, reference, content)
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+        } else if entry_kind == "tool_exchange" && provenance == "tool_exchange" {
+            if encoding_version != 2
+                || source_event_id.is_some()
+                || row
+                    .try_get::<Option<String>, _>("workspace_root_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .is_some()
+                || row
+                    .try_get::<Option<String>, _>("message_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .is_some()
+                || row
+                    .try_get::<Option<String>, _>("message_role")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .is_some()
+                || row
+                    .try_get::<Option<String>, _>("source_run_id")
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
+                    .as_deref()
+                    != Some(run_id.as_str())
+            {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
+            let tool_call_id = ToolCallId::parse(
+                source_tool_call_id.ok_or(ContextManifestStoreError::IntegrityViolation)?,
+            )
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            let exchange = model_tool_exchange::load_exchange(
+                transaction,
+                &run_id,
+                &tool_call_id,
+                model_tool_exchange::ExchangeContext::ExistingManifest(manifest_sequence),
+            )
+            .await
+            .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+            if exchange.content_json() != content {
+                return Err(ContextManifestStoreError::IntegrityViolation);
+            }
+            ContextManifestEntry::ToolExchangeSnapshot { exchange }
         } else {
             return Err(ContextManifestStoreError::IntegrityViolation);
         };

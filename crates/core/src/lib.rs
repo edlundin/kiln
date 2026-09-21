@@ -1155,10 +1155,16 @@ pub enum ContextManifestEntryInput {
     Message {
         message_id: MessageId,
     },
+    ToolExchange {
+        tool_call_id: ToolCallId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextManifestEntry {
+    ToolExchangeSnapshot {
+        exchange: ModelToolExchange,
+    },
     Instruction {
         provenance: ContextInstructionProvenance,
         content: String,
@@ -1206,6 +1212,7 @@ impl ContextManifestEntry {
 
     pub fn content(&self) -> &str {
         match self {
+            Self::ToolExchangeSnapshot { exchange } => exchange.content_json(),
             Self::Instruction { content, .. }
             | Self::MessageSnapshot { content, .. }
             | Self::ChildActivitySnapshot { content, .. } => content,
@@ -1273,9 +1280,28 @@ impl ContextManifest {
         content_hash: ContentHash,
         entries: Vec<ContextManifestEntry>,
     ) -> Result<Self, InvalidContextManifest> {
+        Self::new_inner(
+            context_manifest_id,
+            session_id,
+            run_id,
+            content_hash,
+            entries,
+            false,
+        )
+    }
+
+    fn new_inner(
+        context_manifest_id: ContextManifestId,
+        session_id: SessionId,
+        run_id: RunId,
+        content_hash: ContentHash,
+        entries: Vec<ContextManifestEntry>,
+        allow_tool_exchanges: bool,
+    ) -> Result<Self, InvalidContextManifest> {
         let mut message_ids = HashSet::new();
         let mut user_message_ids = HashSet::new();
         let mut reaction_ids = HashSet::new();
+        let mut tool_call_ids = HashSet::new();
         for entry in &entries {
             if entry.content().is_empty()
                 || !matches!(
@@ -1287,6 +1313,9 @@ impl ContextManifest {
                 ) && entry.content().trim().is_empty()
             {
                 return Err(match entry {
+                    ContextManifestEntry::ToolExchangeSnapshot { .. } => {
+                        InvalidContextManifest::InvalidToolExchange
+                    }
                     ContextManifestEntry::Instruction { .. } => {
                         InvalidContextManifest::InstructionContentRequired
                     }
@@ -1299,6 +1328,14 @@ impl ContextManifest {
                 });
             }
             match entry {
+                ContextManifestEntry::ToolExchangeSnapshot { exchange }
+                    if !allow_tool_exchanges
+                        || exchange.run_id() != &run_id
+                        || exchange.session_id() != &session_id
+                        || !tool_call_ids.insert(exchange.tool_call().tool_call_id()) =>
+                {
+                    return Err(InvalidContextManifest::InvalidToolExchange);
+                }
                 ContextManifestEntry::Instruction {
                     provenance:
                         ContextInstructionProvenance::Run {
@@ -1352,12 +1389,13 @@ impl ContextManifest {
         entries: Vec<ContextManifestEntry>,
         attachments: Vec<ContextManifestAttachment>,
     ) -> Result<Self, InvalidContextManifest> {
-        let mut manifest = Self::new(
+        let mut manifest = Self::new_inner(
             context_manifest_id,
             session_id,
             run_id,
             content_hash,
             entries,
+            true,
         )?;
         let positions = manifest
             .entries
@@ -1423,6 +1461,7 @@ impl ContextManifest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidContextManifest {
+    InvalidToolExchange,
     InvalidAttachment,
     InvalidChildActivity,
     InstructionContentRequired,
@@ -1435,7 +1474,8 @@ pub const CONTEXT_MANIFEST_ENCODING_VERSION: u8 = 1;
 pub const CONTEXT_MANIFEST_ATTACHMENT_ENCODING_VERSION: u8 = 2;
 
 /// Version 2 binds artifact metadata and order as well as the original ordered
-/// entries. The version-1 encoder stays unchanged for historical manifests.
+/// entries. Historical entry encodings remain unchanged; tool exchanges have
+/// their own tag and are accepted only by version-2 manifest construction.
 pub fn canonical_context_manifest_with_attachments_bytes(
     session_id: &SessionId,
     run_id: &RunId,
@@ -1479,6 +1519,10 @@ pub fn canonical_context_manifest_bytes(
     for (position, entry) in entries.iter().enumerate() {
         push_context_field(&mut encoded, &usize_context_bytes(position));
         match entry {
+            ContextManifestEntry::ToolExchangeSnapshot { exchange } => {
+                push_context_field(&mut encoded, b"tool_exchange");
+                push_context_field(&mut encoded, exchange.content_json().as_bytes());
+            }
             ContextManifestEntry::Instruction {
                 provenance,
                 content,
@@ -1530,6 +1574,10 @@ pub fn canonical_context_manifest_request_bytes(command: &CreateContextManifest)
     for (position, entry) in command.entries.iter().enumerate() {
         push_context_field(&mut encoded, &usize_context_bytes(position));
         match entry {
+            ContextManifestEntryInput::ToolExchange { tool_call_id } => {
+                push_context_field(&mut encoded, b"tool_exchange");
+                push_context_field(&mut encoded, tool_call_id.as_str().as_bytes());
+            }
             ContextManifestEntryInput::Instruction {
                 provenance,
                 content,

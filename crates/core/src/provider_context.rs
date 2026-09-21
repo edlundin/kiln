@@ -56,6 +56,11 @@ impl ProviderContextAttachment {
 }
 
 pub enum ProviderContextEntry {
+    ToolExchange {
+        exchange: crate::ModelToolExchange,
+        stdout_artifact: Option<ProviderContextAttachment>,
+        stderr_artifact: Option<ProviderContextAttachment>,
+    },
     Instruction {
         provenance: ContextInstructionProvenance,
         content: String,
@@ -131,12 +136,28 @@ impl ProviderRequest {
             }
         }
         let mut attachment_bytes = 0_u64;
-        for attachment in manifest.attachments() {
-            if attachment.artifact().size() > limits.max_attachment_bytes {
+        let tool_artifacts = manifest
+            .entries()
+            .iter()
+            .flat_map(|entry| match entry {
+                ContextManifestEntry::ToolExchangeSnapshot { exchange } => [
+                    exchange.tool_call().stdout_artifact(),
+                    exchange.tool_call().stderr_artifact(),
+                ],
+                _ => [None, None],
+            })
+            .flatten();
+        for artifact in manifest
+            .attachments()
+            .iter()
+            .map(|attachment| attachment.artifact())
+            .chain(tool_artifacts)
+        {
+            if artifact.size() > limits.max_attachment_bytes {
                 return Err(ProviderContextError::AttachmentLimitExceeded);
             }
             attachment_bytes = attachment_bytes
-                .checked_add(attachment.artifact().size())
+                .checked_add(artifact.size())
                 .ok_or(ProviderContextError::AttachmentLimitExceeded)?;
             if attachment_bytes > limits.max_total_attachment_bytes {
                 return Err(ProviderContextError::AttachmentLimitExceeded);
@@ -147,6 +168,25 @@ impl ProviderRequest {
         let mut entries = Vec::with_capacity(manifest.entries().len());
         for entry in manifest.entries() {
             entries.push(match entry {
+                ContextManifestEntry::ToolExchangeSnapshot { exchange } => {
+                    let stdout_artifact = load_optional_artifact(
+                        reader,
+                        exchange.tool_call().stdout_artifact(),
+                        limits.max_attachment_bytes,
+                    )
+                    .await?;
+                    let stderr_artifact = load_optional_artifact(
+                        reader,
+                        exchange.tool_call().stderr_artifact(),
+                        limits.max_attachment_bytes,
+                    )
+                    .await?;
+                    ProviderContextEntry::ToolExchange {
+                        exchange: exchange.clone(),
+                        stdout_artifact,
+                        stderr_artifact,
+                    }
+                }
                 ContextManifestEntry::Instruction {
                     provenance,
                     content,
@@ -208,6 +248,24 @@ impl ProviderRequest {
             entries,
         })
     }
+}
+
+async fn load_optional_artifact(
+    reader: &impl ProviderContextArtifactReader,
+    artifact: Option<&Artifact>,
+    max_bytes: u64,
+) -> Result<Option<ProviderContextAttachment>, ProviderContextError> {
+    let Some(artifact) = artifact else {
+        return Ok(None);
+    };
+    let bytes = reader.read_context_artifact(artifact, max_bytes).await?;
+    if !artifact_bytes_match(artifact, &bytes) {
+        return Err(ProviderContextError::ArtifactCorrupt);
+    }
+    Ok(Some(ProviderContextAttachment {
+        artifact: artifact.clone(),
+        bytes,
+    }))
 }
 
 fn artifact_bytes_match(artifact: &Artifact, bytes: &[u8]) -> bool {

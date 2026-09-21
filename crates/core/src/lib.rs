@@ -9,6 +9,7 @@ mod child_activity;
 mod model_output;
 mod native_run;
 mod provider;
+mod provider_account;
 mod usage;
 mod usage_store;
 pub use assistant_message::*;
@@ -16,6 +17,7 @@ pub use child_activity::*;
 pub use model_output::*;
 pub use native_run::*;
 pub use provider::*;
+pub use provider_account::*;
 pub use usage::*;
 pub use usage_store::*;
 

@@ -152,9 +152,15 @@ Provider SDK types stop in `crates/providers`. The adapter converts streaming
 updates, tool requests, usage data, errors, and completion into normalized core
 commands.
 
-The first direct provider and its data-retention policy remain open decisions.
-The provider implementation cannot begin until the product states which content
-leaves the machine and how the user can inspect that decision.
+EDL-251 settles the first direct provider as `openai_codex_subscription`, with
+`openai_api` as a separate BYOK provider type. EDL-309 provides the first
+OS-backed account-secret adapter: core and durable metadata carry only an
+opaque `SecretRef`, while vault operations receive the provider and account
+binding explicitly. macOS uses the native Security.framework Keychain API;
+Linux uses Secret Service over stdin without placing secret bytes in process
+arguments or the environment. Provider setup must state which content leaves
+the machine and how the user can inspect the applicable retention policy.
+OAuth, refresh/revocation, and live transport remain pending.
 
 ## 8. Plugin boundary
 
@@ -269,7 +275,7 @@ The first release needs tests that show:
 | --- | --- |
 | Local HTTP and WebSocket credential mechanism | privileged server routes |
 | Git isolation and recovery policy | concurrent repository mutation |
-| First provider and retention policy | direct provider adapter |
+| First provider implementation and retention disclosure | direct provider adapter |
 | Terminal backend and PTY policy | terminal implementation |
 | Client plugin package trust | plugin UI extensions |
 

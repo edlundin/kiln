@@ -272,8 +272,37 @@ Each attempt references an immutable ContextManifest for the same Run. Creation
 requires a queued or running Run and checks the manifest hash and source
 integrity. The selected provider account, model, capability snapshot, settings,
 and purpose are fixed for that attempt.
-Provider account references contain no credentials. Account connection and
-entitlement validation remain part of the later provider boundary.
+Provider account references contain no credentials. EDL-309 adds a durable
+`ProviderAccount` metadata boundary with an opaque `secret_ref`, the states
+`connecting`, `connected`, `reauth_required`, and `disconnected`, durable
+timestamps, and safe provider metadata. Secret references use the canonical
+`sec_<ULID>` form and contain no credential material. Account records are
+associated with workspaces explicitly; model selection can resolve only a
+`connected` account whose provider type matches the requested model and whose workspace
+association matches the Run's Session workspace. The store permits historical
+disconnected records while enforcing one active account per provider type and
+never silently replacing an existing account.
+
+Account connection and entitlement validation remain part of the later
+provider boundary. EDL-309's secret-store slice keeps secret bytes in an
+OS-backed vault adapter and carries only the opaque `SecretRef` through core,
+SQLite, events, and protocol boundaries. Secret wrappers are redacted and
+non-serializable. Connect and rotate write the new vault entry before
+publishing its durable connected reference; a failed metadata write cleans up
+the new entry, and an uncleanable entry is returned as an explicit recoverable
+cleanup error. Disconnect clears the durable reference before deleting the
+old vault entry, so a failed deletion leaves an observable orphan rather than
+metadata that points at missing bytes. Account lifecycle operations serialize
+per account and reject provider/account mismatches.
+Rotation accepts the expected current `SecretRef` and rejects a stale caller
+before writing a replacement. This per-account serialization is lifecycle
+coordination only; OAuth refresh single-flight and token-version policy remain
+part of the pending provider adapter.
+
+OAuth PKCE/device-code flows, credential refresh and revocation, protocol
+routes, and live provider transport remain pending. The deterministic fixture
+continues to use its explicit registry-only account identity and does not
+require a persisted account or secret.
 
 The initial settings snapshot stores provider and model identifiers, an optional
 output-token setting, optional reasoning effort, and versioned tool, vision,

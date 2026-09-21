@@ -3640,6 +3640,7 @@ dependencies = [
  "directories",
  "kiln-core",
  "rustix",
+ "security-framework",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",

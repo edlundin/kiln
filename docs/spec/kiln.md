@@ -702,8 +702,9 @@ cancel the root run without curl or a Rust test client.
 ### Phase 3 — Provider, MCP, and plugin boundaries
 
 EDL-251 settles `openai_codex_subscription` as the primary native provider and
-`openai_api` as a separate BYOK provider type. Their account, secret-store, and
-transport implementation remains pending.
+`openai_api` as a separate BYOK provider type. EDL-309 provides the bounded
+OS-backed secret-store and durable account metadata boundary; OAuth,
+refresh/revocation, and live transport remain pending.
 
 - implement one direct provider adapter;
 - implement one harness adapter as a compatibility path;

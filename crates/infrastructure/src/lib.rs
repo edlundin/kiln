@@ -5,6 +5,9 @@ mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
 mod model_output;
 mod native_run;
+mod provider_account;
+mod secret_store;
+pub use secret_store::OsSecretStore;
 mod usage;
 
 use std::{
@@ -33,7 +36,8 @@ use kiln_core::{
     ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationPurpose,
     ModelInvocationRequest, ModelInvocationSettings, ModelInvocationState, ModelInvocationStore,
     ModelInvocationStoreError, ModelWorkId, PersistedModelInvocation, PersistedToolCall,
-    ProviderAccountId, ProviderType, ReasoningSettings, RecordRunInputDelivery,
+    ProviderAccountId, ProviderAccountIdGenerator, ProviderType, ReasoningSettings,
+    RecordRunInputDelivery,
     RecordRunInputDisposition, RecordRunInputMutation, RootDiscoveryError, Run, RunId,
     RunIdGenerator, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, RunStoreError,
     SendRunInputDisposition, SendRunInputMutation, Session, SessionEvent, SessionEventPage,
@@ -8271,6 +8275,12 @@ impl ModelInvocationIdGenerator for UlidIdGenerator {
 
     fn event_id(&self) -> EventId {
         EventId::from_ulid(Ulid::generate())
+    }
+}
+
+impl ProviderAccountIdGenerator for UlidIdGenerator {
+    fn provider_account_id(&self) -> ProviderAccountId {
+        ProviderAccountId::from_ulid(Ulid::generate())
     }
 }
 

@@ -9,6 +9,15 @@
 [Commit](pending)
 
 
+## 2026-09-21 — `feat`
+
+- Added the EDL-309 provider-account metadata and OS-backed secret-store boundary with typed lifecycle state, opaque secret references, serialized rotation, and recoverable cleanup handling.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+
 ## 2026-09-16 — `feat`
 
 - Added the authenticated, bounded selected-file diff flow for the desktop Changes inspector through protocol `0.22.0`, including explicit unsupported and truncation states.

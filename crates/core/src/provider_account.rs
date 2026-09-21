@@ -916,6 +916,30 @@ where
         .map(ProviderAccountRefresh::Rotated)
     }
 
+    pub async fn read_model_credential<V: SecretStore>(
+        &self,
+        secret_store: &V,
+        request: &crate::ProviderRequest,
+    ) -> Result<crate::ResolvedModelCredential, ProviderAccountError> {
+        let binding = request
+            .credential()
+            .ok_or(ProviderAccountError::CredentialVersionConflict)?;
+        let secret = self
+            .read_provider_account_secret(
+                secret_store,
+                request.invocation().provider_account_id().clone(),
+                request.invocation().settings().provider().clone(),
+                binding.secret_ref().clone(),
+                binding.workspace_id().clone(),
+            )
+            .await?;
+        Ok(crate::ResolvedModelCredential::new(
+            request,
+            binding.clone(),
+            secret,
+        ))
+    }
+
     /// Resolve only the credential version captured by the caller. A reconnect
     /// or refresh may keep the account ID while changing the secret reference;
     /// never silently dispatch an existing invocation with that replacement.

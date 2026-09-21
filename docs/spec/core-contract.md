@@ -386,8 +386,11 @@ Duplicate claims neither recapture a version nor produce another request. Source
 version mismatches reject the claim transaction before it changes state or emits
 Events. Snapshot reads verify Session workspace ownership. No credential bytes
 or private references enter invocation Events, context hashes, or wire request
-bodies. Live transport still needs to resolve exactly this captured reference
-through the guarded vault API before dispatch; it remains unimplemented.
+bodies. `read_model_credential` resolves exactly this captured reference through
+the guarded vault API and returns a non-cloneable, privately constructed
+`ResolvedModelCredential`. The public HTTP transport consumes that proof only
+when its invocation/account/provider/workspace/version matches the request.
+Native registration remains unimplemented.
 
 The authenticated protocol now exposes safe provider-account create, list, and
 get snapshots plus the Codex device-code login start, nonblocking status,
@@ -888,7 +891,7 @@ and replay bytes/items. Attachments serialize individually. No input is trimmed,
 and no partial request is returned after failure. Debug exposes only byte count.
 The body contains no credential fields and is not exposed in Events. Compilation
 and source review do not establish live API acceptance. Model-specific capability
-validation, transport, progressive streaming output,
+validation, native provider integration, progressive streaming output,
 compaction, and subscription endpoint compatibility remain pending.
 
 `ResponsesCompletion::from_response_json` normalizes a terminal public Responses
@@ -922,8 +925,8 @@ inert proposals, final usage and bound continuation must validate before any
 updates are returned. Transport must persist the output before the terminal
 update and reconcile any already-emitted streaming deltas with final output to
 avoid duplication. Local stop draining can retain normalized final usage under
-the locally cancelled/interrupted outcome. Live transport remains unimplemented;
-no live adapter calls this helper.
+the locally cancelled/interrupted outcome. The public HTTP operation composes
+these helpers; native live provider registration remains unimplemented.
 
 `ResponsesSseDecoder` incrementally frames provider-private JSON events across
 arbitrary byte/UTF-8 boundaries, accepts LF/CRLF/CR, one initial BOM, comments and
@@ -958,8 +961,36 @@ It is not a process-memory estimate. Only a terminal candidate followed by clean
 EOF releases a `ResponsesCompletion`; early DONE, missing terminal, truncated
 tail, identity/output mismatch or any poisoned state releases nothing. There is
 no reconnect, tool dispatch or credential access. Output is buffered through
-terminal validation; token-by-token UI projection and HTTP integration remain
+terminal validation; token-by-token UI projection and native integration remain
 pending. Compilation/source review do not establish runtime stream acceptance.
+
+`OpenAiApiTransport` prepares a `ModelProviderOperation` for the fixed
+`https://api.openai.com/v1/responses` endpoint from a claimed request, verified
+assembled context and resolved credential proof. Preparation performs no
+network/vault call. The first operation poll sends one POST with a sensitive
+Authorization header and the bounded stateless streaming request. HTTPS only,
+no redirects, no ambient proxies and no automatic retries prevent implicit
+destination changes or resends. Connection and total HTTP/body deadlines are
+explicit caller inputs; zero/inverted/unrepresentable limits are rejected.
+No default workload or latency claim is made.
+
+Successful responses must be SSE. HTTP failures map to content-free provider
+errors without reading/logging provider error bodies (401 authentication,
+403 unavailable model, 429 rate limit, 5xx provider unavailable, redirects
+protocol change). SSE/terminal validation remains bounded and releases ordered
+output followed by the terminal update only after clean EOF. A taken request
+is never restored after a dropped send future; ambiguous execution cannot
+automatically dispatch again.
+
+Cancellation drops local request/response handles and discards buffered
+output/proposals/replay. It preserves already validated final usage from a
+terminal candidate or queued completion, including on error draining, and
+otherwise records explicit Unknown usage. Repeated cancellation before terminal
+delivery reuses that usage. Dropping local HTTP does not prove remote generation
+or billing stopped. Request/operation/credential content is absent from Debug,
+and raw HTTP errors are never exposed. Actual TLS/authentication/timeout/cancel
+behavior has not been exercised. Native account/model registration, progressive
+output, subscription compatibility and live acceptance remain open.
 
 Source: official [Responses streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses),
 and [streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events),

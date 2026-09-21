@@ -44,3 +44,41 @@ impl fmt::Debug for ModelInvocationCredential {
             .finish_non_exhaustive()
     }
 }
+
+/// A vault value obtained through the expected-version/account/workspace guard.
+/// It is non-cloneable and has no public constructor or serialization.
+pub struct ResolvedModelCredential {
+    binding: ModelInvocationCredential,
+    account_id: crate::ProviderAccountId,
+    provider: crate::ProviderType,
+    secret: crate::SecretValue,
+}
+
+impl ResolvedModelCredential {
+    pub(crate) fn new(
+        request: &crate::ProviderRequest,
+        binding: ModelInvocationCredential,
+        secret: crate::SecretValue,
+    ) -> Self {
+        Self {
+            binding,
+            account_id: request.invocation().provider_account_id().clone(),
+            provider: request.invocation().settings().provider().clone(),
+            secret,
+        }
+    }
+    pub fn matches(&self, request: &crate::ProviderRequest) -> bool {
+        request.credential() == Some(&self.binding)
+            && request.invocation().provider_account_id() == &self.account_id
+            && request.invocation().settings().provider() == &self.provider
+    }
+    pub fn into_secret(self) -> crate::SecretValue {
+        self.secret
+    }
+}
+
+impl fmt::Debug for ResolvedModelCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ResolvedModelCredential(<redacted>)")
+    }
+}

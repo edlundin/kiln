@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added a fixed-endpoint public Responses HTTP operation using pinned credentials, bounded streaming, explicit deadlines, and cancellation that preserves known usage without resending requests.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Pin credential versions atomically with model claims and reject replay/retry across rotations without exposing secret references in model Events or requests.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

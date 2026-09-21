@@ -528,6 +528,17 @@ impl ResponsesStream {
             .take()
             .ok_or(ResponsesStreamError::MissingTerminal)
     }
+
+    /// Cancellation/error draining may retain validated final usage while
+    /// discarding all output/proposals/replay, including after a malformed tail.
+    pub(crate) fn take_terminal_usage(&mut self) -> Option<kiln_core::ProviderUsageUpdate> {
+        let (_, terminal) = self.completion.take()?.into_parts();
+        match terminal {
+            kiln_core::ProviderUpdate::CompletedWithContinuation { usage, .. }
+            | kiln_core::ProviderUpdate::Finished { usage, .. } => Some(usage),
+            _ => None,
+        }
+    }
 }
 
 fn number(value: &Value) -> Result<u64, ResponsesStreamError> {

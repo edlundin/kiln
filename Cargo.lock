@@ -3696,6 +3696,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "ulid",
 ]
 
 [[package]]
@@ -3741,10 +3742,13 @@ dependencies = [
 name = "kiln-providers"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "getrandom 0.4.3",
  "kiln-core",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
 ]
 

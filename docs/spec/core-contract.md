@@ -368,6 +368,25 @@ require reauthentication; transport, malformed response, and unknown failures
 remain transient. Browser UI integration, revocation, and live model transport
 remain pending.
 
+The browser PKCE adapter follows the official Codex OAuth protocol at
+`openai/codex` commit `deb0a08f240fb9b630e514417ad2256cf8e4afba`
+(`codex-rs/login/src/server.rs` and `oauth/{authorization,pkce,client}.rs`).
+It generates the verifier and state with OS randomness, uses S256, and binds
+only IPv4 loopback on registered port 1455 or fallback 1457. It never cancels
+another process occupying those ports. The localhost callback validates Host,
+path, method, unique state/code/error fields, and exact state before accepting
+a code or provider rejection. Invalid callbacks leave the attempt pending.
+A 16 KiB request ceiling and five-second per-peer I/O limits bound local input;
+the fifteen-minute attempt deadline covers the callback and token exchange.
+These are application resource limits, not claimed provider payload guarantees.
+Dropping or cancelling completion closes the listener; a valid code closes it
+before a single token exchange, with redirects and automatic HTTP retries disabled.
+The browser response contains only static text and asks the user to check Kiln;
+it does not claim vault publication succeeded. Codes/verifiers remain private.
+Only identity/offline scopes are requested; connector scopes are not needed here.
+Daemon, protocol, and desktop integration are the next slice. Live OAuth,
+callback, cancellation, and vault behavior remain runtime-unverified.
+
 The native device-code slice follows the Codex service contract rather than a
 generic RFC device flow. It polls immediately, treats only `403` and `404` as
 pending, exchanges the returned authorization code with the returned verifier,

@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added the native ChatGPT browser PKCE adapter with an expiring loopback callback, state validation, cancellation, and private one-shot credential exchange.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added explicit local stdin-only OpenAI API credential import with an account-bound vault envelope, active-account replacement protection, and a saved-but-unverified account label in Settings.
 
 EDL-309: https://linear.app/edlundin/issue/EDL-309

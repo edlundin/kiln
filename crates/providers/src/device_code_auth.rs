@@ -10,8 +10,8 @@ use crate::{
 };
 use kiln_core::SecretValue;
 
-const ISSUER: &str = "https://auth.openai.com";
-const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub(crate) const ISSUER: &str = "https://auth.openai.com";
+pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEVICE_LOGIN_LIFETIME: Duration = Duration::from_secs(15 * 60);
 
 pub struct CodexDeviceLoginClient {
@@ -44,6 +44,7 @@ impl CodexDeviceLoginClient {
         }
         let client = Client::builder()
             .redirect(Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(limits.connect_timeout)
             .timeout(limits.request_timeout)
             .build()
@@ -138,17 +139,35 @@ impl CodexDeviceLoginClient {
         {
             return Err(CodexDeviceLoginError::InvalidResponse);
         }
-        let response = until_deadline(
+        self.exchange_code(
+            &authorization_code.authorization_code,
+            &format!("{ISSUER}/deviceauth/callback"),
+            &authorization_code.code_verifier,
             state.deadline,
             &mut cancellation,
+        )
+        .await
+    }
+
+    pub(crate) async fn exchange_code(
+        &self,
+        code: &str,
+        redirect_uri: &str,
+        code_verifier: &str,
+        deadline: Instant,
+        cancellation: &mut watch::Receiver<bool>,
+    ) -> Result<CodexDeviceLoginResult, CodexDeviceLoginError> {
+        let response = until_deadline(
+            deadline,
+            cancellation,
             self.client
                 .post(format!("{ISSUER}/oauth/token"))
                 .form(&TokenExchangeRequest {
                     grant_type: "authorization_code",
                     client_id: CLIENT_ID,
-                    code: &authorization_code.authorization_code,
-                    redirect_uri: &format!("{ISSUER}/deviceauth/callback"),
-                    code_verifier: &authorization_code.code_verifier,
+                    code,
+                    redirect_uri,
+                    code_verifier,
                 })
                 .send(),
         )
@@ -158,8 +177,8 @@ impl CodexDeviceLoginClient {
             return Err(CodexDeviceLoginError::Rejected);
         }
         let body = until_deadline(
-            state.deadline,
-            &mut cancellation,
+            deadline,
+            cancellation,
             read_body(response, self.max_response_bytes),
         )
         .await??;
@@ -281,7 +300,7 @@ struct TokenExchangeResponse {
     refresh_token: String,
 }
 
-async fn until_deadline<F, T>(
+pub(crate) async fn until_deadline<F, T>(
     deadline: Instant,
     cancellation: &mut watch::Receiver<bool>,
     future: F,

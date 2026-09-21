@@ -1,3 +1,7 @@
+- EDL-309 browser PKCE adapter: OS-random verifier/state, S256, fixed issuer/client, registered loopback ports 1455/1457, strict bounded callback parsing, exact state and duplicate-field checks, cancellation/deadline ownership, and shared one-shot token exchange/account validation. Native callback responses never reflect provider input. The new adapter is not yet wired into daemon/protocol/Settings; that is the next continuation. Source reference: official Codex commit `deb0a08f240fb9b630e514417ad2256cf8e4afba`. Identity/offline scopes intentionally omit unused connector scopes.
+
+  Validation: provider cargo check and focused formatting/diff checks passed. No tests, callback runtime exercise, live OAuth, or vault operations ran. Cargo lock regeneration also recorded the daemon's existing direct ULID dependency. Unrelated reqwest stream changes remain unstaged.
+
 # Implementation handoff
 
 This handoff covers the EDL-216 and EDL-288 milestones and the current EDL-308

@@ -708,6 +708,22 @@ all payload sizes are preflighted before any read and bytes are size/hash checke
 Missing or corrupt output artifacts fail the entire assembly. No live adapter or
 native coordinator consumes these tool-context entries yet.
 
+`WorkspaceFileReadTool` supplies the local `read_file` definition for capability
+`kiln.workspace.read_file`, revision `1`. Explicit path/file byte limits are part
+of its frozen description. Parsing accepts only a single relative slash-separated
+path, rejecting empty, dot, parent, control-character, and backslash components.
+The executor consumes a fresh `ModelToolExecutionRequest`, verifies the registered
+root and capability, and pins the approved scope using the existing filesystem
+identity checks. Unix descriptor-relative traversal rejects symlinks, cross-device
+paths, and nonregular files. A bounded sentinel read enforces the file ceiling
+even if the file grows; invalid UTF-8 and oversized content produce no partial
+output. Results above the existing inline ceiling are stored as Artifacts.
+Other platforms fail closed. Explicit cancellation joins started blocking work
+before reporting Cancelled, without a filesystem latency guarantee. Dropping the
+future may detach blocking work and requires reconciliation of the running claim.
+The implementation is not yet activated by the daemon coordinator; generic
+ReadOnly adoption still denies all proposed tools.
+
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation
 on the active provider operation. Successful cancellation must stop external

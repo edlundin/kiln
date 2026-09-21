@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added a scoped UTF-8 file-read tool with local argument validation, descriptor-based traversal, bounded output, and artifact storage for larger results. Native coordinator activation remains pending.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added durable tool-exchange context snapshots and ordered provider projection with source validation, bounded output-artifact loading, and preserved historical manifest hashes.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

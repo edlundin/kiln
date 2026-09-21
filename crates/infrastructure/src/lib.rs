@@ -16,6 +16,8 @@ mod provider_context;
 mod secret_store;
 pub use secret_store::OsSecretStore;
 mod usage;
+mod workspace_file_read;
+pub use workspace_file_read::execute_workspace_file_read;
 
 use std::{
     collections::BTreeMap,

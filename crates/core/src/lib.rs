@@ -20,6 +20,7 @@ mod provider_account;
 mod provider_context;
 mod usage;
 mod usage_store;
+mod workspace_file_read;
 pub use assistant_message::*;
 pub use child_activity::*;
 pub use model_output::*;
@@ -36,6 +37,7 @@ pub use provider_account::*;
 pub use provider_context::*;
 pub use usage::*;
 pub use usage_store::*;
+pub use workspace_file_read::*;
 
 pub const INLINE_TOOL_OUTPUT_LIMIT: usize = 4_096;
 pub const TOOL_OUTPUT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";

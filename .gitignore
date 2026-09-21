@@ -8,6 +8,7 @@ node_modules/
 dist/
 .turbo/
 .DS_Store
+.agents/skills
 
 # Local analysis caches
 graphify-out/

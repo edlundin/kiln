@@ -24,33 +24,33 @@ use std::{
 use directories::ProjectDirs;
 use kiln_core::{
     Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, AssignTask, CapabilitySupport,
-    ContentHash, ContextInstructionProvenance, ContextManifest, ContextManifestEntry,
-    ContextManifestEntryInput, ContextManifestId, ContextManifestIdGenerator, ContextManifestStore,
-    ContextManifestStoreError, CreateContextManifest, CreateContextManifestDisposition,
-    CreateContextManifestMutation, CreateModelInvocation, CreateModelInvocationDisposition,
-    CreateModelInvocationMutation, CreateTaskDisposition, CreateTaskMutation,
-    DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor, EventId,
-    FilesystemIdentity, GenerationSettings, Message, MessageDelivery, MessageDeliveryMode,
+    ContentHash, ContextInstructionProvenance, ContextManifest, ContextManifestAttachment,
+    ContextManifestEntry, ContextManifestEntryInput, ContextManifestId, ContextManifestIdGenerator,
+    ContextManifestStore, ContextManifestStoreError, CreateContextManifest,
+    CreateContextManifestDisposition, CreateContextManifestMutation, CreateModelInvocation,
+    CreateModelInvocationDisposition, CreateModelInvocationMutation, CreateTaskDisposition,
+    CreateTaskMutation, DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor,
+    EventId, FilesystemIdentity, GenerationSettings, Message, MessageDelivery, MessageDeliveryMode,
     MessageDeliveryState, MessageId, MessageRole, ModelCapabilitySnapshot, ModelId,
     ModelInvocation, ModelInvocationId, ModelInvocationIdGenerator, ModelInvocationMutation,
     ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationPurpose,
     ModelInvocationRequest, ModelInvocationSettings, ModelInvocationState, ModelInvocationStore,
     ModelInvocationStoreError, ModelWorkId, PersistedModelInvocation, PersistedToolCall,
     ProviderAccountId, ProviderAccountIdGenerator, ProviderType, ReasoningSettings,
-    RecordRunInputDelivery,
-    RecordRunInputDisposition, RecordRunInputMutation, RootDiscoveryError, Run, RunId,
-    RunIdGenerator, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, RunStoreError,
-    SendRunInputDisposition, SendRunInputMutation, Session, SessionEvent, SessionEventPage,
-    SessionEventPayload, SessionId, SessionIdGenerator, SessionStore, StartRunDisposition,
-    StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor,
-    SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId, TaskIdGenerator, TaskMutation,
-    TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
-    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceChangeDiff,
-    WorkspaceChangeDiffContent, WorkspaceChangeDiffUnavailableReason, WorkspaceChangeKind,
-    WorkspaceChangePath, WorkspaceChangeSummary, WorkspaceChangedFile, WorkspaceCheckout,
-    WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
-    WorkspaceRootId, WorkspaceRootState, WorkspaceStore, canonical_context_manifest_bytes,
-    canonical_context_manifest_request_bytes, canonical_model_invocation_request_bytes,
+    RecordRunInputDelivery, RecordRunInputDisposition, RecordRunInputMutation, RootDiscoveryError,
+    Run, RunId, RunIdGenerator, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore,
+    RunStoreError, SendRunInputDisposition, SendRunInputMutation, Session, SessionEvent,
+    SessionEventPage, SessionEventPayload, SessionId, SessionIdGenerator, SessionStore,
+    StartRunDisposition, StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution,
+    SubprocessExecutor, SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId,
+    TaskIdGenerator, TaskMutation, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError,
+    ToolCall, ToolCallId, ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace,
+    WorkspaceChangeDiff, WorkspaceChangeDiffContent, WorkspaceChangeDiffUnavailableReason,
+    WorkspaceChangeKind, WorkspaceChangePath, WorkspaceChangeSummary, WorkspaceChangedFile,
+    WorkspaceCheckout, WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot,
+    WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
+    canonical_context_manifest_bytes, canonical_context_manifest_request_bytes,
+    canonical_context_manifest_with_attachments_bytes, canonical_model_invocation_request_bytes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
@@ -3828,33 +3828,36 @@ impl ContextManifestStore for SqliteStore {
         if !run.state().accepts_input() {
             return Err(ContextManifestStoreError::RunNotAcceptingWork);
         }
-        let entries =
+        let (entries, attachments) =
             resolve_context_manifest_entries(&mut transaction, &run, &command.entries).await?;
-        let content_hash = hash_bytes(&canonical_context_manifest_bytes(
+        let content_hash = hash_bytes(&canonical_context_manifest_with_attachments_bytes(
             run.session_id(),
             run.run_id(),
             &entries,
+            &attachments,
         ));
-        let manifest = ContextManifest::new(
+        let manifest = ContextManifest::new_with_attachments(
             context_manifest_id,
             run.session_id().clone(),
             run.run_id().clone(),
             content_hash,
             entries,
+            attachments,
         )
         .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
         let entry_count = i64::try_from(manifest.entries().len())
             .map_err(|_| ContextManifestStoreError::Unavailable)?;
         sqlx::query(
             "INSERT INTO context_manifests
-                (context_manifest_id, session_id, run_id, content_hash, entry_count)
-             VALUES (?, ?, ?, ?, ?)",
+                (context_manifest_id, session_id, run_id, content_hash, entry_count, encoding_version)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(manifest.context_manifest_id().as_str())
         .bind(manifest.session_id().as_str())
         .bind(manifest.run_id().as_str())
         .bind(manifest.content_hash().as_str())
         .bind(entry_count)
+        .bind(i64::from(manifest.encoding_version()))
         .execute(&mut *transaction)
         .await
         .map_err(|_| ContextManifestStoreError::Unavailable)?;
@@ -3947,7 +3950,9 @@ async fn resolve_context_manifest_entries(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     run: &Run,
     inputs: &[ContextManifestEntryInput],
-) -> Result<Vec<ContextManifestEntry>, ContextManifestStoreError> {
+) -> Result<(Vec<ContextManifestEntry>, Vec<ContextManifestAttachment>), ContextManifestStoreError>
+{
+    let mut attachments = Vec::new();
     let mut entries = Vec::with_capacity(inputs.len());
     let mut message_ids = std::collections::HashSet::new();
     for input in inputs {
@@ -3974,6 +3979,12 @@ async fn resolve_context_manifest_entries(
                         .await?
                         .ok_or(ContextManifestStoreError::MessageNotFound)?;
                 validate_context_source_message(transaction, run, &message, delivery_state).await?;
+                validate_message_attachments(transaction, &message)
+                    .await
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+                attachments.extend(message.attachments().iter().cloned().map(|artifact| {
+                    ContextManifestAttachment::new(message.id().clone(), artifact)
+                }));
                 let content = context_manifest_message_content(&message);
                 entries.push(
                     ContextManifestEntry::message_snapshot(
@@ -4004,7 +4015,7 @@ async fn resolve_context_manifest_entries(
             }
         }
     }
-    Ok(entries)
+    Ok((entries, attachments))
 }
 
 fn context_manifest_message_content(message: &Message) -> String {
@@ -4198,6 +4209,25 @@ async fn persist_context_manifest_entries(
         .await
         .map_err(|_| ContextManifestStoreError::Unavailable)?;
     }
+    for (position, attachment) in manifest.attachments().iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO context_manifest_attachments
+                (context_manifest_id, position, message_id, content_hash, media_type, size)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(manifest.context_manifest_id().as_str())
+        .bind(i64::try_from(position).map_err(|_| ContextManifestStoreError::IntegrityViolation)?)
+        .bind(attachment.message_id().as_str())
+        .bind(attachment.artifact().content_hash().as_str())
+        .bind(attachment.artifact().media_type())
+        .bind(
+            i64::try_from(attachment.artifact().size())
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| ContextManifestStoreError::Unavailable)?;
+    }
     Ok(())
 }
 
@@ -4238,7 +4268,7 @@ async fn load_context_manifest(
     context_manifest_id: &ContextManifestId,
 ) -> Result<Option<ContextManifest>, ContextManifestStoreError> {
     let Some(row) = sqlx::query(
-        "SELECT session_id, run_id, content_hash, entry_count
+        "SELECT session_id, run_id, content_hash, entry_count, encoding_version
          FROM context_manifests WHERE context_manifest_id = ?",
     )
     .bind(context_manifest_id.as_str())
@@ -4248,6 +4278,9 @@ async fn load_context_manifest(
     else {
         return Ok(None);
     };
+    let encoding_version = row
+        .try_get::<i64, _>("encoding_version")
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
     let session_id = SessionId::parse(
         row.try_get::<String, _>("session_id")
             .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
@@ -4288,6 +4321,7 @@ async fn load_context_manifest(
         return Err(ContextManifestStoreError::IntegrityViolation);
     }
     let mut entries = Vec::with_capacity(rows.len());
+    let mut expected_attachments = Vec::new();
     for (expected_position, row) in rows.into_iter().enumerate() {
         let position = usize::try_from(
             row.try_get::<i64, _>("position")
@@ -4367,6 +4401,16 @@ async fn load_context_manifest(
             if source.role() != role || context_manifest_message_content(&source) != content {
                 return Err(ContextManifestStoreError::IntegrityViolation);
             }
+            if encoding_version == 2 {
+                validate_message_attachments(transaction, &source)
+                    .await
+                    .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+                expected_attachments.extend(
+                    source.attachments().iter().cloned().map(|artifact| {
+                        ContextManifestAttachment::new(message_id.clone(), artifact)
+                    }),
+                );
+            }
             ContextManifestEntry::message_snapshot(message_id, role, content)
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?
         } else if entry_kind == "child_activity" && provenance == "child_activity" {
@@ -4421,23 +4465,74 @@ async fn load_context_manifest(
         };
         entries.push(entry);
     }
-    let actual_hash = hash_bytes(&canonical_context_manifest_bytes(
-        &session_id,
-        &run_id,
-        &entries,
-    ));
+    let attachment_rows = sqlx::query(
+        "SELECT position, message_id, content_hash, media_type, size
+         FROM context_manifest_attachments WHERE context_manifest_id = ? ORDER BY position ASC",
+    )
+    .bind(context_manifest_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| ContextManifestStoreError::Unavailable)?;
+    let mut attachments = Vec::with_capacity(attachment_rows.len());
+    for (position, row) in attachment_rows.into_iter().enumerate() {
+        if usize::try_from(
+            row.try_get::<i64, _>("position")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+        .ok()
+            != Some(position)
+        {
+            return Err(ContextManifestStoreError::IntegrityViolation);
+        }
+        let message_id = MessageId::parse(
+            row.try_get::<String, _>("message_id")
+                .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
+        )
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        let artifact =
+            parse_artifact(&row).map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
+        attachments.push(ContextManifestAttachment::new(message_id, artifact));
+    }
+    let actual_hash = match encoding_version {
+        1 if attachments.is_empty() => hash_bytes(&canonical_context_manifest_bytes(
+            &session_id,
+            &run_id,
+            &entries,
+        )),
+        2 if attachments == expected_attachments => {
+            hash_bytes(&canonical_context_manifest_with_attachments_bytes(
+                &session_id,
+                &run_id,
+                &entries,
+                &attachments,
+            ))
+        }
+        _ => return Err(ContextManifestStoreError::IntegrityViolation),
+    };
     if actual_hash != stored_hash {
         return Err(ContextManifestStoreError::IntegrityViolation);
     }
-    ContextManifest::new(
-        context_manifest_id.clone(),
-        session_id,
-        run_id,
-        stored_hash,
-        entries,
-    )
-    .map(Some)
-    .map_err(|_| ContextManifestStoreError::IntegrityViolation)
+    let manifest = if encoding_version == 2 {
+        ContextManifest::new_with_attachments(
+            context_manifest_id.clone(),
+            session_id,
+            run_id,
+            stored_hash,
+            entries,
+            attachments,
+        )
+    } else {
+        ContextManifest::new(
+            context_manifest_id.clone(),
+            session_id,
+            run_id,
+            stored_hash,
+            entries,
+        )
+    };
+    manifest
+        .map(Some)
+        .map_err(|_| ContextManifestStoreError::IntegrityViolation)
 }
 
 async fn validate_child_activity(

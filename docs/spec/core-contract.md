@@ -246,20 +246,40 @@ covers Session and Run identity, entry order, kind, provenance, and exact conten
 The manifest hash is computed from this encoding and verified when read. Reads
 also check Message snapshots against their immutable sources and delivery state.
 Child activity reads validate the reference and use the stored projection; they
-do not regenerate it. The new entry kind keeps encoding version 1 and leaves
-existing manifest bytes and hashes unchanged.
+do not regenerate it. Historical version-1 manifests retain their original bytes,
+hashes, invocation bindings, and idempotency results.
+
+New manifests use version 2. Migration `0026` adds an explicit encoding version
+and ordered attachment snapshot rows. Each snapshot binds a source Message ID
+to artifact hash, media type, and byte size; ordering follows message-entry order
+and the original attachment order within each message. Only user-message entries
+can own attachments; duplicate bindings, unknown messages, and reordered message
+groups are invalid. The canonical hash covers the original ordered entries and
+every attachment binding, including the empty attachment set. Creation validates
+artifact ownership against the same Session and commits metadata with the manifest.
+Reads compare snapshots with source attachments, enforce contiguous positions,
+recheck session ownership, and verify the version-appropriate hash. Missing,
+extra, reordered, or altered metadata fails closed.
+
+Version 1 deliberately exposes no complete attachment snapshot and must be
+reassembled before a live provider consumes attachments; it is never silently
+upgraded or assigned a different hash. The provider request exposes the manifest
+version and attachment references. This slice does not read artifact bytes,
+enforce provider payload limits, or send attachments to a model. Attachment-only
+messages retain the existing readable hash-summary placeholder in their text
+entry alongside the new typed references.
 
 A new manifest requires a Run that accepts work. The manifest, ordered entries,
-idempotency result, and `context.manifest_created` Event commit together. The
+attachment snapshots, idempotency result, and `context.manifest_created` Event commit together. The
 Event exposes metadata, not instruction content. An exact retry returns the
 original manifest before checking current Run acceptability; stored source and
 delivery integrity are still verified. Changed input with the same key conflicts.
 Queries retain committed snapshots after Run termination and list them in
 durable creation order.
 
-Context supports text instructions, Message snapshots, and selected child
-activity snapshots. Context assembly for live providers and general attachment
-and tool representations remain pending. The deterministic native mode stores
+Context supports text instructions, Message snapshots, selected child activity
+snapshots, and versioned attachment references. Artifact-byte loading, provider
+payload projection/limits, and tool descriptions/results remain pending. The deterministic native mode stores
 explicit fixture instructions and consumed Run input.
 
 ### Model invocations

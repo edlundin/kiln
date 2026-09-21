@@ -1219,9 +1219,37 @@ pub struct ContextManifest {
     run_id: RunId,
     content_hash: ContentHash,
     entries: Vec<ContextManifestEntry>,
+    encoding_version: u8,
+    attachments: Vec<ContextManifestAttachment>,
+}
+
+/// An ordered, immutable artifact reference bound to a source message in the
+/// manifest. Artifact bytes remain in content-addressed storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextManifestAttachment {
+    message_id: MessageId,
+    artifact: Artifact,
+}
+
+impl ContextManifestAttachment {
+    pub fn new(message_id: MessageId, artifact: Artifact) -> Self {
+        Self {
+            message_id,
+            artifact,
+        }
+    }
+
+    pub fn message_id(&self) -> &MessageId {
+        &self.message_id
+    }
+
+    pub fn artifact(&self) -> &Artifact {
+        &self.artifact
+    }
 }
 
 impl ContextManifest {
+    /// Reconstructs the original text-only format without changing its hash.
     pub fn new(
         context_manifest_id: ContextManifestId,
         session_id: SessionId,
@@ -1295,7 +1323,65 @@ impl ContextManifest {
             run_id,
             content_hash,
             entries,
+            encoding_version: CONTEXT_MANIFEST_ENCODING_VERSION,
+            attachments: Vec::new(),
         })
+    }
+
+    pub fn new_with_attachments(
+        context_manifest_id: ContextManifestId,
+        session_id: SessionId,
+        run_id: RunId,
+        content_hash: ContentHash,
+        entries: Vec<ContextManifestEntry>,
+        attachments: Vec<ContextManifestAttachment>,
+    ) -> Result<Self, InvalidContextManifest> {
+        let mut manifest = Self::new(
+            context_manifest_id,
+            session_id,
+            run_id,
+            content_hash,
+            entries,
+        )?;
+        let positions = manifest
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(position, entry)| match entry {
+                ContextManifestEntry::MessageSnapshot {
+                    message_id,
+                    role: MessageRole::User,
+                    ..
+                } => Some((message_id, position)),
+                _ => None,
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut previous_position = 0;
+        let mut seen = HashSet::new();
+        for attachment in &attachments {
+            let Some(&position) = positions.get(&attachment.message_id) else {
+                return Err(InvalidContextManifest::InvalidAttachment);
+            };
+            if position < previous_position
+                || !seen.insert((&attachment.message_id, attachment.artifact.content_hash()))
+            {
+                return Err(InvalidContextManifest::InvalidAttachment);
+            }
+            previous_position = position;
+        }
+        manifest.encoding_version = CONTEXT_MANIFEST_ATTACHMENT_ENCODING_VERSION;
+        manifest.attachments = attachments;
+        Ok(manifest)
+    }
+
+    /// Version 1 contains only text snapshots, even when source messages have
+    /// attachments. Live consumers must reassemble those manifests before use.
+    pub fn encoding_version(&self) -> u8 {
+        self.encoding_version
+    }
+
+    pub fn attachments(&self) -> &[ContextManifestAttachment] {
+        &self.attachments
     }
 
     pub fn context_manifest_id(&self) -> &ContextManifestId {
@@ -1321,6 +1407,7 @@ impl ContextManifest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidContextManifest {
+    InvalidAttachment,
     InvalidChildActivity,
     InstructionContentRequired,
     MessageContentRequired,
@@ -1329,6 +1416,38 @@ pub enum InvalidContextManifest {
 }
 
 pub const CONTEXT_MANIFEST_ENCODING_VERSION: u8 = 1;
+pub const CONTEXT_MANIFEST_ATTACHMENT_ENCODING_VERSION: u8 = 2;
+
+/// Version 2 binds artifact metadata and order as well as the original ordered
+/// entries. The version-1 encoder stays unchanged for historical manifests.
+pub fn canonical_context_manifest_with_attachments_bytes(
+    session_id: &SessionId,
+    run_id: &RunId,
+    entries: &[ContextManifestEntry],
+    attachments: &[ContextManifestAttachment],
+) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    push_context_field(&mut encoded, b"kiln.context-manifest.attachments");
+    push_context_field(
+        &mut encoded,
+        &[CONTEXT_MANIFEST_ATTACHMENT_ENCODING_VERSION],
+    );
+    push_context_field(
+        &mut encoded,
+        &canonical_context_manifest_bytes(session_id, run_id, entries),
+    );
+    push_context_field(&mut encoded, &usize_context_bytes(attachments.len()));
+    for attachment in attachments {
+        push_context_field(&mut encoded, attachment.message_id().as_str().as_bytes());
+        push_context_field(
+            &mut encoded,
+            attachment.artifact().content_hash().as_str().as_bytes(),
+        );
+        push_context_field(&mut encoded, attachment.artifact().media_type().as_bytes());
+        push_context_field(&mut encoded, &attachment.artifact().size().to_be_bytes());
+    }
+    encoded
+}
 
 pub fn canonical_context_manifest_bytes(
     session_id: &SessionId,

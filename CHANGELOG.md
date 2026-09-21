@@ -2,6 +2,15 @@
 
 ## 2026-09-21 — `feat`
 
+- Added the internal Codex subscription credential envelope and bounded HTTPS refresh adapter with provider/account binding, optional-token rotation, and typed reauthentication outcomes.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+
+## 2026-09-21 — `feat`
+
 - Added serialized provider credential refresh with successful-version coalescing, durable rotation before waiter release, and explicit reauthentication state after permanent rejection.
 
 EDL-309: https://linear.app/edlundin/issue/EDL-309

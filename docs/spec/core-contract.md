@@ -304,10 +304,28 @@ to `reauth_required`, while transient rejection leaves it connected and does
 not cache the failure. This is serialized refresh with successful-version
 coalescing, not general single-flight for transient failures.
 
-OAuth PKCE/device-code flows, provider-specific refresh transport and token
-envelopes, revocation, protocol routes, and live provider transport remain pending. The deterministic fixture
-continues to use its explicit registry-only account identity and does not
-require a persisted account or secret.
+OAuth PKCE/device-code flows, revocation, protocol routes, and live provider
+transport remain pending. The deterministic fixture continues to use its
+explicit registry-only account identity and does not require a persisted
+account or secret.
+
+The first `openai_codex_subscription` credential adapter stores a versioned
+provider-private envelope inside `SecretValue`; its ChatGPT account identifier
+and tokens never enter SQLite, Events, or protocol types. Its HTTPS refresh
+request uses the Codex OAuth refresh grant, rejects redirects, and merges
+optional replacement tokens without clearing an omitted prior token. Kiln's
+operational defaults allow 10 seconds to connect, 30 seconds for the complete
+request, and at most 1 MiB of response bytes; callers can lower or otherwise
+tune the time bounds, while the response cap cannot exceed core's 1 MiB
+`SecretValue` limit. These bound account-lock occupancy and memory under a
+stalled or malformed peer; they are not OAuth service requirements. A
+replacement ID token must retain the stored
+ChatGPT account claim. This reads identity metadata from the trusted HTTPS/vault
+token but does not claim to verify the JWT signature. Unauthorized,
+`invalid_grant`, and known expired, reused, or invalidated refresh-token errors
+require reauthentication; transport, malformed response, and unknown failures
+remain transient. Browser/device login, revocation, public account operations,
+and live model transport remain pending.
 
 The initial settings snapshot stores provider and model identifiers, an optional
 output-token setting, optional reasoning effort, and versioned tool, vision,

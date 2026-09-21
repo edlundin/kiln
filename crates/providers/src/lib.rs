@@ -1,5 +1,9 @@
 //! Direct model adapters. The first adapter is an explicit deterministic runtime.
 
+mod codex_subscription_auth;
+
+pub use codex_subscription_auth::*;
+
 use std::{collections::VecDeque, future::Future, pin::Pin};
 
 use kiln_core::{

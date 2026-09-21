@@ -6,3 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 kiln-core = { path = "../core" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true

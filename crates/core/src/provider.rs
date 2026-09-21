@@ -7,7 +7,8 @@ use crate::{
     ModelInvocationCompletionStore, ModelInvocationId, ModelInvocationIdGenerator,
     ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationState,
     ModelInvocationStore, ModelInvocationStoreError, ModelOutputIdGenerator, ModelOutputMutation,
-    ModelOutputStore, ModelOutputStoreError, ProviderUsageUpdate, RecordModelOutput,
+    ModelOutputStore, ModelOutputStoreError, ModelToolRequestBatch, ModelToolRequestCompletion,
+    ModelToolRequestError, ModelToolRequestStore, ProviderUsageUpdate, RecordModelOutput,
     StoredSessionEvent, UsageFinality, UsageIdGenerator, UsageMutation, UsageStore,
     UsageStoreError,
 };
@@ -144,6 +145,11 @@ pub enum ProviderUpdate {
         outcome: ModelInvocationOutcome,
         usage: ProviderUsageUpdate,
     },
+    /// Terminal generation output. Proposals remain inert until Kiln adopts them.
+    ToolRequests {
+        requests: ModelToolRequestBatch,
+        usage: ProviderUsageUpdate,
+    },
 }
 
 impl ProviderUpdate {
@@ -157,6 +163,12 @@ impl ProviderUpdate {
                 };
             }
             Self::Usage(usage) => (usage, UsageFinality::Partial),
+            Self::ToolRequests { requests, usage } => {
+                requests
+                    .validate_completion(invocation, usage)
+                    .map_err(|_| ProviderError::ProviderResponseInvalid)?;
+                (usage, UsageFinality::Final)
+            }
             Self::Finished { outcome, usage } => {
                 if outcome.completion_kind() == Some(ModelInvocationCompletionKind::ToolRequests) {
                     return Err(ProviderError::ProviderResponseInvalid);
@@ -180,6 +192,7 @@ pub enum ProviderUpdateMutation {
     Output(ModelOutputMutation),
     Usage(UsageMutation),
     Finished(ModelInvocationCompletionMutation),
+    ToolRequests(ModelToolRequestCompletion),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,12 +202,17 @@ pub enum ProviderUpdateError {
     Output(ModelOutputStoreError),
     Usage(UsageStoreError),
     Completion(ModelInvocationCompletionError),
+    ToolRequests(ModelToolRequestError),
     IntegrityViolation,
 }
 
 impl<S, I> ProviderApplication<S, I>
 where
-    S: ModelInvocationStore + ModelOutputStore + UsageStore + ModelInvocationCompletionStore,
+    S: ModelInvocationStore
+        + ModelOutputStore
+        + UsageStore
+        + ModelInvocationCompletionStore
+        + ModelToolRequestStore,
     I: ModelOutputIdGenerator + UsageIdGenerator,
 {
     pub async fn record_update(
@@ -217,6 +235,11 @@ where
             .validate_for(&invocation)
             .map_err(ProviderUpdateError::Provider)?;
         match update {
+            ProviderUpdate::ToolRequests { requests, usage } => self
+                .record_tool_requests(&invocation, &requests, &usage)
+                .await
+                .map(ProviderUpdateMutation::ToolRequests)
+                .map_err(ProviderUpdateError::ToolRequests),
             ProviderUpdate::Output(command) => self
                 .store
                 .record_model_output(
@@ -258,15 +281,15 @@ where
     }
 }
 
-impl<S: crate::ModelToolRequestStore, I: UsageIdGenerator> ProviderApplication<S, I> {
+impl<S: ModelToolRequestStore, I: UsageIdGenerator> ProviderApplication<S, I> {
     /// Record finalized proposals and terminal usage atomically. This operation
     /// does not create executable ToolCalls or grant any tool authority.
     pub async fn record_tool_requests(
         &self,
         invocation: &ModelInvocation,
-        requests: &crate::ModelToolRequestBatch,
+        requests: &ModelToolRequestBatch,
         usage: &ProviderUsageUpdate,
-    ) -> Result<crate::ModelToolRequestCompletion, crate::ModelToolRequestError> {
+    ) -> Result<ModelToolRequestCompletion, ModelToolRequestError> {
         requests.validate_completion(invocation, usage)?;
         self.store
             .finish_model_invocation_with_tool_requests(

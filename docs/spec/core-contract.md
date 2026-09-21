@@ -557,7 +557,13 @@ are absent. The hash detects corruption, not an actor able to rewrite the databa
 Recording proposals does not resolve names, validate tool-specific schemas,
 create executable ToolCalls, grant scope, approve, or dispatch. Those operations
 remain owned by Kiln. The generic provider stream still rejects payload-free
-tool completions; stream integration and tool adoption remain pending.
+tool completions. Its terminal `ToolRequests` variant requires the validated
+batch and final usage and routes through the same atomic proposal store.
+The daemon publishes the committed Events and stops reading after that terminal
+update. When draining an invalid stream after cancellation, it retains validated
+final usage under the failure outcome and discards any proposals. No proposal
+from that error path is persisted or executed. The deterministic native loop
+still advertises tools as unsupported; executable tool adoption remains pending.
 
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation

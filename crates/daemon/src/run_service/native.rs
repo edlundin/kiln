@@ -353,6 +353,11 @@ impl RunService {
                 Ok(Some(update)) => {
                     let outcome = match &update {
                         ProviderUpdate::Finished { outcome, .. } => Some(*outcome),
+                        ProviderUpdate::ToolRequests { .. } => {
+                            Some(ModelInvocationOutcome::completed(
+                                ModelInvocationCompletionKind::ToolRequests,
+                            ))
+                        }
                         _ => None,
                     };
                     if let Err(error) = update.validate_for(invocation) {
@@ -404,7 +409,10 @@ impl RunService {
                 break;
             }
             match update {
-                ProviderUpdate::Finished { usage, .. } => {
+                ProviderUpdate::Finished { usage, .. }
+                | ProviderUpdate::ToolRequests { usage, .. } => {
+                    // After a stream error, retain final usage but do not adopt
+                    // proposals emitted while stopping the invalid operation.
                     return self
                         .persist_native_update(
                             invocation.invocation_id(),
@@ -439,6 +447,7 @@ impl RunService {
             ProviderUpdateMutation::Output(mutation) => mutation.events,
             ProviderUpdateMutation::Usage(mutation) => mutation.events,
             ProviderUpdateMutation::Finished(mutation) => mutation.events,
+            ProviderUpdateMutation::ToolRequests(mutation) => mutation.completion.events,
         };
         self.events.publish(events);
         Ok(())

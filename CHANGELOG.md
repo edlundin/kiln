@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Connected finalized tool-request payloads to provider stream persistence and daemon terminal handling, retaining final usage while discarding proposals from invalid streams.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Persisted ordered, bounded model tool proposals atomically with final usage and invocation completion, preserving exact retries without granting tool execution authority.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

@@ -4,6 +4,7 @@ mod assistant_message;
 mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
 mod model_output;
+mod model_tool_catalog;
 mod model_tool_request;
 mod native_run;
 mod provider_account;
@@ -3615,6 +3616,14 @@ impl ModelInvocationStore for SqliteStore {
         if has_active_tool_call {
             return Err(ModelInvocationStoreError::InvalidTransition);
         }
+        model_tool_catalog::freeze_catalog(&mut transaction, &current)
+            .await
+            .map_err(|error| match error {
+                kiln_core::ModelToolCatalogError::Unavailable => {
+                    ModelInvocationStoreError::Unavailable
+                }
+                _ => ModelInvocationStoreError::IntegrityViolation,
+            })?;
         let next = invocation
             .transition(ModelInvocationState::InFlight, None)
             .map_err(|_| ModelInvocationStoreError::InvalidTransition)?;

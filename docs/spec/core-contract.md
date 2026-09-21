@@ -519,6 +519,30 @@ the native runtime; it does not establish a provider account connection or
 validate its credentials. The storage adapter remains responsible for verifying
 the context content hash and source ownership on reads.
 
+`ProviderRequest::tool_catalog` exposes the ordered immutable tool descriptions
+frozen for that physical invocation. Each definition binds its model-visible
+name, description, Kiln capability, implementation/validation revision, and
+canonical JSON input-schema object. Names are unique. Explicit caller-supplied
+count, per-definition, and aggregate serialized-byte budgets cover all fields.
+Definitions require a root object schema and readable canonical JSON; this
+envelope validation does not establish JSON Schema semantics or validate calls.
+Registered Kiln implementations must perform those checks before adoption.
+
+Migration `0028` stores catalog count, order, canonical definitions, and a
+versioned content hash. Attachment is immutable and allowed only while pending;
+an exact attachment retry returns the prior snapshot. Claim freezes an empty
+catalog when none was supplied. Physical retries inherit their predecessor's
+catalog and reject changes; changed tools require a new logical invocation.
+Historical missing catalogs confer no tool authority. Nonempty catalogs require
+generation purpose and explicitly supported model tool capability.
+
+The provider application reads the frozen catalog after a successful claim,
+preventing a race with pending catalog attachment. A failed post-claim read
+returns no dispatch request; the durable in-flight invocation remains for
+reconciliation. The catalog snapshot is separate from the context-manifest
+hash and is validated independently. It grants no policy scope or approval and
+contains no executor, host path, or credential.
+
 The first port supports assistant-text and exposed reasoning-summary chunks,
 partial usage updates, and a terminal outcome paired with final usage. Output
 updates carry the invocation ID, stable update ID, ordered position, stream,

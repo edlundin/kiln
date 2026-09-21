@@ -94,24 +94,9 @@ impl ModelToolRequestBatch {
                 .max_total_arguments_bytes
                 .checked_sub(total_bytes)
                 .ok_or(ModelToolRequestError::ArgumentsLimitExceeded)?;
-            let mut buffer = LimitedBuffer {
-                bytes: Vec::new(),
-                limit: remaining.min(limits.max_arguments_bytes),
-            };
-            let mut arguments = serde_json::Value::Object(input.arguments);
-            arguments.sort_all_objects();
-            serde_json::to_writer(&mut buffer, &arguments)
-                .map_err(|_| ModelToolRequestError::ArgumentsLimitExceeded)?;
-            total_bytes += buffer.bytes.len();
-            let arguments_json = String::from_utf8(buffer.bytes)
-                .map_err(|_| ModelToolRequestError::InvalidArguments)?;
-            // Persist only values that the storage reader can reconstruct,
-            // including its JSON nesting limit and exact floating-point values.
-            let restored: serde_json::Value = serde_json::from_str(&arguments_json)
-                .map_err(|_| ModelToolRequestError::InvalidArguments)?;
-            if restored != arguments {
-                return Err(ModelToolRequestError::InvalidArguments);
-            }
+            let arguments_json =
+                canonical_object_json(input.arguments, remaining.min(limits.max_arguments_bytes))?;
+            total_bytes += arguments_json.len();
             requests.push(ModelToolRequest {
                 provider_call_id: input.provider_call_id,
                 name: input.name,
@@ -209,13 +194,37 @@ pub trait ModelToolRequestStore: Send + Sync {
     ) -> impl Future<Output = Result<Option<ModelToolRequestBatch>, ModelToolRequestError>> + Send;
 }
 
-fn valid_identifier(value: &str, limit: usize) -> bool {
+pub(crate) fn valid_identifier(value: &str, limit: usize) -> bool {
     !value.is_empty()
         && value.len() <= limit
         && value.is_ascii()
         && !value
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+}
+
+pub(crate) fn canonical_object_json(
+    object: serde_json::Map<String, serde_json::Value>,
+    limit: usize,
+) -> Result<String, ModelToolRequestError> {
+    let mut buffer = LimitedBuffer {
+        bytes: Vec::new(),
+        limit,
+    };
+    let mut value = serde_json::Value::Object(object);
+    value.sort_all_objects();
+    serde_json::to_writer(&mut buffer, &value)
+        .map_err(|_| ModelToolRequestError::ArgumentsLimitExceeded)?;
+    let json =
+        String::from_utf8(buffer.bytes).map_err(|_| ModelToolRequestError::InvalidArguments)?;
+    // Persist only values that the storage reader can reconstruct, including
+    // its JSON nesting limit and exact floating-point values.
+    let restored: serde_json::Value =
+        serde_json::from_str(&json).map_err(|_| ModelToolRequestError::InvalidArguments)?;
+    if restored != value {
+        return Err(ModelToolRequestError::InvalidArguments);
+    }
+    Ok(json)
 }
 
 struct LimitedBuffer {

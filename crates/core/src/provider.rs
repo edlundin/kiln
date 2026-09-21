@@ -7,7 +7,8 @@ use crate::{
     ModelInvocationCompletionStore, ModelInvocationId, ModelInvocationIdGenerator,
     ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationState,
     ModelInvocationStore, ModelInvocationStoreError, ModelOutputIdGenerator, ModelOutputMutation,
-    ModelOutputStore, ModelOutputStoreError, ModelToolRequestBatch, ModelToolRequestCompletion,
+    ModelOutputStore, ModelOutputStoreError, ModelToolCatalog, ModelToolCatalogError,
+    ModelToolCatalogStore, ModelToolRequestBatch, ModelToolRequestCompletion,
     ModelToolRequestError, ModelToolRequestStore, ProviderUsageUpdate, RecordModelOutput,
     StoredSessionEvent, UsageFinality, UsageIdGenerator, UsageMutation, UsageStore,
     UsageStoreError,
@@ -16,6 +17,7 @@ use crate::{
 pub struct ProviderRequest {
     invocation: ModelInvocation,
     manifest: ContextManifest,
+    tool_catalog: ModelToolCatalog,
 }
 
 impl ProviderRequest {
@@ -25,6 +27,10 @@ impl ProviderRequest {
 
     pub fn manifest(&self) -> &ContextManifest {
         &self.manifest
+    }
+
+    pub fn tool_catalog(&self) -> &ModelToolCatalog {
+        &self.tool_catalog
     }
 }
 
@@ -41,6 +47,7 @@ pub enum ProviderClaim {
 pub enum ProviderClaimError {
     Invocation(ModelInvocationStoreError),
     Context(ContextManifestStoreError),
+    ToolCatalog(ModelToolCatalogError),
     ContextNotFound,
     ContextMismatch,
     IntegrityViolation,
@@ -57,8 +64,10 @@ impl<S, I> ProviderApplication<S, I> {
     }
 }
 
-impl<S: ModelInvocationStore + ContextManifestStore, I: ModelInvocationIdGenerator>
-    ProviderApplication<S, I>
+impl<
+    S: ModelInvocationStore + ContextManifestStore + ModelToolCatalogStore,
+    I: ModelInvocationIdGenerator,
+> ProviderApplication<S, I>
 {
     pub async fn claim(
         &self,
@@ -103,10 +112,22 @@ impl<S: ModelInvocationStore + ContextManifestStore, I: ModelInvocationIdGenerat
                 if mutation.value != expected || mutation.events.is_empty() {
                     return Err(ProviderClaimError::IntegrityViolation);
                 }
+                // Read after the claim transaction has frozen the catalog. This
+                // avoids racing a pending invocation's first catalog attachment.
+                let tool_catalog = self
+                    .store
+                    .get_model_tool_catalog(&invocation_id)
+                    .await
+                    .map_err(ProviderClaimError::ToolCatalog)?
+                    .ok_or(ProviderClaimError::IntegrityViolation)?;
+                tool_catalog
+                    .validate_for(&mutation.value)
+                    .map_err(ProviderClaimError::ToolCatalog)?;
                 Ok(ProviderClaim::Applied {
                     request: ProviderRequest {
                         invocation: mutation.value,
                         manifest,
+                        tool_catalog,
                     },
                     events: mutation.events,
                 })

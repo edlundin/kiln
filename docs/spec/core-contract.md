@@ -606,6 +606,33 @@ its position and a typed reason and returns no partial resolved batch. Resolved
 commands carry no ToolCall ID, effective scope, or approval. No concrete native
 resolver or executable adoption path is wired yet.
 
+Locally resolved batches can prepare `AdoptModelToolRequest` commands for one
+position and an explicit requested Workspace scope. The SQLite adoption boundary
+rechecks the complete durable source and frozen catalog before creating a
+ToolCall. Migration `0029` records a unique invocation/provider-call-to-ToolCall
+link atomically with ToolCall state, any Approval, Run state, and Events.
+Exact retries return the existing ToolCall and no new Events even after its
+completion; changing its requested scope conflicts.
+
+Adoption requires a running Run, its latest completed tool-request invocation,
+no active invocation/tool/approval, and terminal adopted predecessors in request
+order. The requested scope must retain the Run's Workspace root and stay inside
+its directory scope. `ask` creates an awaiting-approval ToolCall and a pending
+Approval; `full_access` makes it ready within the requested scope; `read_only`
+conservatively denies it under the current generic policy. No capability-specific
+read-only exemptions are inferred. This serial boundary preserves the existing
+single-approval cancellation invariant.
+
+Both invocation creation and claim reject outstanding stored proposals, so a
+next model turn cannot skip their adoption/completion or deadlock adoption by
+creating a competing pending invocation. Invalid proposals currently require
+Run failure/cancellation; model-visible validation-error results remain pending.
+Adoption is an internal operation and does not dispatch. Native ToolCall
+completion, result context, and coordinator integration remain pending. The
+deterministic subprocess executor refuses native model Runs and foreign
+capabilities; native approval decisions notify the coordinator without spawning
+the subprocess fixture.
+
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation
 on the active provider operation. Successful cancellation must stop external

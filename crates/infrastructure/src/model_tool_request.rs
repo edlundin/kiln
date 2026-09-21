@@ -132,7 +132,7 @@ impl ModelToolRequestStore for SqliteStore {
     }
 }
 
-async fn load_requests(
+pub(super) async fn load_requests(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     invocation: &ModelInvocation,
 ) -> Result<Option<ModelToolRequestBatch>, ModelToolRequestError> {

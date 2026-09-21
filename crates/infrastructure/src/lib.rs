@@ -4,6 +4,7 @@ mod assistant_message;
 mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
 mod model_output;
+mod model_tool_adoption;
 mod model_tool_catalog;
 mod model_tool_request;
 mod native_run;
@@ -3438,6 +3439,9 @@ impl ModelInvocationStore for SqliteStore {
         {
             return Err(ModelInvocationStoreError::ActiveInvocationExists);
         }
+        if model_tool_adoption::has_unfinished_requests(&mut transaction, run.run_id()).await? {
+            return Err(ModelInvocationStoreError::InvalidTransition);
+        }
         let resolved_work_id = if let Some(retry_of) = &command.retry_of {
             let prior = load_model_invocation(&mut transaction, retry_of)
                 .await?
@@ -3613,7 +3617,9 @@ impl ModelInvocationStore for SqliteStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|_| ModelInvocationStoreError::Unavailable)?;
-        if has_active_tool_call {
+        if has_active_tool_call
+            || model_tool_adoption::has_unfinished_requests(&mut transaction, run.run_id()).await?
+        {
             return Err(ModelInvocationStoreError::InvalidTransition);
         }
         model_tool_catalog::freeze_catalog(&mut transaction, &current)

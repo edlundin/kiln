@@ -280,6 +280,12 @@ impl RunService {
             self.runs.get_run(run_id.clone()).await?
         };
 
+        // Resuming the fixture executor must never claim native model tools.
+        // Native approval recovery belongs to the native loop coordinator.
+        if !running.model_invocations().is_empty() {
+            return Err(RunError::InvalidTransition);
+        }
+
         if running.run().state() == RunState::WaitingForApproval {
             loop {
                 let changed = approval_revision.changed();
@@ -407,9 +413,15 @@ impl RunService {
         snapshot: &RunSnapshot,
         tool_call_id: &ToolCallId,
     ) -> Result<SubprocessRequest, RunError> {
-        let scope = snapshot
+        let tool = snapshot
             .tool_call(tool_call_id)
-            .ok_or(RunError::RunNotFound)?
+            .ok_or(RunError::RunNotFound)?;
+        if tool.capability() != kiln_core::DETERMINISTIC_SUBPROCESS_CAPABILITY
+            || !snapshot.model_invocations().is_empty()
+        {
+            return Err(RunError::InvalidTransition);
+        }
+        let scope = tool
             .effective_scope()
             .ok_or(RunError::InvalidTransition)?
             .clone();
@@ -964,7 +976,9 @@ impl RunOperations for RunService {
                     .decide_approval(approval.approval_id().clone(), decision, idempotency_key)
                     .await?;
                 service.events.publish(result.events.clone());
-                if result.value.run().state() == RunState::Running {
+                if result.value.run().state() == RunState::Running
+                    && result.value.model_invocations().is_empty()
+                {
                     service
                         .spawn_active(result.value.run().run_id().clone(), false)
                         .await;
@@ -972,6 +986,7 @@ impl RunOperations for RunService {
                 service
                     .approval_changed
                     .send_modify(|revision| *revision = revision.wrapping_add(1));
+                service.active.changed.notify_waiters();
                 result
             };
             Ok(result)

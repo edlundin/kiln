@@ -366,6 +366,27 @@ impl<S: ModelInvocationStore + ModelToolRequestStore + ModelToolCatalogStore, I>
     }
 }
 
+impl<S: crate::ModelToolAdoptionStore, I: crate::RunIdGenerator> ProviderApplication<S, I> {
+    pub async fn adopt_tool_request(
+        &self,
+        command: &crate::AdoptModelToolRequest,
+    ) -> Result<crate::ModelToolAdoptionMutation, crate::ModelToolAdoptionError> {
+        self.store
+            .adopt_model_tool_request(
+                command,
+                crate::ModelToolAdoptionIds {
+                    tool_call_id: self.ids.tool_call_id(),
+                    approval_id: self.ids.approval_id(),
+                    request_event_id: self.ids.event_id(),
+                    tool_event_id: self.ids.event_id(),
+                    approval_event_id: self.ids.event_id(),
+                    run_event_id: self.ids.event_id(),
+                },
+            )
+            .await
+    }
+}
+
 pub trait ModelProvider: Send + Sync {
     type Operation: ModelProviderOperation;
 

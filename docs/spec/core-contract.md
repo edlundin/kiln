@@ -327,6 +327,30 @@ require reauthentication; transport, malformed response, and unknown failures
 remain transient. Browser/device login, revocation, public account operations,
 and live model transport remain pending.
 
+The native device-code slice follows the Codex service contract rather than a
+generic RFC device flow. It polls immediately, treats only `403` and `404` as
+pending, exchanges the returned authorization code with the returned verifier,
+and requires all three token fields before encoding the credential. A fixed
+positive string polling interval is required; missing, numeric, or zero values
+are rejected as unusable rather than creating an unpaced loop. A fixed
+15-minute outer deadline covers requests and sleeps; each request retains the
+shorter configurable transport limits. The daemon coordinator accepts only an
+empty `connecting` `openai_codex_subscription` account and owns cancellation
+through task join. Replacement starts cancel and join the prior attempt.
+The coordinator retains every join handle until completion even if an awaiting
+caller is cancelled; cancel remains independently callable, and shutdown joins
+all attempts before returning the first cleanup failure.
+Connection rechecks that same empty state under the core lifecycle lock, so an
+attempt cannot overwrite a credential connected by another internal caller.
+Cancellation racing with vault publication conditionally disconnects only the
+exact `SecretRef` published by that attempt; a changed reference is a typed
+conflict and is never deleted. Daemon shutdown cancels and joins active
+attempts and permanently closes the coordinator before taking its join
+snapshot, so a queued or later begin cannot register new work. A cancelled
+shutdown call can be retried because attempt handles remain owned. No protocol,
+client, or UI entrypoint exists yet, and no live device
+login or vault runtime proof has run.
+
 The initial settings snapshot stores provider and model identifiers, an optional
 output-token setting, optional reasoning effort, and versioned tool, vision,
 and structured-output support. Unknown capability support remains explicit.

@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added the native Codex device-code login continuation with bounded polling, credential validation, coordinator-owned cancellation and joining, conditional account cleanup, and daemon shutdown integration.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added the internal Codex subscription credential envelope and bounded HTTPS refresh adapter with provider/account binding, optional-token rotation, and typed reauthentication outcomes.
 
 EDL-309: https://linear.app/edlundin/issue/EDL-309

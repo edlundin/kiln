@@ -624,6 +624,36 @@ where
         .await
     }
 
+    /// Publishes an initial credential only while the account remains in the
+    /// empty connecting state observed by its login attempt.
+    pub async fn connect_provider_account_if_connecting<V: SecretStore>(
+        &self,
+        secret_store: &V,
+        id: ProviderAccountId,
+        expected_provider_type: ProviderType,
+        secret: SecretValue,
+        updated_at_unix_ms: u64,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
+        let _lock = self.lifecycle_lock(&id).await;
+        let current = self.get_provider_account(id.clone()).await?;
+        if current.provider_type() != &expected_provider_type {
+            return Err(ProviderAccountError::ProviderTypeMismatch);
+        }
+        if current.state() != ProviderAccountState::Connecting || current.secret_ref().is_some() {
+            return Err(ProviderAccountError::CredentialVersionConflict);
+        }
+        self.connect_provider_account_locked(
+            secret_store,
+            id,
+            expected_provider_type,
+            secret,
+            updated_at_unix_ms,
+            current,
+            None,
+        )
+        .await
+    }
+
     async fn connect_provider_account_locked<V: SecretStore>(
         &self,
         secret_store: &V,
@@ -869,6 +899,41 @@ where
             {
                 return Err(ProviderAccountError::CredentialCleanupRequired { secret_ref });
             }
+        }
+        Ok(next)
+    }
+
+    /// Disconnects only when the durable credential reference is still owned
+    /// by the caller. This prevents cancellation cleanup from deleting a newer
+    /// credential published after the addressed operation completed.
+    pub async fn disconnect_provider_account_if_current<V: SecretStore>(
+        &self,
+        secret_store: &V,
+        id: ProviderAccountId,
+        expected_secret_ref: SecretRef,
+        updated_at_unix_ms: u64,
+    ) -> Result<ProviderAccount, ProviderAccountError> {
+        let _lock = self.lifecycle_lock(&id).await;
+        let current = self.get_provider_account(id).await?;
+        if current.state() != ProviderAccountState::Connected
+            || current.secret_ref() != Some(&expected_secret_ref)
+        {
+            return Err(ProviderAccountError::CredentialVersionConflict);
+        }
+        let provider_type = current.provider_type().clone();
+        let next = current.disconnect(updated_at_unix_ms)?;
+        self.store
+            .update_provider_account(&current, &next)
+            .await
+            .map_err(map_provider_account_store_error)?;
+        if secret_store
+            .delete(&provider_type, next.id(), &expected_secret_ref)
+            .await
+            .is_err_and(|error| error != SecretStoreError::NotFound)
+        {
+            return Err(ProviderAccountError::CredentialCleanupRequired {
+                secret_ref: expected_secret_ref,
+            });
         }
         Ok(next)
     }

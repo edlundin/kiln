@@ -4,6 +4,7 @@ use std::{
     net::SocketAddr,
     process::{ExitCode, Stdio},
     str::FromStr,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -28,6 +29,10 @@ use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
 
 use crate::run_service::RunService;
 
+// This slice has no public login route; main still owns the coordinator so
+// shutdown always cancels and joins any future internal caller's attempts.
+#[allow(dead_code)]
+mod provider_login;
 mod run_service;
 
 const DETERMINISTIC_BLOCKING_CHILD_ARGUMENT: &str = "blocking-child";
@@ -130,6 +135,16 @@ async fn main() -> ExitCode {
         WorkspaceApplication::new(GitWorkspaceRootDiscovery, store.clone(), UlidIdGenerator);
     let sessions = SessionApplication::new(store.clone(), store.clone(), UlidIdGenerator);
     let usage = UsageApplication::new(store.clone(), UlidIdGenerator);
+    let provider_logins = match provider_login::ProviderAccountLoginCoordinator::new(
+        store.clone(),
+        kiln_infrastructure::OsSecretStore::open_default(),
+    ) {
+        Ok(logins) => Arc::new(logins),
+        Err(_) => {
+            eprintln!("kilnd: cannot configure provider account login");
+            return ExitCode::FAILURE;
+        }
+    };
     let events = EventBroadcaster::default();
     let runs = RunService::new(
         RunApplication::new(store.clone(), UlidIdGenerator),
@@ -180,6 +195,10 @@ async fn main() -> ExitCode {
     let graceful_shutdown = async move {
         lifecycle.wait_for_shutdown_request().await;
         lifecycle.wait_for_commands().await;
+        if provider_logins.shutdown().await.is_err() {
+            eprintln!("kilnd: provider account login cleanup failed");
+            std::future::pending::<()>().await;
+        }
         if let Err(error) = runs.shutdown().await {
             eprintln!("kilnd: graceful shutdown could not persist all terminal Runs: {error:?}");
             std::future::pending::<()>().await;

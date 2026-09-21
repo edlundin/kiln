@@ -348,6 +348,16 @@ fn validate_id_token_account(
     token: &str,
     expected_account_id: &str,
 ) -> Result<(), CodexSubscriptionCredentialError> {
+    let account_id = extract_id_token_account(token)?;
+    if account_id != expected_account_id {
+        return Err(CodexSubscriptionCredentialError::InvalidAccountBinding);
+    }
+    Ok(())
+}
+
+pub(crate) fn extract_id_token_account(
+    token: &str,
+) -> Result<String, CodexSubscriptionCredentialError> {
     let mut parts = token.split('.');
     let (header, payload, signature) =
         match (parts.next(), parts.next(), parts.next(), parts.next()) {
@@ -362,16 +372,13 @@ fn validate_id_token_account(
     let payload = decode_base64_url(payload)?;
     let claims: Value = serde_json::from_slice(&payload)
         .map_err(|_| CodexSubscriptionCredentialError::InvalidEnvelope)?;
-    let account_id = claims
+    claims
         .get("https://api.openai.com/auth")
         .and_then(|auth| auth.get("chatgpt_account_id"))
         .and_then(Value::as_str)
         .filter(|account_id| valid_account_id(account_id))
-        .ok_or(CodexSubscriptionCredentialError::InvalidAccountBinding)?;
-    if account_id != expected_account_id {
-        return Err(CodexSubscriptionCredentialError::InvalidAccountBinding);
-    }
-    Ok(())
+        .ok_or(CodexSubscriptionCredentialError::InvalidAccountBinding)
+        .map(str::to_owned)
 }
 
 fn decode_base64_url(value: &str) -> Result<Vec<u8>, CodexSubscriptionCredentialError> {

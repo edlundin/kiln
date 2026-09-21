@@ -37,6 +37,9 @@ pub struct ResolvedModelToolRequest<C> {
 }
 
 impl<C> ResolvedModelToolRequest<C> {
+    pub(crate) fn into_command(self) -> C {
+        self.command
+    }
     pub fn source(&self) -> &ModelToolRequest {
         &self.source
     }
@@ -57,6 +60,9 @@ pub struct ResolvedModelToolBatch<C> {
 }
 
 impl<C> ResolvedModelToolBatch<C> {
+    pub(crate) fn into_request_at(self, position: usize) -> Option<ResolvedModelToolRequest<C>> {
+        self.requests.into_iter().nth(position)
+    }
     pub fn invocation(&self) -> &ModelInvocation {
         &self.invocation
     }

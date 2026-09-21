@@ -408,6 +408,71 @@ impl<S: crate::ModelToolCompletionStore, I: crate::RunIdGenerator> ProviderAppli
     }
 }
 
+impl<S: crate::ModelToolExecutionStore + crate::RunStore, I: crate::RunIdGenerator>
+    ProviderApplication<S, I>
+{
+    /// Consume locally resolved data and issue execution input only after a
+    /// fresh durable ready-to-running claim. Duplicate claims cannot dispatch.
+    pub async fn claim_tool_call<C>(
+        &self,
+        batch: crate::ResolvedModelToolBatch<C>,
+        position: usize,
+        tool_call_id: crate::ToolCallId,
+    ) -> Result<crate::ModelToolExecutionClaim<C>, crate::ModelToolAdoptionError> {
+        use crate::{
+            ModelToolAdoptionError as Error, ModelToolExecutionDisposition as Disposition,
+        };
+        let (_, tool) = self
+            .store
+            .get_tool_call(&tool_call_id)
+            .await
+            .map_err(Error::Store)?
+            .ok_or(Error::InvalidRequest)?;
+        let scope = tool
+            .requested_scope()
+            .cloned()
+            .ok_or(Error::IntegrityViolation)?;
+        let source = batch.prepare_adoption(position, scope)?;
+        let resolved = batch
+            .into_request_at(position)
+            .ok_or(Error::InvalidRequest)?;
+        let mutation = self
+            .store
+            .claim_model_tool_call(&source, &tool_call_id, self.ids.event_id())
+            .await?;
+        if mutation.tool_call.tool_call_id() != &tool_call_id {
+            return Err(Error::IntegrityViolation);
+        }
+        match mutation.disposition {
+            Disposition::Applied => {
+                if mutation.events.len() != 1 {
+                    return Err(Error::IntegrityViolation);
+                }
+                let request = crate::ModelToolExecutionRequest::new(
+                    &source,
+                    mutation.tool_call,
+                    resolved.into_command(),
+                )?;
+                Ok(crate::ModelToolExecutionClaim::Applied {
+                    request,
+                    events: mutation.events,
+                })
+            }
+            Disposition::Duplicate => {
+                if !mutation.events.is_empty()
+                    || !(mutation.tool_call.state().is_terminal()
+                        || mutation.tool_call.state() == crate::ToolCallState::Running)
+                {
+                    return Err(Error::IntegrityViolation);
+                }
+                Ok(crate::ModelToolExecutionClaim::Duplicate {
+                    tool_call: mutation.tool_call,
+                })
+            }
+        }
+    }
+}
+
 pub trait ModelProvider: Send + Sync {
     type Operation: ModelProviderOperation;
 

@@ -21,35 +21,12 @@ impl ModelToolAdoptionStore for SqliteStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|_| Error::Unavailable)?;
-        let invocation =
-            load_model_invocation(&mut transaction, command.invocation().invocation_id())
-                .await
-                .map_err(Error::Invocation)?
-                .ok_or(Error::InvalidRequest)?;
-        if invocation != *command.invocation() {
-            return Err(Error::IntegrityViolation);
-        }
-        let requests = load_requests(&mut transaction, &invocation)
-            .await
-            .map_err(Error::Requests)?
-            .ok_or(Error::InvalidRequest)?;
-        if requests.requests().get(command.position()) != Some(command.request()) {
-            return Err(Error::IntegrityViolation);
-        }
-        let catalog = load_catalog(&mut transaction, &invocation)
-            .await
-            .map_err(Error::Catalog)?
-            .ok_or(Error::InvalidRequest)?;
-        if catalog != *command.catalog() {
-            return Err(Error::IntegrityViolation);
-        }
-        let definition = catalog
+        let snapshot = validate_source(&mut transaction, command).await?;
+        let invocation = command.invocation();
+        let definition = command
+            .catalog()
             .find(command.request().name())
             .ok_or(Error::InvalidRequest)?;
-        let snapshot = load_snapshot(&mut transaction, invocation.run_id())
-            .await
-            .map_err(Error::Store)?
-            .ok_or(Error::InvalidRun)?;
         let prior: Option<String> = sqlx::query_scalar(
             "SELECT tool_call_id FROM model_tool_adoptions
              WHERE model_invocation_id = ? AND provider_call_id = ?",
@@ -219,4 +196,36 @@ pub(super) async fn has_unfinished_requests(
     .fetch_one(&mut **transaction)
     .await
     .map_err(|_| ModelInvocationStoreError::Unavailable)
+}
+
+pub(super) async fn validate_source(
+    transaction: &mut Transaction<'_, Sqlite>,
+    command: &AdoptModelToolRequest,
+) -> Result<kiln_core::RunSnapshot, Error> {
+    let invocation = load_model_invocation(transaction, command.invocation().invocation_id())
+        .await
+        .map_err(Error::Invocation)?
+        .ok_or(Error::InvalidRequest)?;
+    if invocation != *command.invocation() {
+        return Err(Error::IntegrityViolation);
+    }
+    let requests = load_requests(transaction, &invocation)
+        .await
+        .map_err(Error::Requests)?
+        .ok_or(Error::InvalidRequest)?;
+    if requests.requests().get(command.position()) != Some(command.request()) {
+        return Err(Error::IntegrityViolation);
+    }
+    let catalog = load_catalog(transaction, &invocation)
+        .await
+        .map_err(Error::Catalog)?
+        .ok_or(Error::InvalidRequest)?;
+    if catalog != *command.catalog() {
+        return Err(Error::IntegrityViolation);
+    }
+    let snapshot = load_snapshot(transaction, invocation.run_id())
+        .await
+        .map_err(Error::Store)?
+        .ok_or(Error::InvalidRun)?;
+    Ok(snapshot)
 }

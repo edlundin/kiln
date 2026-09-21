@@ -650,6 +650,24 @@ tools are already terminal and cannot acquire a completion payload. Result bytes
 are not read or uploaded by this operation, and Run/child cancellation and the
 next model turn remain separate decisions.
 
+`ProviderApplication::claim_tool_call` consumes a locally resolved batch and
+selects one adopted ToolCall. The claim transaction revalidates the immutable
+proposal/catalog link, current Run scope, latest invocation, effective ToolCall
+scope, approval state, and absence of overlapping work. Only a fresh
+`ready → running` transition returns a `ModelToolExecutionRequest` and its
+committed state Event. The request carries typed command data, source call IDs,
+and the effective Workspace scope; it has no public constructor, Clone, or Debug.
+It must be consumed by a Kiln-owned executor, never passed to a model provider.
+
+Running and terminal calls return a duplicate result with no execution request
+and no new Events, including after restart. Awaiting/denied/cancelled work cannot
+receive a new execution request. Dropping a fresh request or losing the process
+after claim leaves durable running work requiring explicit reconciliation;
+there is no automatic reset or redispatch. A read-only reconciliation decision
+alone cannot establish that external effects stopped. The legacy subprocess
+`begin_tool_call` entrypoint rejects adopted model calls. Concrete executor
+integration and reconciliation handlers remain pending.
+
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation
 on the active provider operation. Successful cancellation must stop external

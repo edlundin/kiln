@@ -7,6 +7,7 @@ mod model_output;
 mod model_tool_adoption;
 mod model_tool_catalog;
 mod model_tool_completion;
+mod model_tool_execution;
 mod model_tool_request;
 mod native_run;
 mod provider_account;
@@ -5971,6 +5972,18 @@ impl RunStore for SqliteStore {
             .begin()
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
+        // Adopted model calls require a fresh native execution claim with their
+        // locally resolved payload; the subprocess entrypoint cannot claim them.
+        if sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM model_tool_adoptions WHERE tool_call_id = ?)",
+        )
+        .bind(tool_call_id.as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?
+        {
+            return Err(RunStoreError::InvalidTransition);
+        }
         let row = sqlx::query(
             "SELECT tool_call_id, run_id, capability, state,
                     requested_workspace_root_id, requested_relative_directory,

@@ -54,12 +54,7 @@ impl AdoptModelToolRequest {
         &self.requested_scope
     }
 
-    /// Pure policy projection, recomputed inside the storage transaction.
-    pub fn authorize(
-        &self,
-        run: &Run,
-        ids: ModelToolAdoptionIds,
-    ) -> Result<ModelToolAdoptionPlan, ModelToolAdoptionError> {
+    pub fn validate_run_scope(&self, run: &Run) -> Result<(), ModelToolAdoptionError> {
         if run.run_id() != self.invocation.run_id() || run.state() != RunState::Running {
             return Err(ModelToolAdoptionError::InvalidRun);
         }
@@ -71,6 +66,16 @@ impl AdoptModelToolRequest {
         {
             return Err(ModelToolAdoptionError::ScopeOutsideRun);
         }
+        Ok(())
+    }
+
+    /// Pure policy projection, recomputed inside the storage transaction.
+    pub fn authorize(
+        &self,
+        run: &Run,
+        ids: ModelToolAdoptionIds,
+    ) -> Result<ModelToolAdoptionPlan, ModelToolAdoptionError> {
+        self.validate_run_scope(run)?;
         let definition = self
             .catalog
             .find(self.request.name())

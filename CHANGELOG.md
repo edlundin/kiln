@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added fresh native ToolCall execution claims that bind typed commands to approved scope and prevent duplicate or restarted work from being dispatched again.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added atomic native ToolCall completion and partial-output cancellation that retain results without ending the Run, with bounded inline output and exact terminal retries.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

@@ -597,12 +597,13 @@ ready. A failed attachment remains visible with `Retry` and `Remove` actions.
 
 The client uploads bytes and the owning thread ID with `POST /v1/artifacts`,
 then sends returned artifact IDs in `POST /v1/threads/{id}/messages`.
-Attachment-only messages are valid. Removing an attachment before send removes
-it from the draft; artifact garbage collection is a separate storage concern.
+Attachment-only messages are valid for append, targeted run input, and child
+activity reactions. A message with no retained attachment must contain
+non-whitespace text. Removing an attachment before send removes it from the
+draft; artifact garbage collection is a separate storage concern.
 
-No upload size limit is fixed in this planning phase. Phase 2 must measure the
-real repository files used in protocol-backed client tests before it sets a
-transport or storage tripwire.
+Each artifact upload is capped at 64 MiB by the protocol and enforced by the
+desktop and server before persistence.
 
 ### Temporary workspace details
 

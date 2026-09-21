@@ -150,13 +150,16 @@ Root Runs use immutable `interactive` user input mode. Child Runs store one immu
 `GET /v1/sessions/{session_id}/runs` returns the durable flat list whose parent IDs form
 the Session Run tree.
 
-`SendRunInput` accepts only non-empty content for an immutable `interactive`
-Run in `queued`, `running`, or `waiting_for_approval` state. Normal guidance
-uses `queued`; interrupt delivery must be explicit. The targeted Message,
-queued MessageDelivery, idempotency result, `message.appended`, and the matching
-`run.input_queued` or `run.interrupt_requested` Event commit atomically. An exact
-retry returns the first MessageDelivery without new Events, including after the
-Run becomes terminal. A mismatched key reuse conflicts.
+`AppendMessage`, `SendRunInput`, and `ReactToRunActivity` accept empty or
+whitespace content when one or more validated attachments are present. A
+message with no attachments still requires non-whitespace content. `SendRunInput`
+targets an immutable `interactive` Run in `queued`, `running`, or
+`waiting_for_approval` state. Normal guidance uses `queued`; interrupt delivery
+must be explicit. The targeted Message, queued MessageDelivery, idempotency
+result, `message.appended`, and the matching `run.input_queued` or
+`run.interrupt_requested` Event commit atomically. An exact retry returns the
+first MessageDelivery without new Events, including after the Run becomes
+terminal. A mismatched key reuse conflicts.
 
 `ReactToRunActivity` queues a root-targeted user Message with a typed
 `child_activity` reference containing the source Run ID and Event ID. It uses

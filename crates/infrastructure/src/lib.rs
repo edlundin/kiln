@@ -3970,17 +3970,7 @@ async fn resolve_context_manifest_entries(
                         .await?
                         .ok_or(ContextManifestStoreError::MessageNotFound)?;
                 validate_context_source_message(transaction, run, &message, delivery_state).await?;
-                let content = if message.content().trim().is_empty() {
-                    let hashes = message
-                        .attachments()
-                        .iter()
-                        .map(|attachment| attachment.content_hash().as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("[Attached artifact(s): {hashes}]")
-                } else {
-                    message.content().to_owned()
-                };
+                let content = context_manifest_message_content(&message);
                 entries.push(
                     ContextManifestEntry::message_snapshot(
                         message.id().clone(),
@@ -4011,6 +4001,20 @@ async fn resolve_context_manifest_entries(
         }
     }
     Ok(entries)
+}
+
+fn context_manifest_message_content(message: &Message) -> String {
+    if message.content().trim().is_empty() {
+        let hashes = message
+            .attachments()
+            .iter()
+            .map(|attachment| attachment.content_hash().as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("[Attached artifact(s): {hashes}]")
+    } else {
+        message.content().to_owned()
+    }
 }
 
 fn validate_instruction_provenance(
@@ -4356,7 +4360,7 @@ async fn load_context_manifest(
             validate_context_source_message(transaction, &run, &source, delivery_state)
                 .await
                 .map_err(|_| ContextManifestStoreError::IntegrityViolation)?;
-            if source.role() != role || source.content() != content {
+            if source.role() != role || context_manifest_message_content(&source) != content {
                 return Err(ContextManifestStoreError::IntegrityViolation);
             }
             ContextManifestEntry::message_snapshot(message_id, role, content)

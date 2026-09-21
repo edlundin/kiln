@@ -18,6 +18,7 @@ impl AssistantMessageIdGenerator for UlidIdGenerator {
 
 pub(super) fn parse_message_row(
     row: &sqlx::sqlite::SqliteRow,
+    attachments: Vec<Artifact>,
 ) -> Result<Message, AssistantMessageStoreError> {
     let field = |name| {
         row.try_get::<String, _>(name)
@@ -52,7 +53,7 @@ pub(super) fn parse_message_row(
         status: MessageStatus::parse(&field("status")?)
             .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
         origin,
-        attachments: Vec::new(),
+        attachments,
     })
     .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
     match (
@@ -89,7 +90,6 @@ pub(super) async fn load_message(
     let Some(row) = row else {
         return Ok(None);
     };
-    let message = parse_message_row(&row)?;
     let attachment_rows = sqlx::query(
         "SELECT a.content_hash, a.media_type, a.size
          FROM message_attachments ma
@@ -121,9 +121,7 @@ pub(super) async fn load_message(
                 .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
         );
     }
-    let message = message
-        .with_attachments(attachments)
-        .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
+    let message = parse_message_row(&row, attachments)?;
     if message.id() != message_id {
         return Err(AssistantMessageStoreError::IntegrityViolation);
     }

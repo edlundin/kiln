@@ -4,10 +4,13 @@ use std::{
     net::SocketAddr,
     process::{ExitCode, Stdio},
     str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use kiln_core::{
-    RunApplication, SessionApplication, StoreMetadata, UsageApplication, WorkspaceApplication,
+    ModelId, ModelInvocationCompletionKind, ModelInvocationOutcome, ProviderAccountId,
+    ProviderType, RunApplication, SessionApplication, StoreMetadata, UsageApplication,
+    UsageCompleteness, WorkspaceApplication,
 };
 use kiln_infrastructure::{
     DETERMINISTIC_BLOCKING_TREE_ARGUMENT, DETERMINISTIC_FAILURE_ARGUMENT,
@@ -17,6 +20,10 @@ use kiln_infrastructure::{
     KILN_DETERMINISTIC_PID_FILE, LocalAuthCredential, SqliteStore, UlidIdGenerator,
 };
 use kiln_protocol::PROTOCOL_VERSION;
+use kiln_providers::{
+    DETERMINISTIC_MODEL_ID, DETERMINISTIC_PROVIDER_ACCOUNT_ID, DETERMINISTIC_PROVIDER_TYPE,
+    DeterministicModelProvider, DeterministicModelResponse, ProviderRegistry,
+};
 use kiln_server::{AppState, AuthToken, EventBroadcaster, serve_with_shutdown};
 
 use crate::run_service::RunService;
@@ -41,6 +48,17 @@ async fn main() -> ExitCode {
             );
             return ExitCode::FAILURE;
         }
+    };
+    let provider_registry = if deterministic_model {
+        match deterministic_provider_registry() {
+            Ok(registry) => registry,
+            Err(error) => {
+                eprintln!("kilnd: cannot configure deterministic provider: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        ProviderRegistry::new()
     };
     let subprocess_outcome = match configured_subprocess_outcome() {
         Ok(outcome) => outcome,
@@ -120,7 +138,8 @@ async fn main() -> ExitCode {
         store,
         artifacts,
     )
-    .with_deterministic_model(deterministic_model);
+    .with_deterministic_model(deterministic_model)
+    .with_provider_registry(provider_registry);
 
     if let Err(error) = runs.reconcile_deterministic_model_runs().await {
         eprintln!("kilnd: cannot reconcile deterministic native Runs: {error:?}");
@@ -174,6 +193,31 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn deterministic_provider_registry() -> Result<ProviderRegistry, &'static str> {
+    let observed_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .ok_or("system clock is before the Unix epoch")?;
+    let provider_type =
+        ProviderType::parse(DETERMINISTIC_PROVIDER_TYPE).map_err(|_| "invalid provider type")?;
+    let model_id = ModelId::parse(DETERMINISTIC_MODEL_ID).map_err(|_| "invalid model ID")?;
+    let account_id = ProviderAccountId::parse(DETERMINISTIC_PROVIDER_ACCOUNT_ID)
+        .map_err(|_| "invalid provider account ID")?;
+    let provider = DeterministicModelProvider::new(DeterministicModelResponse {
+        text: vec!["Kiln deterministic native assistant response.".to_owned()],
+        quantities: Vec::new(),
+        completeness: UsageCompleteness::Unknown,
+        outcome: ModelInvocationOutcome::completed(ModelInvocationCompletionKind::AssistantOutput),
+        observed_at_unix_ms,
+    });
+    let mut registry = ProviderRegistry::new();
+    registry
+        .register(provider_type, model_id, account_id, provider)
+        .map_err(|_| "duplicate provider registration")?;
+    Ok(registry)
 }
 
 fn deterministic_subprocess_fixture() -> Option<ExitCode> {

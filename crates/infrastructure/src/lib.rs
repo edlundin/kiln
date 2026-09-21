@@ -819,6 +819,61 @@ impl SqliteStore {
         .map_err(|_| StoreError::Unavailable)?;
         row.map(|row| parse_artifact(&row)).transpose()
     }
+
+    pub async fn register_artifact_owner(
+        &self,
+        session_id: &SessionId,
+        artifact: &Artifact,
+    ) -> Result<(), StoreError> {
+        let size = i64::try_from(artifact.size()).map_err(|_| StoreError::Unavailable)?;
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| StoreError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO artifacts (content_hash, media_type, size, storage_reference)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(content_hash) DO NOTHING",
+        )
+        .bind(artifact.content_hash().as_str())
+        .bind(artifact.media_type())
+        .bind(size)
+        .bind(artifact.content_hash().as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?;
+        let stored = sqlx::query("SELECT media_type, size FROM artifacts WHERE content_hash = ?")
+            .bind(artifact.content_hash().as_str())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| StoreError::Unavailable)?;
+        if stored
+            .try_get::<String, _>("media_type")
+            .map_err(|_| StoreError::Unavailable)?
+            != artifact.media_type()
+            || stored
+                .try_get::<i64, _>("size")
+                .map_err(|_| StoreError::Unavailable)?
+                != size
+        {
+            return Err(StoreError::Unavailable);
+        }
+        sqlx::query(
+            "INSERT INTO artifact_session_owners (content_hash, session_id)
+             VALUES (?, ?)
+             ON CONFLICT(content_hash, session_id) DO NOTHING",
+        )
+        .bind(artifact.content_hash().as_str())
+        .bind(session_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StoreError::Unavailable)
+    }
 }
 
 fn parse_artifact(row: &sqlx::sqlite::SqliteRow) -> Result<Artifact, StoreError> {
@@ -839,6 +894,61 @@ fn parse_artifact(row: &sqlx::sqlite::SqliteRow) -> Result<Artifact, StoreError>
         u64::try_from(size).map_err(|_| StoreError::Unavailable)?,
     )
     .map_err(|_| StoreError::Unavailable)
+}
+
+async fn validate_message_attachments(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message: &Message,
+) -> Result<(), StoreError> {
+    let mut seen = std::collections::HashSet::new();
+    for attachment in message.attachments() {
+        if !seen.insert(attachment.content_hash().as_str()) {
+            return Err(StoreError::Unavailable);
+        }
+        let row = sqlx::query(
+            "SELECT a.media_type, a.size
+             FROM artifacts a
+             JOIN artifact_session_owners o ON o.content_hash = a.content_hash
+             WHERE a.content_hash = ? AND o.session_id = ?",
+        )
+        .bind(attachment.content_hash().as_str())
+        .bind(message.session_id().as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?
+        .ok_or(StoreError::Unavailable)?;
+        let media_type = row
+            .try_get::<String, _>("media_type")
+            .map_err(|_| StoreError::Unavailable)?;
+        let size = u64::try_from(
+            row.try_get::<i64, _>("size")
+                .map_err(|_| StoreError::Unavailable)?,
+        )
+        .map_err(|_| StoreError::Unavailable)?;
+        if media_type != attachment.media_type() || size != attachment.size() {
+            return Err(StoreError::Unavailable);
+        }
+    }
+    Ok(())
+}
+
+async fn insert_message_attachments(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message: &Message,
+) -> Result<(), StoreError> {
+    for (position, attachment) in message.attachments().iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO message_attachments (message_id, content_hash, position)
+             VALUES (?, ?, ?)",
+        )
+        .bind(message.id().as_str())
+        .bind(attachment.content_hash().as_str())
+        .bind(i64::try_from(position).map_err(|_| StoreError::Unavailable)?)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?;
+    }
+    Ok(())
 }
 
 fn parse_optional_artifact(
@@ -1310,7 +1420,11 @@ impl SessionStore for SqliteStore {
         &self,
         message: &Message,
         event: &SessionEvent,
-    ) -> Result<(), StoreError> {
+        idempotency_key: &str,
+    ) -> Result<Message, StoreError> {
+        if idempotency_key.is_empty() {
+            return Err(StoreError::IdempotencyKeyRequired);
+        }
         let SessionEventPayload::MessageAppended {
             message: event_message,
         } = event.payload()
@@ -1332,6 +1446,55 @@ impl SessionStore for SqliteStore {
             .begin()
             .await
             .map_err(|_| StoreError::Unavailable)?;
+
+        let attachments_json = serde_json::to_string(
+            &message
+                .attachments()
+                .iter()
+                .map(|attachment| attachment.content_hash().as_str())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| StoreError::Unavailable)?;
+        if let Some(existing) = sqlx::query(
+            "SELECT message_id, content, attachments_json
+             FROM session_message_idempotencies
+             WHERE session_id = ? AND idempotency_key = ?",
+        )
+        .bind(message.session_id().as_str())
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?
+        {
+            if existing
+                .try_get::<String, _>("content")
+                .map_err(|_| StoreError::Unavailable)?
+                != message.content()
+                || existing
+                    .try_get::<String, _>("attachments_json")
+                    .map_err(|_| StoreError::Unavailable)?
+                    != attachments_json
+            {
+                return Err(StoreError::IdempotencyConflict);
+            }
+            let existing_id = MessageId::parse(
+                existing
+                    .try_get::<String, _>("message_id")
+                    .map_err(|_| StoreError::Unavailable)?,
+            )
+            .map_err(|_| StoreError::Unavailable)?;
+            let stored = assistant_message::load_message(&mut transaction, &existing_id)
+                .await
+                .map_err(|_| StoreError::Unavailable)?
+                .ok_or(StoreError::Unavailable)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| StoreError::Unavailable)?;
+            return Ok(stored);
+        }
+
+        validate_message_attachments(&mut transaction, message).await?;
         sqlx::query(
             "INSERT INTO messages (message_id, session_id, role, content, target_run_id) VALUES (?, ?, ?, ?, ?)",
         )
@@ -1340,6 +1503,20 @@ impl SessionStore for SqliteStore {
         .bind(message.role().as_str())
         .bind(message.content())
         .bind(message.target_run_id().map(RunId::as_str))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StoreError::Unavailable)?;
+        insert_message_attachments(&mut transaction, message).await?;
+        sqlx::query(
+            "INSERT INTO session_message_idempotencies
+             (session_id, idempotency_key, message_id, content, attachments_json)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(message.session_id().as_str())
+        .bind(idempotency_key)
+        .bind(message.id().as_str())
+        .bind(message.content())
+        .bind(&attachments_json)
         .execute(&mut *transaction)
         .await
         .map_err(|_| StoreError::Unavailable)?;
@@ -1355,7 +1532,8 @@ impl SessionStore for SqliteStore {
         transaction
             .commit()
             .await
-            .map_err(|_| StoreError::Unavailable)
+            .map_err(|_| StoreError::Unavailable)?;
+        Ok(message.clone())
     }
 
     async fn list_session_events(
@@ -3792,11 +3970,22 @@ async fn resolve_context_manifest_entries(
                         .await?
                         .ok_or(ContextManifestStoreError::MessageNotFound)?;
                 validate_context_source_message(transaction, run, &message, delivery_state).await?;
+                let content = if message.content().trim().is_empty() {
+                    let hashes = message
+                        .attachments()
+                        .iter()
+                        .map(|attachment| attachment.content_hash().as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("[Attached artifact(s): {hashes}]")
+                } else {
+                    message.content().to_owned()
+                };
                 entries.push(
                     ContextManifestEntry::message_snapshot(
                         message.id().clone(),
                         message.role(),
-                        message.content().to_owned(),
+                        content,
                     )
                     .map_err(|_| ContextManifestStoreError::IntegrityViolation)?,
                 );
@@ -4746,6 +4935,14 @@ impl RunStore for SqliteStore {
         let run_id = message
             .target_run_id()
             .ok_or(RunStoreError::InvalidMessageDelivery)?;
+        let attachments_json = serde_json::to_string(
+            &message
+                .attachments()
+                .iter()
+                .map(|attachment| attachment.content_hash().as_str())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| RunStoreError::Unavailable)?;
         if delivery.state() != MessageDeliveryState::Queued
             || events.len() != 2
             || events[0]
@@ -4761,7 +4958,7 @@ impl RunStore for SqliteStore {
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
         if let Some(existing) = sqlx::query(
-            "SELECT message_id, content, delivery_mode
+            "SELECT message_id, content, attachments_json, delivery_mode
              FROM send_run_input_idempotencies
              WHERE run_id = ? AND idempotency_key = ?",
         )
@@ -4775,6 +4972,10 @@ impl RunStore for SqliteStore {
                 .try_get::<String, _>("content")
                 .map_err(|_| RunStoreError::Unavailable)?
                 != message.content()
+                || existing
+                    .try_get::<String, _>("attachments_json")
+                    .map_err(|_| RunStoreError::Unavailable)?
+                    != attachments_json
                 || existing
                     .try_get::<String, _>("delivery_mode")
                     .map_err(|_| RunStoreError::Unavailable)?
@@ -4818,6 +5019,10 @@ impl RunStore for SqliteStore {
             return Err(RunStoreError::RunNotAcceptingInput);
         }
 
+        validate_message_attachments(&mut transaction, message)
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+
         validate_child_activity(&mut transaction, &run, message).await?;
         sqlx::query(
             "INSERT INTO messages (
@@ -4843,6 +5048,9 @@ impl RunStore for SqliteStore {
         .execute(&mut *transaction)
         .await
         .map_err(|_| RunStoreError::Unavailable)?;
+        insert_message_attachments(&mut transaction, message)
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
         let message_event = insert_message_event(&mut transaction, &events[0]).await?;
         let queued_cursor = i64::try_from(message_event.cursor().value())
             .map_err(|_| RunStoreError::Unavailable)?;
@@ -4861,13 +5069,14 @@ impl RunStore for SqliteStore {
         let delivery_event = insert_run_event(&mut transaction, &events[1]).await?;
         sqlx::query(
             "INSERT INTO send_run_input_idempotencies
-                (run_id, idempotency_key, message_id, content, delivery_mode)
-             VALUES (?, ?, ?, ?, ?)",
+             (run_id, idempotency_key, message_id, content, attachments_json, delivery_mode)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(run_id.as_str())
         .bind(idempotency_key)
         .bind(message.id().as_str())
         .bind(message.content())
+        .bind(&attachments_json)
         .bind(delivery.mode().as_str())
         .execute(&mut *transaction)
         .await

@@ -1,16 +1,189 @@
 //! Direct model adapters. The first adapter is an explicit deterministic runtime.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, future::Future, pin::Pin};
 
 use kiln_core::{
-    ModelInvocation, ModelInvocationOutcome, ModelOutputStream, ModelProvider,
-    ModelProviderOperation, ProviderError, ProviderRequest, ProviderUpdate, ProviderUsageMetadata,
-    ProviderUsageUpdate, RecordModelOutput, UsageAccounting, UsageCompleteness, UsageFinality,
-    UsageQuantity, UsageSource,
+    ModelId, ModelInvocation, ModelInvocationOutcome, ModelOutputStream, ModelProvider,
+    ModelProviderOperation, ProviderAccountId, ProviderError, ProviderRequest, ProviderType,
+    ProviderUpdate, ProviderUsageMetadata, ProviderUsageUpdate, RecordModelOutput, UsageAccounting,
+    UsageCompleteness, UsageFinality, UsageQuantity, UsageSource,
 };
 
 pub const DETERMINISTIC_PROVIDER_TYPE: &str = "kiln_deterministic";
 pub const DETERMINISTIC_MODEL_ID: &str = "deterministic_text";
+/// Fixture-only account identity; it never resolves credentials.
+pub const DETERMINISTIC_PROVIDER_ACCOUNT_ID: &str = "pac_00000000000000000000000000";
+
+type OperationFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+type ProviderStartFuture<'a> = OperationFuture<'a, Result<ProviderOperation, ProviderError>>;
+
+trait ErasedProviderOperation: Send {
+    fn next_update(&mut self)
+    -> OperationFuture<'_, Result<Option<ProviderUpdate>, ProviderError>>;
+
+    fn cancel(&mut self) -> OperationFuture<'_, Result<(), ProviderError>>;
+}
+
+impl<T> ErasedProviderOperation for T
+where
+    T: ModelProviderOperation + 'static,
+{
+    fn next_update(
+        &mut self,
+    ) -> OperationFuture<'_, Result<Option<ProviderUpdate>, ProviderError>> {
+        Box::pin(ModelProviderOperation::next_update(self))
+    }
+
+    fn cancel(&mut self) -> OperationFuture<'_, Result<(), ProviderError>> {
+        Box::pin(ModelProviderOperation::cancel(self))
+    }
+}
+
+/// An operation whose concrete adapter type stays inside this crate.
+pub struct ProviderOperation {
+    operation: Box<dyn ErasedProviderOperation>,
+}
+
+impl ProviderOperation {
+    fn new<T>(operation: T) -> Self
+    where
+        T: ModelProviderOperation + 'static,
+    {
+        Self {
+            operation: Box::new(operation),
+        }
+    }
+}
+
+impl ModelProviderOperation for ProviderOperation {
+    fn next_update(
+        &mut self,
+    ) -> impl Future<Output = Result<Option<ProviderUpdate>, ProviderError>> + Send {
+        self.operation.next_update()
+    }
+
+    fn cancel(&mut self) -> impl Future<Output = Result<(), ProviderError>> + Send {
+        self.operation.cancel()
+    }
+}
+
+trait ProviderFactory: Send + Sync {
+    fn provider_type(&self) -> &ProviderType;
+    fn model_id(&self) -> &ModelId;
+    fn account_id(&self) -> &ProviderAccountId;
+    fn start(&self, request: ProviderRequest) -> ProviderStartFuture<'_>;
+}
+
+struct RegisteredProvider<P> {
+    provider_type: ProviderType,
+    model_id: ModelId,
+    account_id: ProviderAccountId,
+    provider: P,
+}
+
+impl<P> ProviderFactory for RegisteredProvider<P>
+where
+    P: ModelProvider + 'static,
+{
+    fn provider_type(&self) -> &ProviderType {
+        &self.provider_type
+    }
+
+    fn model_id(&self) -> &ModelId {
+        &self.model_id
+    }
+
+    fn account_id(&self) -> &ProviderAccountId {
+        &self.account_id
+    }
+
+    fn start(&self, request: ProviderRequest) -> ProviderStartFuture<'_> {
+        Box::pin(async move {
+            self.provider
+                .start(request)
+                .await
+                .map(ProviderOperation::new)
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRegistryError {
+    DuplicateRegistration,
+}
+
+/// Resolves a durable provider selection to one registered adapter.
+///
+/// The registry stores only typed provider, model, and opaque account
+/// identifiers. Credential lookup and transport remain adapter concerns.
+pub struct ProviderRegistry {
+    providers: Vec<Box<dyn ProviderFactory>>,
+}
+
+impl ProviderRegistry {
+    pub fn new() -> Self {
+        Self {
+            providers: Vec::new(),
+        }
+    }
+
+    pub fn register<P>(
+        &mut self,
+        provider_type: ProviderType,
+        model_id: ModelId,
+        account_id: ProviderAccountId,
+        provider: P,
+    ) -> Result<(), ProviderRegistryError>
+    where
+        P: ModelProvider + 'static,
+    {
+        if self.providers.iter().any(|registered| {
+            registered.provider_type() == &provider_type
+                && registered.model_id() == &model_id
+                && registered.account_id() == &account_id
+        }) {
+            return Err(ProviderRegistryError::DuplicateRegistration);
+        }
+        self.providers.push(Box::new(RegisteredProvider {
+            provider_type,
+            model_id,
+            account_id,
+            provider,
+        }));
+        Ok(())
+    }
+
+    pub async fn start(
+        &self,
+        request: ProviderRequest,
+    ) -> Result<ProviderOperation, ProviderError> {
+        let invocation = request.invocation();
+        let provider = invocation.settings().provider();
+        let model = invocation.settings().model();
+        let account = invocation.provider_account_id();
+        let has_provider_model = self.providers.iter().any(|registered| {
+            registered.provider_type() == provider && registered.model_id() == model
+        });
+        let Some(registered) = self.providers.iter().find(|registered| {
+            registered.provider_type() == provider
+                && registered.model_id() == model
+                && registered.account_id() == account
+        }) else {
+            return Err(if has_provider_model {
+                ProviderError::ProviderAccountMismatch
+            } else {
+                ProviderError::ModelUnavailable
+            });
+        };
+        registered.start(request).await
+    }
+}
+
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct DeterministicModelResponse {
     pub text: Vec<String>,
@@ -46,6 +219,9 @@ impl ModelProvider for DeterministicModelProvider {
             || invocation.settings().model().as_str() != DETERMINISTIC_MODEL_ID
         {
             return Err(ProviderError::ModelUnavailable);
+        }
+        if invocation.provider_account_id().as_str() != DETERMINISTIC_PROVIDER_ACCOUNT_ID {
+            return Err(ProviderError::ProviderAccountMismatch);
         }
         let output = self
             .response

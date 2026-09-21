@@ -3,13 +3,19 @@
 //! Runs currently use the deterministic executor fixture. The desktop must label
 //! that executor explicitly; this connection is not a production model account.
 
-use std::{net::SocketAddr, path::Path};
+use std::{
+    fs::File,
+    io::{self, Read},
+    net::SocketAddr,
+    path::Path,
+};
 
 use kiln_client::Client;
 use kiln_protocol::{
     AppendMessageRequest, ApprovalPolicy, ClientIdentity, CreateWorkspaceRequest,
-    MessageDeliveryMode, NegotiateResponse, SendRunInputRequest, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartRunRequest, WorkspaceResponse, WorkspaceRootRequest,
+    MAX_ARTIFACT_UPLOAD_BYTES, MessageDeliveryMode, NegotiateResponse, SendRunInputRequest,
+    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartRunRequest,
+    WorkspaceResponse, WorkspaceRootRequest,
 };
 
 #[derive(Clone)]
@@ -47,11 +53,87 @@ pub enum ConnectionResult {
 pub struct Submission {
     pub session_id: String,
     pub content: String,
+    pub attachments: Vec<kiln_protocol::ArtifactResponse>,
+    pub uploads: Vec<AttachmentUpload>,
     pub idempotency_key: String,
     pub active_run_id: Option<String>,
     pub child_activity: Option<kiln_protocol::ChildActivityReference>,
     pub message_appended: bool,
     pub append_uncertain: bool,
+}
+
+#[derive(Clone)]
+pub struct AttachmentUpload {
+    pub path: Option<String>,
+    pub bytes: Option<Vec<u8>>,
+    pub media_type: String,
+}
+
+const ATTACHMENT_READ_CHUNK_SIZE: usize = 64 * 1024;
+
+fn attachment_too_large() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::FileTooLarge,
+        format!(
+            "attachment exceeds the {} byte upload limit",
+            MAX_ARTIFACT_UPLOAD_BYTES
+        ),
+    )
+}
+
+fn invalid_attachment_source() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "attachment source is not a regular file",
+    )
+}
+
+fn read_attachment_file(path: &Path) -> io::Result<Vec<u8>> {
+    let link_metadata = std::fs::symlink_metadata(path)?;
+    if !link_metadata.file_type().is_file() {
+        return Err(invalid_attachment_source());
+    }
+
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(invalid_attachment_source());
+    }
+    if metadata.len() > MAX_ARTIFACT_UPLOAD_BYTES as u64 {
+        return Err(attachment_too_large());
+    }
+
+    let capacity = usize::try_from(metadata.len())
+        .unwrap_or(MAX_ARTIFACT_UPLOAD_BYTES)
+        .min(MAX_ARTIFACT_UPLOAD_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut chunk = [0_u8; ATTACHMENT_READ_CHUNK_SIZE];
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(read) > MAX_ARTIFACT_UPLOAD_BYTES {
+            return Err(attachment_too_large());
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+
+    // The size can change after the initial metadata check. Keep the bound in
+    // force even when a file is replaced or grows while it is being read.
+    if bytes.len() > MAX_ARTIFACT_UPLOAD_BYTES
+        || file.metadata()?.len() > MAX_ARTIFACT_UPLOAD_BYTES as u64
+    {
+        return Err(attachment_too_large());
+    }
+    Ok(bytes)
+}
+
+fn read_attachment_bytes(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    if bytes.len() > MAX_ARTIFACT_UPLOAD_BYTES {
+        return Err(attachment_too_large());
+    }
+    Ok(bytes.to_vec())
 }
 
 pub async fn connect(config: ConnectionConfig) -> Result<ConnectionResult, String> {
@@ -203,6 +285,40 @@ pub async fn submit(
     root_id: &str,
     submission: &mut Submission,
 ) -> Result<(), String> {
+    if !submission.uploads.is_empty() {
+        let pending_uploads = std::mem::take(&mut submission.uploads);
+        for (index, upload) in pending_uploads.iter().cloned().enumerate() {
+            let source = match (upload.path.as_deref(), upload.bytes.as_deref()) {
+                (Some(path), None) => read_attachment_file(Path::new(path)),
+                (None, Some(bytes)) => read_attachment_bytes(bytes),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "attachment upload has no unambiguous source",
+                )),
+            };
+            let bytes = match source {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    submission
+                        .uploads
+                        .extend(pending_uploads[index..].iter().cloned());
+                    return Err(format!("Read attachment: {error}"));
+                }
+            };
+            match client
+                .upload_artifact(session_id, bytes, &upload.media_type)
+                .await
+            {
+                Ok(artifact) => submission.attachments.push(artifact),
+                Err(error) => {
+                    submission
+                        .uploads
+                        .extend(pending_uploads[index..].iter().cloned());
+                    return Err(error_message("Upload attachment", &error));
+                }
+            }
+        }
+    }
     if let Some(run_id) = submission.active_run_id.as_deref() {
         if let Some(reference) = &submission.child_activity {
             client
@@ -211,6 +327,7 @@ pub async fn submit(
                     &submission.idempotency_key,
                     &kiln_protocol::ReactToRunActivityRequest {
                         content: submission.content.clone(),
+                        attachments: submission.attachments.clone(),
                         child_activity: reference.clone(),
                     },
                 )
@@ -224,6 +341,7 @@ pub async fn submit(
                 &submission.idempotency_key,
                 &SendRunInputRequest {
                     content: submission.content.clone(),
+                    attachments: submission.attachments.clone(),
                     delivery_mode: MessageDeliveryMode::Queued,
                 },
             )
@@ -239,8 +357,10 @@ pub async fn submit(
         let append_result = client
             .append_message(
                 session_id,
+                &submission.idempotency_key,
                 &AppendMessageRequest {
                     content: submission.content.clone(),
+                    attachments: submission.attachments.clone(),
                 },
             )
             .await;

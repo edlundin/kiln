@@ -9,7 +9,7 @@ use std::sync::Arc;
 use gpui::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 
-gpui::actions!(kiln, [Quit]);
+gpui::actions!(kiln, [Quit, PasteAttachments]);
 
 fn main() {
     let runtime = match tokio::runtime::Runtime::new() {
@@ -28,7 +28,11 @@ fn main() {
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
         theme::apply(cx);
-        cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
+        cx.bind_keys([
+            gpui::KeyBinding::new("cmd-q", Quit, None),
+            gpui::KeyBinding::new("cmd-v", PasteAttachments, Some("KilnComposer")),
+            gpui::KeyBinding::new("ctrl-v", PasteAttachments, Some("KilnComposer")),
+        ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {

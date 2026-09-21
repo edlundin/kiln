@@ -14,6 +14,7 @@ pub struct TranscriptItem {
     pub detail: Option<String>,
     pub run_id: Option<String>,
     pub delivery: Option<MessageDeliveryState>,
+    pub attachments: Vec<ArtifactResponse>,
 }
 
 #[derive(Clone)]
@@ -186,13 +187,23 @@ impl Conversation {
                     MessageRole::User => "You",
                     MessageRole::Assistant => "Kiln",
                 };
+                for attachment in &message.attachments {
+                    self.artifacts
+                        .insert(attachment.content_hash.clone(), attachment.clone());
+                }
+                let content = if message.content.is_empty() {
+                    format!("{} attachment(s)", message.attachments.len())
+                } else {
+                    message.content.clone()
+                };
                 self.replace_entry(TranscriptItem {
                     id: key,
                     source_event_id,
                     actor: actor.to_owned(),
-                    content: message.content,
+                    content,
                     run_id: message.target_run_id.or(message.origin_run_id),
                     delivery: None,
+                    attachments: message.attachments,
                     detail: match message.status {
                         MessageStatus::Complete => message.child_activity.map(|reference| {
                             format!(
@@ -217,6 +228,7 @@ impl Conversation {
                     run_id: Some(output.run_id),
                     detail: None,
                     delivery: None,
+                    attachments: Vec::new(),
                 });
             }
             Event::RunCreated {
@@ -299,6 +311,7 @@ impl Conversation {
                     run_id: Some(run_id),
                     detail: None,
                     delivery: None,
+                    attachments: Vec::new(),
                 });
             }
             Event::ArtifactRegistered {
@@ -320,6 +333,7 @@ impl Conversation {
                     run_id: Some(run_id),
                     detail: Some("Stored by the daemon".to_owned()),
                     delivery: None,
+                    attachments: Vec::new(),
                 });
             }
             _ => {}

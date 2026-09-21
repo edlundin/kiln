@@ -1,19 +1,34 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, Entity, FontWeight, IntoElement, RenderOnce, Role, SharedString, Window, div,
-    prelude::*, px,
+    App, ClickEvent, Entity, ExternalPaths, FontWeight, IntoElement, RenderOnce, Role,
+    SharedString, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    Disableable, Selectable, Sizable,
+    Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     input::{Textarea, TextareaState},
 };
 use kiln_protocol::{RunState, TaskState};
 
-use crate::theme;
+use crate::{PasteAttachments, theme};
 
-type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+pub type DropHandler = Rc<dyn Fn(&ExternalPaths, &mut Window, &mut App)>;
+pub type PasteHandler = Rc<dyn Fn(&PasteAttachments, &mut Window, &mut App)>;
+
+#[derive(Clone)]
+pub enum AttachmentThumbnail {
+    Icon(IconName),
+}
+
+#[derive(Clone)]
+pub struct AttachmentChip {
+    pub label: SharedString,
+    pub thumbnail: Option<AttachmentThumbnail>,
+    pub retry: Option<ClickHandler>,
+    pub remove: ClickHandler,
+}
 
 #[derive(IntoElement)]
 pub struct TranscriptRow {
@@ -24,6 +39,8 @@ pub struct TranscriptRow {
     reaction_disabled: bool,
     artifact: Option<ClickHandler>,
     artifact_disabled: bool,
+    attachment_actions: Vec<(SharedString, ClickHandler)>,
+    attachment_actions_disabled: bool,
 }
 
 impl TranscriptRow {
@@ -36,6 +53,8 @@ impl TranscriptRow {
             reaction_disabled: false,
             artifact: None,
             artifact_disabled: false,
+            attachment_actions: Vec::new(),
+            attachment_actions_disabled: false,
         }
     }
 
@@ -63,11 +82,26 @@ impl TranscriptRow {
         self.artifact_disabled = disabled;
         self
     }
+
+    pub fn attachment_action(
+        mut self,
+        label: impl Into<SharedString>,
+        disabled: bool,
+        on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.attachment_actions
+            .push((label.into(), Rc::new(on_open)));
+        self.attachment_actions_disabled = disabled;
+        self
+    }
 }
 
 impl RenderOnce for TranscriptRow {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let role = if self.reaction.is_some() || self.artifact.is_some() {
+        let role = if self.reaction.is_some()
+            || self.artifact.is_some()
+            || !self.attachment_actions.is_empty()
+        {
             Role::Group
         } else {
             Role::Label
@@ -117,7 +151,18 @@ impl RenderOnce for TranscriptRow {
                         .disabled(self.artifact_disabled)
                         .on_click(move |event, window, cx| on_open(event, window, cx)),
                 )
-            });
+            })
+            .children(self.attachment_actions.into_iter().enumerate().map(
+                |(index, (label, on_open))| {
+                    Button::new(format!("open-attachment-{index}"))
+                        .label(label.clone())
+                        .accessibility_label(label)
+                        .small()
+                        .ghost()
+                        .disabled(self.attachment_actions_disabled)
+                        .on_click(move |event, window, cx| on_open(event, window, cx))
+                },
+            ));
 
         div()
             .id("transcript-row")
@@ -509,6 +554,10 @@ pub struct Composer {
     on_stop: ClickHandler,
     disabled: bool,
     reference: Option<(SharedString, ClickHandler)>,
+    attachments: Vec<AttachmentChip>,
+    on_attach: Option<ClickHandler>,
+    on_drop: Option<DropHandler>,
+    on_paste: Option<PasteHandler>,
 }
 
 impl Composer {
@@ -527,6 +576,10 @@ impl Composer {
             on_stop: Rc::new(on_stop),
             disabled: false,
             reference: None,
+            attachments: Vec::new(),
+            on_attach: None,
+            on_drop: None,
+            on_paste: None,
         }
     }
 
@@ -541,6 +594,35 @@ impl Composer {
         on_clear: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.reference = Some((label.into(), Rc::new(on_clear)));
+        self
+    }
+
+    pub fn attachments(mut self, attachments: Vec<AttachmentChip>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    pub fn on_attach(
+        mut self,
+        on_attach: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_attach = Some(Rc::new(on_attach));
+        self
+    }
+
+    pub fn on_drop(
+        mut self,
+        on_drop: impl Fn(&ExternalPaths, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_drop = Some(Rc::new(on_drop));
+        self
+    }
+
+    pub fn on_paste(
+        mut self,
+        on_paste: impl Fn(&PasteAttachments, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_paste = Some(Rc::new(on_paste));
         self
     }
 }
@@ -569,7 +651,67 @@ impl RenderOnce for Composer {
                 })
         };
 
+        let attachment_button = self.on_attach.map(|on_attach| {
+            Button::new("composer-attach")
+                .label("Attach")
+                .small()
+                .disabled(self.disabled)
+                .on_click(move |event, window, cx| on_attach(event, window, cx))
+        });
+        let attachment_list =
+            self.attachments
+                .iter()
+                .fold(div().flex().flex_wrap().gap_1(), |row, attachment| {
+                    let remove = attachment.remove.clone();
+                    let thumbnail = attachment
+                        .thumbnail
+                        .clone()
+                        .map(|thumbnail| match thumbnail {
+                            AttachmentThumbnail::Icon(icon) => Icon::new(icon),
+                        });
+                    row.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_1()
+                            .border_1()
+                            .border_color(theme::BORDER)
+                            .rounded(theme::RADIUS_SMALL)
+                            .when_some(thumbnail, |chip, thumbnail| chip.child(thumbnail.size_8()))
+                            .child(attachment.label.clone())
+                            .when_some(attachment.retry.clone(), |chip, retry| {
+                                chip.child(
+                                    Button::new("retry-attachment")
+                                        .label("Retry")
+                                        .small()
+                                        .on_click(move |event, window, cx| {
+                                            retry(event, window, cx)
+                                        }),
+                                )
+                            })
+                            .child(
+                                Button::new("remove-attachment")
+                                    .label("Remove")
+                                    .small()
+                                    .on_click(move |event, window, cx| remove(event, window, cx)),
+                            ),
+                    )
+                });
+        let on_drop = self.on_drop;
+        let on_paste = self.on_paste;
         let composer = div()
+            .key_context("KilnComposer")
+            .when_some(on_drop, |composer, on_drop| {
+                composer.on_drop(move |paths: &ExternalPaths, window, cx| {
+                    on_drop(paths, window, cx);
+                })
+            })
+            .when_some(on_paste, |composer, on_paste| {
+                composer.on_action(move |action: &PasteAttachments, window, cx| {
+                    on_paste(action, window, cx);
+                })
+            })
             .w_full()
             .max_w(theme::TRANSCRIPT_WIDTH)
             .h(px(164.0))
@@ -587,6 +729,14 @@ impl RenderOnce for Composer {
                     .flex_1()
                     .aria_label("Message to root Run")
                     .disabled(self.disabled),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(attachment_button, |row, button| row.child(button))
+                    .child(attachment_list),
             )
             .child(
                 div()

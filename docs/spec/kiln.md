@@ -591,7 +591,7 @@ can add attachments with the picker, drag and drop, or paste. The picker does
 not restrict selection to images.
 
 Each attachment moves through `local`, `uploading`, `ready`, or `failed` in
-client state. Image attachments show a thumbnail. Other files show name,
+client state. Image attachments show a safe metadata icon. Other files show name,
 media type, and size. The send action waits until every retained attachment is
 ready. A failed attachment remains visible with `Retry` and `Remove` actions.
 
@@ -700,6 +700,10 @@ cancel the root run without curl or a Rust test client.
 
 ### Phase 3 — Provider, MCP, and plugin boundaries
 
+EDL-251 settles `openai_codex_subscription` as the primary native provider and
+`openai_api` as a separate BYOK provider type. Their account, secret-store, and
+transport implementation remains pending.
+
 - implement one direct provider adapter;
 - implement one harness adapter as a compatibility path;
 - implement the plugin host and Rust SDK;
@@ -759,7 +763,7 @@ The following work still needs an implementation decision before its phase:
 - the GPUI-compatible terminal renderer;
 - local authentication and remote enrollment;
 - Git isolation strategy for concurrent repository work;
-- first direct provider and its data-retention policy;
+- first direct provider implementation and its data-retention disclosure;
 - whether client-specific UI extensions need a signed package format.
 
 These are named decisions with owners and phase gates. They are not reasons to

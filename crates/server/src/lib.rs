@@ -5,6 +5,7 @@ use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 use axum::{
     Json, Router,
     body::Bytes,
+    body::{Body, to_bytes},
     extract::{
         FromRequest, Path, Query, Request, State, WebSocketUpgrade,
         rejection::QueryRejection,
@@ -35,14 +36,14 @@ use kiln_core::{
     WorkspaceOperations,
 };
 use kiln_protocol::{
-    ARTIFACT_PATH, AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest,
-    ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
+    ARTIFACT_PATH, ARTIFACT_SESSION_HEADER, ARTIFACTS_PATH, AppendMessageRequest, ApprovalDecision,
+    ApprovalDecisionRequest, ApprovalPolicy as ProtocolApprovalPolicy, ApprovalResponse,
     ApprovalState as ProtocolApprovalState, ArtifactResponse, AssignTaskRequest,
     ChangedFileResponse, ChildActivityReference, CreateTaskRequest, CreateWorkspaceRequest,
     EVENTS_WEBSOCKET_PATH, IDEMPOTENCY_KEY_HEADER, ListSessionsResponse, ListWorkspacesResponse,
-    MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
-    MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
+    MAX_ARTIFACT_UPLOAD_BYTES, MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState,
+    MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
+    PROTOCOL_VERSION, ProblemDetails, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH,
     RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
     SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
     SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest,
@@ -174,6 +175,22 @@ pub trait ArtifactOperations: Send + Sync {
         &self,
         content_hash: ContentHash,
     ) -> impl Future<Output = Result<ArtifactDownload, ArtifactFetchError>> + Send;
+    fn upload_artifact(
+        &self,
+        session_id: SessionId,
+        bytes: Vec<u8>,
+        media_type: String,
+    ) -> impl Future<Output = Result<Artifact, ArtifactUploadError>> + Send;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ArtifactUploadError {
+    #[error("artifact upload is too large")]
+    TooLarge,
+    #[error("artifact media type is invalid")]
+    InvalidMediaType,
+    #[error("artifact store is unavailable")]
+    Unavailable,
 }
 
 const WEBSOCKET_AUTH_PREFIX: &str = "kiln.auth.";
@@ -478,6 +495,7 @@ where
         .route(RUN_REACTIONS_PATH, post(react_to_run_activity))
         .route(RUN_CANCEL_PATH, post(cancel_run))
         .route(TOOL_CALL_APPROVAL_PATH, post(decide_approval))
+        .route(ARTIFACTS_PATH, post(upload_artifact))
         .route(ARTIFACT_PATH, get(get_artifact))
         .route(EVENTS_WEBSOCKET_PATH, get(events))
         .method_not_allowed_fallback(method_not_allowed)
@@ -742,6 +760,7 @@ where
 async fn append_message<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
     StrictJson(request): StrictJson<AppendMessageRequest>,
 ) -> Result<impl IntoResponse, PublicError>
 where
@@ -756,6 +775,8 @@ where
         .append_message(AppendMessage {
             session_id,
             content: request.content,
+            attachments: parse_attachments(request.attachments)?,
+            idempotency_key: required_idempotency_key(&headers)?,
         })
         .await
         .map_err(PublicError::from)?;
@@ -1013,6 +1034,7 @@ where
         .send_run_input(SendRunInput {
             run_id: RunId::parse(run_id).map_err(|_| PublicError::InvalidRequest)?,
             content: request.content,
+            attachments: parse_attachments(request.attachments)?,
             delivery_mode: match request.delivery_mode {
                 MessageDeliveryMode::Queued => CoreMessageDeliveryMode::Queued,
                 MessageDeliveryMode::Interrupt => CoreMessageDeliveryMode::Interrupt,
@@ -1044,6 +1066,7 @@ where
         .react_to_run_activity(ReactToRunActivity {
             run_id: RunId::parse(run_id).map_err(|_| PublicError::InvalidRequest)?,
             content: request.content,
+            attachments: parse_attachments(request.attachments)?,
             child_activity: CoreChildActivityReference {
                 run_id: RunId::parse(request.child_activity.run_id)
                     .map_err(|_| PublicError::InvalidRequest)?,
@@ -1181,6 +1204,47 @@ where
         HeaderValue::from_static("same-origin"),
     );
     Ok(response)
+}
+
+async fn upload_artifact<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    headers: axum::http::HeaderMap,
+    body: Body,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + ArtifactOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let session_id = headers
+        .get(ARTIFACT_SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(PublicError::InvalidRequest)
+        .and_then(|value| SessionId::parse(value).map_err(|_| PublicError::InvalidRequest))?;
+    if headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_ARTIFACT_UPLOAD_BYTES as u64)
+    {
+        return Err(PublicError::ArtifactUpload(ArtifactUploadError::TooLarge));
+    }
+    let bytes = to_bytes(body, MAX_ARTIFACT_UPLOAD_BYTES)
+        .await
+        .map_err(|_| PublicError::ArtifactUpload(ArtifactUploadError::TooLarge))?
+        .to_vec();
+    let media_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let artifact = state
+        .run_operations
+        .upload_artifact(session_id, bytes, media_type)
+        .await
+        .map_err(PublicError::from)?;
+    Ok((StatusCode::CREATED, Json(artifact_response(&artifact))))
 }
 
 async fn cancel_run<W, S, R>(
@@ -1355,6 +1419,11 @@ fn message_response(message: &Message) -> MessageResponse {
             CoreMessageRole::Assistant => MessageRole::Assistant,
         },
         content: message.content().to_owned(),
+        attachments: message
+            .attachments()
+            .iter()
+            .map(artifact_response)
+            .collect(),
         status: match message.status() {
             kiln_core::MessageStatus::Complete => kiln_protocol::MessageStatus::Complete,
             kiln_core::MessageStatus::Incomplete => kiln_protocol::MessageStatus::Incomplete,
@@ -1652,6 +1721,22 @@ fn artifact_response(artifact: &Artifact) -> ArtifactResponse {
         media_type: artifact.media_type().to_owned(),
         size: artifact.size().to_string(),
     }
+}
+
+fn parse_attachments(values: Vec<ArtifactResponse>) -> Result<Vec<Artifact>, PublicError> {
+    values
+        .into_iter()
+        .map(|value| {
+            let content_hash =
+                ContentHash::parse(value.content_hash).map_err(|_| PublicError::InvalidRequest)?;
+            let size = value
+                .size
+                .parse::<u64>()
+                .map_err(|_| PublicError::InvalidRequest)?;
+            Artifact::new(content_hash, value.media_type, size)
+                .map_err(|_| PublicError::InvalidRequest)
+        })
+        .collect()
 }
 
 fn run_state_response(state: CoreRunState) -> RunState {
@@ -2271,6 +2356,8 @@ enum PublicError {
     Run(RunError),
     #[error("artifact operation failed")]
     Artifact(ArtifactFetchError),
+    #[error("artifact upload failed")]
+    ArtifactUpload(ArtifactUploadError),
     #[error("usage query failed")]
     Usage(UsageQueryError),
     #[error("daemon is shutting down")]
@@ -2304,6 +2391,12 @@ impl From<RunError> for PublicError {
 impl From<ArtifactFetchError> for PublicError {
     fn from(error: ArtifactFetchError) -> Self {
         Self::Artifact(error)
+    }
+}
+
+impl From<ArtifactUploadError> for PublicError {
+    fn from(error: ArtifactUploadError) -> Self {
+        Self::ArtifactUpload(error)
     }
 }
 
@@ -2510,6 +2603,16 @@ impl PublicError {
                     StatusCode::BAD_REQUEST,
                     error_code::MESSAGE_CONTENT_REQUIRED,
                     "Invalid Message",
+                ),
+                SessionError::IdempotencyKeyRequired => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::IDEMPOTENCY_KEY_REQUIRED,
+                    "Missing Idempotency-Key",
+                ),
+                SessionError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Idempotency conflict",
                 ),
                 SessionError::InvalidMessageOrigin => (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2728,6 +2831,23 @@ impl PublicError {
                     "Artifact not found",
                 ),
                 ArtifactFetchError::Unavailable => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::ARTIFACT_STORE_UNAVAILABLE,
+                    "Artifact store unavailable",
+                ),
+            },
+            Self::ArtifactUpload(error) => match error {
+                ArtifactUploadError::TooLarge => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    error_code::INVALID_REQUEST,
+                    "Artifact upload is too large",
+                ),
+                ArtifactUploadError::InvalidMediaType => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::INVALID_REQUEST,
+                    "Artifact media type is invalid",
+                ),
+                ArtifactUploadError::Unavailable => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::ARTIFACT_STORE_UNAVAILABLE,
                     "Artifact store unavailable",

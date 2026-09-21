@@ -895,6 +895,7 @@ pub struct Message {
     status: MessageStatus,
     origin: Option<AssistantMessageOrigin>,
     child_activity: Option<ChildActivityReference>,
+    attachments: Vec<Artifact>,
 }
 
 pub struct PersistedMessage {
@@ -905,6 +906,7 @@ pub struct PersistedMessage {
     pub target_run_id: Option<RunId>,
     pub status: MessageStatus,
     pub origin: Option<AssistantMessageOrigin>,
+    pub attachments: Vec<Artifact>,
 }
 
 impl Message {
@@ -914,7 +916,17 @@ impl Message {
         role: MessageRole,
         content: String,
     ) -> Result<Self, SessionError> {
-        Self::new_with_target(id, session_id, role, content, None)
+        Self::new_with_target_and_attachments(id, session_id, role, content, None, Vec::new())
+    }
+
+    pub fn new_with_attachments(
+        id: MessageId,
+        session_id: SessionId,
+        role: MessageRole,
+        content: String,
+        attachments: Vec<Artifact>,
+    ) -> Result<Self, SessionError> {
+        Self::new_with_target_and_attachments(id, session_id, role, content, None, attachments)
     }
 
     pub fn new_targeted(
@@ -924,20 +936,46 @@ impl Message {
         content: String,
         target_run_id: RunId,
     ) -> Result<Self, SessionError> {
-        Self::new_with_target(id, session_id, role, content, Some(target_run_id))
+        Self::new_with_target_and_attachments(
+            id,
+            session_id,
+            role,
+            content,
+            Some(target_run_id),
+            Vec::new(),
+        )
     }
 
-    fn new_with_target(
+    pub fn new_targeted_with_attachments(
+        id: MessageId,
+        session_id: SessionId,
+        role: MessageRole,
+        content: String,
+        target_run_id: RunId,
+        attachments: Vec<Artifact>,
+    ) -> Result<Self, SessionError> {
+        Self::new_with_target_and_attachments(
+            id,
+            session_id,
+            role,
+            content,
+            Some(target_run_id),
+            attachments,
+        )
+    }
+
+    fn new_with_target_and_attachments(
         id: MessageId,
         session_id: SessionId,
         role: MessageRole,
         content: String,
         target_run_id: Option<RunId>,
+        attachments: Vec<Artifact>,
     ) -> Result<Self, SessionError> {
         if role != MessageRole::User {
             return Err(SessionError::InvalidMessageOrigin);
         }
-        if content.trim().is_empty() {
+        if content.trim().is_empty() && attachments.is_empty() {
             return Err(SessionError::MessageContentRequired);
         }
         Ok(Self {
@@ -949,6 +987,7 @@ impl Message {
             status: MessageStatus::Complete,
             origin: None,
             child_activity: None,
+            attachments,
         })
     }
 
@@ -971,21 +1010,26 @@ impl Message {
             status,
             origin: Some(origin),
             child_activity: None,
+            attachments: Vec::new(),
         })
     }
 
     pub fn from_persisted(value: PersistedMessage) -> Result<Self, SessionError> {
         match (value.role, value.status, value.origin, value.target_run_id) {
             (MessageRole::User, MessageStatus::Complete, None, target_run_id) => {
-                Self::new_with_target(
+                Self::new_with_target_and_attachments(
                     value.id,
                     value.session_id,
                     value.role,
                     value.content,
                     target_run_id,
+                    value.attachments,
                 )
             }
             (MessageRole::Assistant, status, Some(origin), None) => {
+                if !value.attachments.is_empty() {
+                    return Err(SessionError::InvalidMessageOrigin);
+                }
                 Self::new_assistant(value.id, value.session_id, origin, status, value.content)
             }
             _ => Err(SessionError::InvalidMessageOrigin),
@@ -1022,6 +1066,21 @@ impl Message {
 
     pub fn child_activity(&self) -> Option<&ChildActivityReference> {
         self.child_activity.as_ref()
+    }
+
+    pub fn attachments(&self) -> &[Artifact] {
+        &self.attachments
+    }
+
+    pub fn with_attachments(mut self, attachments: Vec<Artifact>) -> Result<Self, SessionError> {
+        if self.role != MessageRole::User && !attachments.is_empty() {
+            return Err(SessionError::InvalidMessageOrigin);
+        }
+        if self.content.trim().is_empty() && attachments.is_empty() {
+            return Err(SessionError::MessageContentRequired);
+        }
+        self.attachments = attachments;
+        Ok(self)
     }
 
     pub fn with_child_activity(
@@ -3955,6 +4014,8 @@ impl SessionEventPage {
 pub struct AppendMessage {
     pub session_id: SessionId,
     pub content: String,
+    pub attachments: Vec<Artifact>,
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4039,6 +4100,7 @@ pub fn canonical_model_invocation_request_bytes(command: &CreateModelInvocation)
 pub struct SendRunInput {
     pub run_id: RunId,
     pub content: String,
+    pub attachments: Vec<Artifact>,
     pub delivery_mode: MessageDeliveryMode,
     pub idempotency_key: String,
 }
@@ -4047,6 +4109,7 @@ pub struct SendRunInput {
 pub struct ReactToRunActivity {
     pub run_id: RunId,
     pub content: String,
+    pub attachments: Vec<Artifact>,
     pub child_activity: ChildActivityReference,
     pub idempotency_key: String,
 }
@@ -4194,6 +4257,8 @@ pub enum SessionError {
     WorkspaceRootNotFound,
     SessionNotFound,
     MessageContentRequired,
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
     InvalidMessageOrigin,
     WorkspaceStoreUnavailable,
     SessionStoreUnavailable,
@@ -4550,7 +4615,8 @@ pub trait SessionStore: Send + Sync {
         &self,
         message: &Message,
         event: &SessionEvent,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+        idempotency_key: &str,
+    ) -> impl Future<Output = Result<Message, StoreError>> + Send;
     fn list_session_events(
         &self,
         session_id: &SessionId,
@@ -5147,6 +5213,7 @@ where
             SendRunInput {
                 run_id: command.run_id,
                 content: command.content,
+                attachments: command.attachments,
                 delivery_mode: MessageDeliveryMode::Queued,
                 idempotency_key: command.idempotency_key,
             },
@@ -5164,12 +5231,13 @@ where
             return Err(RunError::IdempotencyKeyRequired);
         }
         let run = self.get_run(command.run_id.clone()).await?.run;
-        let message = Message::new_targeted(
+        let message = Message::new_targeted_with_attachments(
             self.ids.message_id(),
             run.session_id().clone(),
             MessageRole::User,
             command.content,
             command.run_id,
+            command.attachments,
         )
         .map_err(|_| RunError::InputContentRequired)?;
         let message = match reference {
@@ -5960,19 +6028,26 @@ where
     }
 
     pub async fn append_message(&self, command: AppendMessage) -> Result<Message, SessionError> {
+        if command.idempotency_key.is_empty() {
+            return Err(SessionError::IdempotencyKeyRequired);
+        }
         self.get_session(command.session_id.clone()).await?;
-        let message = Message::new(
+        let message = Message::new_with_attachments(
             self.ids.message_id(),
             command.session_id,
             MessageRole::User,
             command.content,
+            command.attachments,
         )?;
         let event = SessionEvent::message_appended(self.ids.event_id(), message.clone());
         self.session_store
-            .append_message(&message, &event)
+            .append_message(&message, &event, &command.idempotency_key)
             .await
-            .map_err(|_| SessionError::SessionStoreUnavailable)?;
-        Ok(message)
+            .map_err(|error| match error {
+                StoreError::IdempotencyConflict => SessionError::IdempotencyConflict,
+                StoreError::IdempotencyKeyRequired => SessionError::IdempotencyKeyRequired,
+                _ => SessionError::SessionStoreUnavailable,
+            })
     }
 
     pub async fn list_session_events(
@@ -6372,6 +6447,8 @@ pub enum RootDiscoveryError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreError {
+    IdempotencyKeyRequired,
+    IdempotencyConflict,
     Unavailable,
 }
 

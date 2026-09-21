@@ -5,9 +5,10 @@ use std::net::SocketAddr;
 
 use futures_util::{SinkExt, StreamExt};
 use kiln_protocol::{
-    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, AppendMessageRequest, ApprovalDecisionRequest,
-    CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
-    ClientIdentity, CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
+    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ARTIFACT_SESSION_HEADER, ARTIFACTS_PATH,
+    AppendMessageRequest, ApprovalDecisionRequest, ArtifactResponse, CANCEL_RUN_OPERATION_ID,
+    CREATE_SESSION_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ClientIdentity,
+    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
     GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
     GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
     LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
@@ -21,8 +22,8 @@ use kiln_protocol::{
     SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
     START_CHILD_RUN_OPERATION_ID, START_RUN_OPERATION_ID, SessionChangeDiffResponse,
     SessionChangesResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
-    StartChildRunRequest, StartRunRequest, TOOL_CALL_APPROVAL_PATH, USAGE_PATH,
-    UsageLedgerResponse, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    StartChildRunRequest, StartRunRequest, TOOL_CALL_APPROVAL_PATH, UPLOAD_ARTIFACT_OPERATION_ID,
+    USAGE_PATH, UsageLedgerResponse, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
     WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
 };
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
@@ -283,6 +284,7 @@ impl Client {
     pub async fn append_message(
         &self,
         session_id: &str,
+        idempotency_key: &str,
         request: &AppendMessageRequest,
     ) -> Result<MessageResponse, Error> {
         let path = path_with_segment(
@@ -293,7 +295,8 @@ impl Client {
         )?;
         self.send_json(
             APPEND_MESSAGE_OPERATION_ID,
-            self.http.post(self.http_url(&path)).json(request),
+            with_idempotency_key(self.http.post(self.http_url(&path)), idempotency_key)?
+                .json(request),
         )
         .await
     }
@@ -441,6 +444,21 @@ impl Client {
         }
         self.send_json(LIST_USAGE_OPERATION_ID, self.http.get(url))
             .await
+    }
+
+    pub async fn upload_artifact(
+        &self,
+        session_id: &str,
+        bytes: Vec<u8>,
+        media_type: &str,
+    ) -> Result<ArtifactResponse, Error> {
+        let request = self
+            .http
+            .post(self.http_url(ARTIFACTS_PATH))
+            .header(ARTIFACT_SESSION_HEADER, session_id)
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .body(bytes);
+        self.send_json(UPLOAD_ARTIFACT_OPERATION_ID, request).await
     }
 
     pub async fn get_artifact(&self, content_hash: &str) -> Result<ArtifactDownload, Error> {

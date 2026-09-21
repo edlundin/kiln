@@ -52,6 +52,7 @@ pub(super) fn parse_message_row(
         status: MessageStatus::parse(&field("status")?)
             .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
         origin,
+        attachments: Vec::new(),
     })
     .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
     match (
@@ -89,6 +90,40 @@ pub(super) async fn load_message(
         return Ok(None);
     };
     let message = parse_message_row(&row)?;
+    let attachment_rows = sqlx::query(
+        "SELECT a.content_hash, a.media_type, a.size
+         FROM message_attachments ma
+         JOIN artifacts a ON a.content_hash = ma.content_hash
+         WHERE ma.message_id = ?
+         ORDER BY ma.position ASC",
+    )
+    .bind(message_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| AssistantMessageStoreError::Unavailable)?;
+    let mut attachments = Vec::with_capacity(attachment_rows.len());
+    for row in attachment_rows {
+        let hash = ContentHash::parse(
+            row.try_get::<String, _>("content_hash")
+                .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
+        )
+        .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
+        let media_type = row
+            .try_get::<String, _>("media_type")
+            .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
+        let size = u64::try_from(
+            row.try_get::<i64, _>("size")
+                .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
+        )
+        .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
+        attachments.push(
+            Artifact::new(hash, media_type, size)
+                .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?,
+        );
+    }
+    let message = message
+        .with_attachments(attachments)
+        .map_err(|_| AssistantMessageStoreError::IntegrityViolation)?;
     if message.id() != message_id {
         return Err(AssistantMessageStoreError::IntegrityViolation);
     }

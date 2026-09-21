@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use kiln_core::{
     ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, ModelInvocationApplication,
@@ -12,8 +12,10 @@ use kiln_infrastructure::{
     DeterministicSubprocessExecutor, FileArtifactStore, SqliteStore, UlidIdGenerator,
     validate_subprocess_request,
 };
+use kiln_providers::ProviderRegistry;
 use kiln_server::{
-    ArtifactDownload, ArtifactFetchError, ArtifactOperations, EventBroadcaster, RunOperations,
+    ArtifactDownload, ArtifactFetchError, ArtifactOperations, ArtifactUploadError,
+    EventBroadcaster, RunOperations,
 };
 use tokio::sync::{Mutex, Notify, oneshot, watch};
 
@@ -35,6 +37,7 @@ pub(crate) struct RunService {
     runs: Arc<RunApplication<SqliteStore, UlidIdGenerator>>,
     executor: DeterministicSubprocessExecutor,
     deterministic_model: bool,
+    provider_registry: Arc<ProviderRegistry>,
     events: EventBroadcaster,
     commit_sequence: Arc<Mutex<()>>,
     active: Arc<ActiveRuns>,
@@ -55,6 +58,7 @@ impl RunService {
             runs: Arc::new(runs),
             executor,
             deterministic_model: false,
+            provider_registry: Arc::new(ProviderRegistry::new()),
             events,
             commit_sequence: Arc::new(Mutex::new(())),
             active: Arc::new(ActiveRuns::default()),
@@ -66,6 +70,11 @@ impl RunService {
 
     pub(crate) fn with_deterministic_model(mut self, enabled: bool) -> Self {
         self.deterministic_model = enabled;
+        self
+    }
+
+    pub(crate) fn with_provider_registry(mut self, registry: ProviderRegistry) -> Self {
+        self.provider_registry = Arc::new(registry);
         self
     }
 
@@ -990,6 +999,35 @@ impl ArtifactOperations for RunService {
                 .map_err(|_| ArtifactFetchError::Unavailable)?
                 .ok_or(ArtifactFetchError::Unavailable)?;
             ArtifactDownload::new(artifact, bytes)
+        }
+    }
+
+    fn upload_artifact(
+        &self,
+        session_id: kiln_core::SessionId,
+        bytes: Vec<u8>,
+        media_type: String,
+    ) -> impl Future<Output = Result<kiln_core::Artifact, ArtifactUploadError>> + Send {
+        let service = self.clone();
+        async move {
+            let probe_hash = ContentHash::parse(&"0".repeat(64))
+                .map_err(|_| ArtifactUploadError::InvalidMediaType)?;
+            Artifact::new(
+                probe_hash,
+                &media_type,
+                u64::try_from(bytes.len()).map_err(|_| ArtifactUploadError::TooLarge)?,
+            )
+            .map_err(|_| ArtifactUploadError::InvalidMediaType)?;
+            let artifact = service
+                .artifacts
+                .store(&bytes, &media_type)
+                .map_err(|_| ArtifactUploadError::Unavailable)?;
+            service
+                .store
+                .register_artifact_owner(&session_id, &artifact)
+                .await
+                .map_err(|_| ArtifactUploadError::Unavailable)?;
+            Ok(artifact)
         }
     }
 }

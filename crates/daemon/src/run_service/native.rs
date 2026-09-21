@@ -6,15 +6,14 @@ use kiln_core::{
     CreateContextManifest, CreateModelInvocation, GenerationSettings, MessageDeliveryMode,
     MessageDeliveryState, ModelCapabilitySnapshot, ModelId, ModelInvocation,
     ModelInvocationCompletionKind, ModelInvocationFailureReason, ModelInvocationId,
-    ModelInvocationPurpose, ModelInvocationSettings, ModelProvider, ModelProviderOperation,
-    NativeRunApplication, ProviderAccountId, ProviderApplication, ProviderClaim, ProviderError,
-    ProviderType, ProviderUpdate, ProviderUpdateMutation, ProviderUsageMetadata,
-    ProviderUsageUpdate, ReasoningSettings, RecordRunInputDelivery, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageSource,
+    ModelInvocationPurpose, ModelInvocationSettings, ModelProviderOperation, NativeRunApplication,
+    ProviderAccountId, ProviderApplication, ProviderClaim, ProviderError, ProviderType,
+    ProviderUpdate, ProviderUpdateMutation, ProviderUsageMetadata, ProviderUsageUpdate,
+    ReasoningSettings, RecordRunInputDelivery, UsageAccounting, UsageCompleteness, UsageFinality,
+    UsageSource,
 };
 use kiln_providers::{
-    DETERMINISTIC_MODEL_ID, DETERMINISTIC_PROVIDER_TYPE, DeterministicModelProvider,
-    DeterministicModelResponse,
+    DETERMINISTIC_MODEL_ID, DETERMINISTIC_PROVIDER_ACCOUNT_ID, DETERMINISTIC_PROVIDER_TYPE,
 };
 
 use super::*;
@@ -53,7 +52,8 @@ impl RunService {
         for (_, snapshot) in ordered {
             if snapshot.model_invocations().iter().any(|invocation| {
                 invocation.settings().model().as_str() != DETERMINISTIC_MODEL_ID
-                    || invocation.provider_account_id().as_str() != "pac_00000000000000000000000000"
+                    || invocation.provider_account_id().as_str()
+                        != DETERMINISTIC_PROVIDER_ACCOUNT_ID
             }) {
                 continue;
             }
@@ -203,7 +203,7 @@ impl RunService {
                                 context_manifest_id: manifest.value.context_manifest_id().clone(),
                                 context_manifest_hash: manifest.value.content_hash().clone(),
                                 provider_account_id: ProviderAccountId::parse(
-                                    "pac_00000000000000000000000000",
+                                    DETERMINISTIC_PROVIDER_ACCOUNT_ID,
                                 )
                                 .map_err(|_| RunError::InvalidTransition)?,
                                 settings: deterministic_settings()?,
@@ -239,16 +239,7 @@ impl RunService {
                 ProviderClaim::Duplicate { .. } => return Err(RunError::InvalidTransition),
             };
             let invocation = request.invocation().clone();
-            let provider = DeterministicModelProvider::new(DeterministicModelResponse {
-                text: vec!["Kiln deterministic native assistant response.".to_owned()],
-                quantities: Vec::new(),
-                completeness: UsageCompleteness::Unknown,
-                outcome: ModelInvocationOutcome::completed(
-                    ModelInvocationCompletionKind::AssistantOutput,
-                ),
-                observed_at_unix_ms: observed_at()?,
-            });
-            let (outcome, steered) = match provider.start(request).await {
+            let (outcome, steered) = match self.provider_registry.start(request).await {
                 Ok(mut operation) => {
                     self.drive_native_operation(&invocation, &mut operation, &mut cancellation)
                         .await?

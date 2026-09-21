@@ -354,8 +354,10 @@ on the active provider operation. Successful cancellation must stop external
 work before the caller records a cancelled outcome. The port has no clock,
 network, secret store, tool executor, or retry policy.
 
-Tool-request payloads, provider accounts, authentication, and live provider
-adapters remain pending.
+EDL-251 settles `openai_codex_subscription` as the primary native provider and
+`openai_api` as a separate BYOK provider type. Tool-request payloads, provider
+accounts, authentication, and live provider adapters remain pending
+implementation.
 
 The `kiln-providers` crate supplies an explicit deterministic adapter for this
 port. It accepts only provider `kiln_deterministic` and model
@@ -695,7 +697,7 @@ implemented:
 - local client authentication mechanism;
 - execution-claim representation and adapter inspection support;
 - Git isolation model for concurrent work;
-- direct provider and provider data-retention policy;
+- direct provider implementation and provider data-retention disclosure;
 - terminal backend and platform PTY behavior; and
 - signed client UI packages for plugin-provided UI.
 

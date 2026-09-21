@@ -14,6 +14,8 @@ pub const PROTOCOL_VERSION: &str = "0.22.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
+pub const ARTIFACT_SESSION_HEADER: &str = "X-Kiln-Artifact-Session";
+pub const MAX_ARTIFACT_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const NEGOTIATE_PATH: &str = "/v1/protocol/negotiate";
 pub const EVENTS_WEBSOCKET_PATH: &str = "/v1/events";
 pub const WORKSPACES_PATH: &str = "/v1/workspaces";
@@ -37,6 +39,7 @@ pub const TASK_TRANSITION_PATH: &str = "/v1/tasks/{task_id}/transition";
 pub const RUN_CANCEL_PATH: &str = "/v1/runs/{run_id}/cancel";
 pub const TOOL_CALL_APPROVAL_PATH: &str = "/v1/tool-calls/{tool_call_id}/approval";
 pub const ARTIFACT_PATH: &str = "/v1/artifacts/{content_hash}";
+pub const ARTIFACTS_PATH: &str = "/v1/artifacts";
 pub const NEGOTIATE_OPERATION_ID: &str = "negotiate_protocol";
 pub const EVENT_STREAM_OPERATION_ID: &str = "event_stream";
 pub const CREATE_WORKSPACE_OPERATION_ID: &str = "create_workspace";
@@ -64,6 +67,7 @@ pub const REACT_TO_RUN_ACTIVITY_OPERATION_ID: &str = "react_to_run_activity";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
 pub const GET_ARTIFACT_OPERATION_ID: &str = "get_artifact";
+pub const UPLOAD_ARTIFACT_OPERATION_ID: &str = "upload_artifact";
 
 pub mod error_code {
     pub const AUTHENTICATION_REQUIRED: &str = "authentication_required";
@@ -302,6 +306,8 @@ pub struct ListWorkspacesResponse {
 #[serde(rename_all = "snake_case")]
 pub struct AppendMessageRequest {
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<ArtifactResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -365,6 +371,8 @@ pub struct StartChildRunRequest {
 #[serde(rename_all = "snake_case")]
 pub struct SendRunInputRequest {
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<ArtifactResponse>,
     pub delivery_mode: MessageDeliveryMode,
 }
 
@@ -381,6 +389,8 @@ pub struct ChildActivityReference {
 #[serde(rename_all = "snake_case")]
 pub struct ReactToRunActivityRequest {
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<ArtifactResponse>,
     pub child_activity: ChildActivityReference,
 }
 
@@ -440,6 +450,8 @@ pub struct MessageResponse {
     pub session_id: String,
     pub role: MessageRole,
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<ArtifactResponse>,
     pub status: MessageStatus,
     #[schemars(with = "RequiredNullableString")]
     pub origin_run_id: Option<String>,

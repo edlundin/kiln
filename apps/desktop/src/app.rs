@@ -1,29 +1,31 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use gpui::{
-    Context, Entity, Focusable, IntoElement, Render, SharedString, Subscription, Window, div,
-    prelude::*, px,
+    ClipboardEntry, Context, Entity, ExternalPaths, Focusable, Image, IntoElement,
+    PathPromptOptions, Render, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::{
-    Disableable, Selectable, Sizable,
+    Disableable, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState, TextareaState},
 };
 use kiln_protocol::{
     ApprovalDecision, ApprovalDecisionRequest, ApprovalState, ArtifactResponse,
-    MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest, SessionChangeDiffContent,
-    SessionChangeDiffResponse, SessionChangeDiffUnavailableReason, SessionChangesResponse,
-    SessionEventResponse, SessionResponse, StartChildRunRequest, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
-    UsageQuantityRelation, UsageSource, WebSocketFrame, WorkspaceResponse,
+    MAX_ARTIFACT_UPLOAD_BYTES, MessageDeliveryMode, RunInputMode, RunState, SendRunInputRequest,
+    SessionChangeDiffContent, SessionChangeDiffResponse, SessionChangeDiffUnavailableReason,
+    SessionChangesResponse, SessionEventResponse, SessionResponse, StartChildRunRequest,
+    UsageAccounting, UsageCompleteness, UsageFinality, UsageLedgerEntryResponse,
+    UsageLedgerResponse, UsageQuantityRelation, UsageSource, WebSocketFrame, WorkspaceResponse,
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
 use crate::{
+    PasteAttachments,
     components::{
-        ApprovalPanel, ChildRunRow, Composer, GuidanceComposer, RunStatus, TranscriptRow,
+        ApprovalPanel, AttachmentChip, AttachmentThumbnail, ChildRunRow, ClickHandler, Composer,
+        GuidanceComposer, RunStatus, TranscriptRow,
     },
-    connection::{self, Connected, ConnectionConfig, Submission},
+    connection::{self, AttachmentUpload, Connected, ConnectionConfig, Submission},
     conversation::Conversation,
     theme,
 };
@@ -125,6 +127,32 @@ struct ReactionDraft {
 struct DraftState {
     content: String,
     reaction: Option<ReactionDraft>,
+    attachments: Vec<DraftAttachment>,
+}
+
+#[derive(Clone)]
+enum DraftAttachmentState {
+    Local,
+    Uploading,
+    Ready,
+    Failed(String),
+}
+
+#[derive(Clone)]
+enum DraftAttachmentSource {
+    Path(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+#[derive(Clone)]
+struct DraftAttachment {
+    source: DraftAttachmentSource,
+    name: String,
+    media_type: String,
+    size: u64,
+    state: DraftAttachmentState,
+    artifact: Option<ArtifactResponse>,
+    thumbnail: Option<AttachmentThumbnail>,
 }
 
 const ARTIFACT_PREVIEW_LIMIT: usize = 64 * 1024;
@@ -265,6 +293,7 @@ pub struct Desktop {
     guidance: BTreeMap<String, GuidanceDraft>,
     guidance_by_session: BTreeMap<String, BTreeMap<String, GuidanceDraft>>,
     drafts: BTreeMap<String, DraftState>,
+    attachments: Vec<DraftAttachment>,
     workspaces: Vec<WorkspaceResponse>,
     sessions: Vec<SessionResponse>,
     selected_workspace_id: Option<String>,
@@ -381,6 +410,7 @@ impl Desktop {
             guidance: BTreeMap::new(),
             guidance_by_session: BTreeMap::new(),
             drafts: BTreeMap::new(),
+            attachments: Vec::new(),
             workspaces: Vec::new(),
             sessions: Vec::new(),
             selected_workspace_id: None,
@@ -534,12 +564,40 @@ impl Desktop {
         };
         let session_id = connected.session.session_id.clone();
         let content = self.composer.read(cx).value().to_string();
-        if content.trim().is_empty() && self.pending.is_none() {
+        if content.trim().is_empty() && self.attachments.is_empty() && self.pending.is_none() {
             return;
         }
         let mut submission = self.pending.take().unwrap_or_else(|| Submission {
             session_id: session_id.clone(),
             content,
+            attachments: self
+                .attachments
+                .iter()
+                .filter_map(|attachment| attachment.artifact.clone())
+                .collect(),
+            uploads: self
+                .attachments
+                .iter()
+                .filter(|attachment| {
+                    matches!(
+                        attachment.state,
+                        DraftAttachmentState::Local | DraftAttachmentState::Failed(_)
+                    )
+                })
+                .map(|attachment| {
+                    let (path, bytes) = match &attachment.source {
+                        DraftAttachmentSource::Path(path) => {
+                            (Some(path.to_string_lossy().into_owned()), None)
+                        }
+                        DraftAttachmentSource::Bytes(bytes) => (None, Some(bytes.clone())),
+                    };
+                    AttachmentUpload {
+                        path,
+                        bytes,
+                        media_type: attachment.media_type.clone(),
+                    }
+                })
+                .collect(),
             idempotency_key: ulid::Ulid::generate().to_string(),
             active_run_id: self
                 .reaction
@@ -554,6 +612,16 @@ impl Desktop {
         let session = session_id.clone();
         let root = connected.workspace.roots[0].workspace_root_id.clone();
         let updates = self.updates.clone();
+        if !submission.uploads.is_empty() {
+            for attachment in &mut self.attachments {
+                if matches!(
+                    attachment.state,
+                    DraftAttachmentState::Local | DraftAttachmentState::Failed(_)
+                ) {
+                    attachment.state = DraftAttachmentState::Uploading;
+                }
+            }
+        }
         self.busy = true;
         self.error = None;
         self.runtime.spawn(async move {
@@ -565,6 +633,226 @@ impl Desktop {
             });
         });
         cx.notify();
+    }
+
+    fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || !self.online || self.switching_session.is_some() || self.pending.is_some() {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach files".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, _window, cx| {
+                this.add_attachment_paths(paths);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn add_attachment_paths(&mut self, paths: Vec<PathBuf>) {
+        if self.pending.is_some() {
+            return;
+        }
+        for path in paths {
+            if self.attachments.iter().any(|attachment| {
+                matches!(
+                    &attachment.source,
+                    DraftAttachmentSource::Path(existing) if existing == &path
+                )
+            }) {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let media_type = media_type_for_path(&path);
+            let (state, thumbnail) = if metadata.len() > MAX_ARTIFACT_UPLOAD_BYTES as u64 {
+                (
+                    DraftAttachmentState::Failed(format!(
+                        "attachment exceeds the {} MiB upload limit",
+                        MAX_ARTIFACT_UPLOAD_BYTES / (1024 * 1024)
+                    )),
+                    None,
+                )
+            } else {
+                (
+                    DraftAttachmentState::Local,
+                    media_type
+                        .starts_with("image/")
+                        .then(|| AttachmentThumbnail::Icon(IconName::File)),
+                )
+            };
+            self.attachments.push(DraftAttachment {
+                name: name.to_owned(),
+                size: metadata.len(),
+                source: DraftAttachmentSource::Path(path),
+                media_type,
+                state,
+                artifact: None,
+                thumbnail,
+            });
+        }
+    }
+
+    fn add_clipboard_image(&mut self, image: &Image) {
+        if image.bytes.len() > MAX_ARTIFACT_UPLOAD_BYTES {
+            return;
+        }
+        if self.attachments.iter().any(|attachment| {
+            matches!(&attachment.source, DraftAttachmentSource::Bytes(bytes) if bytes == &image.bytes)
+        }) {
+            return;
+        }
+        self.attachments.push(DraftAttachment {
+            source: DraftAttachmentSource::Bytes(image.bytes.clone()),
+            name: format!("pasted-image.{}", image.format.extension()),
+            media_type: image.format.mime_type().to_owned(),
+            size: image.bytes.len() as u64,
+            state: DraftAttachmentState::Local,
+            artifact: None,
+            thumbnail: Some(AttachmentThumbnail::Icon(IconName::File)),
+        });
+    }
+
+    fn paste_from_clipboard(
+        &mut self,
+        _action: &PasteAttachments,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy || !self.online || self.switching_session.is_some() || self.pending.is_some() {
+            return;
+        }
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let mut attached = false;
+        for entry in &item.entries {
+            match entry {
+                ClipboardEntry::ExternalPaths(paths) => {
+                    self.add_attachment_paths(paths.paths().to_vec());
+                    attached = true;
+                }
+                ClipboardEntry::Image(image) => {
+                    self.add_clipboard_image(image);
+                    attached = true;
+                }
+                ClipboardEntry::String(_) => {}
+            }
+        }
+        if !attached {
+            if let Some(text) = item.text() {
+                self.composer
+                    .update(cx, |input, cx| input.insert(text, window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.attachments.len() {
+            return;
+        }
+        let removed = self.attachments.remove(index);
+        if let Some(submission) = self
+            .pending
+            .as_mut()
+            .filter(|submission| !submission.message_appended)
+        {
+            if removed.artifact.is_some() {
+                let artifact_index = self
+                    .attachments
+                    .iter()
+                    .take(index)
+                    .filter(|attachment| attachment.artifact.is_some())
+                    .count();
+                if artifact_index < submission.attachments.len() {
+                    submission.attachments.remove(artifact_index);
+                }
+            } else {
+                let upload_index = self
+                    .attachments
+                    .iter()
+                    .take(index)
+                    .filter(|attachment| attachment.artifact.is_none())
+                    .count();
+                if upload_index < submission.uploads.len() {
+                    submission.uploads.remove(upload_index);
+                }
+            }
+        }
+        if self.attachments.is_empty()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|submission| !submission.message_appended)
+            && self.composer.read(cx).value().trim().is_empty()
+        {
+            self.pending = None;
+            self.error = None;
+        }
+        cx.notify();
+    }
+
+    fn retry_attachment(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(attachment) = self.attachments.get_mut(index) {
+            if matches!(attachment.state, DraftAttachmentState::Failed(_)) {
+                attachment.state = DraftAttachmentState::Local;
+            }
+        }
+        self.submit(window, cx);
+    }
+
+    fn attachment_labels(&self, cx: &mut Context<Self>) -> Vec<AttachmentChip> {
+        self.attachments
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| {
+                let state = match &attachment.state {
+                    DraftAttachmentState::Local => "local".to_owned(),
+                    DraftAttachmentState::Uploading => "uploading".to_owned(),
+                    DraftAttachmentState::Ready => "ready".to_owned(),
+                    DraftAttachmentState::Failed(error) => format!("failed: {error}"),
+                };
+                let label = format!(
+                    "{} · {} · {} · {}",
+                    attachment.name, attachment.media_type, attachment.size, state
+                );
+                let retry =
+                    matches!(attachment.state, DraftAttachmentState::Failed(_)).then(|| {
+                        let retry = cx.listener(move |this, _, window, cx| {
+                            this.retry_attachment(index, window, cx);
+                        });
+                        std::rc::Rc::new(retry) as ClickHandler
+                    });
+                let on_remove = cx.listener(move |this, _, _, cx| {
+                    this.remove_attachment(index, cx);
+                });
+                let on_remove: ClickHandler = std::rc::Rc::new(move |event, window, app| {
+                    on_remove(event, window, app);
+                });
+                AttachmentChip {
+                    label: label.into(),
+                    thumbnail: attachment.thumbnail.clone(),
+                    retry,
+                    remove: on_remove,
+                }
+            })
+            .collect()
     }
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -914,6 +1202,7 @@ impl Desktop {
                 ulid::Ulid::generate().to_string(),
                 SendRunInputRequest {
                     content,
+                    attachments: Vec::new(),
                     delivery_mode,
                 },
             )
@@ -1144,11 +1433,18 @@ impl Desktop {
         };
         let content = self.composer.read(cx).value().to_string();
         let reaction = self.reaction.take();
-        if !content.is_empty() || reaction.is_some() {
-            self.drafts
-                .insert(session_id.clone(), DraftState { content, reaction });
+        if !content.is_empty() || reaction.is_some() || !self.attachments.is_empty() {
+            self.drafts.insert(
+                session_id.clone(),
+                DraftState {
+                    content,
+                    reaction,
+                    attachments: std::mem::take(&mut self.attachments),
+                },
+            );
         } else {
             self.drafts.remove(&session_id);
+            self.attachments.clear();
         }
         if let Some(pending) = self.pending.take() {
             self.pending_by_session.insert(session_id.clone(), pending);
@@ -1173,10 +1469,12 @@ impl Desktop {
             self.composer
                 .update(cx, |input, cx| input.set_value(draft.content, window, cx));
             self.reaction = draft.reaction;
+            self.attachments = draft.attachments;
         } else {
             self.composer
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.reaction = None;
+            self.attachments.clear();
         }
         self.pending = self.pending_by_session.remove(session_id);
         self.pending_child_start = self.pending_child_by_session.remove(session_id);
@@ -1194,6 +1492,7 @@ impl Desktop {
         self.pending_by_session.clear();
         self.pending_child_by_session.clear();
         self.reaction = None;
+        self.attachments.clear();
         self.guidance.clear();
         self.guidance_by_session.clear();
         self.drafts.clear();
@@ -1773,6 +2072,37 @@ impl Desktop {
                     return;
                 }
                 self.busy = false;
+                match &result {
+                    Ok(()) => self.attachments.clear(),
+                    Err(error) => {
+                        let uploaded: Vec<_> = submission
+                            .attachments
+                            .iter()
+                            .filter(|candidate| {
+                                !self.attachments.iter().any(|attachment| {
+                                    attachment.artifact.as_ref().is_some_and(|artifact| {
+                                        artifact.content_hash == candidate.content_hash
+                                    })
+                                })
+                            })
+                            .cloned()
+                            .collect();
+                        let mut uploaded = uploaded.into_iter();
+                        for attachment in self.attachments.iter_mut().filter(|attachment| {
+                            matches!(
+                                attachment.state,
+                                DraftAttachmentState::Uploading | DraftAttachmentState::Local
+                            )
+                        }) {
+                            if let Some(artifact) = uploaded.next() {
+                                attachment.artifact = Some(artifact);
+                                attachment.state = DraftAttachmentState::Ready;
+                            } else {
+                                attachment.state = DraftAttachmentState::Failed(error.clone());
+                            }
+                        }
+                    }
+                }
                 match result {
                     Ok(()) => {
                         self.composer
@@ -3454,10 +3784,29 @@ impl Render for Desktop {
             if let Some(detail) = self.conversation.transcript_detail(item) {
                 row = row.detail(detail);
             }
-            if self.conversation.artifacts.contains_key(&item.content) {
+            let artifact_disabled = !self.online || self.switching_session.is_some();
+            for (position, attachment) in item.attachments.iter().enumerate() {
+                let content_hash = attachment.content_hash.clone();
+                let label = format!(
+                    "Open attachment {} ({}, {} bytes)",
+                    position + 1,
+                    attachment.media_type,
+                    attachment.size
+                );
+                row = row.attachment_action(
+                    label,
+                    artifact_disabled,
+                    cx.listener(move |this, _, _, cx| {
+                        this.open_artifact(content_hash.clone(), cx);
+                    }),
+                );
+            }
+            if item.attachments.is_empty()
+                && self.conversation.artifacts.contains_key(&item.content)
+            {
                 let content_hash = item.content.clone();
                 row = row.artifact(
-                    !self.online || self.switching_session.is_some(),
+                    artifact_disabled,
                     cx.listener(move |this, _, _, cx| {
                         this.open_artifact(content_hash.clone(), cx);
                     }),
@@ -3776,10 +4125,19 @@ impl Render for Desktop {
                                                 cx.listener(|this, _, window, cx| {
                                                     this.submit(window, cx)
                                                 }),
-                                                cx.listener(|this, _, _, cx| this.cancel(cx)),
-                                            )
-                                            .disabled(disabled)
-                                            .when_some(self.reaction.as_ref(), |composer, draft| composer.reference(
+            cx.listener(|this, _, _, cx| this.cancel(cx)),
+        )
+        .disabled(disabled)
+        .attachments(self.attachment_labels(cx))
+        .on_attach(cx.listener(|this, _, window, cx| this.pick_attachments(window, cx)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.add_attachment_paths(paths.paths().to_vec());
+            cx.notify();
+        }))
+        .on_paste(cx.listener(|this, action: &PasteAttachments, window, cx| {
+            this.paste_from_clipboard(action, window, cx);
+        }))
+                .when_some(self.reaction.as_ref(), |composer, draft| composer.reference(
                                                 format!("Reply to root about child {} · Event {}", draft.reference.run_id, draft.reference.event_id),
                                                 cx.listener(|this, _, window, cx| {
                                                     this.reaction = None;
@@ -4075,6 +4433,28 @@ fn run_state_label(state: RunState) -> &'static str {
         RunState::Failed => "Failed",
         RunState::Cancelled => "Cancelled",
     }
+}
+
+fn media_type_for_path(path: &std::path::Path) -> String {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("json") => "application/json",
+        Some("txt") | Some("md") | Some("rs") | Some("toml") | Some("yaml") | Some("yml") => {
+            "text/plain"
+        }
+        _ => "application/octet-stream",
+    }
+    .to_owned()
 }
 
 fn text_input(

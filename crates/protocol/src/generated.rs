@@ -9,16 +9,16 @@ use serde_json::{Value, json};
 use ts_rs::{Config, TS};
 
 use crate::{
-    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ASSIGN_TASK_OPERATION_ID, AppendMessageRequest,
-    ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy, ApprovalResponse, ApprovalState,
-    ArtifactResponse, AssignTaskRequest, CANCEL_RUN_OPERATION_ID, CREATE_SESSION_OPERATION_ID,
-    CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID, ChangedFileResponse,
-    ChildActivityReference, ClientIdentity, ContextManifestCreatedResponse, CreateTaskRequest,
-    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
-    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
+    APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ARTIFACTS_PATH, ASSIGN_TASK_OPERATION_ID,
+    AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
+    ApprovalResponse, ApprovalState, ArtifactResponse, AssignTaskRequest, CANCEL_RUN_OPERATION_ID,
+    CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
+    ChangedFileResponse, ChildActivityReference, ClientIdentity, ContextManifestCreatedResponse,
+    CreateTaskRequest, CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
+    GET_ARTIFACT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
+    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
+    IDEMPOTENCY_KEY_HEADER, LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
     LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_USAGE_OPERATION_ID,
     LIST_WORKSPACES_OPERATION_ID, ListSessionsResponse, ListWorkspacesResponse,
     MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState, MessageResponse,
@@ -36,10 +36,11 @@ use crate::{
     SessionResponse, SessionRunsResponse, StartChildRunRequest, StartRunRequest, StoreIdentity,
     TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
     TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
-    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, USAGE_PATH,
-    UpdateTaskRequest, UsageAccounting, UsageCompleteness, UsageFinality, UsageLedgerEntryResponse,
-    UsageLedgerResponse, UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse,
-    UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
+    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID,
+    UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UpdateTaskRequest, UsageAccounting,
+    UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
+    UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse, UsageSource,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
     WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
     error_code,
 };
@@ -517,6 +518,10 @@ fn catalogue() -> String {
             "path": RUN_CANCEL_PATH,
             "operation": CANCEL_RUN_OPERATION_ID
         }, {
+            "method": "POST",
+            "path": ARTIFACTS_PATH,
+            "operation": UPLOAD_ARTIFACT_OPERATION_ID
+        }, {
             "method": "GET",
             "path": ARTIFACT_PATH,
             "operation": GET_ARTIFACT_OPERATION_ID
@@ -666,6 +671,7 @@ fn fixture_list_workspaces_response() -> String {
 fn fixture_append_message_request() -> String {
     serialize_fixture(&AppendMessageRequest {
         content: "Inspect the Workspace event model.".to_owned(),
+        attachments: Vec::new(),
     })
 }
 
@@ -721,6 +727,7 @@ fn fixture_message() -> MessageResponse {
         origin_run_id: None,
         model_invocation_id: None,
         content: "Inspect the Workspace event model.".to_owned(),
+        attachments: Vec::new(),
         target_run_id: None,
         child_activity: None,
     }
@@ -774,6 +781,7 @@ fn fixture_start_child_run_request() -> String {
 fn fixture_send_run_input_request() -> String {
     serialize_fixture(&SendRunInputRequest {
         content: "Use the durable event cursor as the next checkpoint.".to_owned(),
+        attachments: Vec::new(),
         delivery_mode: MessageDeliveryMode::Queued,
     })
 }
@@ -1646,6 +1654,32 @@ paths:
         '500':
           $ref: '#/components/responses/Problem'
         '503':
+          $ref: '#/components/responses/Problem'
+  {ARTIFACTS_PATH}:
+    post:
+      operationId: {UPLOAD_ARTIFACT_OPERATION_ID}
+      parameters:
+        - name: X-Kiln-Artifact-Session
+          in: header
+          required: true
+          schema: {{type: string}}
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {{type: string, format: binary}}
+      responses:
+        '201':
+          description: Stored immutable artifact metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '500':
           $ref: '#/components/responses/Problem'
   {ARTIFACT_PATH}:
     get:

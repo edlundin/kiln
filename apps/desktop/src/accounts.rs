@@ -1,6 +1,6 @@
 //! Global provider settings. Only public protocol data enters the desktop.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use gpui::{ClipboardItem, Context, Render, SharedString, Window, div, prelude::*};
 use gpui_component::{
@@ -23,7 +23,15 @@ const VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 enum Update {
     Listed(Result<Vec<ProviderAccountResponse>, String>),
     Created(Result<ProviderAccountResponse, String>),
-    Started(Result<StartProviderAccountLoginResponse, String>),
+    Started {
+        account_id: String,
+        result: Result<StartProviderAccountLoginResponse, String>,
+        cleanup_required: bool,
+    },
+    Disconnected {
+        account_id: String,
+        result: Result<ProviderAccountResponse, String>,
+    },
     Status {
         result: Result<ProviderAccountLoginResponse, String>,
         inactive: bool,
@@ -44,6 +52,8 @@ pub struct AccountSettings {
     login: Option<StartProviderAccountLoginResponse>,
     login_state: Option<ProviderAccountLoginState>,
     copied: bool,
+    confirm_disconnect: Option<String>,
+    cleanup_accounts: HashSet<String>,
 }
 
 impl AccountSettings {
@@ -70,6 +80,8 @@ impl AccountSettings {
             login: None,
             login_state: None,
             copied: false,
+            confirm_disconnect: None,
+            cleanup_accounts: HashSet::new(),
         };
         settings.refresh(cx);
         settings
@@ -77,6 +89,9 @@ impl AccountSettings {
 
     pub fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
         self.online = online;
+        if !online {
+            self.confirm_disconnect = None;
+        }
         cx.notify();
     }
 
@@ -85,6 +100,7 @@ impl AccountSettings {
             return;
         }
         self.busy = true;
+        self.confirm_disconnect = None;
         self.error = None;
         let client = self.client.clone();
         let updates = self.updates.clone();
@@ -100,16 +116,22 @@ impl AccountSettings {
     }
 
     fn sign_in(&mut self, cx: &mut Context<Self>) {
-        if self.busy || !self.online || !self.loaded || self.sign_in_blocked() {
+        if self.busy
+            || !self.online
+            || !self.loaded
+            || self.sign_in_blocked()
+            || self.confirm_disconnect.is_some()
+        {
             return;
         }
         if let Some(account) = self
             .accounts
             .iter()
-            .find(|account| {
+            .filter(|account| {
                 account.provider_type == CODEX_PROVIDER
                     && matches!(account.state.as_str(), "connecting" | "disconnected")
             })
+            .min_by_key(|account| account.state != "connecting")
             .cloned()
         {
             self.begin(account, cx);
@@ -143,11 +165,36 @@ impl AccountSettings {
         let client = self.client.clone();
         let updates = self.updates.clone();
         self.runtime.spawn(async move {
-            let result = client
+            let response = client
                 .start_provider_account_login(&account.provider_account_id)
+                .await;
+            let cleanup_required = matches!(&response, Err(kiln_client::Error::Api { problem, .. })
+                if problem.code == kiln_protocol::error_code::PROVIDER_ACCOUNT_CLEANUP_REQUIRED);
+            let result =
+                response.map_err(|error| connection::error_message("Start Codex sign-in", &error));
+            let _ = updates.send(Update::Started {
+                account_id: account.provider_account_id,
+                result,
+                cleanup_required,
+            });
+        });
+        cx.notify();
+    }
+
+    fn disconnect(&mut self, account_id: String, cx: &mut Context<Self>) {
+        if self.busy || !self.online || self.confirm_disconnect.as_ref() != Some(&account_id) {
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        let client = self.client.clone();
+        let updates = self.updates.clone();
+        self.runtime.spawn(async move {
+            let result = client
+                .disconnect_provider_account(&account_id)
                 .await
-                .map_err(|error| connection::error_message("Start Codex sign-in", &error));
-            let _ = updates.send(Update::Started(result));
+                .map_err(|error| connection::error_message("Disconnect account", &error));
+            let _ = updates.send(Update::Disconnected { account_id, result });
         });
         cx.notify();
     }
@@ -207,6 +254,36 @@ impl AccountSettings {
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
         self.busy = false;
         match update {
+            Update::Disconnected { account_id, result } => {
+                // The daemon cancels sign-in before disconnecting. Even an error
+                // can mean partial progress; stop presenting the old user code.
+                if self
+                    .login
+                    .as_ref()
+                    .is_some_and(|login| login.account.provider_account_id == account_id)
+                {
+                    self.login = None;
+                    self.login_state = None;
+                }
+                match result {
+                    Ok(account) => {
+                        self.cleanup_accounts.remove(&account_id);
+                        self.upsert(account);
+                        self.confirm_disconnect = None;
+                        self.loaded = false;
+                        self.refresh(cx);
+                    }
+                    Err(error) => {
+                        // Keep retry available even if refresh reports the account
+                        // disconnected while an unpublished entry still needs cleanup.
+                        self.cleanup_accounts.insert(account_id);
+                        self.loaded = false;
+                        self.error = Some(format!(
+                            "{error} Refresh accounts to check the current state, or retry disconnect."
+                        ));
+                    }
+                }
+            }
             Update::Listed(Ok(accounts)) => {
                 self.accounts = accounts;
                 self.loaded = true;
@@ -219,7 +296,9 @@ impl AccountSettings {
                     self.begin(account, cx);
                 }
             }
-            Update::Started(Ok(login)) => {
+            Update::Started {
+                result: Ok(login), ..
+            } => {
                 self.upsert(login.account.clone());
                 self.login_state = Some(ProviderAccountLoginState::Pending);
                 self.copied = false;
@@ -227,6 +306,16 @@ impl AccountSettings {
                     self.error = Some("The daemon returned an unexpected sign-in address. Cancel this attempt and reconnect.".to_owned());
                 }
                 self.login = Some(login);
+            }
+            Update::Started {
+                account_id,
+                result: Err(error),
+                cleanup_required,
+            } => {
+                if cleanup_required {
+                    self.cleanup_accounts.insert(account_id);
+                }
+                self.error = Some(error);
             }
             Update::Status {
                 result: Ok(response),
@@ -251,7 +340,6 @@ impl AccountSettings {
             }
             Update::Listed(Err(error))
             | Update::Created(Err(error))
-            | Update::Started(Err(error))
             | Update::Status {
                 result: Err(error), ..
             } => {
@@ -267,7 +355,8 @@ impl AccountSettings {
             Some(ProviderAccountLoginState::Pending | ProviderAccountLoginState::CleanupRequired)
         ) || self.accounts.iter().any(|account| {
             account.provider_type == CODEX_PROVIDER
-                && matches!(account.state.as_str(), "connected" | "reauth_required")
+                && (matches!(account.state.as_str(), "connected" | "reauth_required")
+                    || self.cleanup_accounts.contains(&account.provider_account_id))
         })
     }
 }
@@ -290,7 +379,7 @@ impl Render for AccountSettings {
                 .child(Button::new("refresh-accounts").label(if self.busy { "Working…" } else { "Refresh accounts" })
                     .disabled(disabled).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
                 .child(Button::new("connect-codex").label("Sign in to Codex").primary()
-                    .disabled(disabled || !self.loaded || self.sign_in_blocked())
+                    .disabled(disabled || !self.loaded || self.sign_in_blocked() || self.confirm_disconnect.is_some())
                     .on_click(cx.listener(|this, _, _, cx| this.sign_in(cx)))));
         if self.loaded && self.accounts.is_empty() {
             content = content.child(
@@ -310,11 +399,19 @@ impl Render for AccountSettings {
                 "connecting" => "Not signed in",
                 "connected" => "Connected",
                 "reauth_required" => {
-                    "Sign-in expired — account recovery is not yet available in the desktop"
+                    "Sign-in expired or disconnect incomplete — disconnect, then sign in again"
                 }
                 "disconnected" => "Disconnected",
                 _ => "Unknown account state",
             };
+            let account_id = account.provider_account_id.clone();
+            let confirm = self.confirm_disconnect.as_ref() == Some(&account_id);
+            let cleanup_pending = self.login_state
+                == Some(ProviderAccountLoginState::CleanupRequired)
+                && self
+                    .login
+                    .as_ref()
+                    .is_some_and(|login| login.account.provider_account_id == account_id);
             content = content.child(
                 div()
                     .id(SharedString::from(account.provider_account_id.clone()))
@@ -330,7 +427,29 @@ impl Render for AccountSettings {
                             .text_xs()
                             .text_color(theme::MUTED)
                             .child(format!("{provider} · {state}")),
-                    ),
+                    )
+                    .when(account.state != "disconnected" || confirm || cleanup_pending || self.cleanup_accounts.contains(&account_id), |view| {
+                        if confirm {
+                            let target = account_id.clone();
+                            view.child(div().text_sm().text_color(theme::ATTENTION)
+                                .child("Disconnect this account? This cancels sign-in and removes credentials from this Kiln instance. It does not revoke access at OpenAI."))
+                                .child(div().flex().flex_wrap().gap_2()
+                                    .child(Button::new("confirm-account-disconnect").label("Confirm disconnect")
+                                        .disabled(disabled).on_click(cx.listener(move |this, _, _, cx| this.disconnect(target.clone(), cx))))
+                                    .child(Button::new("cancel-account-disconnect").label("Keep account")
+                                        .disabled(disabled).on_click(cx.listener(|this, _, _, cx| {
+                                            this.confirm_disconnect = None;
+                                            cx.notify();
+                                        }))))
+                        } else {
+                            let target = account_id.clone();
+                            view.child(Button::new("disconnect-account").label("Disconnect")
+                                .disabled(disabled).on_click(cx.listener(move |this, _, _, cx| {
+                                    this.confirm_disconnect = Some(target.clone());
+                                    cx.notify();
+                                })))
+                        }
+                    }),
             );
         }
         if let Some(login) = &self.login {
@@ -341,7 +460,7 @@ impl Render for AccountSettings {
                     "Sign-in failed or expired. You can start a new attempt."
                 }
                 Some(ProviderAccountLoginState::CleanupRequired) => {
-                    "Credential cleanup is required in the daemon. Do not start another sign-in until it is resolved."
+                    "Credential cleanup is required. Choose Disconnect on this account to retry local cleanup before signing in again."
                 }
                 _ => "Open the verification page, enter this code, then check sign-in status.",
             };

@@ -28,7 +28,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.23.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.24.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.
@@ -78,18 +78,25 @@ browser, then choose **Check sign-in**. Status checks are user-initiated; the da
 owns polling OpenAI and credential storage. **Cancel sign-in** addresses only the
 displayed attempt. Expired/replaced attempts require refreshing the account list
 before starting again. A cleanup-required result is shown explicitly and blocks
-another attempt in that view. The daemon also rejects replacement of an attempt
-with unresolved credential cleanup, preserving its terminal status until shutdown.
-Cleanup recovery across daemon restarts is not yet implemented.
+another attempt in that view. Choose **Disconnect** on the account to retry local
+cleanup. The daemon rejects replacement while a retained cleanup failure remains.
+
+**Disconnect** asks for confirmation, cancels active sign-in, and removes credentials
+from this Kiln instance. It does not revoke access at OpenAI. After success, the
+account list refreshes and **Sign in to Codex** can reuse the same account. For
+expired sign-in or an incomplete disconnect, disconnect first, then sign in again.
+If deletion fails, the account is disabled and its saved reference remains available
+for retry, including after restart. Unpublished or retired credentials from failed
+connection or rotation still lack durable cleanup recovery. Refresh after an error to
+check the current account state; disconnect requests are never automatically retried.
 
 Closing Settings does not cancel sign-in. Reconnecting the desktop discards its
 connection-scoped attempt display; refresh the accounts to recover the durable
 state. An unfinished connecting or disconnected account can start a replacement
 attempt. If requesting a replacement fails, the prior terminal attempt remains
 available by its original ID. Closing the desktop leaves daemon-owned work running.
-Account recovery after credentials
-expire, disconnect/revoke controls, browser PKCE, and API-key entry are not yet
-available in the desktop. A connected account does not enable live model Runs.
+Provider-side revocation, browser PKCE, and API-key entry are not yet available in
+the desktop. A connected account does not enable live model Runs.
 
 Only public account metadata, the device user code, and the verification address
 enter the view. Tokens and vault references stay in the daemon. The desktop opens
@@ -99,6 +106,11 @@ Compilation and source checks passed, and the global Settings layout/account-lis
 empty state was inspected in the native app against an isolated local daemon.
 Live OAuth, credential-vault operations, sign-in terminal states, and minimum-window
 layout remain unverified at runtime.
+
+The local disconnect continuation was also inspected against an isolated daemon
+with an empty account: confirmation, Keep account, and successful disconnect with
+account refresh were observed. Credential deletion, concurrent cancellation, and
+failure/retry layouts were not exercised at runtime.
 
 ## Start or resume a session
 

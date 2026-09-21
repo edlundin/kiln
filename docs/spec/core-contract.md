@@ -309,8 +309,16 @@ not cache the failure. This is serialized refresh with successful-version
 coalescing, not general single-flight for transient failures.
 
 The authenticated protocol now exposes safe provider-account create, list, and
-get snapshots plus the Codex device-code login start, nonblocking status, and
-cancellation routes. Account creation requires a non-empty `Idempotency-Key`;
+get snapshots plus the Codex device-code login start, nonblocking status,
+cancellation, and local disconnect routes. Protocol `0.24.0` adds authenticated
+`POST /v1/provider-accounts/{provider_account_id}/disconnect`: it cancels and joins
+the current login, disables account use, removes local credentials, retries cleanup
+retained by the current login attempt, and returns a safe disconnected account
+snapshot. Successful disconnect invalidates that login attempt. Deletion failure
+returns `provider_account_cleanup_required` without exposing credential references.
+Already-disconnected accounts are idempotent, but a new disconnect request also
+affects a subsequently reconnected account; clients do not automatically retry.
+Provider-side revocation is not performed. Account creation requires a non-empty `Idempotency-Key`;
 an exact retry returns the original account and changed payload reuse is a
 typed conflict. Account responses omit secret references, provider subjects,
 arbitrary metadata, and credential material. Login attempt IDs are

@@ -154,6 +154,8 @@ pub enum ProviderAccountOperationError {
     StoreUnavailable,
     #[error("the provider account credential store is unavailable")]
     CredentialStoreUnavailable,
+    #[error("provider account credential cleanup must be retried")]
+    CleanupRequired,
     #[error("the provider account is in an invalid state")]
     InvalidState,
     #[error("the provider account login attempt was not found")]
@@ -176,8 +178,8 @@ impl From<ProviderAccountError> for ProviderAccountOperationError {
             ProviderAccountError::ProviderAccountLimitReached => Self::ProviderAccountLimitReached,
             ProviderAccountError::IdempotencyConflict => Self::IdempotencyConflict,
             ProviderAccountError::StoreUnavailable => Self::StoreUnavailable,
+            ProviderAccountError::CredentialCleanupRequired { .. } => Self::CleanupRequired,
             ProviderAccountError::CredentialStore(_)
-            | ProviderAccountError::CredentialCleanupRequired { .. }
             | ProviderAccountError::CredentialStoreRequired => Self::CredentialStoreUnavailable,
             ProviderAccountError::ProviderTypeMismatch
             | ProviderAccountError::InvalidLabel
@@ -197,6 +199,17 @@ impl From<ProviderAccountError> for ProviderAccountOperationError {
 }
 
 pub trait ProviderAccountOperations: Send + Sync {
+    fn disconnect_provider_account(
+        &self,
+        _account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccount, ProviderAccountOperationError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::StoreUnavailable) })
+    }
+
     fn create_provider_account(
         &self,
         command: ProviderAccountCreateCommand,
@@ -744,6 +757,10 @@ where
         )
         .route(PROVIDER_ACCOUNT_PATH, get(get_provider_account))
         .route(
+            kiln_protocol::PROVIDER_ACCOUNT_DISCONNECT_PATH,
+            post(disconnect_provider_account),
+        )
+        .route(
             PROVIDER_ACCOUNT_LOGIN_PATH,
             post(start_provider_account_login),
         )
@@ -1024,6 +1041,26 @@ where
     let account = state
         .provider_account_operations
         .get_provider_account(account_id)
+        .await
+        .map_err(PublicError::from)?;
+    Ok(Json(provider_account_response(&account)))
+}
+
+async fn disconnect_provider_account<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(provider_account_id): Path<String>,
+) -> Result<Json<ProviderAccountResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let account_id = ProviderAccountId::parse(provider_account_id)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let account = state
+        .provider_account_operations
+        .disconnect_provider_account(account_id)
         .await
         .map_err(PublicError::from)?;
     Ok(Json(provider_account_response(&account)))
@@ -3353,6 +3390,11 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
                     "Provider account credential store unavailable",
+                ),
+                ProviderAccountOperationError::CleanupRequired => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::PROVIDER_ACCOUNT_CLEANUP_REQUIRED,
+                    "Credential cleanup failed; retry disconnect",
                 ),
                 ProviderAccountOperationError::InvalidState => (
                     StatusCode::CONFLICT,

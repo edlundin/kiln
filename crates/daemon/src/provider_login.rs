@@ -221,6 +221,55 @@ impl ProviderAccountLoginCoordinator {
         self.application.list_provider_accounts(None).await
     }
 
+    pub(crate) async fn disconnect_account(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Result<ProviderAccount, ProviderAccountLoginError> {
+        // Serialize against new attempts and shutdown. A dropped caller leaves
+        // either the owned login task or the disabled durable account retryable.
+        let control = self.control.lock().await;
+        if *control {
+            return Err(ProviderAccountLoginError::InvalidState);
+        }
+        let previous = self.attempts.lock().await.get(&account_id).cloned();
+        let mut cleanup_ref = None;
+        if let Some(previous) = &previous {
+            previous.cancellation.send_replace(true);
+            if let Err(ProviderAccountLoginError::Account(
+                ProviderAccountError::CredentialCleanupRequired { secret_ref },
+            )) = join_attempt(previous).await
+            {
+                cleanup_ref = Some(secret_ref);
+            }
+        }
+        let account = self
+            .application
+            .disconnect_provider_account(&self.secret_store, account_id.clone(), now()?)
+            .await
+            .map_err(ProviderAccountLoginError::Account)?;
+        if let Some(secret_ref) = cleanup_ref {
+            // A failed login may also retain an unpublished vault entry. Keep
+            // the attempt (and its reference) until this deletion succeeds.
+            self.application
+                .cleanup_provider_account_secret(
+                    &self.secret_store,
+                    account_id.clone(),
+                    account.provider_type().clone(),
+                    secret_ref.clone(),
+                )
+                .await
+                .map_err(|_| {
+                    ProviderAccountLoginError::Account(
+                        ProviderAccountError::CredentialCleanupRequired { secret_ref },
+                    )
+                })?;
+        }
+        if let Some(previous) = previous {
+            self.remove_if_same(&account_id, &previous).await;
+        }
+        Ok(account)
+    }
+
     pub(crate) async fn get_account(
         &self,
         account_id: ProviderAccountId,
@@ -418,6 +467,23 @@ fn now_millis() -> Result<u64, ProviderAccountLoginError> {
 }
 
 impl ProviderAccountOperations for ProviderAccountLoginCoordinator {
+    fn disconnect_provider_account(
+        &self,
+        account_id: ProviderAccountId,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderAccount, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.disconnect_account(account_id)
+                .await
+                .map_err(ProviderAccountOperationError::from)
+        })
+    }
+
     fn create_provider_account(
         &self,
         command: ProviderAccountCreateCommand,

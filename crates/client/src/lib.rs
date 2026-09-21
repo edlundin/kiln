@@ -257,6 +257,25 @@ impl Client {
         .await
     }
 
+    /// Disconnects the addressed account locally. The caller decides whether
+    /// to retry; a later request also disconnects a newly reconnected account.
+    pub async fn disconnect_provider_account(
+        &self,
+        provider_account_id: &str,
+    ) -> Result<ProviderAccountResponse, Error> {
+        let path = path_with_segment(
+            kiln_protocol::PROVIDER_ACCOUNT_DISCONNECT_PATH,
+            "{provider_account_id}",
+            "provider_account_id",
+            provider_account_id,
+        )?;
+        self.send_json(
+            kiln_protocol::DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID,
+            self.http.post(self.http_url(&path)),
+        )
+        .await
+    }
+
     pub async fn start_provider_account_login(
         &self,
         provider_account_id: &str,

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `feat`
+
+- Added authenticated local provider-account disconnect through protocol `0.24.0`, the Rust client, and confirmed desktop Settings controls, including explicit cleanup retry and disconnect-then-sign-in recovery.
+
+EDL-309: https://linear.app/edlundin/issue/EDL-309
+
+[Commit](pending)
+
 ## 2026-09-21 — `fix`
 
 - Made provider-account disconnect disable credential use before vault deletion and retain its durable reference until cleanup succeeds, so interrupted disconnects can be retried after restart.

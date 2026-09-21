@@ -120,6 +120,13 @@ decisions.
 
 ## Current scope
 
+`disconnect_provider_account` cancels active sign-in and removes local credentials
+through the authenticated protocol `0.24.0` route. It returns a safe account snapshot
+and does not revoke provider-side access. A `provider_account_cleanup_required`
+problem requires an explicit retry after checking current account state. The client
+does not retry automatically: another disconnect would also affect a newly signed-in
+account with the same ID.
+
 This crate supplies transport for the native client. The separate
 `kiln-desktop` crate implements the GPUI window, transcript state, and desktop
 connection flow. Neither crate discovers or launches the daemon, and the

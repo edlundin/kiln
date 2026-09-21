@@ -17,11 +17,11 @@ use crate::{
     CREATE_WORKSPACE_OPERATION_ID, ChangedFileResponse, ChildActivityReference, ClientIdentity,
     ContextManifestCreatedResponse, CreateProviderAccountRequest, CreateTaskRequest,
     CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
-    GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, GET_PROVIDER_ACCOUNT_OPERATION_ID,
-    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
+    DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
+    GET_ARTIFACT_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    GET_PROVIDER_ACCOUNT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
+    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
+    IDEMPOTENCY_KEY_HEADER, LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
     LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
     LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse,
     ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode, MessageDeliveryResponse,
@@ -29,24 +29,25 @@ use crate::{
     ModelInvocationCompletionKind, ModelInvocationEventResponse, ModelInvocationFailureReason,
     ModelInvocationPurpose, ModelInvocationStatus, ModelOutputRecordedResponse, ModelOutputStream,
     NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH,
-    PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse,
-    ProviderAccountLoginState, ProviderAccountResponse, REACT_TO_RUN_ACTIVITY_OPERATION_ID,
-    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH,
-    ReactToRunActivityRequest, RunInputMode, RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID,
-    SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
-    START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, START_RUN_OPERATION_ID, SendRunInputRequest,
-    SessionChangeDiffContent, SessionChangeDiffResponse, SessionChangeDiffUnavailableReason,
-    SessionChangesResponse, SessionEventDataResponse, SessionEventResponse, SessionEventsResponse,
-    SessionResponse, SessionRunsResponse, StartChildRunRequest, StartProviderAccountLoginResponse,
-    StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH,
-    TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState,
-    ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
-    UPDATE_TASK_OPERATION_ID, UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UpdateTaskRequest,
-    UsageAccounting, UsageCompleteness, UsageFinality, UsageLedgerEntryResponse,
-    UsageLedgerResponse, UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse,
-    UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
+    PROVIDER_ACCOUNT_DISCONNECT_PATH, PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+    PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails,
+    ProviderAccountLoginResponse, ProviderAccountLoginState, ProviderAccountResponse,
+    REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
+    RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunResponse, RunState,
+    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    START_RUN_OPERATION_ID, SendRunInputRequest, SessionChangeDiffContent,
+    SessionChangeDiffResponse, SessionChangeDiffUnavailableReason, SessionChangesResponse,
+    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
+    SessionRunsResponse, StartChildRunRequest, StartProviderAccountLoginResponse, StartRunRequest,
+    StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
+    TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
+    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID,
+    UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UpdateTaskRequest, UsageAccounting,
+    UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
+    UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse, UsageSource,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
     WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
     error_code,
 };
@@ -513,6 +514,10 @@ fn catalogue() -> String {
             "method": "GET",
             "path": PROVIDER_ACCOUNT_PATH,
             "operation": GET_PROVIDER_ACCOUNT_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": PROVIDER_ACCOUNT_DISCONNECT_PATH,
+            "operation": DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID
         }, {
             "method": "POST",
             "path": PROVIDER_ACCOUNT_LOGIN_PATH,
@@ -1253,6 +1258,31 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
         '500':
+          $ref: '#/components/responses/Problem'
+  {PROVIDER_ACCOUNT_DISCONNECT_PATH}:
+    post:
+      operationId: {DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID}
+      parameters:
+        - name: provider_account_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '200':
+          description: Locally disconnected provider account; provider-side revocation is not performed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderAccountResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
           $ref: '#/components/responses/Problem'
   {PROVIDER_ACCOUNT_LOGIN_PATH}:
     post:
@@ -2260,7 +2290,7 @@ fn reference() -> String {
     )
     .replace(
         &format!("`GET {WORKSPACE_PATH}` returns the stored snapshot."),
-        &format!("`GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {PROVIDER_ACCOUNTS_PATH}` requires a non-empty `{IDEMPOTENCY_KEY_HEADER}` header and creates an empty `connecting` provider account from a provider type, label, and optional workspace associations. A repeated key with the same provider type, label, and normalized workspace associations returns the original account; a changed request is an idempotency conflict. Account list and get responses expose only safe account metadata; credential references, provider subjects, arbitrary metadata, and credential bytes are never returned. `POST {PROVIDER_ACCOUNT_LOGIN_PATH}` starts the supported Codex device login for an empty connecting or disconnected account and returns an opaque process-local attempt ID, verification URL, and user code. A disconnected account is transitioned to connecting without changing its identity. Replacement retains the prior terminal result until a new attempt is ready; unresolved credential cleanup prevents replacement. `GET {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}` is nonblocking and reports `pending`, `connected`, `failed`, `cancelled`, or `cleanup_required`; the latest terminal result remains available until a replacement starts. `POST {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}` cancels the addressed attempt. Attempts are ephemeral and are not resumed after daemon restart."),
+        &format!("`GET {WORKSPACE_PATH}` returns the stored snapshot.\n\n`POST {PROVIDER_ACCOUNTS_PATH}` requires a non-empty `{IDEMPOTENCY_KEY_HEADER}` header and creates an empty `connecting` provider account from a provider type, label, and optional workspace associations. A repeated key with the same provider type, label, and normalized workspace associations returns the original account; a changed request is an idempotency conflict. Account list and get responses expose only safe account metadata; credential references, provider subjects, arbitrary metadata, and credential bytes are never returned. `POST {PROVIDER_ACCOUNT_LOGIN_PATH}` starts the supported Codex device login for an empty connecting or disconnected account and returns an opaque process-local attempt ID, verification URL, and user code. A disconnected account is transitioned to connecting without changing its identity. Replacement retains the prior terminal result until a new attempt is ready; unresolved credential cleanup prevents replacement. `GET {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}` is nonblocking and reports `pending`, `connected`, `failed`, `cancelled`, or `cleanup_required`; the latest terminal result remains available until a replacement starts. `POST {PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH}` cancels the addressed attempt. Attempts are ephemeral and are not resumed after daemon restart. `POST {PROVIDER_ACCOUNT_DISCONNECT_PATH}` cancels and joins active sign-in before disabling the account, removing local credentials, and returning the safe disconnected account snapshot. It also retries credential cleanup retained by the current daemon. Failed deletion leaves a disabled durable reference for retry after restart; unpublished or retired credentials from failed connection/rotation are not durably journaled. A `provider_account_cleanup_required` error means disconnect must be retried. Successful disconnect invalidates the retained login attempt. Already-disconnected accounts are idempotent, but a later disconnect request also affects an account that has since reconnected; clients must not automatically retry stale requests. This operation does not revoke access at the provider."),
     )
     .replace(
         "A repeated key with the same normalized request returns the original Task. A mismatched reuse is an idempotency conflict. `GET /v1/tasks/{task_id}` returns the durable Task snapshot.",

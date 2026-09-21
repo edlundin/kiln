@@ -6,6 +6,7 @@ pub use daemon_lock::DaemonStoreLock;
 mod model_output;
 mod native_run;
 mod provider_account;
+mod provider_context;
 mod secret_store;
 pub use secret_store::OsSecretStore;
 mod usage;
@@ -383,6 +384,13 @@ impl FileArtifactStore {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(ArtifactStoreError::Filesystem(error)),
         };
+        if !file
+            .metadata()
+            .map_err(ArtifactStoreError::Filesystem)?
+            .is_file()
+        {
+            return Err(ArtifactStoreError::Corrupt);
+        }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
             .map_err(ArtifactStoreError::Filesystem)?;
@@ -460,7 +468,9 @@ fn hex_digit(byte: u8) -> Option<u8> {
 fn open_artifact_file(path: &Path) -> io::Result<fs::File> {
     open(
         path,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        // A corrupt/replaced blob must not block open on a FIFO before the
+        // caller can reject non-regular files through descriptor metadata.
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(fs::File::from)

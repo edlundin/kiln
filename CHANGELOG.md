@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added ordered provider-context assembly with explicit byte budgets, source-bound attachment payloads, hash verification, and whole-request failure for missing or invalid artifacts.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added versioned context-manifest attachment snapshots that bind source messages, artifact metadata, and attachment order into the durable hash while preserving historical manifests.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

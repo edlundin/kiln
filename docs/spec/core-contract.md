@@ -264,8 +264,8 @@ extra, reordered, or altered metadata fails closed.
 Version 1 deliberately exposes no complete attachment snapshot and must be
 reassembled before a live provider consumes attachments; it is never silently
 upgraded or assigned a different hash. The provider request exposes the manifest
-version and attachment references. This slice does not read artifact bytes,
-enforce provider payload limits, or send attachments to a model. Attachment-only
+version and attachment references. The subsequent provider-context assembler resolves those references into bounded,
+hash-verified bytes; this does not send attachments to a model. Attachment-only
 messages retain the existing readable hash-summary placeholder in their text
 entry alongside the new typed references.
 
@@ -278,8 +278,30 @@ Queries retain committed snapshots after Run termination and list them in
 durable creation order.
 
 Context supports text instructions, Message snapshots, selected child activity
-snapshots, and versioned attachment references. Artifact-byte loading, provider
-payload projection/limits, and tool descriptions/results remain pending. The deterministic native mode stores
+snapshots, and versioned attachment references. `ProviderRequest::assemble_context`
+returns an ordered, provider-neutral projection with instruction provenance,
+message IDs/roles, attachment bytes/metadata, and selected child references. It
+rejects version-1 snapshots explicitly. The caller supplies nonzero text,
+per-attachment, and total attachment byte ceilings; these are resource budgets,
+not token counts or provider model limits. Preflight rejects excess bytes or
+arithmetic overflow before any artifact read. Repeated artifact occurrences count
+toward the total each time because each occurrence is represented in the output.
+
+The filesystem reader runs one bounded read off the async executor, rejects
+non-regular files and size mismatches, and reads no more than expected size plus
+one sentinel byte. Unix opens reject symlinks and use nonblocking open so a FIFO
+cannot stall before file-type validation. Assembly verifies exact size and SHA-256
+against the immutable metadata before accepting each payload. Missing, unavailable,
+corrupt, or oversized artifacts fail the whole assembly; nothing is silently
+truncated or omitted. Dropping assembly stops further reads and discards partial
+results; an already-started blocking filesystem read may finish within its byte
+bound. No wall-clock filesystem cancellation guarantee is claimed.
+
+The assembled context has no content-bearing Debug implementation and does not
+upload data, infer provider media support, execute tools, or append inherited
+parent/session history. Tool descriptions/results, model-specific serialization,
+context-window/token accounting/compaction policy, and live transport integration
+remain pending. The deterministic native mode stores
 explicit fixture instructions and consumed Run input.
 
 ### Model invocations

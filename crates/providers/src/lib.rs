@@ -8,6 +8,7 @@ mod responses_completion;
 mod responses_replay;
 mod responses_request;
 mod responses_sse;
+mod responses_stream;
 
 pub use browser_auth::*;
 pub use codex_subscription_auth::*;
@@ -17,6 +18,7 @@ pub use responses_completion::*;
 pub use responses_replay::*;
 pub use responses_request::*;
 pub use responses_sse::*;
+pub use responses_stream::*;
 
 use std::{collections::VecDeque, future::Future, pin::Pin};
 

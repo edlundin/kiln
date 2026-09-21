@@ -19,6 +19,29 @@ pub struct ResponsesCompletionLimits {
     pub continuation: ModelContinuationLimits,
 }
 
+impl ResponsesCompletionLimits {
+    pub(crate) fn validate(self) -> Result<(), ResponsesCompletionError> {
+        use ResponsesCompletionError as Error;
+        if self.max_response_bytes == 0
+            || self.max_identifier_bytes == 0
+            || self.max_visible_output_bytes == 0
+            || self.replay.max_output_bytes == 0
+            || self.replay.max_item_bytes == 0
+            || self.replay.max_items == 0
+            || self.requests.max_requests == 0
+            || self.requests.max_provider_call_id_bytes == 0
+            || self.requests.max_name_bytes == 0
+            || self.requests.max_arguments_bytes == 0
+            || self.requests.max_total_arguments_bytes == 0
+            || self.continuation.max_format_bytes == 0
+            || self.continuation.max_payload_bytes == 0
+        {
+            return Err(Error::InvalidLimits);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponsesCompletionError {
     InvalidLimits,
@@ -49,22 +72,7 @@ impl ResponsesCompletion {
         limits: ResponsesCompletionLimits,
     ) -> Result<Self, ResponsesCompletionError> {
         use ResponsesCompletionError as Error;
-        if limits.max_response_bytes == 0
-            || limits.max_identifier_bytes == 0
-            || limits.max_visible_output_bytes == 0
-            || limits.replay.max_output_bytes == 0
-            || limits.replay.max_item_bytes == 0
-            || limits.replay.max_items == 0
-            || limits.requests.max_requests == 0
-            || limits.requests.max_provider_call_id_bytes == 0
-            || limits.requests.max_name_bytes == 0
-            || limits.requests.max_arguments_bytes == 0
-            || limits.requests.max_total_arguments_bytes == 0
-            || limits.continuation.max_format_bytes == 0
-            || limits.continuation.max_payload_bytes == 0
-        {
-            return Err(Error::InvalidLimits);
-        }
+        limits.validate()?;
         if response.len() > limits.max_response_bytes {
             return Err(Error::ResponseLimitExceeded);
         }

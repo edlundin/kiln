@@ -892,8 +892,8 @@ inert proposals, final usage and bound continuation must validate before any
 updates are returned. Transport must persist the output before the terminal
 update and reconcile any already-emitted streaming deltas with final output to
 avoid duplication. Local stop draining can retain normalized final usage under
-the locally cancelled/interrupted outcome. Stream reconciliation and live
-transport remain unimplemented; no live adapter calls this helper.
+the locally cancelled/interrupted outcome. Live transport remains unimplemented;
+no live adapter calls this helper.
 
 `ResponsesSseDecoder` incrementally frames provider-private JSON events across
 arbitrary byte/UTF-8 boundaries, accepts LF/CRLF/CR, one initial BOM, comments and
@@ -904,11 +904,35 @@ message label). Invalid JSON/UTF-8/types, excess limits, post-DONE events or
 truncated EOF permanently close the decoder. `[DONE]` is only an optional
 transport marker and never establishes successful model completion. SSE `id`
 and `retry` fields do not enable reconnect or redispatch. Debug hides payloads.
-This framing layer does not validate lifecycle, sequence numbers, response/item
-identity, delta consistency or terminal semantics; that layer and actual HTTP
-transport remain pending.
+This framing layer does not itself validate lifecycle, sequence numbers,
+response/item identity, delta consistency or terminal semantics.
+
+`ResponsesStream` owns one claimed public-API generation request and composes
+framing with a bounded semantic collector. It requires one created in-progress
+response, stable response/model/item identities, strictly increasing event
+sequence numbers, and unique item indexes/IDs. The initial supported sequence
+uses empty Message content and reasoning summaries, followed by explicit part
+additions, deltas, text/argument completion and item completion. Interleaved
+items/parts use their indexes, not arrival-order concatenation. Finalized text,
+refusals, summaries and argument strings must exactly match accumulated parts;
+successful terminal output must exactly match the ordered completed items.
+Incomplete items can remain unfinished only for unsuccessful terminal handling;
+they cannot enter successful replay.
+
+Unknown events, raw reasoning, built-in tools, compaction and server-side
+steering are unsupported and close the collector. Final annotations, phase and
+encrypted reasoning remain in the exact completed-item/terminal snapshots.
+An explicit retained-data budget covers identifiers/deltas, serialized completed
+items and the terminal response, in addition to framing and completion limits.
+It is not a process-memory estimate. Only a terminal candidate followed by clean
+EOF releases a `ResponsesCompletion`; early DONE, missing terminal, truncated
+tail, identity/output mismatch or any poisoned state releases nothing. There is
+no reconnect, tool dispatch or credential access. Output is buffered through
+terminal validation; token-by-token UI projection and HTTP integration remain
+pending. Compilation/source review do not establish runtime stream acceptance.
 
 Source: official [Responses streaming guide](https://developers.openai.com/api/docs/guides/streaming-responses),
+and [streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events),
 consulted 2026-09-21. No live streaming acceptance is claimed.
 
 Source: official [function-calling guidance](https://developers.openai.com/api/docs/guides/function-calling),

@@ -74,6 +74,7 @@ impl ResponsesStream {
             .map_err(ResponsesStreamError::Completion)?;
         if request.invocation().settings().provider().as_str() != crate::OPENAI_API_PROVIDER_TYPE
             || request.invocation().purpose() != kiln_core::ModelInvocationPurpose::Generation
+            || request.credential().is_none()
         {
             return Err(ResponsesStreamError::InvalidEvent);
         }

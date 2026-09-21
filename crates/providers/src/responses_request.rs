@@ -29,6 +29,7 @@ pub enum ResponsesRequestError {
     UnsupportedPurpose,
     UnsupportedSettings,
     ContextMismatch,
+    MissingCredentialBinding,
     RequestLimitExceeded,
     ItemLimitExceeded,
     InvalidReplay,
@@ -75,6 +76,9 @@ impl ResponsesRequestBody {
         }
         if invocation.purpose() != ModelInvocationPurpose::Generation {
             return Err(Error::UnsupportedPurpose);
+        }
+        if request.credential().is_none() {
+            return Err(Error::MissingCredentialBinding);
         }
         if context.manifest_id() != invocation.context_manifest_id()
             || context.manifest_hash() != invocation.context_manifest_hash()

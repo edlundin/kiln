@@ -364,10 +364,30 @@ account/provider/workspace binding. `read_provider_account_secret` rechecks
 connected state and workspace access under the account lifecycle lock, rejects
 a different current reference with `CredentialVersionConflict`, and holds the
 lock through the vault read. It never falls back to newly connected/refreshed
-credentials. This guard does not yet persist a version per ModelInvocation or
-prove upstream-principal continuity across rotation. Pinning invocation/replay
-history and wiring the live adapter remain required; the guard does not revoke
-a credential value already returned to an in-flight caller.
+credentials. The guard does not prove upstream-principal continuity across
+rotation or revoke a value already returned to an in-flight caller.
+
+Migration `0033` adds private `model_invocation_credentials` snapshots containing
+the invocation, Session workspace and opaque secret reference. The first
+pending-to-in-flight claim captures the current connected account version after
+rechecking provider/workspace authorization, in the same transaction as the
+catalog freeze and state/Events. Every retry and private replay source must have
+the same captured version. Rotation therefore rejects subsequent replay/retry
+claims rather than inferring unchanged upstream identity from Kiln account ID.
+This conservative rule also rejects automatic-refresh version changes; a safe
+principal/credential-lineage contract would be needed to relax it.
+
+Historical invocations are not backfilled from mutable account metadata.
+Account-less fixtures and stores without credential support remain unpinned;
+public Responses request serialization and stream construction reject missing
+snapshots. `ProviderRequest::credential` exposes the private typed binding after
+claim; post-claim read failure yields no dispatch request and needs reconciliation.
+Duplicate claims neither recapture a version nor produce another request. Source
+version mismatches reject the claim transaction before it changes state or emits
+Events. Snapshot reads verify Session workspace ownership. No credential bytes
+or private references enter invocation Events, context hashes, or wire request
+bodies. Live transport still needs to resolve exactly this captured reference
+through the guarded vault API before dispatch; it remains unimplemented.
 
 The authenticated protocol now exposes safe provider-account create, list, and
 get snapshots plus the Codex device-code login start, nonblocking status,
@@ -833,7 +853,7 @@ Missing, corrupt, or over-budget replay fails the full assembly. The resulting
 promoted to an instruction.
 
 `ResponsesRequestBody::from_context` serializes a verified context for the public
-`openai_api` provider only. It checks manifest identity/hash/Run/Session and
+`openai_api` provider only. It requires a private credential snapshot and checks manifest identity/hash/Run/Session and
 generation purpose, retains the requested model/output limit/reasoning effort,
 and emits `store:false`, streaming, disabled truncation, and sequential tool
 preference. Output caps below the public schema minimum of 16 and unknown
@@ -868,7 +888,7 @@ and replay bytes/items. Attachments serialize individually. No input is trimmed,
 and no partial request is returned after failure. Debug exposes only byte count.
 The body contains no credential fields and is not exposed in Events. Compilation
 and source review do not establish live API acceptance. Model-specific capability
-validation, transport, credential-generation binding, streaming normalization,
+validation, transport, progressive streaming output,
 compaction, and subscription endpoint compatibility remain pending.
 
 `ResponsesCompletion::from_response_json` normalizes a terminal public Responses

@@ -564,7 +564,7 @@ fn to_sql_timestamp(value: u64) -> Result<i64, ProviderAccountStoreError> {
     i64::try_from(value).map_err(|_| ProviderAccountStoreError::IntegrityViolation)
 }
 
-async fn load_provider_account(
+pub(super) async fn load_provider_account(
     connection: &mut SqliteConnection,
     id: &ProviderAccountId,
 ) -> Result<Option<ProviderAccount>, ProviderAccountStoreError> {

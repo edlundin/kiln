@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-21 — `feat`
+
+- Pin credential versions atomically with model claims and reject replay/retry across rotations without exposing secret references in model Events or requests.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
 ## 2026-09-21 — `fix`
 
 - Require the expected credential version during provider vault lookup so reconnect or refresh cannot silently substitute credentials.

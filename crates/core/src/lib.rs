@@ -7,6 +7,7 @@ use ulid::Ulid;
 mod assistant_message;
 mod child_activity;
 mod model_continuation;
+mod model_credential;
 mod model_output;
 mod model_tool_adoption;
 mod model_tool_catalog;
@@ -25,6 +26,7 @@ mod workspace_file_read;
 pub use assistant_message::*;
 pub use child_activity::*;
 pub use model_continuation::*;
+pub use model_credential::*;
 pub use model_output::*;
 pub use model_tool_adoption::*;
 pub use model_tool_catalog::*;
@@ -4884,6 +4886,15 @@ pub trait ContextManifestStore: Send + Sync {
 }
 
 pub trait ModelInvocationStore: Send + Sync {
+    /// Stores without credential-backed providers may return None. Live adapters
+    /// must require a snapshot; historical absence is never an implicit latest version.
+    fn get_model_invocation_credential(
+        &self,
+        _model_invocation_id: &ModelInvocationId,
+    ) -> impl Future<Output = Result<Option<ModelInvocationCredential>, ModelInvocationStoreError>> + Send
+    {
+        async { Ok(None) }
+    }
     fn create_model_invocation(
         &self,
         command: &CreateModelInvocation,

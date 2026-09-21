@@ -4,6 +4,7 @@ mod assistant_message;
 mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
 mod model_continuation;
+mod model_credential;
 mod model_output;
 mod model_tool_adoption;
 mod model_tool_catalog;
@@ -3359,6 +3360,13 @@ async fn insert_model_invocation(
 }
 
 impl ModelInvocationStore for SqliteStore {
+    async fn get_model_invocation_credential(
+        &self,
+        id: &ModelInvocationId,
+    ) -> Result<Option<kiln_core::ModelInvocationCredential>, ModelInvocationStoreError> {
+        let mut connection = self.connection.lock().await;
+        model_credential::load(&mut connection, id).await
+    }
     async fn create_model_invocation(
         &self,
         command: &CreateModelInvocation,
@@ -3646,6 +3654,7 @@ impl ModelInvocationStore for SqliteStore {
         {
             return Err(ModelInvocationStoreError::InvalidTransition);
         }
+        model_credential::freeze(&mut transaction, &current).await?;
         model_tool_catalog::freeze_catalog(&mut transaction, &current)
             .await
             .map_err(|error| match error {

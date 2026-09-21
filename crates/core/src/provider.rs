@@ -18,6 +18,7 @@ pub struct ProviderRequest {
     invocation: ModelInvocation,
     manifest: ContextManifest,
     tool_catalog: ModelToolCatalog,
+    credential: Option<crate::ModelInvocationCredential>,
 }
 
 impl ProviderRequest {
@@ -31,6 +32,9 @@ impl ProviderRequest {
 
     pub fn tool_catalog(&self) -> &ModelToolCatalog {
         &self.tool_catalog
+    }
+    pub fn credential(&self) -> Option<&crate::ModelInvocationCredential> {
+        self.credential.as_ref()
     }
 }
 
@@ -130,11 +134,23 @@ impl<
                 tool_catalog
                     .validate_for(&mutation.value)
                     .map_err(ProviderClaimError::ToolCatalog)?;
+                let credential = self
+                    .store
+                    .get_model_invocation_credential(&invocation_id)
+                    .await
+                    .map_err(ProviderClaimError::Invocation)?;
+                if credential
+                    .as_ref()
+                    .is_some_and(|credential| credential.invocation_id() != &invocation_id)
+                {
+                    return Err(ProviderClaimError::IntegrityViolation);
+                }
                 Ok(ProviderClaim::Applied {
                     request: ProviderRequest {
                         invocation: mutation.value,
                         manifest,
                         tool_catalog,
+                        credential,
                     },
                     events: mutation.events,
                 })

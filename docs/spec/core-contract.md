@@ -668,6 +668,21 @@ alone cannot establish that external effects stopped. The legacy subprocess
 `begin_tool_call` entrypoint rejects adopted model calls. Concrete executor
 integration and reconciliation handlers remain pending.
 
+`ModelToolExchangeStore::get_model_tool_exchange` reads a terminal adopted call
+for an explicitly requested Run in one SQLite snapshot. It verifies the adoption
+link, invocation/manifest integrity, complete proposal batch, frozen catalog,
+capability, Run/Session ownership, and terminal output shape. Missing, foreign,
+incomplete, or inconsistent sources cannot become exchanges. No tool executes
+and no output Artifact bytes are loaded by this operation.
+
+The resulting `ModelToolExchange` retains the local ToolCall and provider call
+IDs, source invocation, tool name/capability/revision, canonical arguments,
+terminal state, inline stdout/stderr, Artifact metadata, and exit code. Its
+versioned canonical JSON preserves null versus empty output and denial versus
+cancellation; its Debug representation omits payload content. This projection
+is the source for future context snapshots; it is not yet included in context
+manifests or serialized by a live adapter.
+
 The caller must treat end-of-stream without a terminal update as interruption.
 Cancellation is an explicit operation
 on the active provider operation. Successful cancellation must stop external

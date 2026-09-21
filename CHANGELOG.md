@@ -2,6 +2,14 @@
 
 ## 2026-09-21 — `feat`
 
+- Added verified terminal tool-exchange projections that retain call provenance, canonical arguments, outcomes, and output metadata for subsequent model context.
+
+EDL-311: https://linear.app/edlundin/issue/EDL-311
+
+[Commit](pending)
+
+## 2026-09-21 — `feat`
+
 - Added fresh native ToolCall execution claims that bind typed commands to approved scope and prevent duplicate or restarted work from being dispatched again.
 
 EDL-311: https://linear.app/edlundin/issue/EDL-311

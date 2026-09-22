@@ -77,6 +77,20 @@ The desktop dependencies are pinned exactly to `gpui-pre` 0.3.2,
 `gpui-pre-platform` 0.3.2, and `gpui-component` 0.6.1. Update these pins
 together only after checking compatibility.
 
+## Configuration synchronization status
+
+Open **Settings** to see the connected daemon's configuration role, instance ID,
+group and master IDs, stored snapshot revision, and highest observed revision.
+**Refresh status** reloads that metadata; a failed request offers **Retry status**.
+Loading this section does not block provider-account actions. Disconnecting
+clears the displayed metadata and cancels the request; reconnecting loads it again.
+
+Remote synchronization currently reports **unconfigured**. The displayed revisions
+describe durable metadata, not remote connectivity or activation in running
+Sessions. Master designation, follower enrollment, and distribution of shared
+settings, global MCP servers, and skills are not yet available from Settings.
+Provider credentials remain local to each instance.
+
 ## Provider accounts
 
 After connecting to the daemon, open **Settings** in the global toolbar. Provider

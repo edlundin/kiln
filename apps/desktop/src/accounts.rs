@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use gpui::{ClipboardItem, Context, Render, SharedString, Window, div, prelude::*};
+use gpui::{ClipboardItem, Context, Entity, Render, SharedString, Window, div, prelude::*};
 use gpui_component::{
     Disableable,
     button::{Button, ButtonVariants},
@@ -14,7 +14,7 @@ use kiln_protocol::{
 };
 use tokio::{runtime::Runtime, sync::mpsc};
 
-use crate::{connection, theme};
+use crate::{configuration_sync::ConfigurationSyncSettings, connection, theme};
 
 const CODEX_PROVIDER: &str = "openai_codex_subscription";
 // Browser and device destinations are validated before opening.
@@ -111,6 +111,7 @@ enum Update {
 }
 
 pub struct AccountSettings {
+    configuration_sync: Entity<ConfigurationSyncSettings>,
     client: Client,
     runtime: Arc<Runtime>,
     updates: mpsc::UnboundedSender<Update>,
@@ -140,6 +141,8 @@ impl AccountSettings {
         })
         .detach();
         let mut settings = Self {
+            configuration_sync: cx
+                .new(|cx| ConfigurationSyncSettings::new(client.clone(), runtime.clone(), cx)),
             client,
             runtime,
             updates,
@@ -161,6 +164,8 @@ impl AccountSettings {
 
     pub fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
         self.online = online;
+        self.configuration_sync
+            .update(cx, |settings, cx| settings.set_online(online, cx));
         if !online {
             self.confirm_disconnect = None;
         }
@@ -463,6 +468,7 @@ impl Render for AccountSettings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let disabled = self.busy || !self.online;
         let mut content = div().flex().flex_col().gap_4().w_full().min_w_0().max_w(theme::TRANSCRIPT_WIDTH)
+            .child(self.configuration_sync.clone())
             .child(div().text_lg().child("Provider accounts"))
             .child(div().text_sm().text_color(theme::MUTED)
                 .child("Connect your Codex subscription in a browser on this daemon’s host. Use device sign-in for a remote host or if the callback is unavailable. OpenAI account terms and data controls apply."))

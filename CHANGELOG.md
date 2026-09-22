@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Show configuration synchronization authority and revision status in desktop Settings, with independent loading, retry, and disconnect handling.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Expose authenticated read-only configuration authority and revision status through protocol 0.26.0 and the Rust client.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

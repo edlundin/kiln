@@ -115,10 +115,11 @@ observation or unchanged role is a no-op. Leaving a group preserves its history;
 rejoining restores its highest observed revision. Integer storage uses SQLite's
 signed 64-bit positive range and rejects exhaustion/overflow.
 
-This storage does not yet contain snapshot payloads, applied revisions, enrollment
-credentials or remote endpoints. It exposes no network routes and grants no
-transport authentication. Schema/content verification, active snapshot storage,
-public status projection and administrative enrollment UI remain subsequent work.
+Migration 35 adds coherent snapshot payloads and active revisions as described
+below. Enrollment credentials and remote endpoint associations remain absent.
+These internal stores expose no network routes or transport authentication.
+Public status projection, administrative enrollment UI and consumers remain
+subsequent work.
 
 ## Portable skill package validation
 
@@ -148,13 +149,18 @@ bytes. Filesystem importers must separately refuse symlinks/special entries and
 limit what the user selected for sharing; this pure validator never reads the
 filesystem, scans the vault, extracts files, executes scripts, or installs a skill.
 Cross-package dependency checks now belong to the complete snapshot validator;
-snapshot persistence/application remains open.
+SQLite snapshot persistence is described below; filesystem materialization and
+runtime consumers remain open.
 
 ## Coherent shared snapshot schema 1
 
 The core snapshot validator accepts all three categories together and returns an
-immutable snapshot only after validation. This is currently a typed internal
-schema, not a wire decoder, filesystem importer, or active configuration store.
+immutable snapshot only after validation. Bounded canonical metadata restoration
+reconstructs settings/MCP definitions with the complete validated skill payloads
+and requires byte-for-byte regeneration. Extra/duplicate fields, unknown schema,
+missing packages, mismatched hashes and noncanonical metadata are rejected. This
+is an internal persistence format, not an authenticated sync transport or a
+filesystem importer.
 
 The initial global-settings allowlist is `model_defaults`: a logical local account
 binding, exact provider/model and generation/reasoning settings, and versioned
@@ -191,3 +197,37 @@ snapshot hash binds the metadata and therefore settings, server definitions,
 enabled state, skill content and dependency metadata. `verify_revision` checks
 schema/hash correspondence only; the follower authority/watermark and authenticated
 master checks are still separately required. No content is applied by validation.
+
+## Atomic snapshot persistence
+
+Migration 35 stores one complete active snapshot per authority group with its
+revision/schema/hash, canonical settings/MCP metadata, skill package metadata and
+regular-file bytes. Retained groups remain separate: leaving a group does not
+activate its data under a new group. Superseded content within one group is replaced,
+including removed packages and files; complete historical payloads are not retained.
+The active revision remains monotonic, and rollback is publication of older content
+at a new revision.
+
+Internal master publication requires the current master role and exact expected
+instance state, then allocates the next positive SQLite-representable revision.
+Follower application requires the current follower role, matching enrolled
+authority, matching schema/content hash and the applied/observed revision checks.
+An identical already-applied revision is a no-op. A valid newer snapshot atomically
+replaces all categories and file data, advances the instance CAS version and records
+the follower observation. Publication also advances the CAS version. Failed writes
+roll back the entire change. These methods assume an already authenticated and
+authorized caller; they do not enroll or authenticate peers.
+
+Reads select the current group's state and snapshot in one transaction. They
+check metadata size, package/file counts and byte lengths before loading payloads,
+then revalidate file hashes, package hashes/paths/dependencies, canonical metadata,
+snapshot hash and revision binding. Lower caller budgets fail explicitly. This is
+a data budget, not a process-memory bound. Returned snapshots own their verified
+bytes and can be pinned by consumers across a later update. No method extracts
+files, changes host bindings, starts MCP servers, provisions secrets, or switches
+an already running model invocation.
+
+Fresh schema/startup and SQL preparation have been checked. Populated upgrades,
+publication/application/duplicate/concurrency paths and content restoration remain
+unverified at runtime; no synchronization transport or end-to-end acceptance is
+claimed.

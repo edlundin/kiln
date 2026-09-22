@@ -120,16 +120,7 @@ impl SharedSkillPackage {
         limits: SharedSkillLimits,
     ) -> Result<Self, SharedSkillError> {
         use SharedSkillError as Error;
-        if limits.max_identifier_bytes == 0
-            || limits.max_version_bytes == 0
-            || limits.max_dependencies == 0
-            || limits.max_files == 0
-            || limits.max_path_bytes == 0
-            || limits.max_file_bytes == 0
-            || limits.max_total_file_bytes == 0
-        {
-            return Err(Error::InvalidLimits);
-        }
+        limits.validate()?;
         GlobalSkillId::parse(input.id.as_str(), limits.max_identifier_bytes)?;
         if input.version.is_empty()
             || input.version.len() > limits.max_version_bytes
@@ -302,4 +293,20 @@ fn digest_hash(digest: Sha256) -> ContentHash {
         encoded.push(b"0123456789abcdef"[(byte & 0x0f) as usize] as char);
     }
     ContentHash::parse(encoded).expect("SHA-256 is a valid content hash")
+}
+
+impl SharedSkillLimits {
+    pub fn validate(self) -> Result<(), SharedSkillError> {
+        if self.max_identifier_bytes == 0
+            || self.max_version_bytes == 0
+            || self.max_dependencies == 0
+            || self.max_files == 0
+            || self.max_path_bytes == 0
+            || self.max_file_bytes == 0
+            || self.max_total_file_bytes == 0
+        {
+            return Err(SharedSkillError::InvalidLimits);
+        }
+        Ok(())
+    }
 }

@@ -93,7 +93,7 @@ impl ConfigurationStateStore for SqliteStore {
     }
 }
 
-async fn load(
+pub(super) async fn load(
     connection: &mut SqliteConnection,
 ) -> Result<Option<ConfigurationInstanceState>, Error> {
     let row = sqlx::query("SELECT i.instance_id, i.version, i.role, i.group_id, a.master_instance_id, a.observed_revision, a.observed_schema_version, a.observed_content_hash FROM configuration_instance i LEFT JOIN configuration_authorities a ON a.group_id = i.group_id WHERE i.singleton = 1")
@@ -164,7 +164,7 @@ async fn load(
         .map_err(|_| Error::IntegrityViolation)
 }
 
-async fn save(
+pub(super) async fn save(
     connection: &mut SqliteConnection,
     current: &ConfigurationInstanceState,
     next: &ConfigurationInstanceState,

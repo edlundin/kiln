@@ -96,6 +96,7 @@ pub struct SharedConfigurationLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SharedConfigurationError {
     InvalidLimits,
+    InvalidMetadata,
     InvalidKey,
     InvalidEnvironmentName,
     InvalidArgument,
@@ -139,19 +140,7 @@ impl SharedConfigurationSnapshot {
         limits: SharedConfigurationLimits,
     ) -> Result<Self, SharedConfigurationError> {
         use SharedConfigurationError as Error;
-        if limits.max_key_bytes == 0
-            || limits.max_metadata_bytes == 0
-            || limits.max_mcp_servers == 0
-            || limits.max_mcp_arguments == 0
-            || limits.max_mcp_argument_bytes == 0
-            || limits.max_mcp_environment == 0
-            || limits.max_endpoint_bytes == 0
-            || limits.max_skills == 0
-            || limits.max_total_skill_files == 0
-            || limits.max_total_skill_bytes == 0
-        {
-            return Err(Error::InvalidLimits);
-        }
+        limits.validate()?;
         if input.mcp_servers.len() > limits.max_mcp_servers
             || input.skills.len() > limits.max_skills
         {
@@ -421,4 +410,23 @@ fn validate_skill_dependencies(
         return Err(Error::SkillDependencyCycle);
     }
     Ok(())
+}
+
+impl SharedConfigurationLimits {
+    pub fn validate(self) -> Result<(), SharedConfigurationError> {
+        if self.max_key_bytes == 0
+            || self.max_metadata_bytes == 0
+            || self.max_mcp_servers == 0
+            || self.max_mcp_arguments == 0
+            || self.max_mcp_argument_bytes == 0
+            || self.max_mcp_environment == 0
+            || self.max_endpoint_bytes == 0
+            || self.max_skills == 0
+            || self.max_total_skill_files == 0
+            || self.max_total_skill_bytes == 0
+        {
+            return Err(SharedConfigurationError::InvalidLimits);
+        }
+        Ok(())
+    }
 }

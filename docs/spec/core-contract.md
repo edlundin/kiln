@@ -1452,3 +1452,10 @@ follower access store. It shares the bounded local snapshot encoder but exposes
 no administrative operations. Responses are no-store and failures are content-free.
 The owning daemon must still supply authenticated HTTPS, explicit enrollment,
 credential-adapter composition, resource limits and shutdown handling before serving it.
+
+The router is now opaque and can enter only the dedicated
+`serve_configuration_followers` TLS serving boundary. Explicit DER identity and
+caller-selected socket/buffer/deadline budgets are required. The service performs
+one HTTP/1 request per TLS connection, caps accepted tasks, and drains then aborts
+owned work on shutdown. Daemon startup still does not bind or serve this component;
+certificate/enrollment ownership and concrete credential composition remain pending.

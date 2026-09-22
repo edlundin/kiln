@@ -3764,6 +3764,8 @@ name = "kiln-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "hyper",
+ "hyper-util",
  "kiln-core",
  "kiln-protocol",
  "semver",
@@ -3771,6 +3773,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

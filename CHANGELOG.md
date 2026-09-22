@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Add TLS serving for the isolated follower router with explicit identity, connection/buffer/deadline budgets and owned shutdown cleanup. Daemon activation and enrollment remain pending.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Add an isolated follower snapshot router with strict credential/identity headers, transactional grant checks and bounded responses. It remains unmounted pending HTTPS and enrollment setup.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

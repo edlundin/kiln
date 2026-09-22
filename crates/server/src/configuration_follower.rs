@@ -19,6 +19,10 @@ use std::sync::Arc;
 #[error("configuration follower service requires an explicit valid Host authority")]
 pub struct InvalidConfigurationFollowerHost;
 
+/// Only the restricted router can enter the follower TLS serving boundary.
+/// There is intentionally no conversion from an arbitrary administrative router.
+pub struct ConfigurationFollowerRouter(pub(super) Router);
+
 struct FollowerState<T, F> {
     store: T,
     credential_digest: F,
@@ -37,7 +41,7 @@ pub fn configuration_follower_router<T, F>(
     store: T,
     credential_digest: F,
     expected_host: &str,
-) -> Result<Router, InvalidConfigurationFollowerHost>
+) -> Result<ConfigurationFollowerRouter, InvalidConfigurationFollowerHost>
 where
     T: ConfigurationAccessStore + 'static,
     F: Fn(&[u8]) -> Option<ConfigurationCredentialDigest> + Send + Sync + 'static,
@@ -59,14 +63,16 @@ where
         credential_digest,
         expected_host,
     });
-    Ok(Router::new()
-        .route(
-            kiln_protocol::CONFIGURATION_SNAPSHOT_PATH,
-            get(snapshot::<T, F>),
-        )
-        .fallback(|| async { StatusCode::NOT_FOUND })
-        .layer(middleware::map_response(no_store))
-        .with_state(state))
+    Ok(ConfigurationFollowerRouter(
+        Router::new()
+            .route(
+                kiln_protocol::CONFIGURATION_SNAPSHOT_PATH,
+                get(snapshot::<T, F>),
+            )
+            .fallback(|| async { StatusCode::NOT_FOUND })
+            .layer(middleware::map_response(no_store))
+            .with_state(state),
+    ))
 }
 
 async fn snapshot<T, F>(

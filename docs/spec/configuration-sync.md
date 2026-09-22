@@ -206,7 +206,7 @@ runtime activation follows merely from constructing the client or fetching data.
 
 ## Isolated follower read service
 
-`kiln-server::configuration_follower_router` builds a separate router with only
+`kiln-server::configuration_follower_router` builds a separate opaque router with only
 the snapshot GET. The daemon does not mount or serve it yet. It must never be
 merged into the local administrative router. Its owner must supply authenticated
 HTTPS for the enrolled master certificate, connection/request resource limits
@@ -235,9 +235,53 @@ export's full bounded JSON encoder and validator limits. Every response, includi
 fallbacks/errors, has `Cache-Control: no-store`. Other paths have no registered
 operations, and no general API, publication, vault or execution access is available.
 
-Router compilation is not remote-delivery acceptance. TLS serving, concrete
-credential-adapter composition, explicit enrollment and audit/recovery remain
-unwired, and no remote HTTP interaction has been verified.
+Router compilation is not remote-delivery acceptance. The TLS serving component
+below is not wired into daemon startup. Concrete credential-adapter composition,
+explicit enrollment and audit/recovery remain unwired, and no remote HTTP
+interaction has been verified.
+
+## Bounded TLS serving component
+
+`ConfigurationFollowerTls::from_der` consumes an explicitly supplied leaf-first
+DER certificate chain and DER private key. Rustls checks key usability and that
+the key matches the leaf certificate. The immutable, non-Debug/non-Clone wrapper
+does not read files or provision an identity. Its TLS 1.2/1.3 server configuration
+advertises only HTTP/1.1, disables session storage/tickets, and retains disabled
+early-data/key-logging defaults. Followers authenticate with their restricted
+bearer; client certificates are not required. Enrollment must separately approve
+the master CA/hostname/group binding, and followers still verify that binding.
+
+`serve_configuration_followers` accepts an already-bound listener, the opaque
+`ConfigurationFollowerRouter`, TLS configuration, explicit resource budgets and
+a shutdown future. An arbitrary administrative Axum router cannot be supplied.
+The server function is available as a library component but the daemon does not
+bind a remote listener or call it. Local startup behavior is unchanged.
+
+`ConfigurationTlsLimits` requires a positive accepted-connection cap, HTTP/1
+buffer bytes, and nonzero handshake/request/shutdown durations representable by
+the local monotonic clock. Hyper requires a minimum 8192-byte buffer; values below
+that documented library minimum are rejected. Other values are chosen by the
+caller for the deployment, without invented default throughput or timeouts.
+Accepted sockets share one task cap across TLS handshake, HTTP headers, storage
+read and response. When full, the server pauses acceptance; the OS manages its
+listening backlog. Completed tasks are reaped before more admission.
+
+Each socket has one TLS handshake deadline and then one deadline covering the
+entire HTTP request/response. HTTP/1 keep-alive is disabled, so each connection
+serves at most one request; HTTP/2 and upgrades are not served. The whole-request
+deadline replaces Hyper's separate header timer. Peer TLS/HTTP errors, disconnects
+and expired deadlines close only that socket and expose no remote diagnostics.
+A listener error or unexpected task failure stops admission and is reported as a
+content-free service error.
+
+Shutdown stops accepting, drops the listener, and permits existing sockets to
+finish for the supplied drain duration. Remaining tasks are then aborted and
+joined. Dropping the serving future also aborts its owned tasks. Deadlines and
+cancellation are cooperative at async polling boundaries: these are network and
+admission budgets, not hard CPU/wall-clock or total process-memory guarantees.
+The existing snapshot/encoded-content limits remain in force. Certificate-file
+ownership, live composition, enrollment, audit/recovery and TLS runtime acceptance
+are still required before enabling remote synchronization.
 
 ## Initial local master designation
 

@@ -2,7 +2,12 @@
 
 mod configuration_follower;
 pub use configuration_follower::{
-    InvalidConfigurationFollowerHost, configuration_follower_router,
+    ConfigurationFollowerRouter, InvalidConfigurationFollowerHost, configuration_follower_router,
+};
+mod configuration_tls;
+pub use configuration_tls::{
+    ConfigurationFollowerTls, ConfigurationTlsError, ConfigurationTlsLimits,
+    serve_configuration_followers,
 };
 
 mod configuration_publication;

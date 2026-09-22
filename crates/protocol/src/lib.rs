@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.26.0";
+pub const PROTOCOL_VERSION: &str = "0.27.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -21,6 +21,8 @@ pub const EVENTS_WEBSOCKET_PATH: &str = "/v1/events";
 pub const WORKSPACES_PATH: &str = "/v1/workspaces";
 pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
+pub const CONFIGURATION_MASTER_PATH: &str = "/v1/configuration-sync/master";
+pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configuration_master";
 pub const GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID: &str = "get_configuration_sync_status";
 pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
 pub const PROVIDER_ACCOUNT_PATH: &str = "/v1/provider-accounts/{provider_account_id}";
@@ -164,6 +166,8 @@ pub mod error_code {
     pub const PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID: &str =
         "provider_account_workspace_association_invalid";
     pub const CONFIGURATION_SYNC_UNAVAILABLE: &str = "configuration_sync_unavailable";
+    pub const CONFIGURATION_SYNC_INVALID_REQUEST: &str = "configuration_sync_invalid_request";
+    pub const CONFIGURATION_SYNC_CONFLICT: &str = "configuration_sync_conflict";
     pub const PROVIDER_ACCOUNT_STORE_UNAVAILABLE: &str = "provider_account_store_unavailable";
     pub const PROVIDER_ACCOUNT_INVALID_STATE: &str = "provider_account_invalid_state";
     pub const PROVIDER_ACCOUNT_LOGIN_NOT_FOUND: &str = "provider_account_login_not_found";
@@ -245,6 +249,8 @@ pub mod error_code {
         PROVIDER_ACCOUNT_LIMIT_REACHED,
         PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID,
         CONFIGURATION_SYNC_UNAVAILABLE,
+        CONFIGURATION_SYNC_INVALID_REQUEST,
+        CONFIGURATION_SYNC_CONFLICT,
         PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
         PROVIDER_ACCOUNT_INVALID_STATE,
         PROVIDER_ACCOUNT_LOGIN_NOT_FOUND,
@@ -366,6 +372,21 @@ pub enum ConfigurationSyncRole {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationSyncTransportState {
     Unconfigured,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DesignateConfigurationMasterRequest {
+    pub expected_instance_id: String,
+    pub expected_state_version: u64,
+}
+
+/// Immutable command receipt. Reload status to obtain the current role.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationMasterDesignationResponse {
+    pub instance_id: String,
+    pub state_version: u64,
+    pub group_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

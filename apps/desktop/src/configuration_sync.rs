@@ -1,4 +1,4 @@
-//! Read-only configuration authority status, scoped to one daemon connection.
+//! Configuration authority controls, scoped to one daemon connection.
 
 use std::sync::Arc;
 
@@ -7,22 +7,31 @@ use gpui_component::{Disableable, button::Button};
 use kiln_client::Client;
 use kiln_protocol::{
     ConfigurationRevisionResponse, ConfigurationSyncRole, ConfigurationSyncStatusResponse,
-    ConfigurationSyncTransportState,
+    ConfigurationSyncTransportState, DesignateConfigurationMasterRequest,
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 use ulid::Ulid;
 
 use crate::{connection, theme};
 
+enum Update {
+    Status(Result<ConfigurationSyncStatusResponse, String>),
+    Designated(Result<kiln_protocol::ConfigurationMasterDesignationResponse, kiln_client::Error>),
+}
+
 pub struct ConfigurationSyncSettings {
     client: Client,
     runtime: Arc<Runtime>,
-    updates: mpsc::UnboundedSender<(Ulid, Result<ConfigurationSyncStatusResponse, String>)>,
+    updates: mpsc::UnboundedSender<(Ulid, Update)>,
     request: Option<Ulid>,
     task: Option<JoinHandle<()>>,
     online: bool,
     status: Option<ConfigurationSyncStatusResponse>,
     error: Option<String>,
+    confirmation: Option<DesignateConfigurationMasterRequest>,
+    // Keep the exact request/key after an ambiguous failure, including disconnect.
+    pending_designation: Option<(String, DesignateConfigurationMasterRequest)>,
+    notice: Option<String>,
 }
 
 impl ConfigurationSyncSettings {
@@ -38,10 +47,7 @@ impl ConfigurationSyncSettings {
                         }
                         this.request = None;
                         this.task = None;
-                        match result {
-                            Ok(status) => this.status = Some(status),
-                            Err(error) => this.error = Some(error),
-                        }
+                        this.apply(result, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -60,6 +66,9 @@ impl ConfigurationSyncSettings {
             online: true,
             status: None,
             error: None,
+            confirmation: None,
+            pending_designation: None,
+            notice: None,
         };
         settings.refresh(cx);
         settings
@@ -73,6 +82,8 @@ impl ConfigurationSyncSettings {
         self.request = None;
         self.status = None;
         self.error = None;
+        self.confirmation = None;
+        self.notice = None;
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -91,6 +102,7 @@ impl ConfigurationSyncSettings {
         // A failed refresh must not leave old metadata looking current.
         self.status = None;
         self.error = None;
+        self.confirmation = None;
         let client = self.client.clone();
         let updates = self.updates.clone();
         self.task = Some(self.runtime.spawn(async move {
@@ -98,9 +110,86 @@ impl ConfigurationSyncSettings {
                 .get_configuration_sync_status()
                 .await
                 .map_err(|error| connection::error_message("Load synchronization status", &error));
-            let _ = updates.send((request, result));
+            let _ = updates.send((request, Update::Status(result)));
         }));
         cx.notify();
+    }
+
+    fn confirm_master(&mut self, cx: &mut Context<Self>) {
+        if !self.online || self.request.is_some() || self.pending_designation.is_some() {
+            return;
+        }
+        let Some(status) = &self.status else {
+            return;
+        };
+        if status.role != ConfigurationSyncRole::Unassigned {
+            return;
+        }
+        self.confirmation = Some(DesignateConfigurationMasterRequest {
+            expected_instance_id: status.instance_id.clone(),
+            expected_state_version: status.state_version,
+        });
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn designate(&mut self, cx: &mut Context<Self>) {
+        if !self.online || self.request.is_some() {
+            return;
+        }
+        if self.pending_designation.is_none() {
+            let Some(command) = self.confirmation.take() else {
+                return;
+            };
+            self.pending_designation = Some((Ulid::generate().to_string(), command));
+        }
+        let Some((key, command)) = self.pending_designation.clone() else {
+            return;
+        };
+        let request = Ulid::generate();
+        self.request = Some(request);
+        self.status = None;
+        self.error = None;
+        self.notice = None;
+        let client = self.client.clone();
+        let updates = self.updates.clone();
+        self.task = Some(self.runtime.spawn(async move {
+            let result = client.designate_configuration_master(&key, &command).await;
+            let _ = updates.send((request, Update::Designated(result)));
+        }));
+        cx.notify();
+    }
+
+    fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
+        match update {
+            Update::Status(Ok(status)) => self.status = Some(status),
+            Update::Status(Err(error)) => self.error = Some(error),
+            Update::Designated(Ok(_receipt)) => {
+                self.pending_designation = None;
+                self.notice = Some("Master designation recorded.".into());
+                // An idempotent receipt can predate later role changes.
+                self.refresh(cx);
+            }
+            Update::Designated(Err(error)) => {
+                let rejected = matches!(&error, kiln_client::Error::Api { problem, .. }
+                    if matches!(problem.code.as_str(),
+                        kiln_protocol::error_code::CONFIGURATION_SYNC_CONFLICT
+                        | kiln_protocol::error_code::CONFIGURATION_SYNC_INVALID_REQUEST
+                        | kiln_protocol::error_code::IDEMPOTENCY_CONFLICT));
+                if rejected {
+                    self.pending_designation = None;
+                }
+                let action = if rejected {
+                    "Refresh status before making another choice."
+                } else {
+                    "The outcome is unconfirmed. Retry designation to recover the original result."
+                };
+                self.error = Some(format!(
+                    "{} {action}",
+                    connection::error_message("Designate master", &error)
+                ));
+            }
+        }
     }
 }
 
@@ -137,7 +226,7 @@ impl Render for ConfigurationSyncSettings {
             .child(
                 Button::new("refresh-configuration-sync")
                     .label(if self.request.is_some() {
-                        "Loading status…"
+                        "Working…"
                     } else if self.error.is_some() {
                         "Retry status"
                     } else {
@@ -164,6 +253,16 @@ impl Render for ConfigurationSyncSettings {
                     .text_color(theme::DANGER)
                     .child(error.clone()),
             );
+        }
+        if let Some(notice) = &self.notice {
+            content = content.child(div().text_sm().child(notice.clone()));
+        }
+        if self.pending_designation.is_some() {
+            content = content.child(div().text_sm().text_color(theme::ATTENTION)
+                .child("A designation request is awaiting confirmation. Retrying uses the same request."))
+                .child(Button::new("retry-master-designation").label("Retry designation")
+                    .disabled(!self.online || self.request.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.designate(cx))));
         }
         if let Some(status) = &self.status {
             let role = match status.role {
@@ -219,6 +318,31 @@ impl Render for ConfigurationSyncSettings {
             content = content.child(div().text_sm().text_color(theme::MUTED).child(
                 "Last loaded from this daemon. Stored revisions do not confirm remote connectivity or activation in running sessions.",
             ));
+            if status.role == ConfigurationSyncRole::Unassigned
+                && self.pending_designation.is_none()
+            {
+                if self.confirmation.is_some() {
+                    content = content.child(div().text_sm().child(format!(
+                        "Designate instance {} as master for a new configuration group? This records its role; publishing and remote synchronization are not yet available.", status.instance_id)))
+                        .child(div().flex().flex_wrap().gap_2()
+                            .child(Button::new("confirm-master-designation").label("Confirm master")
+                                .disabled(!self.online || self.request.is_some())
+                                .on_click(cx.listener(|this, _, _, cx| this.designate(cx))))
+                            .child(Button::new("cancel-master-designation").label("Keep unassigned")
+                                .disabled(!self.online || self.request.is_some())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.confirmation = None;
+                                    cx.notify();
+                                }))));
+                } else {
+                    content = content.child(
+                        Button::new("designate-master")
+                            .label("Designate as master")
+                            .disabled(!self.online || self.request.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_master(cx))),
+                    );
+                }
+            }
         }
         content
     }

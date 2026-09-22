@@ -243,6 +243,24 @@ impl Client {
         .await
     }
 
+    /// Exact retries return the original designation receipt, not current status.
+    pub async fn designate_configuration_master(
+        &self,
+        idempotency_key: &str,
+        request: &kiln_protocol::DesignateConfigurationMasterRequest,
+    ) -> Result<kiln_protocol::ConfigurationMasterDesignationResponse, Error> {
+        self.send_json(
+            kiln_protocol::DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID,
+            with_idempotency_key(
+                self.http
+                    .post(self.http_url(kiln_protocol::CONFIGURATION_MASTER_PATH)),
+                idempotency_key,
+            )?
+            .json(request),
+        )
+        .await
+    }
+
     pub async fn list_provider_accounts(&self) -> Result<ListProviderAccountsResponse, Error> {
         self.send_json(
             LIST_PROVIDER_ACCOUNTS_OPERATION_ID,

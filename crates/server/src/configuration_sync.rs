@@ -10,6 +10,97 @@ use kiln_protocol::{
 };
 use std::{future::Future, pin::Pin};
 
+pub(super) trait ConfigurationAdministrationOperations: Send + Sync {
+    fn designate(
+        &self,
+        instance: kiln_core::KilnInstanceId,
+        version: u64,
+        key: String,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        kiln_core::ConfigurationInstanceState,
+                        kiln_core::ConfigurationMasterError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >;
+}
+
+pub(super) struct ConfigurationAdministrationAdapter<T, I>(pub T, pub I);
+
+impl<T: kiln_core::ConfigurationAdministrationStore, I: kiln_core::ConfigurationGroupIdGenerator>
+    ConfigurationAdministrationOperations for ConfigurationAdministrationAdapter<T, I>
+{
+    fn designate(
+        &self,
+        instance: kiln_core::KilnInstanceId,
+        version: u64,
+        key: String,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        kiln_core::ConfigurationInstanceState,
+                        kiln_core::ConfigurationMasterError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.0
+                .designate_configuration_master(
+                    &instance,
+                    version,
+                    &key,
+                    self.1.next_configuration_group_id(),
+                )
+                .await
+        })
+    }
+}
+
+pub(super) async fn designate_master<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    headers: axum::http::HeaderMap,
+    super::StrictJson(request): super::StrictJson<
+        kiln_protocol::DesignateConfigurationMasterRequest,
+    >,
+) -> Result<Json<kiln_protocol::ConfigurationMasterDesignationResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let key = super::required_idempotency_key(&headers)?;
+    let instance =
+        kiln_core::KilnInstanceId::parse(request.expected_instance_id).map_err(|_| {
+            PublicError::ConfigurationMaster(kiln_core::ConfigurationMasterError::InvalidRequest)
+        })?;
+    let operations = state
+        .configuration_administration_operations
+        .as_ref()
+        .ok_or(PublicError::ConfigurationSyncUnavailable)?;
+    let result = operations
+        .designate(instance, request.expected_state_version, key)
+        .await
+        .map_err(PublicError::ConfigurationMaster)?;
+    let ConfigurationRole::Master(authority) = result.role() else {
+        return Err(PublicError::ConfigurationSyncUnavailable);
+    };
+    Ok(Json(
+        kiln_protocol::ConfigurationMasterDesignationResponse {
+            instance_id: result.instance_id().as_str().to_owned(),
+            state_version: result.version(),
+            group_id: authority.group_id().as_str().to_owned(),
+        },
+    ))
+}
+
 pub(super) trait ConfigurationStatusOperations: Send + Sync {
     fn status(
         &self,

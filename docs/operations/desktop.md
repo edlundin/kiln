@@ -40,7 +40,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.26.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.27.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.
@@ -87,8 +87,16 @@ clears the displayed metadata and cancels the request; reconnecting loads it aga
 
 Remote synchronization currently reports **unconfigured**. The displayed revisions
 describe durable metadata, not remote connectivity or activation in running
-Sessions. Master designation, follower enrollment, and distribution of shared
-settings, global MCP servers, and skills are not yet available from Settings.
+Sessions. For an unassigned instance, **Designate as master** shows the instance
+ID and asks for confirmation before creating its configuration group. **Keep
+unassigned** cancels without changing anything. A stale choice is rejected;
+refresh status before choosing again. If the result is unconfirmed, **Retry
+designation** reuses the original request and cannot create another group.
+The view reloads current status after success. An existing master or follower
+cannot be reassigned through this control.
+
+Designation records the role only. Publishing, follower enrollment, and
+distribution of shared settings, global MCP servers, and skills remain unavailable.
 Provider credentials remain local to each instance.
 
 ## Provider accounts

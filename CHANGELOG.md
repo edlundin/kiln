@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Designate an unassigned Kiln instance as configuration master from Settings, with confirmed intent, stale-state protection, and durable exact-retry receipts.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Show configuration synchronization authority and revision status in desktop Settings, with independent loading, retry, and disconnect handling.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

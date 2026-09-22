@@ -656,6 +656,8 @@ pub struct AppState<W, S, R> {
     provider_account_operations: Arc<dyn ProviderAccountOperations>,
     configuration_status_operations:
         Option<Arc<dyn configuration_sync::ConfigurationStatusOperations>>,
+    configuration_administration_operations:
+        Option<Arc<dyn configuration_sync::ConfigurationAdministrationOperations>>,
     event_broadcaster: EventBroadcaster,
     lifecycle: LifecycleCoordinator,
 }
@@ -675,6 +677,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
             provider_account_operations: Arc::clone(&self.provider_account_operations),
             configuration_status_operations: self
                 .configuration_status_operations
+                .as_ref()
+                .map(Arc::clone),
+            configuration_administration_operations: self
+                .configuration_administration_operations
                 .as_ref()
                 .map(Arc::clone),
             event_broadcaster: self.event_broadcaster.clone(),
@@ -731,6 +737,7 @@ impl<W, S, R> AppState<W, S, R> {
             usage_operations: Arc::new(usage_operations),
             provider_account_operations: Arc::new(UnavailableProviderAccountOperations),
             configuration_status_operations: None,
+            configuration_administration_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -763,6 +770,7 @@ impl<W, S, R> AppState<W, S, R> {
             usage_operations: Arc::new(usage_operations),
             provider_account_operations,
             configuration_status_operations: None,
+            configuration_administration_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -781,6 +789,20 @@ impl<W, S, R> AppState<W, S, R> {
     pub fn lifecycle(&self) -> LifecycleCoordinator {
         self.lifecycle.clone()
     }
+
+    pub fn with_configuration_administration_store<
+        T: kiln_core::ConfigurationAdministrationStore + 'static,
+        I: kiln_core::ConfigurationGroupIdGenerator + 'static,
+    >(
+        mut self,
+        store: T,
+        ids: I,
+    ) -> Self {
+        self.configuration_administration_operations = Some(Arc::new(
+            configuration_sync::ConfigurationAdministrationAdapter(store, ids),
+        ));
+        self
+    }
 }
 
 pub fn router<W, S, R>(state: AppState<W, S, R>) -> Router
@@ -793,6 +815,10 @@ where
         .route(
             kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
             get(configuration_sync::get_status),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_MASTER_PATH,
+            post(configuration_sync::designate_master),
         )
         .route(NEGOTIATE_PATH, post(negotiate))
         .route(WORKSPACES_PATH, get(list_workspaces).post(create_workspace))
@@ -2919,6 +2945,8 @@ enum PublicError {
     ProviderAccount(ProviderAccountOperationError),
     #[error("configuration synchronization status is unavailable")]
     ConfigurationSyncUnavailable,
+    #[error("configuration master designation failed")]
+    ConfigurationMaster(kiln_core::ConfigurationMasterError),
     #[error("daemon is shutting down")]
     DaemonShuttingDown,
 }
@@ -3070,6 +3098,28 @@ impl PublicError {
                 error_code::CONFIGURATION_SYNC_UNAVAILABLE,
                 "Configuration synchronization unavailable",
             ),
+            Self::ConfigurationMaster(error) => match error {
+                kiln_core::ConfigurationMasterError::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
+                    "Invalid configuration designation request",
+                ),
+                kiln_core::ConfigurationMasterError::Conflict => (
+                    StatusCode::CONFLICT,
+                    error_code::CONFIGURATION_SYNC_CONFLICT,
+                    "Configuration state changed or is already assigned",
+                ),
+                kiln_core::ConfigurationMasterError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Idempotency key was reused with a different designation request",
+                ),
+                kiln_core::ConfigurationMasterError::State(_) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::CONFIGURATION_SYNC_UNAVAILABLE,
+                    "Configuration synchronization unavailable",
+                ),
+            },
             Self::DaemonShuttingDown => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 error_code::DAEMON_SHUTTING_DOWN,

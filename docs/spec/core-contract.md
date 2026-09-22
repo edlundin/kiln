@@ -1409,6 +1409,12 @@ instance/authority/CAS and applied/observed revision metadata in one transaction
 without reading or disclosing shared payloads or credentials. Transport is
 explicitly `unconfigured`, so revision equality is not a currentness claim.
 Unavailable/corrupt state returns content-free HTTP 503
-`configuration_sync_unavailable`. This is read-only; designation, enrollment,
-publication and follower application are not public commands yet. See the
+`configuration_sync_unavailable`.
+
+Protocol `0.27.0` adds local `POST /v1/configuration-sync/master`, guarded by
+instance ID, expected state version, and an `Idempotency-Key`. Only an unassigned
+instance may become master of a fresh group. The role change and immutable retry
+receipt commit together; exact replay returns the original result without changing
+the current role. The client reloads status after success. Enrollment, publication,
+role replacement and follower application are not public commands yet. See the
 [configuration synchronization contract](configuration-sync.md).

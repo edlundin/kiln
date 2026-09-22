@@ -2,8 +2,9 @@
 
 EDL-322 requires one explicitly designated master Kiln instance to supply shared
 settings, global MCP configuration, and global skills to followers, including
-remote hosts. This document specifies the initial contract. It does not claim
-that remote enrollment, synchronization transport, storage, or UI already exists.
+remote hosts. Durable authority/snapshot storage, status, and initial local master
+designation are implemented. Remote enrollment, synchronization transport, and
+runtime activation remain incomplete.
 
 ## Authority and enrollment
 
@@ -106,8 +107,9 @@ No runtime delivery is complete until those paths exist and are verified.
 ## Current persistence boundary
 
 Migration 34 stores one durable instance ID, an initially unassigned role, and a
-compare-and-swap version. Master/follower assignments are internal administrative
-operations; daemon startup never chooses a role. Authority history binds every
+compare-and-swap version. Initial master designation is available through the local
+administrative API; other role changes remain internal operations. Daemon startup
+never chooses a role. Authority history binds every
 seen group to its original master and retains follower observation metadata.
 Role changes and observations commit atomically with the instance state version.
 Stale expected state fails instead of changing a newer enrollment. An identical
@@ -117,9 +119,40 @@ signed 64-bit positive range and rejects exhaustion/overflow.
 
 Migration 35 adds coherent snapshot payloads and active revisions as described
 below. Enrollment credentials and remote endpoint associations remain absent.
-These internal stores expose no network routes or transport authentication.
-Public status projection, administrative enrollment UI and consumers remain
-subsequent work.
+The local API exposes status and initial master designation, described below.
+Remote enrollment and consumers remain subsequent work.
+
+## Initial local master designation
+
+Protocol `0.27.0` adds authenticated `POST /v1/configuration-sync/master` with a
+required `Idempotency-Key`. Its strict JSON body carries `expected_instance_id`
+and `expected_state_version`, obtained from the status endpoint. The expected
+version must be positive and below SQLite's maximum signed 64-bit integer.
+Only the matching, still-unassigned instance may be designated. A master or
+follower cannot be replaced or promoted through this route.
+
+The service generates a fresh group ID. Migration 36 retains the request identity
+and original result in the same transaction as authority creation and the instance
+version increment. An exact retry returns the original receipt even after a later
+role change; it never reapplies designation. Reusing a key with different request
+values returns `409 idempotency_conflict`. A stale version, wrong instance, or
+already-assigned role returns `409 configuration_sync_conflict`; malformed values
+return `400 configuration_sync_invalid_request`. Storage failures remain
+content-free `503 configuration_sync_unavailable` responses. Failed transactions
+leave no role, authority, or receipt changes.
+
+The `200` response contains the original `instance_id`, resulting `state_version`,
+and `group_id`. It is a command receipt, not current status. Callers must reload
+status after success. Settings offers **Designate as master** only for an
+unassigned instance, identifies that instance in a confirmation, retains the
+exact request/key for ambiguous retries while the connection view survives,
+and reloads status rather than displaying an old receipt as the current role.
+Replacing the connection discards pending UI state and loads durable status.
+
+Designation records authority only: it publishes no snapshot, reads or copies no
+credentials, grants no remote access, and starts no MCP/skill consumer. Follower
+enrollment, role replacement, publication, and remote transport remain separate
+work. Shutdown rejects new designations through the existing command gate.
 
 ## Portable skill package validation
 

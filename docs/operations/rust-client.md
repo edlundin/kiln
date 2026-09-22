@@ -155,3 +155,13 @@ live master connection or completed synchronization. The method returns no share
 content or credentials and makes no configuration changes. See the
 [configuration sync contract](../spec/configuration-sync.md) for pending enrollment
 and consumer behavior.
+
+Protocol `0.27.0` adds `designate_configuration_master(key, request)`. Obtain
+`expected_instance_id` and `expected_state_version` from status, then submit
+`DesignateConfigurationMasterRequest` after the administrator chooses this
+unassigned instance as master. Keep the same key and request across uncertain
+outcomes. Exact retries return the immutable original
+`ConfigurationMasterDesignationResponse`; reload status to learn the current
+role. Changed key reuse and stale/already-assigned state return distinct 409
+errors. The command creates a new authority group but publishes no configuration
+and does not enable remote transport.

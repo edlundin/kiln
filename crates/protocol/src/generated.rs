@@ -12,19 +12,21 @@ use crate::{
     APPEND_MESSAGE_OPERATION_ID, ARTIFACT_PATH, ARTIFACTS_PATH, ASSIGN_TASK_OPERATION_ID,
     AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
     ApprovalResponse, ApprovalState, ArtifactResponse, AssignTaskRequest,
-    CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, CANCEL_RUN_OPERATION_ID,
+    CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, CANCEL_RUN_OPERATION_ID, CONFIGURATION_MASTER_PATH,
     CONFIGURATION_SYNC_STATUS_PATH, CREATE_PROVIDER_ACCOUNT_OPERATION_ID,
     CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
-    ChangedFileResponse, ChildActivityReference, ClientIdentity, ConfigurationRevisionResponse,
-    ConfigurationSyncRole, ConfigurationSyncStatusResponse, ConfigurationSyncTransportState,
+    ChangedFileResponse, ChildActivityReference, ClientIdentity,
+    ConfigurationMasterDesignationResponse, ConfigurationRevisionResponse, ConfigurationSyncRole,
+    ConfigurationSyncStatusResponse, ConfigurationSyncTransportState,
     ContextManifestCreatedResponse, CreateProviderAccountRequest, CreateTaskRequest,
-    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
-    DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
-    GET_ARTIFACT_OPERATION_ID, GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID,
-    GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, GET_PROVIDER_ACCOUNT_OPERATION_ID,
-    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
+    CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID,
+    DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID, DesignateConfigurationMasterRequest,
+    EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
+    GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    GET_PROVIDER_ACCOUNT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
+    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
+    IDEMPOTENCY_KEY_HEADER, LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
     LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
     LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse,
     ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode, MessageDeliveryResponse,
@@ -230,6 +232,14 @@ pub fn write_generated_artifacts(root: impl AsRef<Path>) -> Result<(), String> {
 fn schema() -> String {
     let mut defs = serde_json::Map::new();
     for (name, value) in [
+        (
+            "DesignateConfigurationMasterRequest",
+            schema_for!(DesignateConfigurationMasterRequest),
+        ),
+        (
+            "ConfigurationMasterDesignationResponse",
+            schema_for!(ConfigurationMasterDesignationResponse),
+        ),
         ("ConfigurationSyncRole", schema_for!(ConfigurationSyncRole)),
         (
             "ConfigurationSyncTransportState",
@@ -418,6 +428,8 @@ fn schema() -> String {
 fn typescript() -> String {
     let config = Config::default();
     [
+        DesignateConfigurationMasterRequest::decl(&config),
+        ConfigurationMasterDesignationResponse::decl(&config),
         ConfigurationSyncRole::decl(&config),
         ConfigurationSyncTransportState::decl(&config),
         ConfigurationRevisionResponse::decl(&config),
@@ -528,6 +540,10 @@ fn catalogue() -> String {
             "method": "GET",
             "path": CONFIGURATION_SYNC_STATUS_PATH,
             "operation": GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_MASTER_PATH,
+            "operation": DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID
         }, {
             "method": "GET",
             "path": WORKSPACE_PATH,
@@ -1233,6 +1249,33 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
         '500':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_MASTER_PATH}:
+    post:
+      operationId: {DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID}
+      parameters:
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DesignateConfigurationMasterRequest'
+      responses:
+        '200':
+          description: Original committed designation receipt, including on exact replay; reload status for the current role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationMasterDesignationResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
           $ref: '#/components/responses/Problem'
   {CONFIGURATION_SYNC_STATUS_PATH}:
     get:
@@ -2126,6 +2169,14 @@ components:
         (
             "WorkspaceRootResponse",
             openapi_schema::<WorkspaceRootResponse>(),
+        ),
+        (
+            "DesignateConfigurationMasterRequest",
+            openapi_schema::<DesignateConfigurationMasterRequest>(),
+        ),
+        (
+            "ConfigurationMasterDesignationResponse",
+            openapi_schema::<ConfigurationMasterDesignationResponse>(),
         ),
         (
             "ConfigurationSyncRole",

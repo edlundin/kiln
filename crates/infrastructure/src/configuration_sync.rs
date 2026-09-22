@@ -1,10 +1,99 @@
 use super::SqliteStore;
 use kiln_core::{
-    ConfigurationAuthority, ConfigurationGroupId, ConfigurationInstanceState,
-    ConfigurationRevision, ConfigurationRole, ConfigurationStateError as Error,
-    ConfigurationStateStore, ContentHash, KilnInstanceId,
+    ConfigurationAdministrationStore, ConfigurationAuthority, ConfigurationGroupId,
+    ConfigurationInstanceState, ConfigurationMasterError, ConfigurationRevision, ConfigurationRole,
+    ConfigurationStateError as Error, ConfigurationStateStore, ContentHash, KilnInstanceId,
 };
 use sqlx::{Connection, Row, SqliteConnection};
+
+impl kiln_core::ConfigurationGroupIdGenerator for super::UlidIdGenerator {
+    fn next_configuration_group_id(&self) -> ConfigurationGroupId {
+        ConfigurationGroupId::from_ulid(ulid::Ulid::generate())
+    }
+}
+
+impl ConfigurationAdministrationStore for SqliteStore {
+    async fn designate_configuration_master(
+        &self,
+        expected_instance: &KilnInstanceId,
+        expected_version: u64,
+        idempotency_key: &str,
+        proposed_group: ConfigurationGroupId,
+    ) -> Result<ConfigurationInstanceState, ConfigurationMasterError> {
+        if idempotency_key.is_empty()
+            || expected_version == 0
+            || expected_version >= i64::MAX as u64
+        {
+            return Err(ConfigurationMasterError::InvalidRequest);
+        }
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let receipt = sqlx::query("SELECT d.instance_id, d.expected_version, d.group_id, a.master_instance_id FROM configuration_master_designations d JOIN configuration_authorities a ON a.group_id = d.group_id WHERE d.idempotency_key = ?")
+            .bind(idempotency_key).fetch_optional(&mut *transaction).await
+            .map_err(|_| Error::Unavailable)?;
+        if let Some(receipt) = receipt {
+            let instance: String = receipt
+                .try_get("instance_id")
+                .map_err(|_| Error::IntegrityViolation)?;
+            let version: i64 = receipt
+                .try_get("expected_version")
+                .map_err(|_| Error::IntegrityViolation)?;
+            if instance != expected_instance.as_str() || version != expected_version as i64 {
+                return Err(ConfigurationMasterError::IdempotencyConflict);
+            }
+            let master: String = receipt
+                .try_get("master_instance_id")
+                .map_err(|_| Error::IntegrityViolation)?;
+            if master != instance {
+                return Err(Error::IntegrityViolation.into());
+            }
+            let group = ConfigurationGroupId::parse(
+                receipt
+                    .try_get::<String, _>("group_id")
+                    .map_err(|_| Error::IntegrityViolation)?,
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+            let original = ConfigurationInstanceState::from_persisted(
+                expected_instance.clone(),
+                expected_version + 1,
+                ConfigurationRole::Master(ConfigurationAuthority::new(
+                    group,
+                    expected_instance.clone(),
+                )),
+                None,
+            )?;
+            transaction.commit().await.map_err(|_| Error::Unavailable)?;
+            return Ok(original);
+        }
+        let current = load(&mut transaction).await?.ok_or(Error::Uninitialized)?;
+        if current.instance_id() != expected_instance
+            || current.version() != expected_version
+            || !matches!(current.role(), ConfigurationRole::Unassigned)
+        {
+            return Err(ConfigurationMasterError::Conflict);
+        }
+        // Never reactivate a historical group through this initial-designation route.
+        let inserted = sqlx::query("INSERT INTO configuration_authorities (group_id, master_instance_id) VALUES (?, ?) ON CONFLICT(group_id) DO NOTHING")
+            .bind(proposed_group.as_str()).bind(expected_instance.as_str())
+            .execute(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
+        if inserted.rows_affected() != 1 {
+            return Err(Error::AuthorityConflict.into());
+        }
+        let next = current.change_role(ConfigurationRole::Master(ConfigurationAuthority::new(
+            proposed_group.clone(),
+            expected_instance.clone(),
+        )))?;
+        save(&mut transaction, &current, &next).await?;
+        sqlx::query("INSERT INTO configuration_master_designations (idempotency_key, instance_id, expected_version, group_id) VALUES (?, ?, ?, ?)")
+            .bind(idempotency_key).bind(expected_instance.as_str()).bind(expected_version as i64)
+            .bind(proposed_group.as_str()).execute(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
+        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(next)
+    }
+}
 
 impl ConfigurationStateStore for SqliteStore {
     async fn initialize_configuration_instance(

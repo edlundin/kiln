@@ -4,13 +4,40 @@ use kiln_core::{
     ConfigurationInstanceState, ConfigurationRevision, ConfigurationRole,
     ConfigurationSnapshotDisposition, ConfigurationSnapshotError as Error,
     ConfigurationSnapshotMutation, ConfigurationSnapshotReadLimits, ConfigurationSnapshotStore,
-    ConfigurationStateError, ContentHash, GlobalSkillId, SHARED_CONFIGURATION_SCHEMA_VERSION,
-    SharedConfigurationSnapshot, SharedSkillFileInput, SharedSkillPackage, SharedSkillPackageInput,
-    StoredConfigurationSnapshot,
+    ConfigurationStateError, ConfigurationSyncStatus, ContentHash, GlobalSkillId,
+    SHARED_CONFIGURATION_SCHEMA_VERSION, SharedConfigurationSnapshot, SharedSkillFileInput,
+    SharedSkillPackage, SharedSkillPackageInput, StoredConfigurationSnapshot,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 
 impl ConfigurationSnapshotStore for SqliteStore {
+    async fn get_configuration_sync_status(&self) -> Result<ConfigurationSyncStatus, Error> {
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection.begin().await.map_err(|_| Error::Unavailable)?;
+        let state = configuration_sync::load(&mut transaction)
+            .await
+            .map_err(Error::State)?
+            .ok_or(Error::State(ConfigurationStateError::Uninitialized))?;
+        let applied_revision = match state.role().authority() {
+            Some(authority) => load_revision(&mut transaction, authority).await?,
+            None => None,
+        };
+        if let ConfigurationRole::Follower(authority) = state.role() {
+            ConfigurationFollowerCursor::from_persisted(
+                state.instance_id().clone(),
+                authority.clone(),
+                applied_revision.clone(),
+                state.observed().cloned(),
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+        }
+        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(ConfigurationSyncStatus {
+            state,
+            applied_revision,
+        })
+    }
+
     async fn publish_configuration_snapshot(
         &self,
         expected: &ConfigurationInstanceState,

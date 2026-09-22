@@ -144,3 +144,14 @@ desktop does not connect to a live model provider.
 The public protocol types are separate from domain types. This lets the desktop
 client compile without process supervision or database dependencies. Async
 methods perform I/O; returned protocol values can then be used by UI state code.
+
+## Configuration synchronization status
+
+Protocol `0.26.0` adds `get_configuration_sync_status`. It reads the authenticated
+local daemon's stable instance ID, role, master/group, CAS version and committed
+applied/observed revision metadata through `GET /v1/configuration-sync`.
+Transport currently reports `unconfigured`; matching revisions do not imply a
+live master connection or completed synchronization. The method returns no shared
+content or credentials and makes no configuration changes. See the
+[configuration sync contract](../spec/configuration-sync.md) for pending enrollment
+and consumer behavior.

@@ -1401,3 +1401,14 @@ implemented:
 
 No numeric timeout, payload, queue, retry, concurrency, or retention limit is
 specified yet. Each limit needs a measured workload and a stated reason.
+
+### Local configuration synchronization status
+
+Protocol `0.26.0` adds authenticated `GET /v1/configuration-sync`. It reads durable
+instance/authority/CAS and applied/observed revision metadata in one transaction,
+without reading or disclosing shared payloads or credentials. Transport is
+explicitly `unconfigured`, so revision equality is not a currentness claim.
+Unavailable/corrupt state returns content-free HTTP 503
+`configuration_sync_unavailable`. This is read-only; designation, enrollment,
+publication and follower application are not public commands yet. See the
+[configuration synchronization contract](configuration-sync.md).

@@ -232,6 +232,17 @@ impl Client {
         .await
     }
 
+    pub async fn get_configuration_sync_status(
+        &self,
+    ) -> Result<kiln_protocol::ConfigurationSyncStatusResponse, Error> {
+        self.send_json(
+            kiln_protocol::GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID,
+            self.http
+                .get(self.http_url(kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH)),
+        )
+        .await
+    }
+
     pub async fn list_provider_accounts(&self) -> Result<ListProviderAccountsResponse, Error> {
         self.send_json(
             LIST_PROVIDER_ACCOUNTS_OPERATION_ID,

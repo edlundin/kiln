@@ -1,5 +1,6 @@
 //! HTTP and WebSocket transport for the current Kiln protocol slice.
 
+mod configuration_sync;
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 
 use axum::{
@@ -653,6 +654,8 @@ pub struct AppState<W, S, R> {
     run_operations: Arc<R>,
     usage_operations: Arc<dyn UsageOperations>,
     provider_account_operations: Arc<dyn ProviderAccountOperations>,
+    configuration_status_operations:
+        Option<Arc<dyn configuration_sync::ConfigurationStatusOperations>>,
     event_broadcaster: EventBroadcaster,
     lifecycle: LifecycleCoordinator,
 }
@@ -670,6 +673,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
             run_operations: Arc::clone(&self.run_operations),
             usage_operations: Arc::clone(&self.usage_operations),
             provider_account_operations: Arc::clone(&self.provider_account_operations),
+            configuration_status_operations: self
+                .configuration_status_operations
+                .as_ref()
+                .map(Arc::clone),
             event_broadcaster: self.event_broadcaster.clone(),
             lifecycle: self.lifecycle.clone(),
         }
@@ -723,6 +730,7 @@ impl<W, S, R> AppState<W, S, R> {
             run_operations: Arc::new(run_operations),
             usage_operations: Arc::new(usage_operations),
             provider_account_operations: Arc::new(UnavailableProviderAccountOperations),
+            configuration_status_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -754,9 +762,20 @@ impl<W, S, R> AppState<W, S, R> {
             run_operations: Arc::new(run_operations),
             usage_operations: Arc::new(usage_operations),
             provider_account_operations,
+            configuration_status_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
+    }
+
+    pub fn with_configuration_status_store<T: kiln_core::ConfigurationSnapshotStore + 'static>(
+        mut self,
+        store: T,
+    ) -> Self {
+        self.configuration_status_operations = Some(Arc::new(
+            configuration_sync::ConfigurationStatusAdapter(store),
+        ));
+        self
     }
 
     pub fn lifecycle(&self) -> LifecycleCoordinator {
@@ -771,6 +790,10 @@ where
     R: RunOperations + ArtifactOperations + 'static,
 {
     Router::new()
+        .route(
+            kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
+            get(configuration_sync::get_status),
+        )
         .route(NEGOTIATE_PATH, post(negotiate))
         .route(WORKSPACES_PATH, get(list_workspaces).post(create_workspace))
         .route(WORKSPACE_PATH, get(get_workspace))
@@ -2894,6 +2917,8 @@ enum PublicError {
     Usage(UsageQueryError),
     #[error("provider account operation failed")]
     ProviderAccount(ProviderAccountOperationError),
+    #[error("configuration synchronization status is unavailable")]
+    ConfigurationSyncUnavailable,
     #[error("daemon is shutting down")]
     DaemonShuttingDown,
 }
@@ -3040,6 +3065,11 @@ impl PublicError {
                 "Method not allowed",
             ),
             Self::NotFound => (StatusCode::NOT_FOUND, error_code::NOT_FOUND, "Not found"),
+            Self::ConfigurationSyncUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                error_code::CONFIGURATION_SYNC_UNAVAILABLE,
+                "Configuration synchronization unavailable",
+            ),
             Self::DaemonShuttingDown => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 error_code::DAEMON_SHUTTING_DOWN,

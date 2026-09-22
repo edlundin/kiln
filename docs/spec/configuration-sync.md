@@ -231,3 +231,21 @@ Fresh schema/startup and SQL preparation have been checked. Populated upgrades,
 publication/application/duplicate/concurrency paths and content restoration remain
 unverified at runtime; no synchronization transport or end-to-end acceptance is
 claimed.
+
+## Authenticated local status API
+
+Protocol 0.26.0 adds read-only `GET /v1/configuration-sync`, exposed by the Rust
+client as `get_configuration_sync_status`. It uses the daemon's existing local
+bearer, Host and Origin checks. The response contains instance ID, CAS state
+version, role, nullable group/master IDs, and nullable applied/observed revision
+metadata (revision number, schema and content hash). These fields are read in one
+transaction. No snapshot payload, skill file, endpoint, host binding, or credential
+is returned.
+
+`transport` is explicitly `unconfigured` until authenticated follower transport
+exists. Equal applied/observed revisions alone do not establish currentness.
+The endpoint reports committed metadata, not a fresh validation of every stored
+payload byte. Store/integrity failures produce content-free HTTP 503
+`configuration_sync_unavailable`. This endpoint cannot designate a master,
+enroll a follower or publish/apply configuration. Administrative commands and
+Settings presentation remain subsequent work.

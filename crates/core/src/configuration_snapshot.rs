@@ -10,6 +10,13 @@ pub struct ConfigurationSnapshotReadLimits {
     pub skill: SharedSkillLimits,
 }
 
+/// Durable metadata only; this does not attest to transport connectivity or
+/// revalidate every payload byte. Use get_configuration_snapshot for content.
+pub struct ConfigurationSyncStatus {
+    pub state: ConfigurationInstanceState,
+    pub applied_revision: Option<ConfigurationRevision>,
+}
+
 pub struct StoredConfigurationSnapshot {
     pub state: ConfigurationInstanceState,
     pub revision: ConfigurationRevision,
@@ -39,6 +46,9 @@ pub enum ConfigurationSnapshotError {
 /// enrollment proof or permission to activate MCP tools, skills or credentials.
 /// Content and the active revision must change in one storage transaction.
 pub trait ConfigurationSnapshotStore: Send + Sync {
+    fn get_configuration_sync_status(
+        &self,
+    ) -> impl Future<Output = Result<ConfigurationSyncStatus, ConfigurationSnapshotError>> + Send;
     fn publish_configuration_snapshot(
         &self,
         expected: &ConfigurationInstanceState,

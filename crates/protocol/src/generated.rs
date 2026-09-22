@@ -13,15 +13,18 @@ use crate::{
     AppendMessageRequest, ApprovalDecision, ApprovalDecisionRequest, ApprovalPolicy,
     ApprovalResponse, ApprovalState, ArtifactResponse, AssignTaskRequest,
     CANCEL_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, CANCEL_RUN_OPERATION_ID,
-    CREATE_PROVIDER_ACCOUNT_OPERATION_ID, CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID,
-    CREATE_WORKSPACE_OPERATION_ID, ChangedFileResponse, ChildActivityReference, ClientIdentity,
+    CONFIGURATION_SYNC_STATUS_PATH, CREATE_PROVIDER_ACCOUNT_OPERATION_ID,
+    CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
+    ChangedFileResponse, ChildActivityReference, ClientIdentity, ConfigurationRevisionResponse,
+    ConfigurationSyncRole, ConfigurationSyncStatusResponse, ConfigurationSyncTransportState,
     ContextManifestCreatedResponse, CreateProviderAccountRequest, CreateTaskRequest,
     CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
     DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID, EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
-    GET_ARTIFACT_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
-    GET_PROVIDER_ACCOUNT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    IDEMPOTENCY_KEY_HEADER, LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
+    GET_ARTIFACT_OPERATION_ID, GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID,
+    GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, GET_PROVIDER_ACCOUNT_OPERATION_ID,
+    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
+    GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
+    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
     LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
     LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse,
     ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode, MessageDeliveryResponse,
@@ -227,6 +230,19 @@ pub fn write_generated_artifacts(root: impl AsRef<Path>) -> Result<(), String> {
 fn schema() -> String {
     let mut defs = serde_json::Map::new();
     for (name, value) in [
+        ("ConfigurationSyncRole", schema_for!(ConfigurationSyncRole)),
+        (
+            "ConfigurationSyncTransportState",
+            schema_for!(ConfigurationSyncTransportState),
+        ),
+        (
+            "ConfigurationRevisionResponse",
+            schema_for!(ConfigurationRevisionResponse),
+        ),
+        (
+            "ConfigurationSyncStatusResponse",
+            schema_for!(ConfigurationSyncStatusResponse),
+        ),
         ("ClientIdentity", schema_for!(ClientIdentity)),
         ("NegotiateRequest", schema_for!(NegotiateRequest)),
         ("NegotiateResponse", schema_for!(NegotiateResponse)),
@@ -402,6 +418,10 @@ fn schema() -> String {
 fn typescript() -> String {
     let config = Config::default();
     [
+        ConfigurationSyncRole::decl(&config),
+        ConfigurationSyncTransportState::decl(&config),
+        ConfigurationRevisionResponse::decl(&config),
+        ConfigurationSyncStatusResponse::decl(&config),
         ClientIdentity::decl(&config),
         NegotiateRequest::decl(&config),
         NegotiateResponse::decl(&config),
@@ -504,6 +524,10 @@ fn catalogue() -> String {
             "method": "GET",
             "path": WORKSPACES_PATH,
             "operation": LIST_WORKSPACES_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": CONFIGURATION_SYNC_STATUS_PATH,
+            "operation": GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID
         }, {
             "method": "GET",
             "path": WORKSPACE_PATH,
@@ -1209,6 +1233,18 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
         '500':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_SYNC_STATUS_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID}
+      responses:
+        '200':
+          description: Durable configuration authority and revision metadata; transport currentness is not implied.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationSyncStatusResponse'
+        '503':
           $ref: '#/components/responses/Problem'
   {PROVIDER_ACCOUNTS_PATH}:
     post:
@@ -2090,6 +2126,22 @@ components:
         (
             "WorkspaceRootResponse",
             openapi_schema::<WorkspaceRootResponse>(),
+        ),
+        (
+            "ConfigurationSyncRole",
+            openapi_schema::<ConfigurationSyncRole>(),
+        ),
+        (
+            "ConfigurationSyncTransportState",
+            openapi_schema::<ConfigurationSyncTransportState>(),
+        ),
+        (
+            "ConfigurationRevisionResponse",
+            openapi_schema::<ConfigurationRevisionResponse>(),
+        ),
+        (
+            "ConfigurationSyncStatusResponse",
+            openapi_schema::<ConfigurationSyncStatusResponse>(),
         ),
         ("WorkspaceResponse", openapi_schema::<WorkspaceResponse>()),
         (

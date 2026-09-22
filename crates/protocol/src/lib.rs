@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.25.0";
+pub const PROTOCOL_VERSION: &str = "0.26.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -20,6 +20,8 @@ pub const NEGOTIATE_PATH: &str = "/v1/protocol/negotiate";
 pub const EVENTS_WEBSOCKET_PATH: &str = "/v1/events";
 pub const WORKSPACES_PATH: &str = "/v1/workspaces";
 pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
+pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
+pub const GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID: &str = "get_configuration_sync_status";
 pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
 pub const PROVIDER_ACCOUNT_PATH: &str = "/v1/provider-accounts/{provider_account_id}";
 pub const PROVIDER_ACCOUNT_LOGIN_PATH: &str = "/v1/provider-accounts/{provider_account_id}/login";
@@ -161,6 +163,7 @@ pub mod error_code {
     pub const PROVIDER_ACCOUNT_LIMIT_REACHED: &str = "provider_account_limit_reached";
     pub const PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID: &str =
         "provider_account_workspace_association_invalid";
+    pub const CONFIGURATION_SYNC_UNAVAILABLE: &str = "configuration_sync_unavailable";
     pub const PROVIDER_ACCOUNT_STORE_UNAVAILABLE: &str = "provider_account_store_unavailable";
     pub const PROVIDER_ACCOUNT_INVALID_STATE: &str = "provider_account_invalid_state";
     pub const PROVIDER_ACCOUNT_LOGIN_NOT_FOUND: &str = "provider_account_login_not_found";
@@ -241,6 +244,7 @@ pub mod error_code {
         PROVIDER_ACCOUNT_INVALID,
         PROVIDER_ACCOUNT_LIMIT_REACHED,
         PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID,
+        CONFIGURATION_SYNC_UNAVAILABLE,
         PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
         PROVIDER_ACCOUNT_INVALID_STATE,
         PROVIDER_ACCOUNT_LOGIN_NOT_FOUND,
@@ -348,6 +352,57 @@ pub struct CreateProviderAccountRequest {
     pub label: String,
     #[serde(default)]
     pub workspace_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSyncRole {
+    Unassigned,
+    Master,
+    Follower,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSyncTransportState {
+    Unconfigured,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationRevisionResponse {
+    pub revision: u64,
+    pub schema_version: u32,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationSyncStatusResponse {
+    pub instance_id: String,
+    pub state_version: u64,
+    pub role: ConfigurationSyncRole,
+    #[schemars(with = "RequiredNullableString")]
+    pub group_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub master_instance_id: Option<String>,
+    #[schemars(with = "RequiredNullableConfigurationRevision")]
+    pub applied_revision: Option<ConfigurationRevisionResponse>,
+    #[schemars(with = "RequiredNullableConfigurationRevision")]
+    pub observed_revision: Option<ConfigurationRevisionResponse>,
+    pub transport: ConfigurationSyncTransportState,
+}
+
+struct RequiredNullableConfigurationRevision;
+impl JsonSchema for RequiredNullableConfigurationRevision {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableConfigurationRevision".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let revision = generator.subschema_for::<ConfigurationRevisionResponse>();
+        json_schema!({"anyOf": [revision, {"type": "null"}]})
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

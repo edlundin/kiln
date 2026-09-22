@@ -237,7 +237,7 @@ async fn main() -> ExitCode {
         RunApplication::new(store.clone(), UlidIdGenerator),
         DeterministicSubprocessExecutor::new(subprocess_outcome),
         events.clone(),
-        store,
+        store.clone(),
         artifacts,
     )
     .with_native_model(native_selection)
@@ -285,7 +285,8 @@ async fn main() -> ExitCode {
         provider_account_operations,
         events,
         AuthToken::from_bytes(credential.token()),
-    );
+    )
+    .with_configuration_status_store(store);
     let lifecycle = state.lifecycle();
     let signal_lifecycle = lifecycle.clone();
     tokio::spawn(async move {

@@ -37,6 +37,17 @@ pub(super) trait ConfigurationIdentityCommandOperations: Send + Sync {
                 + '_,
         >,
     >;
+    fn retire_by_id(
+        &self,
+        instance: kiln_core::KilnInstanceId,
+        identity_id: kiln_core::ConfigurationMasterIdentityId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<(), kiln_core::ConfigurationIdentityCommandError>>
+                + Send
+                + '_,
+        >,
+    >;
 }
 pub(super) struct ConfigurationIdentityCommandAdapter<T>(pub T);
 impl<T: kiln_core::ConfigurationIdentityAdministration> ConfigurationIdentityCommandOperations
@@ -71,6 +82,19 @@ impl<T: kiln_core::ConfigurationIdentityAdministration> ConfigurationIdentityCom
         >,
     > {
         Box::pin(self.0.retire_master_identity(instance, setup_key))
+    }
+    fn retire_by_id(
+        &self,
+        instance: kiln_core::KilnInstanceId,
+        identity_id: kiln_core::ConfigurationMasterIdentityId,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<(), kiln_core::ConfigurationIdentityCommandError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(self.0.retire_master_identity_by_id(instance, identity_id))
     }
 }
 
@@ -156,6 +180,42 @@ where
     tokio::spawn(async move {
         let _permit = permit;
         operations.retire(instance, setup_key).await
+    })
+    .await
+    .map_err(|_| PublicError::ConfigurationSyncUnavailable)?
+    .map_err(PublicError::ConfigurationIdentity)?;
+    Ok((
+        axum::http::StatusCode::NO_CONTENT,
+        [(header::CACHE_CONTROL, "no-store")],
+    ))
+}
+
+pub(super) async fn retire_by_id<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    super::StrictJson(request): super::StrictJson<kiln_protocol::RetireMasterIdentityByIdRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let permit = state.lifecycle.begin_command()?;
+    let invalid = || {
+        PublicError::ConfigurationIdentity(
+            kiln_core::ConfigurationIdentityCommandError::InvalidRequest,
+        )
+    };
+    let instance =
+        kiln_core::KilnInstanceId::parse(request.expected_instance_id).map_err(|_| invalid())?;
+    let identity_id = kiln_core::ConfigurationMasterIdentityId::parse(request.identity_id)
+        .map_err(|_| invalid())?;
+    let operations = state
+        .configuration_identity_command_operations
+        .clone()
+        .ok_or(PublicError::ConfigurationSyncUnavailable)?;
+    tokio::spawn(async move {
+        let _permit = permit;
+        operations.retire_by_id(instance, identity_id).await
     })
     .await
     .map_err(|_| PublicError::ConfigurationSyncUnavailable)?

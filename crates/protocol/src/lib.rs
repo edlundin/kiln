@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.31.0";
+pub const PROTOCOL_VERSION: &str = "0.32.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -24,8 +24,11 @@ pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
 pub const CONFIGURATION_MASTER_PATH: &str = "/v1/configuration-sync/master";
 pub const CONFIGURATION_IDENTITY_STATUS_PATH: &str = "/v1/configuration-sync/identity";
 pub const CONFIGURATION_IDENTITY_RETIRE_PATH: &str = "/v1/configuration-sync/identity/retire";
+pub const CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH: &str =
+    "/v1/configuration-sync/identity/retire/by-id";
 pub const CONFIGURE_MASTER_IDENTITY_OPERATION_ID: &str = "configure_master_identity";
 pub const RETIRE_MASTER_IDENTITY_OPERATION_ID: &str = "retire_master_identity";
+pub const RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID: &str = "retire_master_identity_by_id";
 pub const GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID: &str =
     "get_configuration_identity_status";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
@@ -490,8 +493,9 @@ pub struct ConfigurationSyncStatusResponse {
     pub transport: ConfigurationSyncTransportState,
 }
 
-/// Public setup metadata only. Active does not imply a valid certificate now,
-/// accessible private keys, follower enrollment or an enabled remote listener.
+/// Public setup metadata only. identity_id is independent of the private vault
+/// references. Active does not imply current certificate validity, accessible
+/// private keys, follower enrollment or an enabled remote listener.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 pub struct ConfigurationIdentitySummaryResponse {
     pub identity_id: String,
@@ -548,6 +552,15 @@ pub struct ConfigurationIdentitySetupResponse {
 pub struct RetireMasterIdentityRequest {
     pub expected_instance_id: String,
     pub setup_idempotency_key: String,
+}
+
+/// Retire a known identity by its stable public ID. Exact repeats safely retry
+/// cleanup, including for historical identities after a role change.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetireMasterIdentityByIdRequest {
+    pub expected_instance_id: String,
+    pub identity_id: String,
 }
 
 struct RequiredNullableConfigurationIdentity;

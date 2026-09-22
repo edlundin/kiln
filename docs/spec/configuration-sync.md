@@ -412,20 +412,20 @@ one SQLite transaction. Only a current master's pending/active identity is
 included. Unassigned/follower instances, and masters without a live setup record,
 return `identity: null`; retired and historical-group identities are excluded.
 
-The identity summary contains an opaque local identity ID, `pending`/`active`
+The identity summary contains an opaque public identity ID, `pending`/`active`
 phase, canonical DNS/IP server name, SHA-256 CA fingerprint and the configured
-not-before/leaf-expiry/CA-expiry Unix seconds. The local ID names the lifecycle
-record for administration; it is neither a bearer credential nor shared snapshot
-content. No private keys, key envelopes, TLS-slot references or certificate bytes
-are returned, and no vault read or recovery mutation occurs. `active` describes a
-past successful setup transition: it does not guarantee current key availability,
-current certificate validity, follower trust or a running remote listener.
+not-before/leaf-expiry/CA-expiry Unix seconds. The ID names the lifecycle record;
+it is independently generated and cannot reveal either vault reference. No
+private keys, key envelopes, SecretRefs or certificate bytes are returned, and no
+vault read or recovery mutation occurs. `active` describes a past successful
+setup transition: it does not guarantee current key availability, current
+certificate validity, follower trust or a running remote listener.
 
 Successful responses have `Cache-Control: no-store`. The route inherits the
 local API's bearer, Host and Origin protections. Unavailable/invalid persistence
 returns content-free `503 configuration_sync_unavailable`; no pending identity is
-silently treated as ready. Setup/retirement commands are described below; desktop presentation is
-still pending. The separate follower router does not expose this route.
+silently treated as ready. Setup/retirement commands and desktop controls are
+described below. The separate follower router does not expose this route.
 
 ## Explicit managed identity setup and retirement
 
@@ -451,7 +451,11 @@ receipt. Legacy explicit-reference identities have a null command key and remain
 manageable through the internal lifecycle API.
 
 A successful `200` receipt contains `instance_id`, `group_id`,
-`reserved_state_version` and opaque `identity_id`. Reload status after success;
+`reserved_state_version` and the public opaque `identity_id`. Migration 41 adds
+independent public IDs to the identity journal, backfills existing rows with
+random IDs, and enforces uniqueness and immutability. A uniqueness collision
+aborts migration instead of changing or aliasing an existing target. Setup/status
+responses never serialize the CA or TLS SecretRefs. Reload status after success;
 the original reserved version is not current authority status. Malformed input
 or invalid validity yields `400 configuration_sync_invalid_request`; stale
 state, occupied identity or retired work yields `409 configuration_sync_conflict`.
@@ -467,8 +471,19 @@ checks local ownership, retires it, and attempts deletion of both keys. Success
 is `204`; missing/wrong-instance targets are conflicts. Retrying the exact body
 is safe after an uncertain result or deletion failure. The original setup key
 can never create another identity, even after successful cleanup; use a fresh key
-and current state for a replacement. Internal explicit-reference identities and
-historical cleanup enumeration remain available through the lifecycle adapter.
+and current state for a replacement.
+
+Protocol `0.32.0` adds `POST /v1/configuration-sync/identity/retire/by-id`, which
+takes a strict body with
+`expected_instance_id` and the public `identity_id`. It resolves the unique,
+immutable ID and verifies the recorded owner before writing the retirement
+tombstone and deleting both vault keys. It does not require that the identity's
+master role is still current, so a retained historical ID remains cleanable after
+role loss. The ID cannot select a replacement identity; replacement receives a
+new ID. Exact request retries safely repeat tombstone cleanup. Status continues to
+return only the current master's pending/active record and does not enumerate
+historical identities. Internal explicit-reference identities and historical
+cleanup enumeration remain available through the lifecycle adapter.
 
 Both commands inherit the local API's bearer/Host/Origin protections and return
 no-store on success. The command gate rejects new writes once shutdown starts.
@@ -478,14 +493,20 @@ release database/process ownership early. Shutdown waits for those accepted
 operations; there is no arbitrary timeout that abandons an uncertain OS write.
 The supplied daemon wall clock is sampled after queueing and at activation.
 
-The Rust client exposes `configure_master_identity(key, request)` and
-`retire_master_identity(request)`; it does not automatically retry either. The
-retirement client requires HTTP 204. Persist the exact setup key/request for
-uncertain retries and keep the key for future cleanup. No remote listener,
+The Rust client exposes `configure_master_identity(key, request)`,
+`retire_master_identity(request)` for original-key recovery, and
+`retire_master_identity_by_id(request)` for a known stable target; it does not
+automatically retry them. Both retirement clients require HTTP 204. Retain the
+exact setup key/request after an uncertain setup and the exact target request
+after uncertain retirement. No remote listener,
 follower credential, trust installation or snapshot publication is created by
 these commands. Replacement root trust still needs explicit follower approval;
 listener teardown/reenrollment integration must precede remote runtime activation.
-Desktop controls and live vault/cancellation/shutdown acceptance remain pending.
+Desktop offers explicit setup and retirement confirmation, preserves exact
+uncertain requests within the live Settings connection, and reloads both status
+views after confirmed changes. App restart reloads the current stable identity ID
+from status, allowing retirement without the original setup key. Live vault,
+cancellation and shutdown acceptance remain unverified.
 
 ## Initial local master designation
 

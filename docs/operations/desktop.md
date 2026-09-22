@@ -95,6 +95,32 @@ designation** reuses the original request and cannot create another group.
 The view reloads current status after success. An existing master or follower
 cannot be reassigned through this control.
 
+On a master, **Managed master identity** loads the public identity status with the
+authority state. The server name is the exact DNS name or IP address followers
+will use. Leaf and CA validity are editable whole-day values, initially 90 and
+365 days; the CA period must be at least as long as the leaf period. **Review
+identity setup…** freezes the displayed master instance/group/state, name and
+validity, then asks for confirmation before creating either private key. Kiln
+stores both keys in the daemon host's OS vault. Setup does not start a listener,
+enroll followers or enable remote synchronization.
+
+An uncertain setup offers **Retry identity setup**, which reuses its exact
+request and idempotency key. If recovery reports an incomplete reservation,
+**Retry identity cleanup** uses that original setup key to retry both deletions.
+Refresh or disconnect clears an unsubmitted confirmation and rejects stale
+responses; submitted retry state stays in the Settings connection view. After an
+app restart, Settings reloads the current public identity ID from daemon status.
+
+**Retire managed identity…** shows the selected server name and asks for a second
+confirmation before marking that exact identity retired and deleting both vault
+keys. It requires no setup key, so the current identity can still be retired after
+reopening Settings or restarting the app. An uncertain result offers **Retry
+identity retirement** for the same stable ID; the server keeps the tombstone and
+retries both deletions. A replacement identity has a different ID and cannot be
+retired by an old retry. Status exposes only the current master's identity and
+does not list historical IDs. Identity metadata describes setup state; it does
+not confirm that a key is currently available or that remote serving is active.
+
 Designation records the role only. On a master, **Import bundle…** opens a single
 explicit JSON bundle file. Settings previews the model-default presence and
 MCP/skill/file counts, identifies the target instance and group, and requires

@@ -7,9 +7,10 @@ use super::{
     decode_configuration_private_key, generate_configuration_identity, hash_bytes,
 };
 use kiln_core::{
-    ConfigurationAuthority, ConfigurationGroupId, ConfigurationInstanceState, ConfigurationRole,
-    ConfigurationSecretBinding, ConfigurationSecretPurpose, ConfigurationSecretStore, ContentHash,
-    KilnInstanceId, SecretRef, SecretStoreError,
+    ConfigurationAuthority, ConfigurationGroupId, ConfigurationInstanceState,
+    ConfigurationMasterIdentityId, ConfigurationRole, ConfigurationSecretBinding,
+    ConfigurationSecretPurpose, ConfigurationSecretStore, ContentHash, KilnInstanceId, SecretRef,
+    SecretStoreError,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 
@@ -47,7 +48,7 @@ impl kiln_core::ConfigurationIdentityStatusStore for SqliteStore {
                     return Err(StateError::IntegrityViolation);
                 }
                 Some(kiln_core::ConfigurationMasterIdentitySummary {
-                    identity_id: reference,
+                    identity_id: record.identity_id.clone(),
                     phase: match record.status {
                         ConfigurationIdentityStatus::Pending => Phase::Pending,
                         ConfigurationIdentityStatus::Active => Phase::Active,
@@ -186,7 +187,7 @@ impl kiln_core::ConfigurationIdentityAdministration for ConfigurationIdentityCom
                 instance_id: record.request.ca_binding.instance_id().clone(),
                 group_id: record.request.ca_binding.authority().group_id().clone(),
                 reserved_state_version: record.request.expected_version,
-                identity_id: record.request.ca_binding.secret_ref().clone(),
+                identity_id: record.identity_id,
             })
         })
         .await
@@ -229,6 +230,17 @@ impl kiln_core::ConfigurationIdentityAdministration for ConfigurationIdentityCom
         }
         self.provisioner
             .retire_and_cleanup(identity_id)
+            .await
+            .map_err(command_error)
+    }
+
+    async fn retire_master_identity_by_id(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        identity_id: ConfigurationMasterIdentityId,
+    ) -> Result<(), kiln_core::ConfigurationIdentityCommandError> {
+        self.provisioner
+            .retire_and_cleanup_by_identity_id(identity_id, expected_instance_id)
             .await
             .map_err(command_error)
     }
@@ -352,6 +364,7 @@ pub enum ConfigurationIdentityStatus {
 /// of current authority, certificate validity or permission to serve remotely.
 #[derive(Debug, Clone)]
 pub struct ConfigurationIdentityRecord {
+    pub identity_id: ConfigurationMasterIdentityId,
     pub request: ConfigurationIdentityRequest,
     pub status: ConfigurationIdentityStatus,
     pub certificate_authority_der: Vec<u8>,
@@ -433,31 +446,71 @@ impl ConfigurationIdentityProvisioner {
         let owner = self.clone();
         tokio::spawn(async move {
             let _guard = owner.store.configuration_identity_operations.lock().await;
-            let stored = {
-                let mut connection = owner.store.connection.lock().await;
-                let stored = load(&mut connection, &ca_ref)
-                    .await?
-                    .ok_or(Error::InvalidRequest)?;
-                retire(&mut connection, &ca_ref).await?;
-                stored
-            };
-            // Try both slots even if the first delete fails. Tombstone retries
-            // are deliberate: never forget an uncertain OS deletion.
-            let ca = owner.vault.delete(stored.record.request.ca_binding()).await;
-            let tls = owner
-                .vault
-                .delete(stored.record.request.tls_binding())
-                .await;
-            for result in [ca, tls] {
-                match result {
-                    Ok(()) | Err(SecretStoreError::NotFound) => {}
-                    Err(error) => return Err(Error::Vault(error)),
-                }
-            }
-            Ok(())
+            owner.retire_and_cleanup_owned(ca_ref).await
         })
         .await
         .map_err(|_| Error::Unavailable)?
+    }
+
+    /// Retire exactly the identity selected by its public ID. The owner check,
+    /// tombstone write, and vault cleanup share the same serialized operation.
+    /// Historical identities remain cleanable after their master role is left.
+    pub async fn retire_and_cleanup_by_identity_id(
+        &self,
+        identity_id: ConfigurationMasterIdentityId,
+        expected_instance_id: KilnInstanceId,
+    ) -> Result<(), Error> {
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let _guard = owner.store.configuration_identity_operations.lock().await;
+            let ca_ref = {
+                let mut connection = owner.store.connection.lock().await;
+                let reference: Option<String> = sqlx::query_scalar(
+                    "SELECT ca_ref FROM configuration_master_identities WHERE identity_id = ? AND master_instance_id = ?",
+                )
+                .bind(identity_id.as_str())
+                .bind(expected_instance_id.as_str())
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(|_| Error::Unavailable)?;
+                let ca_ref = SecretRef::parse(reference.ok_or(Error::InvalidRequest)?)
+                    .map_err(|_| Error::IntegrityViolation)?;
+                let stored = load(&mut connection, &ca_ref)
+                    .await?
+                    .ok_or(Error::IntegrityViolation)?;
+                if stored.record.identity_id != identity_id
+                    || stored.record.request.ca_binding.instance_id() != &expected_instance_id
+                {
+                    return Err(Error::IntegrityViolation);
+                }
+                ca_ref
+            };
+            owner.retire_and_cleanup_owned(ca_ref).await
+        })
+        .await
+        .map_err(|_| Error::Unavailable)?
+    }
+
+    async fn retire_and_cleanup_owned(&self, ca_ref: SecretRef) -> Result<(), Error> {
+        let stored = {
+            let mut connection = self.store.connection.lock().await;
+            let stored = load(&mut connection, &ca_ref)
+                .await?
+                .ok_or(Error::InvalidRequest)?;
+            retire(&mut connection, &ca_ref).await?;
+            stored
+        };
+        // Try both slots even if the first delete fails. Tombstone retries
+        // are deliberate: never forget an uncertain OS deletion.
+        let ca = self.vault.delete(stored.record.request.ca_binding()).await;
+        let tls = self.vault.delete(stored.record.request.tls_binding()).await;
+        for result in [ca, tls] {
+            match result {
+                Ok(()) | Err(SecretStoreError::NotFound) => {}
+                Err(error) => return Err(Error::Vault(error)),
+            }
+        }
+        Ok(())
     }
 
     async fn provision_owned(
@@ -498,6 +551,7 @@ impl ConfigurationIdentityProvisioner {
                 ca_key_hash: hash_bytes(generated.certificate_authority_key.as_bytes()),
                 tls_key_hash: hash_bytes(generated.server_private_key.as_bytes()),
                 record: ConfigurationIdentityRecord {
+                    identity_id: ConfigurationMasterIdentityId::from_ulid(ulid::Ulid::generate()),
                     request: request.clone(),
                     status: ConfigurationIdentityStatus::Pending,
                     certificate_authority_der: generated.certificate_authority_der,
@@ -601,7 +655,7 @@ impl ConfigurationIdentityProvisioner {
         if occupied != 0 {
             return Err(Error::Conflict);
         }
-        sqlx::query("INSERT INTO configuration_master_identities (ca_ref, tls_ref, group_id, master_instance_id, reserved_state_version, server_name, not_before, leaf_not_after, ca_not_after, ca_der, tls_der, ca_key_hash, tls_key_hash, status, request_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")
+        sqlx::query("INSERT INTO configuration_master_identities (ca_ref, tls_ref, group_id, master_instance_id, reserved_state_version, server_name, not_before, leaf_not_after, ca_not_after, ca_der, tls_der, ca_key_hash, tls_key_hash, status, request_key, identity_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)")
             .bind(request.ca_binding.secret_ref().as_str()).bind(request.tls_binding.secret_ref().as_str())
             .bind(request.ca_binding.authority().group_id().as_str()).bind(request.ca_binding.instance_id().as_str())
             .bind(request.expected_version as i64).bind(&request.server_name)
@@ -609,6 +663,7 @@ impl ConfigurationIdentityProvisioner {
             .bind(&stored.record.certificate_authority_der).bind(&stored.record.server_certificate_der)
             .bind(stored.ca_key_hash.as_str()).bind(stored.tls_key_hash.as_str())
             .bind(request_key)
+            .bind(stored.record.identity_id.as_str())
             .execute(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
         transaction.commit().await.map_err(|_| Error::Unavailable)
     }
@@ -708,6 +763,8 @@ async fn load(
         tls_key_hash: ContentHash::parse(string("tls_key_hash")?)
             .map_err(|_| Error::IntegrityViolation)?,
         record: ConfigurationIdentityRecord {
+            identity_id: ConfigurationMasterIdentityId::parse(string("identity_id")?)
+                .map_err(|_| Error::IntegrityViolation)?,
             request,
             status,
             certificate_authority_fingerprint: hash_bytes(&ca_der),

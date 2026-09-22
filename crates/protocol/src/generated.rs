@@ -1,7 +1,9 @@
 use crate::{
-    CONFIGURATION_IDENTITY_RETIRE_PATH, CONFIGURE_MASTER_IDENTITY_OPERATION_ID,
-    RETIRE_MASTER_IDENTITY_OPERATION_ID, ConfigureMasterIdentityRequest,
-    ConfigurationIdentitySetupResponse, RetireMasterIdentityRequest,
+    CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH, CONFIGURATION_IDENTITY_RETIRE_PATH,
+    CONFIGURE_MASTER_IDENTITY_OPERATION_ID, ConfigurationIdentitySetupResponse,
+    ConfigureMasterIdentityRequest, RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID,
+    RETIRE_MASTER_IDENTITY_OPERATION_ID, RetireMasterIdentityByIdRequest,
+    RetireMasterIdentityRequest,
 };
 use crate::{
     CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
@@ -315,6 +317,10 @@ fn schema() -> String {
             "RetireMasterIdentityRequest",
             schema_for!(RetireMasterIdentityRequest),
         ),
+        (
+            "RetireMasterIdentityByIdRequest",
+            schema_for!(RetireMasterIdentityByIdRequest),
+        ),
         ("ClientIdentity", schema_for!(ClientIdentity)),
         ("NegotiateRequest", schema_for!(NegotiateRequest)),
         ("NegotiateResponse", schema_for!(NegotiateResponse)),
@@ -508,6 +514,7 @@ fn typescript() -> String {
         ConfigureMasterIdentityRequest::decl(&config),
         ConfigurationIdentitySetupResponse::decl(&config),
         RetireMasterIdentityRequest::decl(&config),
+        RetireMasterIdentityByIdRequest::decl(&config),
         ClientIdentity::decl(&config),
         NegotiateRequest::decl(&config),
         NegotiateResponse::decl(&config),
@@ -626,6 +633,10 @@ fn catalogue() -> String {
             "method": "POST",
             "path": CONFIGURATION_IDENTITY_RETIRE_PATH,
             "operation": RETIRE_MASTER_IDENTITY_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH,
+            "operation": RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID
         }, {
             "method": "POST",
             "path": CONFIGURATION_MASTER_PATH,
@@ -1426,6 +1437,25 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/RetireMasterIdentityRequest'
+      responses:
+        '204':
+          description: Identity retired and both vault deletions completed; historical references remain reserved.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH}:
+    post:
+      operationId: {RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID}
+      description: Retire the exact managed identity selected by its stable public ID. The target is bound to the expected local instance; historical identities remain cleanable after authority changes. Repeating the same request retries both vault deletions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireMasterIdentityByIdRequest'
       responses:
         '204':
           description: Identity retired and both vault deletions completed; historical references remain reserved.
@@ -2441,6 +2471,10 @@ components:
         (
             "RetireMasterIdentityRequest",
             openapi_schema::<RetireMasterIdentityRequest>(),
+        ),
+        (
+            "RetireMasterIdentityByIdRequest",
+            openapi_schema::<RetireMasterIdentityByIdRequest>(),
         ),
         ("WorkspaceResponse", openapi_schema::<WorkspaceResponse>()),
         (

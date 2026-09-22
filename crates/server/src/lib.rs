@@ -893,6 +893,10 @@ where
             post(configuration_identity::retire),
         )
         .route(
+            kiln_protocol::CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH,
+            post(configuration_identity::retire_by_id),
+        )
+        .route(
             kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
             get(configuration_sync::get_status),
         )
@@ -3257,23 +3261,28 @@ impl PublicError {
             },
             Self::ConfigurationIdentity(error) => match error {
                 kiln_core::ConfigurationIdentityCommandError::InvalidRequest => (
-                    StatusCode::BAD_REQUEST, error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
+                    StatusCode::BAD_REQUEST,
+                    error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
                     "Invalid configuration identity request",
                 ),
                 kiln_core::ConfigurationIdentityCommandError::Conflict => (
-                    StatusCode::CONFLICT, error_code::CONFIGURATION_SYNC_CONFLICT,
+                    StatusCode::CONFLICT,
+                    error_code::CONFIGURATION_SYNC_CONFLICT,
                     "Configuration authority, state or identity changed",
                 ),
                 kiln_core::ConfigurationIdentityCommandError::IdempotencyConflict => (
-                    StatusCode::CONFLICT, error_code::IDEMPOTENCY_CONFLICT,
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
                     "Idempotency key was reused with a different identity request",
                 ),
                 kiln_core::ConfigurationIdentityCommandError::RecoveryRequired => (
-                    StatusCode::CONFLICT, error_code::CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
+                    StatusCode::CONFLICT,
+                    error_code::CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
                     "Incomplete identity retired; clean up and use a fresh setup request",
                 ),
                 kiln_core::ConfigurationIdentityCommandError::Unavailable => (
-                    StatusCode::SERVICE_UNAVAILABLE, error_code::CONFIGURATION_SYNC_UNAVAILABLE,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::CONFIGURATION_SYNC_UNAVAILABLE,
                     "Configuration identity unavailable",
                 ),
             },

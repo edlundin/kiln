@@ -250,3 +250,14 @@ key, allowing cleanup even after a lost setup response; it requires HTTP 204 and
 can be retried with the same body. A retired key never provisions a replacement.
 These commands write/delete OS-vault keys but enable no listener or follower trust.
 See the [setup contract](../spec/configuration-sync.md#explicit-managed-identity-setup-and-retirement).
+
+Protocol `0.32.0` adds `retire_master_identity_by_id(request)` for a known
+identity. `ConfigurationIdentityStatusResponse.identity_id` and the setup receipt
+now contain a stable public ID independent of the CA/TLS vault references. Use
+that ID with the expected local instance to retire after reconnect or app restart;
+the daemon verifies ownership and targets only that immutable record, including
+after the instance has left its former master role. The existing
+`retire_master_identity(request)` remains available for cleanup by the original
+setup idempotency key when the setup response was lost. Either retirement request
+is safe to repeat after an uncertain result; the client does not retry
+automatically. Status does not enumerate retired or historical IDs.

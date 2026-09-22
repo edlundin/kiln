@@ -2,13 +2,19 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use gpui::{Context, PathPromptOptions, Render, Window, div, prelude::*};
-use gpui_component::{Disableable, button::Button};
+use gpui::{Context, Entity, PathPromptOptions, Render, Window, div, prelude::*};
+use gpui_component::{
+    Disableable,
+    button::{Button, ButtonVariants},
+    input::{Input, InputState},
+};
 use kiln_client::Client;
 use kiln_protocol::{
-    ConfigurationRevisionResponse, ConfigurationSyncRole, ConfigurationSyncStatusResponse,
-    ConfigurationSyncTransportState, DesignateConfigurationMasterRequest,
-    PublishConfigurationSnapshotRequest, SharedConfigurationBundle,
+    ConfigurationIdentityStatusResponse, ConfigurationRevisionResponse, ConfigurationSyncRole,
+    ConfigurationSyncStatusResponse, ConfigurationSyncTransportState,
+    ConfigureMasterIdentityRequest, DesignateConfigurationMasterRequest,
+    PublishConfigurationSnapshotRequest, RetireMasterIdentityByIdRequest,
+    RetireMasterIdentityRequest, SharedConfigurationBundle,
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 use ulid::Ulid;
@@ -24,8 +30,21 @@ struct PublicationDraft {
 }
 
 enum Update {
-    Status(Result<ConfigurationSyncStatusResponse, String>),
+    Status(
+        Result<
+            (
+                ConfigurationSyncStatusResponse,
+                ConfigurationIdentityStatusResponse,
+            ),
+            String,
+        >,
+    ),
     Designated(Result<kiln_protocol::ConfigurationMasterDesignationResponse, kiln_client::Error>),
+    IdentityConfigured(
+        Result<kiln_protocol::ConfigurationIdentitySetupResponse, kiln_client::Error>,
+    ),
+    IdentityRetired(Result<(), kiln_client::Error>),
+    IdentityCleanup(Result<(), kiln_client::Error>),
     Imported(Result<PublicationDraft, String>),
     Published(Result<kiln_protocol::ConfigurationPublicationResponse, kiln_client::Error>),
     ExportReady(Result<(PathBuf, SharedConfigurationBundle), String>),
@@ -40,10 +59,19 @@ pub struct ConfigurationSyncSettings {
     task: Option<JoinHandle<()>>,
     online: bool,
     status: Option<ConfigurationSyncStatusResponse>,
+    identity_status: Option<ConfigurationIdentityStatusResponse>,
     error: Option<String>,
     confirmation: Option<DesignateConfigurationMasterRequest>,
     // Keep the exact request/key after an ambiguous failure, including disconnect.
     pending_designation: Option<(String, DesignateConfigurationMasterRequest)>,
+    identity_confirmation: Option<ConfigureMasterIdentityRequest>,
+    pending_identity_setup: Option<(String, ConfigureMasterIdentityRequest)>,
+    pending_identity_cleanup: Option<RetireMasterIdentityRequest>,
+    identity_retirement_confirmation: Option<RetireMasterIdentityByIdRequest>,
+    pending_identity_retirement: Option<RetireMasterIdentityByIdRequest>,
+    server_name_input: Option<Entity<InputState>>,
+    leaf_validity_days_input: Option<Entity<InputState>>,
+    ca_validity_days_input: Option<Entity<InputState>>,
     notice: Option<String>,
     draft: Option<PublicationDraft>,
     pending_publication: Option<(String, PublishConfigurationSnapshotRequest)>,
@@ -80,9 +108,18 @@ impl ConfigurationSyncSettings {
             task: None,
             online: true,
             status: None,
+            identity_status: None,
             error: None,
             confirmation: None,
             pending_designation: None,
+            identity_confirmation: None,
+            pending_identity_setup: None,
+            pending_identity_cleanup: None,
+            identity_retirement_confirmation: None,
+            pending_identity_retirement: None,
+            server_name_input: None,
+            leaf_validity_days_input: None,
+            ca_validity_days_input: None,
             notice: None,
             draft: None,
             pending_publication: None,
@@ -98,8 +135,11 @@ impl ConfigurationSyncSettings {
         self.online = online;
         self.request = None;
         self.status = None;
+        self.identity_status = None;
         self.error = None;
         self.confirmation = None;
+        self.identity_confirmation = None;
+        self.identity_retirement_confirmation = None;
         self.notice = None;
         self.draft = None;
         if let Some(task) = self.task.take() {
@@ -119,16 +159,30 @@ impl ConfigurationSyncSettings {
         self.request = Some(request);
         // A failed refresh must not leave old metadata looking current.
         self.status = None;
+        self.identity_status = None;
         self.error = None;
         self.confirmation = None;
+        self.identity_confirmation = None;
+        self.identity_retirement_confirmation = None;
         self.draft = None;
         let client = self.client.clone();
         let updates = self.updates.clone();
         self.task = Some(self.runtime.spawn(async move {
-            let result = client
-                .get_configuration_sync_status()
-                .await
-                .map_err(|error| connection::error_message("Load synchronization status", &error));
+            let (status, identity_status) = tokio::join!(
+                client.get_configuration_sync_status(),
+                client.get_configuration_identity_status(),
+            );
+            let result = match (status, identity_status) {
+                (Ok(status), Ok(identity_status)) => Ok((status, identity_status)),
+                (Err(error), _) => Err(connection::error_message(
+                    "Load synchronization status",
+                    &error,
+                )),
+                (_, Err(error)) => Err(connection::error_message(
+                    "Load managed identity status",
+                    &error,
+                )),
+            };
             let _ = updates.send((request, Update::Status(result)));
         }));
         cx.notify();
@@ -156,6 +210,195 @@ impl ConfigurationSyncSettings {
         cx.notify();
     }
 
+    fn prepare_identity_setup(&mut self, cx: &mut Context<Self>) {
+        if !self.online
+            || self.request.is_some()
+            || self.pending_identity_setup.is_some()
+            || self.pending_identity_cleanup.is_some()
+            || self.pending_identity_retirement.is_some()
+        {
+            return;
+        }
+        let Some(status) = &self.identity_status else {
+            return;
+        };
+        if status.role != ConfigurationSyncRole::Master || status.identity.is_some() {
+            return;
+        }
+        let (Some(server_name), Some(leaf_days), Some(ca_days)) = (
+            self.server_name_input.as_ref(),
+            self.leaf_validity_days_input.as_ref(),
+            self.ca_validity_days_input.as_ref(),
+        ) else {
+            return;
+        };
+        let server_name = server_name.read(cx).value().to_string();
+        if server_name.is_empty() {
+            self.error = Some("Enter the exact DNS name or IP address followers will use.".into());
+            cx.notify();
+            return;
+        }
+        let leaf_seconds = match validity_seconds_from_days(leaf_days.read(cx).value().as_ref()) {
+            Some(seconds) => seconds,
+            None => {
+                self.error = Some("Leaf validity must be a positive whole number of days.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let ca_seconds = match validity_seconds_from_days(ca_days.read(cx).value().as_ref()) {
+            Some(seconds) if seconds >= leaf_seconds => seconds,
+            _ => {
+                self.error = Some(
+                    "CA validity must be a positive number of days at least as long as leaf validity."
+                        .into(),
+                );
+                cx.notify();
+                return;
+            }
+        };
+        let now = match std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        {
+            Some(now) => now,
+            None => {
+                self.error =
+                    Some("The system clock cannot provide a valid certificate date.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let Some(leaf_not_after_unix_seconds) = now.checked_add(leaf_seconds) else {
+            self.error = Some("Leaf validity is outside the supported date range.".into());
+            cx.notify();
+            return;
+        };
+        let Some(ca_not_after_unix_seconds) = now.checked_add(ca_seconds) else {
+            self.error = Some("CA validity is outside the supported date range.".into());
+            cx.notify();
+            return;
+        };
+        let Some(group_id) = status.group_id.clone() else {
+            self.error = Some("The master has no configuration group. Refresh status.".into());
+            cx.notify();
+            return;
+        };
+        self.identity_confirmation = Some(ConfigureMasterIdentityRequest {
+            expected_instance_id: status.instance_id.clone(),
+            expected_group_id: group_id,
+            expected_state_version: status.state_version,
+            server_name,
+            not_before_unix_seconds: now,
+            leaf_not_after_unix_seconds,
+            ca_not_after_unix_seconds,
+        });
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn configure_identity(&mut self, cx: &mut Context<Self>) {
+        if !self.online || self.request.is_some() {
+            return;
+        }
+        if self.pending_identity_setup.is_none() {
+            let Some(command) = self.identity_confirmation.take() else {
+                return;
+            };
+            self.pending_identity_setup = Some((Ulid::generate().to_string(), command));
+        }
+        let Some((key, command)) = self.pending_identity_setup.clone() else {
+            return;
+        };
+        let request = Ulid::generate();
+        self.request = Some(request);
+        self.status = None;
+        self.identity_status = None;
+        self.error = None;
+        self.notice = None;
+        let client = self.client.clone();
+        let updates = self.updates.clone();
+        self.task = Some(self.runtime.spawn(async move {
+            let result = client.configure_master_identity(&key, &command).await;
+            let _ = updates.send((request, Update::IdentityConfigured(result)));
+        }));
+        cx.notify();
+    }
+
+    fn prepare_identity_retirement(&mut self, cx: &mut Context<Self>) {
+        if !self.online
+            || self.request.is_some()
+            || self.pending_identity_setup.is_some()
+            || self.pending_identity_cleanup.is_some()
+            || self.pending_identity_retirement.is_some()
+        {
+            return;
+        }
+        let Some(status) = &self.identity_status else {
+            return;
+        };
+        let Some(identity) = &status.identity else {
+            return;
+        };
+        self.identity_retirement_confirmation = Some(RetireMasterIdentityByIdRequest {
+            expected_instance_id: status.instance_id.clone(),
+            identity_id: identity.identity_id.clone(),
+        });
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn retire_identity(&mut self, cx: &mut Context<Self>) {
+        if !self.online || self.request.is_some() {
+            return;
+        }
+        if self.pending_identity_retirement.is_none() {
+            let Some(request) = self.identity_retirement_confirmation.take() else {
+                return;
+            };
+            self.pending_identity_retirement = Some(request);
+        }
+        let Some(command) = self.pending_identity_retirement.clone() else {
+            return;
+        };
+        let request = Ulid::generate();
+        self.request = Some(request);
+        self.status = None;
+        self.identity_status = None;
+        self.error = None;
+        self.notice = None;
+        let client = self.client.clone();
+        let updates = self.updates.clone();
+        self.task = Some(self.runtime.spawn(async move {
+            let result = client.retire_master_identity_by_id(&command).await;
+            let _ = updates.send((request, Update::IdentityRetired(result)));
+        }));
+        cx.notify();
+    }
+
+    fn cleanup_incomplete_identity(&mut self, cx: &mut Context<Self>) {
+        if !self.online || self.request.is_some() {
+            return;
+        }
+        let Some(command) = self.pending_identity_cleanup.clone() else {
+            return;
+        };
+        let request = Ulid::generate();
+        self.request = Some(request);
+        self.error = None;
+        self.notice = None;
+        let client = self.client.clone();
+        let updates = self.updates.clone();
+        self.task = Some(self.runtime.spawn(async move {
+            let result = client.retire_master_identity(&command).await;
+            let _ = updates.send((request, Update::IdentityCleanup(result)));
+        }));
+        cx.notify();
+    }
+
     fn designate(&mut self, cx: &mut Context<Self>) {
         if !self.online || self.request.is_some() {
             return;
@@ -172,6 +415,7 @@ impl ConfigurationSyncSettings {
         let request = Ulid::generate();
         self.request = Some(request);
         self.status = None;
+        self.identity_status = None;
         self.error = None;
         self.notice = None;
         let client = self.client.clone();
@@ -232,7 +476,19 @@ impl ConfigurationSyncSettings {
                     connection::error_message("Publish configuration", &error)
                 ));
             }
-            Update::Status(Ok(status)) => self.status = Some(status),
+            Update::Status(Ok((status, identity_status))) => {
+                if same_configuration_state(&status, &identity_status) {
+                    self.status = Some(status);
+                    self.identity_status = Some(identity_status);
+                } else {
+                    self.status = None;
+                    self.identity_status = None;
+                    self.error = Some(
+                        "Configuration changed while loading status. Refresh before continuing."
+                            .into(),
+                    );
+                }
+            }
             Update::Status(Err(error)) => self.error = Some(error),
             Update::Designated(Ok(_receipt)) => {
                 self.pending_designation = None;
@@ -257,6 +513,107 @@ impl ConfigurationSyncSettings {
                 self.error = Some(format!(
                     "{} {action}",
                     connection::error_message("Designate master", &error)
+                ));
+            }
+            Update::IdentityConfigured(Ok(_receipt)) => {
+                self.pending_identity_setup = None;
+                self.identity_confirmation = None;
+                self.notice =
+                    Some("Managed identity setup completed. Reloading current status.".into());
+                self.refresh(cx);
+            }
+            Update::IdentityConfigured(Err(error)) => {
+                let recovery_required = api_problem_code(&error)
+                    == Some(kiln_protocol::error_code::CONFIGURATION_IDENTITY_RECOVERY_REQUIRED);
+                let rejected = recovery_required
+                    || matches!(
+                        api_problem_code(&error),
+                        Some(
+                            kiln_protocol::error_code::CONFIGURATION_SYNC_CONFLICT
+                                | kiln_protocol::error_code::CONFIGURATION_SYNC_INVALID_REQUEST
+                                | kiln_protocol::error_code::IDEMPOTENCY_CONFLICT
+                                | kiln_protocol::error_code::INVALID_JSON
+                                | kiln_protocol::error_code::INVALID_REQUEST
+                        )
+                    );
+                if recovery_required {
+                    if let Some((key, command)) = self.pending_identity_setup.take() {
+                        self.pending_identity_cleanup = Some(RetireMasterIdentityRequest {
+                            expected_instance_id: command.expected_instance_id,
+                            setup_idempotency_key: key,
+                        });
+                    }
+                } else if rejected {
+                    self.pending_identity_setup = None;
+                }
+                let action = if recovery_required {
+                    "Retry cleanup for the incomplete setup before creating a new identity."
+                } else if rejected {
+                    "Refresh identity status and review the request before trying setup again."
+                } else {
+                    "The outcome is unconfirmed. Retry setup with the same request to recover its result."
+                };
+                self.error = Some(format!(
+                    "{} {action}",
+                    connection::error_message("Set up managed identity", &error)
+                ));
+            }
+            Update::IdentityRetired(Ok(())) => {
+                self.pending_identity_retirement = None;
+                self.identity_retirement_confirmation = None;
+                self.notice = Some("Managed identity retired and vault cleanup completed.".into());
+                self.refresh(cx);
+            }
+            Update::IdentityRetired(Err(error)) => {
+                let rejected = matches!(
+                    api_problem_code(&error),
+                    Some(
+                        kiln_protocol::error_code::CONFIGURATION_SYNC_CONFLICT
+                            | kiln_protocol::error_code::CONFIGURATION_SYNC_INVALID_REQUEST
+                            | kiln_protocol::error_code::INVALID_JSON
+                            | kiln_protocol::error_code::INVALID_REQUEST
+                    )
+                );
+                if rejected {
+                    self.pending_identity_retirement = None;
+                    self.identity_retirement_confirmation = None;
+                }
+                let action = if rejected {
+                    "Refresh status before choosing an identity to retire."
+                } else {
+                    "The outcome is unconfirmed. Retry retirement for the same identity."
+                };
+                self.error = Some(format!(
+                    "{} {action}",
+                    connection::error_message("Retire managed identity", &error)
+                ));
+            }
+            Update::IdentityCleanup(Ok(())) => {
+                self.pending_identity_cleanup = None;
+                self.notice = Some("Incomplete identity keys were removed.".into());
+                self.refresh(cx);
+            }
+            Update::IdentityCleanup(Err(error)) => {
+                let rejected = matches!(
+                    api_problem_code(&error),
+                    Some(
+                        kiln_protocol::error_code::CONFIGURATION_SYNC_CONFLICT
+                            | kiln_protocol::error_code::CONFIGURATION_SYNC_INVALID_REQUEST
+                            | kiln_protocol::error_code::INVALID_JSON
+                            | kiln_protocol::error_code::INVALID_REQUEST
+                    )
+                );
+                if rejected {
+                    self.pending_identity_cleanup = None;
+                }
+                let action = if rejected {
+                    "Refresh identity status before continuing setup."
+                } else {
+                    "The outcome is unconfirmed. Retry cleanup with the same setup key."
+                };
+                self.error = Some(format!(
+                    "{} {action}",
+                    connection::error_message("Clean up incomplete identity", &error)
                 ));
             }
         }
@@ -355,6 +712,7 @@ impl ConfigurationSyncSettings {
         let request = Ulid::generate();
         self.request = Some(request);
         self.status = None;
+        self.identity_status = None;
         self.error = None;
         self.notice = None;
         let client = self.client.clone();
@@ -452,8 +810,65 @@ fn revision_label(revision: Option<&ConfigurationRevisionResponse>) -> String {
     )
 }
 
+fn validity_seconds_from_days(value: &str) -> Option<i64> {
+    let days = value.parse::<i64>().ok()?;
+    if days <= 0 {
+        return None;
+    }
+    days.checked_mul(86_400)
+}
+
+fn validity_days(not_after: i64, not_before: i64) -> i64 {
+    not_after.saturating_sub(not_before).div_euclid(86_400)
+}
+
+fn same_configuration_state(
+    status: &ConfigurationSyncStatusResponse,
+    identity_status: &ConfigurationIdentityStatusResponse,
+) -> bool {
+    status.instance_id == identity_status.instance_id
+        && status.state_version == identity_status.state_version
+        && status.role == identity_status.role
+        && status.group_id == identity_status.group_id
+        && status.master_instance_id == identity_status.master_instance_id
+}
+
+fn api_problem_code(error: &kiln_client::Error) -> Option<&str> {
+    match error {
+        kiln_client::Error::Api { problem, .. } => Some(problem.code.as_str()),
+        _ => None,
+    }
+}
+
 impl Render for ConfigurationSyncSettings {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.server_name_input.is_none() {
+            self.server_name_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("sync.example.com")
+                    .default_value("")
+            }));
+        }
+        if self.leaf_validity_days_input.is_none() {
+            self.leaf_validity_days_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("90")
+                    .default_value("90")
+            }));
+        }
+        if self.ca_validity_days_input.is_none() {
+            self.ca_validity_days_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("365")
+                    .default_value("365")
+            }));
+        }
+        let server_name_input = self.server_name_input.clone().expect("created above");
+        let leaf_validity_days_input = self
+            .leaf_validity_days_input
+            .clone()
+            .expect("created above");
+        let ca_validity_days_input = self.ca_validity_days_input.clone().expect("created above");
         let mut content = div()
             .flex()
             .flex_col()
@@ -518,6 +933,54 @@ impl Render for ConfigurationSyncSettings {
                         .label("Retry publication")
                         .disabled(!self.online || self.request.is_some())
                         .on_click(cx.listener(|this, _, _, cx| this.publish(cx))),
+                );
+        }
+        if let Some((_, command)) = &self.pending_identity_setup {
+            content = content
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::ATTENTION)
+                        .child(format!(
+                            "Managed identity setup is unconfirmed for {}. Retry uses the same authority, name, validity and key.",
+                            command.server_name
+                        )),
+                )
+                .child(
+                    Button::new("retry-managed-identity-setup")
+                        .label("Retry identity setup")
+                        .disabled(!self.online || self.request.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.configure_identity(cx))),
+                );
+        }
+        if self.pending_identity_cleanup.is_some() {
+            content = content
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::ATTENTION)
+                        .child("An incomplete identity needs cleanup. Retry removes keys reserved by that exact setup request."),
+                )
+                .child(
+                    Button::new("retry-managed-identity-cleanup")
+                        .label("Retry identity cleanup")
+                        .disabled(!self.online || self.request.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cleanup_incomplete_identity(cx)
+                        })),
+                );
+        }
+        if let Some(command) = &self.pending_identity_retirement {
+            content = content
+                .child(div().text_sm().text_color(theme::ATTENTION).child(format!(
+                    "Retirement is unconfirmed for identity {}. Retry targets this same identity.",
+                    command.identity_id
+                )))
+                .child(
+                    Button::new("retry-managed-identity-retirement")
+                        .label("Retry identity retirement")
+                        .disabled(!self.online || self.request.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.retire_identity(cx))),
                 );
         }
         if let Some(draft) = &self.draft {
@@ -645,6 +1108,168 @@ impl Render for ConfigurationSyncSettings {
                             .disabled(!self.online || self.request.is_some())
                             .on_click(cx.listener(|this, _, _, cx| this.confirm_master(cx))),
                     );
+                }
+            }
+            if let Some(identity_status) = &self.identity_status {
+                content = content
+                    .child(div().text_lg().pt_2().child("Managed master identity"))
+                    .child(div().text_sm().text_color(theme::MUTED).child(
+                        "This identity is stored in the daemon host’s OS vault. Setup and retirement do not enable a listener or enroll followers.",
+                    ));
+                if identity_status.role == ConfigurationSyncRole::Master {
+                    if let Some(identity) = &identity_status.identity {
+                        let phase = match identity.phase {
+                            kiln_protocol::ConfigurationIdentityPhase::Pending => {
+                                "Pending recovery or activation"
+                            }
+                            kiln_protocol::ConfigurationIdentityPhase::Active => "Active",
+                        };
+                        content = content
+                            .child(div().text_sm().child(format!(
+                                "Identity {} · {phase} · {}",
+                                identity.identity_id, identity.server_name
+                            )))
+                            .child(div().text_sm().text_color(theme::MUTED).child(format!(
+                                "Certificate authority fingerprint: {}",
+                                identity.certificate_authority_fingerprint
+                            )))
+                            .child(div().text_sm().text_color(theme::MUTED).child(format!(
+                                "Leaf validity: {} days · CA validity: {} days",
+                                validity_days(
+                                    identity.leaf_not_after_unix_seconds,
+                                    identity.not_before_unix_seconds
+                                ),
+                                validity_days(
+                                    identity.ca_not_after_unix_seconds,
+                                    identity.not_before_unix_seconds
+                                ),
+                            )));
+                        if self.identity_retirement_confirmation.is_some() {
+                            content = content
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme::ATTENTION)
+                                        .child(format!(
+                                            "Permanently retire identity {} for {}? Kiln will retain a tombstone and remove both private keys from the OS vault.",
+                                            identity.identity_id, identity.server_name
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("confirm-managed-identity-retirement")
+                                                .label("Confirm retirement")
+                                                .disabled(
+                                                    !self.online || self.request.is_some(),
+                                                )
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.retire_identity(cx)
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("cancel-managed-identity-retirement")
+                                                .label("Keep identity")
+                                                .disabled(self.request.is_some())
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.identity_retirement_confirmation = None;
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                );
+                        } else {
+                            content = content.child(
+                                Button::new("retire-managed-identity")
+                                    .label("Retire managed identity…")
+                                    .disabled(
+                                        !self.online
+                                            || self.request.is_some()
+                                            || self.pending_identity_setup.is_some()
+                                            || self.pending_identity_cleanup.is_some()
+                                            || self.pending_identity_retirement.is_some(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.prepare_identity_retirement(cx)
+                                    })),
+                            );
+                        }
+                    } else if self.identity_confirmation.is_some() {
+                        let command = self.identity_confirmation.as_ref().expect("checked above");
+                        content = content
+                            .child(div().text_sm().child(format!(
+                                "Create a managed CA and server certificate for {} in group {}? The leaf is valid for {} days and the CA for {} days, starting now. The daemon stores both private keys in its OS vault. This does not start a remote listener.",
+                                command.server_name,
+                                command.expected_group_id,
+                                validity_days(command.leaf_not_after_unix_seconds,
+                                    command.not_before_unix_seconds),
+                                validity_days(command.ca_not_after_unix_seconds,
+                                    command.not_before_unix_seconds),
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("confirm-managed-identity-setup")
+                                            .label("Create identity")
+                                            .primary()
+                                            .disabled(
+                                                !self.online
+                                                    || self.request.is_some()
+                                                    || self.pending_identity_cleanup.is_some(),
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.configure_identity(cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("cancel-managed-identity-setup")
+                                            .label("Cancel")
+                                            .disabled(self.request.is_some())
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.identity_confirmation = None;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            );
+                    } else {
+                        let blocked = !self.online
+                            || self.request.is_some()
+                            || self.pending_identity_setup.is_some()
+                            || self.pending_identity_cleanup.is_some()
+                            || self.pending_identity_retirement.is_some();
+                        content = content
+                            .child(div().text_sm().child("Server name"))
+                            .child(Input::new(&server_name_input).aria_label("Server name"))
+                            .child(div().text_xs().text_color(theme::MUTED).child(
+                                "Enter the exact DNS name or IP address followers will use to reach this master.",
+                            ))
+                            .child(div().text_sm().child("Leaf certificate validity (days)"))
+                            .child(Input::new(&leaf_validity_days_input)
+                                .aria_label("Leaf certificate validity in days"))
+                            .child(div().text_sm().child("Certificate authority validity (days)"))
+                            .child(Input::new(&ca_validity_days_input)
+                                .aria_label("Certificate authority validity in days"))
+                            .child(div().text_xs().text_color(theme::MUTED).child(
+                                "Defaults are 90 days for the server certificate and 365 days for the CA. The CA lifetime must be at least as long as the server certificate. Kiln does not renew identities automatically.",
+                            ))
+                            .child(
+                                Button::new("prepare-managed-identity-setup")
+                                    .label("Review identity setup…")
+                                    .disabled(blocked)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.prepare_identity_setup(cx)
+                                    })),
+                            );
+                    }
+                } else {
+                    content = content.child(div().text_sm().text_color(theme::MUTED).child(
+                        "A managed server identity can be configured only on the designated master instance.",
+                    ));
                 }
             }
         }

@@ -313,6 +313,29 @@ impl Client {
         Ok(())
     }
 
+    /// Retire a known identity by its stable public ID. Retrying the same
+    /// request is safe after an uncertain result or incomplete vault cleanup.
+    pub async fn retire_master_identity_by_id(
+        &self,
+        request: &kiln_protocol::RetireMasterIdentityByIdRequest,
+    ) -> Result<(), Error> {
+        let operation = kiln_protocol::RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID;
+        let response = self
+            .http
+            .post(self.http_url(kiln_protocol::CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH))
+            .json(request)
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport { operation, source })?;
+        let response = successful_response(response).await?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(Error::UnexpectedResponse {
+                status: response.status().as_u16(),
+            });
+        }
+        Ok(())
+    }
+
     /// Export the verified stored bundle. Both success and error bodies are
     /// bounded while streaming; an oversized response is never truncated into JSON.
     pub async fn get_configuration_snapshot(

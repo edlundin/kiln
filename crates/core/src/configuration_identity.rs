@@ -2,9 +2,40 @@
 
 use crate::{
     ConfigurationGroupId, ConfigurationInstanceState, ConfigurationStateError, ContentHash,
-    KilnInstanceId, SecretRef,
+    InvalidKilnId, KilnInstanceId,
 };
 use std::future::Future;
+use ulid::Ulid;
+
+/// Stable public identifier for one managed identity. It is generated
+/// independently from the vault references and cannot be converted into one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConfigurationMasterIdentityId(String);
+
+impl ConfigurationMasterIdentityId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("cmi_{:032x}", value.0))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
+        let value = value.into();
+        let Some(suffix) = value.strip_prefix("cmi_") else {
+            return Err(InvalidKilnId);
+        };
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(InvalidKilnId);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigurationMasterIdentityPhase {
@@ -15,7 +46,7 @@ pub enum ConfigurationMasterIdentityPhase {
 /// Setup status only: no claim about live vault availability, certificate
 /// validity at the current time, or an enabled remote listener.
 pub struct ConfigurationMasterIdentitySummary {
-    pub identity_id: SecretRef,
+    pub identity_id: ConfigurationMasterIdentityId,
     pub phase: ConfigurationMasterIdentityPhase,
     pub server_name: String,
     pub certificate_authority_fingerprint: ContentHash,
@@ -63,7 +94,7 @@ pub struct ConfigurationIdentitySetupReceipt {
     pub instance_id: KilnInstanceId,
     pub group_id: ConfigurationGroupId,
     pub reserved_state_version: u64,
-    pub identity_id: SecretRef,
+    pub identity_id: ConfigurationMasterIdentityId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,5 +125,13 @@ pub trait ConfigurationIdentityAdministration: Send + Sync {
         &self,
         expected_instance_id: KilnInstanceId,
         setup_idempotency_key: String,
+    ) -> impl Future<Output = Result<(), ConfigurationIdentityCommandError>> + Send;
+
+    /// Retire a known identity by its stable public ID. This remains usable
+    /// after the identity's master authority has been left or replaced.
+    fn retire_master_identity_by_id(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        identity_id: ConfigurationMasterIdentityId,
     ) -> impl Future<Output = Result<(), ConfigurationIdentityCommandError>> + Send;
 }

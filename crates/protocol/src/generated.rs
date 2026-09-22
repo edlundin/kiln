@@ -1,4 +1,9 @@
 use crate::{
+    CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
+    ConfigurationIdentityStatusResponse, ConfigurationIdentitySummaryResponse,
+    GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID,
+};
+use crate::{
     CONFIGURATION_PUBLICATION_MAX_BYTES, CONFIGURATION_PUBLICATIONS_PATH,
     CONFIGURATION_SNAPSHOT_PATH, ConfigurationPublicationResponse, ConfigurationSnapshotResponse,
     GET_CONFIGURATION_SNAPSHOT_OPERATION_ID, PUBLISH_CONFIGURATION_OPERATION_ID,
@@ -281,6 +286,18 @@ fn schema() -> String {
             "ConfigurationSyncStatusResponse",
             schema_for!(ConfigurationSyncStatusResponse),
         ),
+        (
+            "ConfigurationIdentityStatusResponse",
+            schema_for!(ConfigurationIdentityStatusResponse),
+        ),
+        (
+            "ConfigurationIdentitySummaryResponse",
+            schema_for!(ConfigurationIdentitySummaryResponse),
+        ),
+        (
+            "ConfigurationIdentityPhase",
+            schema_for!(ConfigurationIdentityPhase),
+        ),
         ("ClientIdentity", schema_for!(ClientIdentity)),
         ("NegotiateRequest", schema_for!(NegotiateRequest)),
         ("NegotiateResponse", schema_for!(NegotiateResponse)),
@@ -468,6 +485,9 @@ fn typescript() -> String {
         ConfigurationSyncTransportState::decl(&config),
         ConfigurationRevisionResponse::decl(&config),
         ConfigurationSyncStatusResponse::decl(&config),
+        ConfigurationIdentityStatusResponse::decl(&config),
+        ConfigurationIdentitySummaryResponse::decl(&config),
+        ConfigurationIdentityPhase::decl(&config),
         ClientIdentity::decl(&config),
         NegotiateRequest::decl(&config),
         NegotiateResponse::decl(&config),
@@ -574,6 +594,10 @@ fn catalogue() -> String {
             "method": "GET",
             "path": CONFIGURATION_SYNC_STATUS_PATH,
             "operation": GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": CONFIGURATION_IDENTITY_STATUS_PATH,
+            "operation": GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID
         }, {
             "method": "POST",
             "path": CONFIGURATION_MASTER_PATH,
@@ -1362,6 +1386,21 @@ paths:
           $ref: '#/components/responses/Problem'
         '409':
           $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_IDENTITY_STATUS_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID}
+      responses:
+        '200':
+          description: Current authority and optional pending/active managed identity metadata from one transaction; no vault access or transport readiness claim.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationIdentityStatusResponse'
         '503':
           $ref: '#/components/responses/Problem'
   {CONFIGURATION_SYNC_STATUS_PATH}:
@@ -2304,6 +2343,18 @@ components:
         (
             "ConfigurationSyncStatusResponse",
             openapi_schema::<ConfigurationSyncStatusResponse>(),
+        ),
+        (
+            "ConfigurationIdentityStatusResponse",
+            openapi_schema::<ConfigurationIdentityStatusResponse>(),
+        ),
+        (
+            "ConfigurationIdentitySummaryResponse",
+            openapi_schema::<ConfigurationIdentitySummaryResponse>(),
+        ),
+        (
+            "ConfigurationIdentityPhase",
+            openapi_schema::<ConfigurationIdentityPhase>(),
         ),
         ("WorkspaceResponse", openapi_schema::<WorkspaceResponse>()),
         (

@@ -251,6 +251,19 @@ impl Client {
         .await
     }
 
+    /// Read the current authority and its managed identity setup metadata.
+    /// This does not read private keys or establish remote transport readiness.
+    pub async fn get_configuration_identity_status(
+        &self,
+    ) -> Result<kiln_protocol::ConfigurationIdentityStatusResponse, Error> {
+        self.send_json(
+            kiln_protocol::GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID,
+            self.http
+                .get(self.http_url(kiln_protocol::CONFIGURATION_IDENTITY_STATUS_PATH)),
+        )
+        .await
+    }
+
     /// Export the verified stored bundle. Both success and error bodies are
     /// bounded while streaming; an oversized response is never truncated into JSON.
     pub async fn get_configuration_snapshot(

@@ -287,6 +287,7 @@ async fn main() -> ExitCode {
         AuthToken::from_bytes(credential.token()),
     )
     .with_configuration_status_store(store.clone())
+    .with_configuration_identity_status_store(store.clone())
     .with_configuration_administration_store(store.clone(), UlidIdGenerator)
     .with_configuration_publication_store(store);
     let lifecycle = state.lifecycle();

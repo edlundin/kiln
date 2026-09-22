@@ -13,6 +13,68 @@ use kiln_core::{
 };
 use sqlx::{Connection, Row, SqliteConnection};
 
+impl kiln_core::ConfigurationIdentityStatusStore for SqliteStore {
+    async fn get_configuration_identity_status(
+        &self,
+    ) -> Result<kiln_core::ConfigurationMasterIdentityStatus, kiln_core::ConfigurationStateError>
+    {
+        use kiln_core::{
+            ConfigurationMasterIdentityPhase as Phase, ConfigurationStateError as StateError,
+        };
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| StateError::Unavailable)?;
+        let state = configuration_sync::load(&mut transaction)
+            .await?
+            .ok_or(StateError::Uninitialized)?;
+        let identity = if let ConfigurationRole::Master(authority) = state.role() {
+            let reference: Option<String> = sqlx::query_scalar("SELECT ca_ref FROM configuration_master_identities WHERE group_id = ? AND status != 'retired'")
+                .bind(authority.group_id().as_str()).fetch_optional(&mut *transaction).await.map_err(|_| StateError::Unavailable)?;
+            if let Some(reference) = reference {
+                let reference =
+                    SecretRef::parse(reference).map_err(|_| StateError::IntegrityViolation)?;
+                let stored = load(&mut transaction, &reference)
+                    .await
+                    .map_err(|error| match error {
+                        Error::Unavailable => StateError::Unavailable,
+                        _ => StateError::IntegrityViolation,
+                    })?
+                    .ok_or(StateError::IntegrityViolation)?;
+                let record = stored.record;
+                if !is_master(&state, &record.request) {
+                    return Err(StateError::IntegrityViolation);
+                }
+                Some(kiln_core::ConfigurationMasterIdentitySummary {
+                    identity_id: reference,
+                    phase: match record.status {
+                        ConfigurationIdentityStatus::Pending => Phase::Pending,
+                        ConfigurationIdentityStatus::Active => Phase::Active,
+                        ConfigurationIdentityStatus::Retired => {
+                            return Err(StateError::IntegrityViolation);
+                        }
+                    },
+                    server_name: record.request.server_name,
+                    certificate_authority_fingerprint: record.certificate_authority_fingerprint,
+                    not_before_unix_seconds: record.request.validity.not_before,
+                    leaf_not_after_unix_seconds: record.request.validity.leaf_not_after,
+                    ca_not_after_unix_seconds: record.request.validity.ca_not_after,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StateError::Unavailable)?;
+        Ok(kiln_core::ConfigurationMasterIdentityStatus { state, identity })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigurationIdentityLifecycleError {
     InvalidRequest,

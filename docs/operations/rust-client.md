@@ -229,3 +229,14 @@ Errors contain categories/status numbers, without remote bodies, URLs or secrets
 Response authority must match the pin. The consumer must still validate full
 snapshot content and revisions and fence enrollment changes before applying it.
 See the [transport contract](../spec/configuration-sync.md#pinned-https-follower-client).
+
+## Managed master identity status
+
+Protocol `0.30.0` adds `get_configuration_identity_status()`. The authenticated
+local read returns current authority/state and optional pending/active identity
+metadata from one transaction, including server name, CA fingerprint and explicit
+validity timestamps. Unassigned/follower instances and masters without a live
+identity return `identity: None`. Retired/historical identities are excluded.
+This reads no vault secrets and performs no setup, recovery or retirement. An
+active phase does not establish current key availability, certificate validity
+or remote serving. See the [identity status contract](../spec/configuration-sync.md#local-managed-identity-status).

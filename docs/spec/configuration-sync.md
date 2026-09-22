@@ -399,9 +399,33 @@ cleanup work; they do not perform OS effects inside SQLite transactions.
 Validation currently covers compilation/build, source review, fresh migration
 39 startup and SQL preparation only. No tests, actual certificate generation,
 vault operations, cancellation/recovery scenarios or TLS handshakes have run.
-Authenticated setup/status/retirement routes, private follower enrollment and
+Authenticated setup/retirement routes, private follower enrollment and
 credential delivery, daemon composition, follower fetch/apply and consumers
 remain open; remote synchronization is not enabled.
+
+## Local managed identity status
+
+Protocol `0.30.0` adds authenticated `GET /v1/configuration-sync/identity` and
+Rust-client `get_configuration_identity_status()`. It returns current instance,
+state version, role, group/master IDs and an explicit nullable `identity`, read in
+one SQLite transaction. Only a current master's pending/active identity is
+included. Unassigned/follower instances, and masters without a live setup record,
+return `identity: null`; retired and historical-group identities are excluded.
+
+The identity summary contains an opaque local identity ID, `pending`/`active`
+phase, canonical DNS/IP server name, SHA-256 CA fingerprint and the configured
+not-before/leaf-expiry/CA-expiry Unix seconds. The local ID names the lifecycle
+record for administration; it is neither a bearer credential nor shared snapshot
+content. No private keys, key envelopes, TLS-slot references or certificate bytes
+are returned, and no vault read or recovery mutation occurs. `active` describes a
+past successful setup transition: it does not guarantee current key availability,
+current certificate validity, follower trust or a running remote listener.
+
+Successful responses have `Cache-Control: no-store`. The route inherits the
+local API's bearer, Host and Origin protections. Unavailable/invalid persistence
+returns content-free `503 configuration_sync_unavailable`; no pending identity is
+silently treated as ready. Setup/retirement commands and desktop presentation are
+still pending. The separate follower router does not expose this route.
 
 ## Initial local master designation
 

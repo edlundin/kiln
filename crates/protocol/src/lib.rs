@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.29.0";
+pub const PROTOCOL_VERSION: &str = "0.30.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -22,6 +22,9 @@ pub const WORKSPACES_PATH: &str = "/v1/workspaces";
 pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
 pub const CONFIGURATION_MASTER_PATH: &str = "/v1/configuration-sync/master";
+pub const CONFIGURATION_IDENTITY_STATUS_PATH: &str = "/v1/configuration-sync/identity";
+pub const GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID: &str =
+    "get_configuration_identity_status";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
 pub const CONFIGURATION_SNAPSHOT_PATH: &str = "/v1/configuration-sync/snapshot";
 pub const GET_CONFIGURATION_SNAPSHOT_OPERATION_ID: &str = "get_configuration_snapshot";
@@ -479,6 +482,53 @@ pub struct ConfigurationSyncStatusResponse {
     #[schemars(with = "RequiredNullableConfigurationRevision")]
     pub observed_revision: Option<ConfigurationRevisionResponse>,
     pub transport: ConfigurationSyncTransportState,
+}
+
+/// Public setup metadata only. Active does not imply a valid certificate now,
+/// accessible private keys, follower enrollment or an enabled remote listener.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationIdentitySummaryResponse {
+    pub identity_id: String,
+    pub phase: ConfigurationIdentityPhase,
+    pub server_name: String,
+    pub certificate_authority_fingerprint: String,
+    pub not_before_unix_seconds: i64,
+    pub leaf_not_after_unix_seconds: i64,
+    pub ca_not_after_unix_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationIdentityPhase {
+    Pending,
+    Active,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationIdentityStatusResponse {
+    pub instance_id: String,
+    pub state_version: u64,
+    pub role: ConfigurationSyncRole,
+    #[schemars(with = "RequiredNullableString")]
+    pub group_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub master_instance_id: Option<String>,
+    #[schemars(with = "RequiredNullableConfigurationIdentity")]
+    pub identity: Option<ConfigurationIdentitySummaryResponse>,
+}
+
+struct RequiredNullableConfigurationIdentity;
+impl JsonSchema for RequiredNullableConfigurationIdentity {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableConfigurationIdentity".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let identity = generator.subschema_for::<ConfigurationIdentitySummaryResponse>();
+        json_schema!({"anyOf": [identity, {"type": "null"}]})
+    }
 }
 
 struct RequiredNullableConfigurationRevision;

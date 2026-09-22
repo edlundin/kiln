@@ -1459,3 +1459,16 @@ caller-selected socket/buffer/deadline budgets are required. The service perform
 one HTTP/1 request per TLS connection, caps accepted tasks, and drains then aborts
 owned work on shutdown. Daemon startup still does not bind or serve this component;
 certificate/enrollment ownership and concrete credential composition remain pending.
+
+### Managed configuration identity status
+
+Protocol `0.30.0` exposes authenticated local
+`GET /v1/configuration-sync/identity`. `ConfigurationIdentityStatusStore` reads
+current authority/state and optional pending/active master setup metadata in one
+transaction. The response includes an opaque identity ID, canonical server name,
+CA fingerprint and explicit validity timestamps; unassigned/follower instances
+and masters without a live record have a null identity. Retired/historical rows
+are excluded. No vault access, private-key material, setup or cleanup occurs.
+Successful responses are no-store. Active is durable setup metadata, not evidence
+of current certificate/key validity or a running listener. See the
+[identity status contract](configuration-sync.md#local-managed-identity-status).

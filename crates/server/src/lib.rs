@@ -10,6 +10,7 @@ pub use configuration_tls::{
     serve_configuration_followers,
 };
 
+mod configuration_identity;
 mod configuration_publication;
 mod configuration_sync;
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
@@ -667,6 +668,8 @@ pub struct AppState<W, S, R> {
     provider_account_operations: Arc<dyn ProviderAccountOperations>,
     configuration_status_operations:
         Option<Arc<dyn configuration_sync::ConfigurationStatusOperations>>,
+    configuration_identity_status_operations:
+        Option<Arc<dyn configuration_identity::ConfigurationIdentityStatusOperations>>,
     configuration_administration_operations:
         Option<Arc<dyn configuration_sync::ConfigurationAdministrationOperations>>,
     configuration_publication_operations:
@@ -690,6 +693,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
             provider_account_operations: Arc::clone(&self.provider_account_operations),
             configuration_status_operations: self
                 .configuration_status_operations
+                .as_ref()
+                .map(Arc::clone),
+            configuration_identity_status_operations: self
+                .configuration_identity_status_operations
                 .as_ref()
                 .map(Arc::clone),
             configuration_administration_operations: self
@@ -754,6 +761,7 @@ impl<W, S, R> AppState<W, S, R> {
             usage_operations: Arc::new(usage_operations),
             provider_account_operations: Arc::new(UnavailableProviderAccountOperations),
             configuration_status_operations: None,
+            configuration_identity_status_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
             event_broadcaster,
@@ -788,6 +796,7 @@ impl<W, S, R> AppState<W, S, R> {
             usage_operations: Arc::new(usage_operations),
             provider_account_operations,
             configuration_status_operations: None,
+            configuration_identity_status_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
             event_broadcaster,
@@ -807,6 +816,18 @@ impl<W, S, R> AppState<W, S, R> {
 
     pub fn lifecycle(&self) -> LifecycleCoordinator {
         self.lifecycle.clone()
+    }
+
+    pub fn with_configuration_identity_status_store<
+        T: kiln_core::ConfigurationIdentityStatusStore + 'static,
+    >(
+        mut self,
+        store: T,
+    ) -> Self {
+        self.configuration_identity_status_operations = Some(Arc::new(
+            configuration_identity::ConfigurationIdentityStatusAdapter(store),
+        ));
+        self
     }
 
     pub fn with_configuration_publication_store<
@@ -843,6 +864,10 @@ where
     R: RunOperations + ArtifactOperations + 'static,
 {
     Router::new()
+        .route(
+            kiln_protocol::CONFIGURATION_IDENTITY_STATUS_PATH,
+            get(configuration_identity::get_status),
+        )
         .route(
             kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
             get(configuration_sync::get_status),

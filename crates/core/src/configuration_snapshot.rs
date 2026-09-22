@@ -1,6 +1,7 @@
 use crate::{
-    ConfigurationInstanceState, ConfigurationRevision, ConfigurationStateError,
-    SharedConfigurationLimits, SharedConfigurationSnapshot, SharedSkillLimits,
+    ConfigurationGroupId, ConfigurationInstanceState, ConfigurationRevision,
+    ConfigurationStateError, KilnInstanceId, SharedConfigurationLimits,
+    SharedConfigurationSnapshot, SharedSkillLimits,
 };
 use std::future::Future;
 
@@ -36,10 +37,25 @@ pub struct ConfigurationSnapshotMutation {
 pub enum ConfigurationSnapshotError {
     State(ConfigurationStateError),
     InvalidSnapshot,
+    InvalidRequest,
+    IdempotencyConflict,
     InvalidLimits,
     LimitExceeded,
     IntegrityViolation,
     Unavailable,
+}
+
+/// Public administrative publication with durable retry identity. Replays return
+/// the original state/revision receipt without republishing or changing authority.
+pub trait ConfigurationPublicationStore: Send + Sync {
+    fn publish_configuration_snapshot_idempotent(
+        &self,
+        expected_instance: &KilnInstanceId,
+        expected_group: &ConfigurationGroupId,
+        expected_version: u64,
+        idempotency_key: &str,
+        snapshot: &SharedConfigurationSnapshot,
+    ) -> impl Future<Output = Result<ConfigurationSnapshotMutation, ConfigurationSnapshotError>> + Send;
 }
 
 /// Internal authenticated-caller boundary. A validated snapshot is data, not an

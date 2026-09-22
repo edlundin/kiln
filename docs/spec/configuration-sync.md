@@ -2,8 +2,8 @@
 
 EDL-322 requires one explicitly designated master Kiln instance to supply shared
 settings, global MCP configuration, and global skills to followers, including
-remote hosts. Durable authority/snapshot storage, status, and initial local master
-designation are implemented. Remote enrollment, synchronization transport, and
+remote hosts. Durable authority/snapshot storage, status, initial local master
+designation, and explicit local snapshot publication are implemented. Remote enrollment, synchronization transport, and
 runtime activation remain incomplete.
 
 ## Authority and enrollment
@@ -150,9 +150,62 @@ and reloads status rather than displaying an old receipt as the current role.
 Replacing the connection discards pending UI state and loads durable status.
 
 Designation records authority only: it publishes no snapshot, reads or copies no
-credentials, grants no remote access, and starts no MCP/skill consumer. Follower
-enrollment, role replacement, publication, and remote transport remain separate
-work. Shutdown rejects new designations through the existing command gate.
+credentials, grants no remote access, and starts no MCP/skill consumer. Explicit
+publication is a separate command described below. Follower enrollment, role
+replacement, and remote transport remain open. Shutdown rejects new designations
+through the existing command gate.
+
+## Explicit local snapshot publication
+
+Protocol `0.28.0` adds authenticated `POST /v1/configuration-sync/publications`,
+exposed by the Rust client as `publish_configuration_snapshot`. The request carries
+`expected_instance_id`, `expected_group_id`, `expected_state_version`, and a complete
+`snapshot` bundle. Only the matching current master may publish. The existing
+local bearer/Host/Origin checks and shutdown command gate apply; this is not a
+follower transport credential or remote publication endpoint.
+
+The bundle contains `metadata_json`, the exact canonical schema-1 metadata string,
+and a `skills` array. Each package supplies `id`, `version`, `enabled`,
+`dependencies`, and `files`. Each file supplies a portable `path`, explicit
+regular-file `content` as a JSON array of integers from 0 through 255, and its
+SHA-256 `content_hash`. All object fields are strict. File/package hashes, paths,
+dependencies, settings and MCP definitions are revalidated through the existing
+core validators. Exact canonical metadata regeneration binds the complete package
+contents and rejects missing packages, changed hashes, extra metadata and
+unsupported schema. Binary files need no archive extraction or text conversion.
+
+The entire serialized JSON request, including metadata escaping and byte-array
+overhead, is capped at 2,097,152 bytes, preserving the existing Axum JSON request
+ceiling. Per-field, count, metadata, and aggregate file limits are bounded by that
+same request budget. These are transport bounds, not recommended catalogue sizes
+or a process-memory ceiling. Larger bundles require a separately designed transfer
+protocol. Oversized or malformed JSON follows the existing `400 invalid_json` /
+`400 invalid_request` handling; invalid bundle content or preconditions use
+`400 configuration_sync_invalid_request`.
+
+Publication replaces all shared categories at once: omitted definitions and files
+are removed; an empty snapshot clears the group's shared content. It does not
+merge with the previous snapshot. The caller must explicitly prepare the complete
+content to share. The command never scans local configuration directories, reads
+the vault, resolves host bindings, installs skills, or starts MCP servers. Explicit
+user-authored literals/file bytes are not scanned for embedded secrets.
+
+`Idempotency-Key` is required. Migration 37 atomically records the expected
+instance/group/version, canonical content hash, and resulting revision alongside
+the payload replacement and CAS increment. Exact retries compare validated content
+identity and return the original immutable receipt, without publishing another
+revision or restoring old content after later changes. Changed content or
+preconditions under the same key return `409 idempotency_conflict`. A fresh key
+against stale state or the wrong authority/role returns
+`409 configuration_sync_conflict`. Receipts retain metadata only, not historical
+payloads. Storage/integrity failures return content-free
+`503 configuration_sync_unavailable`.
+
+The `200` response includes the original instance/group IDs, resulting state
+version, and revision number/schema/content hash. Reload status to see the current
+stored revision. Publication does not establish remote currentness or activate
+configuration consumers. Desktop bundle import, authenticated remote distribution,
+and runtime activation remain incomplete.
 
 ## Portable skill package validation
 
@@ -280,5 +333,5 @@ exists. Equal applied/observed revisions alone do not establish currentness.
 The endpoint reports committed metadata, not a fresh validation of every stored
 payload byte. Store/integrity failures produce content-free HTTP 503
 `configuration_sync_unavailable`. This endpoint cannot designate a master,
-enroll a follower or publish/apply configuration. Administrative commands and
-Settings presentation remain subsequent work.
+enroll a follower or publish/apply configuration. Settings presents this status;
+master designation and publication use the separate commands above.

@@ -40,7 +40,7 @@ Keep this process running. On startup, it writes one JSON readiness line to
 standard output:
 
 ```json
-{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.27.0"}
+{"address":"127.0.0.1:49152","credential_path":"/path/to/credential","event":"ready","protocol_version":"0.28.0"}
 ```
 
 Use the values from the actual line. `address` is the bound loopback address.
@@ -95,9 +95,11 @@ designation** reuses the original request and cannot create another group.
 The view reloads current status after success. An existing master or follower
 cannot be reassigned through this control.
 
-Designation records the role only. Publishing, follower enrollment, and
-distribution of shared settings, global MCP servers, and skills remain unavailable.
-Provider credentials remain local to each instance.
+Designation records the role only. The Rust client can now
+[publish an explicitly prepared snapshot](rust-client.md#configuration-snapshot-publication);
+**Refresh status** shows its stored revision. Desktop bundle import, follower
+enrollment, and distribution of shared settings, global MCP servers, and skills
+remain unavailable. Provider credentials remain local to each instance.
 
 ## Provider accounts
 

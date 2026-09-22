@@ -323,7 +323,7 @@ impl Render for ConfigurationSyncSettings {
             {
                 if self.confirmation.is_some() {
                     content = content.child(div().text_sm().child(format!(
-                        "Designate instance {} as master for a new configuration group? This records its role; publishing and remote synchronization are not yet available.", status.instance_id)))
+                        "Designate instance {} as master for a new configuration group? This records its role; remote synchronization is not yet available.", status.instance_id)))
                         .child(div().flex().flex_wrap().gap_2()
                             .child(Button::new("confirm-master-designation").label("Confirm master")
                                 .disabled(!self.online || self.request.is_some())

@@ -1,5 +1,6 @@
 //! HTTP and WebSocket transport for the current Kiln protocol slice.
 
+mod configuration_publication;
 mod configuration_sync;
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 
@@ -658,6 +659,8 @@ pub struct AppState<W, S, R> {
         Option<Arc<dyn configuration_sync::ConfigurationStatusOperations>>,
     configuration_administration_operations:
         Option<Arc<dyn configuration_sync::ConfigurationAdministrationOperations>>,
+    configuration_publication_operations:
+        Option<Arc<dyn configuration_publication::ConfigurationPublicationOperations>>,
     event_broadcaster: EventBroadcaster,
     lifecycle: LifecycleCoordinator,
 }
@@ -681,6 +684,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
                 .map(Arc::clone),
             configuration_administration_operations: self
                 .configuration_administration_operations
+                .as_ref()
+                .map(Arc::clone),
+            configuration_publication_operations: self
+                .configuration_publication_operations
                 .as_ref()
                 .map(Arc::clone),
             event_broadcaster: self.event_broadcaster.clone(),
@@ -738,6 +745,7 @@ impl<W, S, R> AppState<W, S, R> {
             provider_account_operations: Arc::new(UnavailableProviderAccountOperations),
             configuration_status_operations: None,
             configuration_administration_operations: None,
+            configuration_publication_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -771,6 +779,7 @@ impl<W, S, R> AppState<W, S, R> {
             provider_account_operations,
             configuration_status_operations: None,
             configuration_administration_operations: None,
+            configuration_publication_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -788,6 +797,18 @@ impl<W, S, R> AppState<W, S, R> {
 
     pub fn lifecycle(&self) -> LifecycleCoordinator {
         self.lifecycle.clone()
+    }
+
+    pub fn with_configuration_publication_store<
+        T: kiln_core::ConfigurationPublicationStore + 'static,
+    >(
+        mut self,
+        store: T,
+    ) -> Self {
+        self.configuration_publication_operations = Some(Arc::new(
+            configuration_publication::ConfigurationPublicationAdapter(store),
+        ));
+        self
     }
 
     pub fn with_configuration_administration_store<
@@ -819,6 +840,12 @@ where
         .route(
             kiln_protocol::CONFIGURATION_MASTER_PATH,
             post(configuration_sync::designate_master),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_PUBLICATIONS_PATH,
+            post(configuration_publication::publish).layer(axum::extract::DefaultBodyLimit::max(
+                kiln_protocol::CONFIGURATION_PUBLICATION_MAX_BYTES,
+            )),
         )
         .route(NEGOTIATE_PATH, post(negotiate))
         .route(WORKSPACES_PATH, get(list_workspaces).post(create_workspace))
@@ -2947,6 +2974,8 @@ enum PublicError {
     ConfigurationSyncUnavailable,
     #[error("configuration master designation failed")]
     ConfigurationMaster(kiln_core::ConfigurationMasterError),
+    #[error("configuration publication failed")]
+    ConfigurationPublication(kiln_core::ConfigurationSnapshotError),
     #[error("daemon is shutting down")]
     DaemonShuttingDown,
 }
@@ -3098,6 +3127,33 @@ impl PublicError {
                 error_code::CONFIGURATION_SYNC_UNAVAILABLE,
                 "Configuration synchronization unavailable",
             ),
+            Self::ConfigurationPublication(error) => match error {
+                kiln_core::ConfigurationSnapshotError::InvalidSnapshot
+                | kiln_core::ConfigurationSnapshotError::InvalidRequest
+                | kiln_core::ConfigurationSnapshotError::LimitExceeded => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
+                    "Invalid configuration publication request",
+                ),
+                kiln_core::ConfigurationSnapshotError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Idempotency key was reused with different configuration content or preconditions",
+                ),
+                kiln_core::ConfigurationSnapshotError::State(
+                    kiln_core::ConfigurationStateError::Conflict
+                    | kiln_core::ConfigurationStateError::InvalidRole,
+                ) => (
+                    StatusCode::CONFLICT,
+                    error_code::CONFIGURATION_SYNC_CONFLICT,
+                    "Configuration authority or state changed",
+                ),
+                _ => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::CONFIGURATION_SYNC_UNAVAILABLE,
+                    "Configuration synchronization unavailable",
+                ),
+            },
             Self::ConfigurationMaster(error) => match error {
                 kiln_core::ConfigurationMasterError::InvalidRequest => (
                     StatusCode::BAD_REQUEST,

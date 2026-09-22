@@ -1,3 +1,9 @@
+use crate::{
+    CONFIGURATION_PUBLICATION_MAX_BYTES, CONFIGURATION_PUBLICATIONS_PATH,
+    ConfigurationPublicationResponse, PUBLISH_CONFIGURATION_OPERATION_ID,
+    PublishConfigurationSnapshotRequest, SharedConfigurationBundle, SharedSkillFileBundle,
+    SharedSkillPackageBundle,
+};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
@@ -233,6 +239,23 @@ fn schema() -> String {
     let mut defs = serde_json::Map::new();
     for (name, value) in [
         (
+            "PublishConfigurationSnapshotRequest",
+            schema_for!(PublishConfigurationSnapshotRequest),
+        ),
+        (
+            "SharedConfigurationBundle",
+            schema_for!(SharedConfigurationBundle),
+        ),
+        (
+            "SharedSkillPackageBundle",
+            schema_for!(SharedSkillPackageBundle),
+        ),
+        ("SharedSkillFileBundle", schema_for!(SharedSkillFileBundle)),
+        (
+            "ConfigurationPublicationResponse",
+            schema_for!(ConfigurationPublicationResponse),
+        ),
+        (
             "DesignateConfigurationMasterRequest",
             schema_for!(DesignateConfigurationMasterRequest),
         ),
@@ -428,6 +451,11 @@ fn schema() -> String {
 fn typescript() -> String {
     let config = Config::default();
     [
+        PublishConfigurationSnapshotRequest::decl(&config),
+        SharedConfigurationBundle::decl(&config),
+        SharedSkillPackageBundle::decl(&config),
+        SharedSkillFileBundle::decl(&config),
+        ConfigurationPublicationResponse::decl(&config),
         DesignateConfigurationMasterRequest::decl(&config),
         ConfigurationMasterDesignationResponse::decl(&config),
         ConfigurationSyncRole::decl(&config),
@@ -544,6 +572,10 @@ fn catalogue() -> String {
             "method": "POST",
             "path": CONFIGURATION_MASTER_PATH,
             "operation": DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_PUBLICATIONS_PATH,
+            "operation": PUBLISH_CONFIGURATION_OPERATION_ID
         }, {
             "method": "GET",
             "path": WORKSPACE_PATH,
@@ -1249,6 +1281,34 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
         '500':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_PUBLICATIONS_PATH}:
+    post:
+      operationId: {PUBLISH_CONFIGURATION_OPERATION_ID}
+      description: Complete explicit snapshot replacement on the current master. The whole serialized JSON request is limited to {CONFIGURATION_PUBLICATION_MAX_BYTES} bytes. Publication does not distribute or activate content.
+      parameters:
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublishConfigurationSnapshotRequest'
+      responses:
+        '200':
+          description: Original committed publication receipt, including on exact retry; reload status for the current revision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationPublicationResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
           $ref: '#/components/responses/Problem'
   {CONFIGURATION_MASTER_PATH}:
     post:
@@ -2169,6 +2229,26 @@ components:
         (
             "WorkspaceRootResponse",
             openapi_schema::<WorkspaceRootResponse>(),
+        ),
+        (
+            "PublishConfigurationSnapshotRequest",
+            openapi_schema::<PublishConfigurationSnapshotRequest>(),
+        ),
+        (
+            "SharedConfigurationBundle",
+            openapi_schema::<SharedConfigurationBundle>(),
+        ),
+        (
+            "SharedSkillPackageBundle",
+            openapi_schema::<SharedSkillPackageBundle>(),
+        ),
+        (
+            "SharedSkillFileBundle",
+            openapi_schema::<SharedSkillFileBundle>(),
+        ),
+        (
+            "ConfigurationPublicationResponse",
+            openapi_schema::<ConfigurationPublicationResponse>(),
         ),
         (
             "DesignateConfigurationMasterRequest",

@@ -1,14 +1,120 @@
 use super::{SqliteStore, configuration_sync};
 use kiln_core::{
     ConfigurationAuthority, ConfigurationCandidateDisposition, ConfigurationFollowerCursor,
-    ConfigurationInstanceState, ConfigurationRevision, ConfigurationRole,
-    ConfigurationSnapshotDisposition, ConfigurationSnapshotError as Error,
-    ConfigurationSnapshotMutation, ConfigurationSnapshotReadLimits, ConfigurationSnapshotStore,
-    ConfigurationStateError, ConfigurationSyncStatus, ContentHash, GlobalSkillId,
+    ConfigurationGroupId, ConfigurationInstanceState, ConfigurationPublicationStore,
+    ConfigurationRevision, ConfigurationRole, ConfigurationSnapshotDisposition,
+    ConfigurationSnapshotError as Error, ConfigurationSnapshotMutation,
+    ConfigurationSnapshotReadLimits, ConfigurationSnapshotStore, ConfigurationStateError,
+    ConfigurationSyncStatus, ContentHash, GlobalSkillId, KilnInstanceId,
     SHARED_CONFIGURATION_SCHEMA_VERSION, SharedConfigurationSnapshot, SharedSkillFileInput,
     SharedSkillPackage, SharedSkillPackageInput, StoredConfigurationSnapshot,
 };
 use sqlx::{Connection, Row, SqliteConnection};
+
+impl ConfigurationPublicationStore for SqliteStore {
+    async fn publish_configuration_snapshot_idempotent(
+        &self,
+        expected_instance: &KilnInstanceId,
+        expected_group: &ConfigurationGroupId,
+        expected_version: u64,
+        idempotency_key: &str,
+        snapshot: &SharedConfigurationSnapshot,
+    ) -> Result<ConfigurationSnapshotMutation, Error> {
+        if idempotency_key.is_empty()
+            || expected_version == 0
+            || expected_version >= i64::MAX as u64
+        {
+            return Err(Error::InvalidRequest);
+        }
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let receipt = sqlx::query("SELECT p.instance_id, p.group_id, p.expected_version, p.revision, p.schema_version, p.content_hash, a.master_instance_id FROM configuration_publications p JOIN configuration_authorities a ON a.group_id = p.group_id WHERE p.idempotency_key = ?")
+            .bind(idempotency_key).fetch_optional(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
+        if let Some(receipt) = receipt {
+            let instance: String = receipt
+                .try_get("instance_id")
+                .map_err(|_| Error::IntegrityViolation)?;
+            let group: String = receipt
+                .try_get("group_id")
+                .map_err(|_| Error::IntegrityViolation)?;
+            let version: i64 = receipt
+                .try_get("expected_version")
+                .map_err(|_| Error::IntegrityViolation)?;
+            let hash: String = receipt
+                .try_get("content_hash")
+                .map_err(|_| Error::IntegrityViolation)?;
+            if instance != expected_instance.as_str()
+                || group != expected_group.as_str()
+                || version != expected_version as i64
+                || hash != snapshot.content_hash().as_str()
+            {
+                return Err(Error::IdempotencyConflict);
+            }
+            let master: String = receipt
+                .try_get("master_instance_id")
+                .map_err(|_| Error::IntegrityViolation)?;
+            if master != instance {
+                return Err(Error::IntegrityViolation);
+            }
+            let authority =
+                ConfigurationAuthority::new(expected_group.clone(), expected_instance.clone());
+            let revision = ConfigurationRevision::new(
+                authority.clone(),
+                u64::try_from(
+                    receipt
+                        .try_get::<i64, _>("revision")
+                        .map_err(|_| Error::IntegrityViolation)?,
+                )
+                .map_err(|_| Error::IntegrityViolation)?,
+                u32::try_from(
+                    receipt
+                        .try_get::<i64, _>("schema_version")
+                        .map_err(|_| Error::IntegrityViolation)?,
+                )
+                .map_err(|_| Error::IntegrityViolation)?,
+                ContentHash::parse(hash).map_err(|_| Error::IntegrityViolation)?,
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+            snapshot
+                .verify_revision(&revision)
+                .map_err(|_| Error::IntegrityViolation)?;
+            let original = ConfigurationInstanceState::from_persisted(
+                expected_instance.clone(),
+                expected_version + 1,
+                ConfigurationRole::Master(authority),
+                None,
+            )
+            .map_err(Error::State)?;
+            transaction.commit().await.map_err(|_| Error::Unavailable)?;
+            return Ok(ConfigurationSnapshotMutation {
+                state: original,
+                revision,
+                disposition: ConfigurationSnapshotDisposition::Duplicate,
+            });
+        }
+        let current = configuration_sync::load(&mut transaction)
+            .await
+            .map_err(Error::State)?
+            .ok_or(Error::State(ConfigurationStateError::Uninitialized))?;
+        if current.instance_id() != expected_instance
+            || current.version() != expected_version
+            || !matches!(current.role(), ConfigurationRole::Master(authority) if authority.group_id() == expected_group)
+        {
+            return Err(Error::State(ConfigurationStateError::Conflict));
+        }
+        let result = publish(&mut transaction, &current, snapshot).await?;
+        sqlx::query("INSERT INTO configuration_publications (idempotency_key, instance_id, group_id, expected_version, revision, schema_version, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(idempotency_key).bind(expected_instance.as_str()).bind(expected_group.as_str()).bind(expected_version as i64)
+            .bind(i64::try_from(result.revision.number()).map_err(|_| Error::InvalidSnapshot)?)
+            .bind(i64::from(result.revision.schema_version())).bind(result.revision.content_hash().as_str())
+            .execute(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
+        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(result)
+    }
+}
 
 impl ConfigurationSnapshotStore for SqliteStore {
     async fn get_configuration_sync_status(&self) -> Result<ConfigurationSyncStatus, Error> {
@@ -49,38 +155,9 @@ impl ConfigurationSnapshotStore for SqliteStore {
             .await
             .map_err(|_| Error::Unavailable)?;
         let current = current(&mut transaction, expected).await?;
-        let ConfigurationRole::Master(authority) = current.role() else {
-            return Err(Error::State(ConfigurationStateError::InvalidRole));
-        };
-        let previous = load_revision(&mut transaction, authority).await?;
-        if previous
-            .as_ref()
-            .is_some_and(|value| value.schema_version() != SHARED_CONFIGURATION_SCHEMA_VERSION)
-        {
-            return Err(Error::InvalidSnapshot);
-        }
-        let number = previous
-            .map_or(Some(1), |value| value.number().checked_add(1))
-            .filter(|value| *value <= i64::MAX as u64)
-            .ok_or(Error::State(ConfigurationStateError::VersionExhausted))?;
-        let revision = ConfigurationRevision::new(
-            authority.clone(),
-            number,
-            SHARED_CONFIGURATION_SCHEMA_VERSION,
-            snapshot.content_hash().clone(),
-        )
-        .map_err(|_| Error::InvalidSnapshot)?;
-        let next = advanced_state(&current, None)?;
-        write_snapshot(&mut transaction, &revision, snapshot).await?;
-        configuration_sync::save(&mut transaction, &current, &next)
-            .await
-            .map_err(Error::State)?;
+        let result = publish(&mut transaction, &current, snapshot).await?;
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
-        Ok(ConfigurationSnapshotMutation {
-            state: next,
-            revision,
-            disposition: ConfigurationSnapshotDisposition::Applied,
-        })
+        Ok(result)
     }
 
     async fn apply_configuration_snapshot(
@@ -173,6 +250,44 @@ impl ConfigurationSnapshotStore for SqliteStore {
             snapshot,
         }))
     }
+}
+
+async fn publish(
+    connection: &mut SqliteConnection,
+    current: &ConfigurationInstanceState,
+    snapshot: &SharedConfigurationSnapshot,
+) -> Result<ConfigurationSnapshotMutation, Error> {
+    let ConfigurationRole::Master(authority) = current.role() else {
+        return Err(Error::State(ConfigurationStateError::InvalidRole));
+    };
+    let previous = load_revision(connection, authority).await?;
+    if previous
+        .as_ref()
+        .is_some_and(|value| value.schema_version() != SHARED_CONFIGURATION_SCHEMA_VERSION)
+    {
+        return Err(Error::InvalidSnapshot);
+    }
+    let number = previous
+        .map_or(Some(1), |value| value.number().checked_add(1))
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or(Error::State(ConfigurationStateError::VersionExhausted))?;
+    let revision = ConfigurationRevision::new(
+        authority.clone(),
+        number,
+        SHARED_CONFIGURATION_SCHEMA_VERSION,
+        snapshot.content_hash().clone(),
+    )
+    .map_err(|_| Error::InvalidSnapshot)?;
+    let next = advanced_state(current, None)?;
+    write_snapshot(connection, &revision, snapshot).await?;
+    configuration_sync::save(connection, current, &next)
+        .await
+        .map_err(Error::State)?;
+    Ok(ConfigurationSnapshotMutation {
+        state: next,
+        revision,
+        disposition: ConfigurationSnapshotDisposition::Applied,
+    })
 }
 
 async fn current(

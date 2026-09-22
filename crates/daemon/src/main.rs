@@ -287,7 +287,8 @@ async fn main() -> ExitCode {
         AuthToken::from_bytes(credential.token()),
     )
     .with_configuration_status_store(store.clone())
-    .with_configuration_administration_store(store, UlidIdGenerator);
+    .with_configuration_administration_store(store.clone(), UlidIdGenerator)
+    .with_configuration_publication_store(store);
     let lifecycle = state.lifecycle();
     let signal_lifecycle = lifecycle.clone();
     tokio::spawn(async move {

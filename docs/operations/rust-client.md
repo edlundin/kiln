@@ -165,3 +165,23 @@ outcomes. Exact retries return the immutable original
 role. Changed key reuse and stale/already-assigned state return distinct 409
 errors. The command creates a new authority group but publishes no configuration
 and does not enable remote transport.
+
+## Configuration snapshot publication
+
+Protocol `0.28.0` adds `publish_configuration_snapshot(key, request)`. Prepare a
+complete `SharedConfigurationBundle`, then use current master status to fill
+`PublishConfigurationSnapshotRequest.expected_instance_id`, `expected_group_id`,
+and `expected_state_version`. Every field in the bundle is explicitly supplied;
+the client does not discover or read host configuration, skill directories, or
+credentials. The [publication contract](../spec/configuration-sync.md#explicit-local-snapshot-publication)
+defines canonical metadata, skill file bytes/hashes, replacement semantics, and
+the 2 MiB limit on the whole serialized request.
+
+Keep the same key, preconditions and content for retries after uncertain outcomes.
+The returned `ConfigurationPublicationResponse` is the original receipt, even
+after later publication or role changes. It contains a revision/schema/hash and
+the resulting state version, not current content or an activation result. Reload
+`get_configuration_sync_status` before preparing another publication. Changed key
+reuse is `idempotency_conflict`; stale state/wrong master is
+`configuration_sync_conflict`. Publication stores the complete snapshot locally;
+remote distribution and runtime consumers are not yet wired.

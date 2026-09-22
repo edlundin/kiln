@@ -243,6 +243,25 @@ impl Client {
         .await
     }
 
+    /// Publish a complete explicitly prepared bundle. Exact retries return the
+    /// original receipt; reload status to learn the current stored revision.
+    pub async fn publish_configuration_snapshot(
+        &self,
+        idempotency_key: &str,
+        request: &kiln_protocol::PublishConfigurationSnapshotRequest,
+    ) -> Result<kiln_protocol::ConfigurationPublicationResponse, Error> {
+        self.send_json(
+            kiln_protocol::PUBLISH_CONFIGURATION_OPERATION_ID,
+            with_idempotency_key(
+                self.http
+                    .post(self.http_url(kiln_protocol::CONFIGURATION_PUBLICATIONS_PATH)),
+                idempotency_key,
+            )?
+            .json(request),
+        )
+        .await
+    }
+
     /// Exact retries return the original designation receipt, not current status.
     pub async fn designate_configuration_master(
         &self,

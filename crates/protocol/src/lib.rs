@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.27.0";
+pub const PROTOCOL_VERSION: &str = "0.28.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -22,6 +22,11 @@ pub const WORKSPACES_PATH: &str = "/v1/workspaces";
 pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
 pub const CONFIGURATION_MASTER_PATH: &str = "/v1/configuration-sync/master";
+pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
+pub const PUBLISH_CONFIGURATION_OPERATION_ID: &str = "publish_configuration_snapshot";
+/// Keep explicit snapshot imports within the existing Axum JSON request ceiling.
+/// This bounds the whole serialized request, including metadata and byte arrays.
+pub const CONFIGURATION_PUBLICATION_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configuration_master";
 pub const GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID: &str = "get_configuration_sync_status";
 pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
@@ -387,6 +392,52 @@ pub struct ConfigurationMasterDesignationResponse {
     pub instance_id: String,
     pub state_version: u64,
     pub group_id: String,
+}
+
+// No Debug: explicit imported content may contain private user-authored data.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublishConfigurationSnapshotRequest {
+    pub expected_instance_id: String,
+    pub expected_group_id: String,
+    pub expected_state_version: u64,
+    pub snapshot: SharedConfigurationBundle,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SharedConfigurationBundle {
+    /// Exact canonical schema-1 metadata, binding all package hashes.
+    pub metadata_json: String,
+    pub skills: Vec<SharedSkillPackageBundle>,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSkillPackageBundle {
+    pub id: String,
+    pub version: String,
+    pub enabled: bool,
+    pub dependencies: Vec<String>,
+    pub files: Vec<SharedSkillFileBundle>,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSkillFileBundle {
+    pub path: String,
+    /// Explicit regular-file bytes encoded as JSON integers from 0 to 255.
+    pub content: Vec<u8>,
+    pub content_hash: String,
+}
+
+/// Immutable publication receipt. It is not a current-status or activation claim.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationPublicationResponse {
+    pub instance_id: String,
+    pub group_id: String,
+    pub state_version: u64,
+    pub revision: ConfigurationRevisionResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

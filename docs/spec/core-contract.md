@@ -1415,6 +1415,14 @@ Protocol `0.27.0` adds local `POST /v1/configuration-sync/master`, guarded by
 instance ID, expected state version, and an `Idempotency-Key`. Only an unassigned
 instance may become master of a fresh group. The role change and immutable retry
 receipt commit together; exact replay returns the original result without changing
-the current role. The client reloads status after success. Enrollment, publication,
-role replacement and follower application are not public commands yet. See the
+the current role. The client reloads status after success.
+
+Protocol `0.28.0` adds local `POST /v1/configuration-sync/publications`. It validates
+a complete explicitly supplied settings/MCP/skill bundle within the existing
+2 MiB JSON request budget, requires the expected master instance/group/version,
+and atomically commits replacement content, the next revision, CAS advancement,
+and a durable retry receipt. Exact replay returns the original receipt without
+republishing; changed key reuse or stale authority/state conflict. Publication
+does not distribute or activate content. Enrollment, role replacement and follower
+application are not public commands yet. See the
 [configuration synchronization contract](configuration-sync.md).

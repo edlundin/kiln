@@ -308,6 +308,41 @@ reservation, activation, cleanup/recovery and typed secret envelopes. Constructi
 the store performs no vault access. No actual vault operation has been exercised
 for this synchronization namespace yet.
 
+## Managed certificate and key envelopes
+
+The default provisioning direction is Kiln-managed certificates.
+`generate_configuration_identity` is an infrastructure primitive, not an enabled
+administrative operation. It takes separately reserved master CA/TLS bindings for
+one authority, an exact canonical lowercase DNS name or canonical IP address,
+explicit validity timestamps and a caller-supplied current time. Wildcards,
+URLs/ports and noncanonical names are rejected. DNS labels/total length follow
+the RFC limits of 63/253 bytes. The leaf must be valid at the supplied time and
+cannot outlive its CA. No validity duration is chosen implicitly.
+
+The generator uses rcgen with fresh independent ECDSA P-256/SHA-256 keys. The CA
+has path length zero and certificate/CRL-signing usage. The leaf explicitly is not
+a CA, has digital-signature/server-auth usage, and contains only the chosen DNS/IP
+subject alternative name. It returns the public CA/leaf DER, a SHA-256 CA
+fingerprint and two separate redacted vault envelopes. Nothing is persisted,
+installed into system trust or activated; root identity approval remains part of
+enrollment. Renewal, revocation distribution and imported-identity handling remain
+future lifecycle work.
+
+Schema-1 private-key envelopes contain exact instance/group/master/purpose/reference
+bindings and DER key bytes encoded as a compact JSON byte array inside SecretValue.
+They remain subject to the existing 1 MiB secret-value limit and are never snapshot
+content. `decode_configuration_private_key` rejects unknown fields, mismatched
+bindings/schema and unusable DER keys. It returns a non-Debug/non-Clone wrapper
+whose owned DER buffer is zeroized on drop; decoding exposes bytes only through
+an explicit accessor. Generator key serialization buffers also use rcgen's
+zeroization support. Matching the decoded key to its public
+certificate remains the TLS adapter's responsibility, and the caller must still
+check current role/version before any vault read or activation.
+
+The primitive uses rcgen for certificate construction. It and the envelopes have
+compile/source validation only so far; no certificate
+generation, vault write, handshake or trust installation has been exercised.
+
 ## Initial local master designation
 
 Protocol `0.27.0` adds authenticated `POST /v1/configuration-sync/master` with a

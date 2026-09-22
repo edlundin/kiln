@@ -4,6 +4,12 @@ mod assistant_message;
 mod configuration_access;
 mod configuration_credential;
 pub use configuration_credential::ConfigurationReadCredential;
+mod configuration_identity;
+pub use configuration_identity::{
+    ConfigurationCertificateValidity, ConfigurationIdentityError, ConfigurationPrivateKey,
+    GeneratedConfigurationIdentity, decode_configuration_private_key,
+    generate_configuration_identity,
+};
 mod configuration_snapshot;
 mod configuration_sync;
 mod daemon_lock;

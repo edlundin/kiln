@@ -8,13 +8,17 @@ build = "build.rs"
 [dependencies]
 directories.workspace = true
 kiln-core = { path = "../core" }
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "zeroize"] }
 rustix.workspace = true
 sha2.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
+time = { version = "=0.3.55", default-features = false }
 tokio.workspace = true
 ulid.workspace = true
+zeroize = { version = "=1.9.0", features = ["serde"] }
 
 [dev-dependencies]
 

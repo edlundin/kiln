@@ -265,6 +265,11 @@ pub(super) async fn save(
         // Leaving a master authority permanently invalidates its credentials.
         // Rejoining the historical group must never revive remote access.
         if let ConfigurationRole::Master(authority) = current.role() {
+            sqlx::query("UPDATE configuration_master_identities SET status = 'retired' WHERE group_id = ? AND status != 'retired'")
+                .bind(authority.group_id().as_str())
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| Error::Unavailable)?;
             sqlx::query("UPDATE configuration_read_grants SET revoked = 1 WHERE group_id = ? AND revoked = 0")
                 .bind(authority.group_id().as_str())
                 .execute(&mut *connection)

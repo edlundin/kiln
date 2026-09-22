@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Persist managed master identities before vault writes, recover exact setup retries, fence activation on role changes, and retain retired references for safe cleanup.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Add managed CA/server certificate generation with explicit validity and authority-bound private-key envelopes. Provisioning, trust approval and activation remain pending.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

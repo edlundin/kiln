@@ -22,7 +22,7 @@ pub enum ConfigurationIdentityError {
 
 /// Caller-selected validity in UTC Unix seconds. Both certificates start at
 /// not_before; the leaf must currently be valid and cannot outlive its CA.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfigurationCertificateValidity {
     pub not_before: i64,
     pub leaf_not_after: i64,
@@ -49,7 +49,8 @@ impl ConfigurationPrivateKey {
 }
 
 /// Generate fresh independent P-256 CA and leaf keys. Bindings must already name
-/// separately reserved master CA/TLS references in one authority. The caller
+/// distinct fresh master CA/TLS references in one authority. The caller must
+/// durably reserve references and public metadata before any vault write, and
 /// supplies the clock and validity policy; this function persists nothing.
 pub fn generate_configuration_identity(
     ca_binding: &ConfigurationSecretBinding,
@@ -207,7 +208,7 @@ fn key_purpose(
     }
 }
 
-fn valid_server_name(name: &str) -> bool {
+pub(super) fn valid_server_name(name: &str) -> bool {
     if let Ok(address) = name.parse::<IpAddr>() {
         return address.to_string() == name;
     }

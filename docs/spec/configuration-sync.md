@@ -303,8 +303,9 @@ Writes/deletes reuse the existing per-entry locks, retained until an OS operatio
 finishes even if its caller drops the future. Clones share those locks. Writes
 require a fresh reference reserved in durable metadata by the lifecycle owner;
 this low-level adapter does not enforce current-role authorization, immutable
-reference use or cross-process coordination. Enrollment must still implement
-reservation, activation, cleanup/recovery and typed secret envelopes. Constructing
+reference use or cross-process coordination. The managed-identity owner below
+adds reservation, activation and recovery for CA/TLS keys; follower credential
+enrollment still needs its own lifecycle. Constructing
 the store performs no vault access. No actual vault operation has been exercised
 for this synchronization namespace yet.
 
@@ -312,7 +313,7 @@ for this synchronization namespace yet.
 
 The default provisioning direction is Kiln-managed certificates.
 `generate_configuration_identity` is an infrastructure primitive, not an enabled
-administrative operation. It takes separately reserved master CA/TLS bindings for
+administrative operation. It takes distinct fresh master CA/TLS bindings for
 one authority, an exact canonical lowercase DNS name or canonical IP address,
 explicit validity timestamps and a caller-supplied current time. Wildcards,
 URLs/ports and noncanonical names are rejected. DNS labels/total length follow
@@ -323,8 +324,8 @@ The generator uses rcgen with fresh independent ECDSA P-256/SHA-256 keys. The CA
 has path length zero and certificate/CRL-signing usage. The leaf explicitly is not
 a CA, has digital-signature/server-auth usage, and contains only the chosen DNS/IP
 subject alternative name. It returns the public CA/leaf DER, a SHA-256 CA
-fingerprint and two separate redacted vault envelopes. Nothing is persisted,
-installed into system trust or activated; root identity approval remains part of
+fingerprint and two separate redacted vault envelopes. The primitive persists nothing,
+installs no system trust and activates nothing; root identity approval remains part of
 enrollment. Renewal, revocation distribution and imported-identity handling remain
 future lifecycle work.
 
@@ -342,6 +343,65 @@ check current role/version before any vault read or activation.
 The primitive uses rcgen for certificate construction. It and the envelopes have
 compile/source validation only so far; no certificate
 generation, vault write, handshake or trust installation has been exercised.
+
+## Durable managed identity setup
+
+`ConfigurationIdentityProvisioner` composes the SQLite journal, managed generator
+and configuration OS vault. It is an internal infrastructure adapter, not an
+HTTP operation or daemon startup action. A request carries the exact expected
+master state version, distinct fresh CA/TLS references, canonical server name
+and explicit validity. Keep that exact request for uncertain retries; its CA
+reference is the durable command identity.
+
+Migration 39 stores immutable public certificates, original request metadata and
+SHA-256 hashes of the two complete secret envelopes. Keys are generated in memory
+first, then all metadata and references are reserved in one immediate transaction
+before either vault write. Only the exact current master state can reserve work.
+Both reference columns are checked against both historical columns, including
+retired rows, and only one pending/active identity is allowed per group. Replacing
+an identity therefore requires explicit retirement and fresh references; this
+is not automatic certificate renewal or follower trust migration.
+
+Provisioning writes each reserved slot once, reads both envelopes back, checks
+their immutable hashes and exact binding/key decoding, then marks the identity
+active while rechecking current master authority in the activation transaction.
+The supplied clock is sampled after queueing and again immediately before
+activation: vault delays cannot bypass the configured validity window. Normal
+snapshot publication may advance the state version without invalidating this
+reservation. Leaving the master role retires all its pending/active identities
+inside the role-change transaction, permanently fencing old work even on rejoin.
+
+An exact retry loads the journal instead of generating or writing replacement
+keys. If both original envelopes reached the vault it can finish activation;
+missing, malformed or changed envelopes retire the attempt and require fresh
+references. Temporary vault/storage failures retain the record for retry.
+Expired requests cannot activate and require explicit retirement before a fresh
+setup. A returned active record describes durable setup state, not a reusable
+proof of current role, certificate validity or permission to open a listener.
+Matching a loaded public certificate/key and verifying its chain remains part of
+TLS composition; database contents are host-local trusted metadata.
+
+Provisioning and cleanup share a store-owned mutex across clones. Spawned tasks
+retain ownership through vault work even when the caller disconnects, preventing
+another lifecycle operation from overtaking a late OS effect. Callers must use
+one daemon/store owner and cloned vault handles; this is not cross-process
+coordination or protection against direct writes through the low-level vault.
+Daemon admission/shutdown integration must account for these owned operations
+before runtime activation is enabled.
+
+`get` and cursor-based `list_references` expose public journal metadata for
+restart recovery, with an explicit nonzero page limit. `retire_and_cleanup`
+permanently retires a record before attempting both vault deletions. Tombstones
+remain after success, so uncertain deletions can always be retried and references
+can never be reused. Role changes and incomplete recovery retain discoverable
+cleanup work; they do not perform OS effects inside SQLite transactions.
+
+Validation currently covers compilation/build, source review, fresh migration
+39 startup and SQL preparation only. No tests, actual certificate generation,
+vault operations, cancellation/recovery scenarios or TLS handshakes have run.
+Authenticated setup/status/retirement routes, private follower enrollment and
+credential delivery, daemon composition, follower fetch/apply and consumers
+remain open; remote synchronization is not enabled.
 
 ## Initial local master designation
 

@@ -5,6 +5,11 @@ mod configuration_access;
 mod configuration_credential;
 pub use configuration_credential::ConfigurationReadCredential;
 mod configuration_identity;
+mod configuration_identity_lifecycle;
+pub use configuration_identity_lifecycle::{
+    ConfigurationIdentityLifecycleError, ConfigurationIdentityProvisioner,
+    ConfigurationIdentityRecord, ConfigurationIdentityRequest, ConfigurationIdentityStatus,
+};
 pub use configuration_identity::{
     ConfigurationCertificateValidity, ConfigurationIdentityError, ConfigurationPrivateKey,
     GeneratedConfigurationIdentity, decode_configuration_private_key,
@@ -507,6 +512,7 @@ fn open_artifact_file(path: &Path) -> io::Result<fs::File> {
 #[derive(Clone)]
 pub struct SqliteStore {
     connection: Arc<Mutex<SqliteConnection>>,
+    configuration_identity_operations: Arc<Mutex<()>>,
 }
 
 pub const DETERMINISTIC_SUBPROCESS_ARGUMENT: &str = "--kiln-deterministic-subprocess";
@@ -838,6 +844,7 @@ impl SqliteStore {
             .map_err(InfrastructureError::Database)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            configuration_identity_operations: Arc::new(Mutex::new(())),
         })
     }
 

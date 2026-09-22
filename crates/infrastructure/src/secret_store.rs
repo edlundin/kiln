@@ -1,4 +1,5 @@
 use kiln_core::{
+    ConfigurationSecretBinding, ConfigurationSecretPurpose, ConfigurationSecretStore,
     ProviderAccountId, ProviderType, SecretRef, SecretStore, SecretStoreError, SecretValue,
 };
 use std::{
@@ -13,6 +14,64 @@ use tokio::{io::AsyncWriteExt, process::Command};
 use tokio::task::spawn_blocking;
 
 const DEFAULT_SERVICE: &str = "dev.kiln.provider-account";
+const CONFIGURATION_SERVICE: &str = "dev.kiln.configuration-sync";
+
+/// Host-local configuration credentials in a distinct OS vault service. Clones
+/// share per-entry write/delete locks; construction performs no vault operation.
+#[derive(Clone)]
+pub struct OsConfigurationSecretStore(OsSecretStore);
+
+impl OsConfigurationSecretStore {
+    pub fn open_default() -> Self {
+        Self(OsSecretStore {
+            service: CONFIGURATION_SERVICE.to_owned(),
+            entry_locks: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    fn key(binding: &ConfigurationSecretBinding) -> String {
+        let purpose = match binding.purpose() {
+            ConfigurationSecretPurpose::MasterCertificateAuthority => "master-ca",
+            ConfigurationSecretPurpose::MasterTlsIdentity => "master-tls",
+            ConfigurationSecretPurpose::FollowerReadCredential => "follower-read",
+        };
+        format!(
+            "{}:{}:{}:{purpose}:{}",
+            binding.instance_id().as_str(),
+            binding.authority().group_id().as_str(),
+            binding.authority().master_id().as_str(),
+            binding.secret_ref().as_str()
+        )
+    }
+}
+
+impl Default for OsConfigurationSecretStore {
+    fn default() -> Self {
+        Self::open_default()
+    }
+}
+
+impl ConfigurationSecretStore for OsConfigurationSecretStore {
+    async fn put_at(
+        &self,
+        binding: &ConfigurationSecretBinding,
+        value: SecretValue,
+    ) -> Result<(), SecretStoreError> {
+        self.0.put_key(Self::key(binding), value).await
+    }
+
+    async fn get(
+        &self,
+        binding: &ConfigurationSecretBinding,
+    ) -> Result<SecretValue, SecretStoreError> {
+        let bytes = self.0.read_value(&Self::key(binding)).await?;
+        SecretValue::new(bytes).map_err(|_| SecretStoreError::InvalidSecret)
+    }
+
+    async fn delete(&self, binding: &ConfigurationSecretBinding) -> Result<(), SecretStoreError> {
+        self.0.delete_key(Self::key(binding)).await
+    }
+}
 
 /// OS-backed storage for provider credentials. The database receives only the
 /// generated SecretRef; the secret value is passed directly to the native
@@ -88,23 +147,7 @@ impl SecretStore for OsSecretStore {
         value: SecretValue,
     ) -> Result<(), SecretStoreError> {
         let key = self.key(provider_type, account_id, secret_ref);
-        let guard = self.entry_lock(&key).await;
-        let store = self.clone();
-        // Keep the lock until the OS effect finishes even if the caller drops
-        // its future. Journal recovery must not delete before a late write.
-        tokio::spawn(async move {
-            let _guard = guard;
-            #[cfg(target_os = "macos")]
-            {
-                store.store_keychain(&key, value).await
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                store.store_value(&key, value.as_bytes()).await
-            }
-        })
-        .await
-        .map_err(|_| SecretStoreError::Unavailable)?
+        self.put_key(key, value).await
     }
 
     async fn get(
@@ -124,7 +167,33 @@ impl SecretStore for OsSecretStore {
         account_id: &ProviderAccountId,
         secret_ref: &SecretRef,
     ) -> Result<(), SecretStoreError> {
-        let key = self.key(provider_type, account_id, secret_ref);
+        self.delete_key(self.key(provider_type, account_id, secret_ref))
+            .await
+    }
+}
+
+impl OsSecretStore {
+    async fn put_key(&self, key: String, value: SecretValue) -> Result<(), SecretStoreError> {
+        let guard = self.entry_lock(&key).await;
+        let store = self.clone();
+        // Keep the lock until the OS effect finishes even if the caller drops
+        // its future. Journal recovery must not delete before a late write.
+        tokio::spawn(async move {
+            let _guard = guard;
+            #[cfg(target_os = "macos")]
+            {
+                store.store_keychain(&key, value).await
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                store.store_value(&key, value.as_bytes()).await
+            }
+        })
+        .await
+        .map_err(|_| SecretStoreError::Unavailable)?
+    }
+
+    async fn delete_key(&self, key: String) -> Result<(), SecretStoreError> {
         let guard = self.entry_lock(&key).await;
         let store = self.clone();
         tokio::spawn(async move {

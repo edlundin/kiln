@@ -283,6 +283,31 @@ The existing snapshot/encoded-content limits remain in force. Certificate-file
 ownership, live composition, enrollment, audit/recovery and TLS runtime acceptance
 are still required before enabling remote synchronization.
 
+## Host-local configuration vault
+
+`ConfigurationSecretStore` and `OsConfigurationSecretStore` provide a separate
+`dev.kiln.configuration-sync` vault service. Lookup keys include the local instance,
+authority group, master instance, purpose and opaque `SecretRef`. Master CA and
+TLS-identity purposes require the local instance to equal the authority's master;
+follower read-credential purpose requires a different instance. These bindings
+are metadata, not evidence that an enrollment remains active. The application
+must check current role/version before resolving them.
+
+Values reuse the existing redacted `SecretValue` boundary: nonempty, at most 1 MiB,
+with no NUL/CR/LF. Binary key material therefore needs an adapter-owned single-line
+encoded envelope. Raw secrets and their references are never shared snapshot
+fields. macOS uses Keychain and Linux uses Secret Service through the existing
+backend; there is no plaintext fallback or provider-account aliasing.
+
+Writes/deletes reuse the existing per-entry locks, retained until an OS operation
+finishes even if its caller drops the future. Clones share those locks. Writes
+require a fresh reference reserved in durable metadata by the lifecycle owner;
+this low-level adapter does not enforce current-role authorization, immutable
+reference use or cross-process coordination. Enrollment must still implement
+reservation, activation, cleanup/recovery and typed secret envelopes. Constructing
+the store performs no vault access. No actual vault operation has been exercised
+for this synchronization namespace yet.
+
 ## Initial local master designation
 
 Protocol `0.27.0` adds authenticated `POST /v1/configuration-sync/master` with a

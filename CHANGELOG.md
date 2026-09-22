@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Add a dedicated OS-vault namespace for configuration TLS keys and follower credentials, with authority/purpose-bound references and shared write/delete locking.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Add TLS serving for the isolated follower router with explicit identity, connection/buffer/deadline budgets and owned shutdown cleanup. Daemon activation and enrollment remain pending.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

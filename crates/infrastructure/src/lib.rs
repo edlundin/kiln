@@ -22,7 +22,7 @@ mod provider_account;
 mod provider_context;
 pub use provider_context::StoredProviderContextReader;
 mod secret_store;
-pub use secret_store::OsSecretStore;
+pub use secret_store::{OsConfigurationSecretStore, OsSecretStore};
 mod usage;
 mod workspace_file_read;
 pub use workspace_file_read::execute_workspace_file_read;

@@ -53,7 +53,7 @@ impl fmt::Debug for SecretRef {
     }
 }
 
-/// Secret material is only carried between a provider adapter and a secret
+/// Secret material is only carried between a provider/configuration adapter and a secret
 /// store. It deliberately has no `Debug`, `Display`, or serialization of its
 /// bytes; callers must make the boundary explicit with `as_bytes`.
 pub struct SecretValue(Vec<u8>);

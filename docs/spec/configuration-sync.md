@@ -147,4 +147,47 @@ content correspondence, not publisher trust or the absence of secrets in supplie
 bytes. Filesystem importers must separately refuse symlinks/special entries and
 limit what the user selected for sharing; this pure validator never reads the
 filesystem, scans the vault, extracts files, executes scripts, or installs a skill.
-Cross-package dependency checks and snapshot persistence/application remain open.
+Cross-package dependency checks now belong to the complete snapshot validator;
+snapshot persistence/application remains open.
+
+## Coherent shared snapshot schema 1
+
+The core snapshot validator accepts all three categories together and returns an
+immutable snapshot only after validation. This is currently a typed internal
+schema, not a wire decoder, filesystem importer, or active configuration store.
+
+The initial global-settings allowlist is `model_defaults`: a logical local account
+binding, exact provider/model and generation/reasoning settings, and versioned
+model capabilities. There are no local provider-account IDs, credentials, host
+resource budgets or paths in this setting. Additional UI or runtime preferences
+must declare their shared scope and extend the schema explicitly.
+
+MCP entries have stable portable IDs, enabled state, and one transport:
+
+- `stdio`: a logical runtime binding, ordered literal/host-binding arguments, and
+  environment variable names mapped to local bindings. Environment names follow
+  portable identifier syntax and cannot collide under ASCII case folding.
+- `https`: a normalized HTTPS endpoint plus an optional local credential binding.
+  URI user information, query strings, fragments and whitespace/control characters
+  are unsupported; use host bindings for local or credential-bearing endpoints.
+- `host_endpoint`: a logical endpoint binding resolved and validated on each host.
+
+Bindings remain names until the host explicitly maps them. Literal arguments are
+explicit portable data and may not contain NUL; the validator does not interpret
+shell syntax, detect secrets inside arbitrary literals, or make master-local paths
+portable. Exporters must classify local values into bindings instead of copying
+them as literals. Synchronization does not grant network access, launch a server,
+install a runtime, or create an approval grant.
+
+The skill catalog rejects duplicate IDs, missing dependencies, enabled packages
+that depend on disabled packages, and cycles (including disabled-package cycles).
+The graph walk is iterative. Counts, argument/endpoint/key bytes, total skill files
+and bytes, and canonical metadata bytes have explicit caller limits. Package-level
+validation limits remain independently required before constructing a snapshot.
+
+Canonical metadata sorts object keys and definition IDs while retaining MCP
+argument order, and includes each complete skill package hash. The versioned
+snapshot hash binds the metadata and therefore settings, server definitions,
+enabled state, skill content and dependency metadata. `verify_revision` checks
+schema/hash correspondence only; the follower authority/watermark and authenticated
+master checks are still separately required. No content is applied by validation.

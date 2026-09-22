@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Validate coherent shared snapshots of model preferences, global MCP definitions, and skills with canonical hashes and dependency checks.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Validate bounded portable global skill packages and canonical content hashes before synchronization or filesystem materialization.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

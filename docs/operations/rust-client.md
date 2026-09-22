@@ -203,3 +203,29 @@ For a later publication, deliberately prepare the full replacement from the
 returned bundle and confirm the current master/state. Export metadata does not
 authenticate a remote peer or enroll a follower. See the
 [export contract](../spec/configuration-sync.md#verified-local-snapshot-export).
+
+## Restricted follower transport
+
+`ConfigurationSyncClient` is a separate HTTPS-only client component for future
+enrolled followers. It is not the local `Client`, has no general request method,
+and exposes only `get_snapshot()`. No remote daemon listener or enrollment flow
+is enabled yet; this API alone does not make synchronization operational.
+
+Supply `ConfigurationMasterPin` with the HTTPS origin, a dedicated master CA in
+DER format, canonical master/group/follower IDs, the follower-specific `kcfg1_`
+bearer, and `ConfigurationSyncTimeouts` with nonzero connect/total network budgets.
+The caller must have authenticated and approved the whole binding through
+enrollment before sending credentials. The client does not load files, fetch
+certificates, discover peers, or substitute the local API bearer. It excludes
+system roots while retaining hostname/chain verification. It trusts the supplied
+CA and hostname, allowing leaf certificate renewal under that binding; it does
+not enforce an exact leaf certificate fingerprint.
+
+The request is a fixed snapshot GET with claimed master/group/follower headers
+and a sensitive Authorization header. Redirects, proxies, automatic retries,
+decompression and TLS key logging are disabled. Only HTTP 200 can yield a candidate;
+non-success bodies are discarded. Declared/collected bytes are bounded at 2 MiB.
+Errors contain categories/status numbers, without remote bodies, URLs or secrets.
+Response authority must match the pin. The consumer must still validate full
+snapshot content and revisions and fence enrollment changes before applying it.
+See the [transport contract](../spec/configuration-sync.md#pinned-https-follower-client).

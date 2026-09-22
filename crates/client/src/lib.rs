@@ -1,5 +1,11 @@
 //! Typed HTTP and WebSocket client for the public Kiln daemon protocol.
 
+mod configuration_sync;
+pub use configuration_sync::{
+    ConfigurationMasterPin, ConfigurationSyncClient, ConfigurationSyncError,
+    ConfigurationSyncTimeouts,
+};
+
 use std::fmt;
 use std::net::SocketAddr;
 

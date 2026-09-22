@@ -164,6 +164,46 @@ This is not completed enrollment. Master identity pinning, encrypted authenticat
 transport, explicit approval/delivery, follower secret storage, administration UI,
 audit/recovery and reconnect remain to be wired before remote access is enabled.
 
+## Pinned HTTPS follower client
+
+The Rust `ConfigurationSyncClient` is the restricted outgoing transport component.
+It is not wired into daemon synchronization and does not enable a remote listener.
+Local protocol `0.29.0` remains unchanged. A future isolated HTTPS read listener
+must serve `GET /v1/configuration-sync/snapshot` with the existing snapshot response
+and check `kiln-configuration-master`, `kiln-configuration-group` and
+`kiln-configuration-follower` headers against the presented read credential. These
+headers carry claimed IDs, never authentication proof. The existing local API
+does not recognize them as authorization and rejects the distinct sync bearer.
+
+Construction takes an HTTPS origin, one explicit DER trust anchor, the bound
+master/group/follower IDs, a `kcfg1_` read bearer and caller-supplied nonzero connect
+and total request deadlines. Enrollment must approve this entire binding before
+sending the credential. No snapshot or discovery response can replace it. The
+trust anchor must be dedicated to that master's TLS identity; a public/shared CA
+would broaden trust. This pins a certificate authority plus hostname, rather than
+the exact leaf certificate: leaf renewal under that same authority/name remains
+possible. Changing the authority, origin or master/group requires explicit
+reenrollment. Certificate provisioning and that approval flow remain pending.
+
+The client uses only the supplied root, with normal hostname and certificate-chain
+verification and TLS 1.2 or later. System roots, plaintext HTTP, proxies, redirects,
+automatic retries, decompression and TLS key logging are disabled. Only one fixed
+snapshot URL is callable. Connect timeout cannot exceed the total network deadline,
+which covers response-body transfer as well as connection/headers. The caller
+chooses deployment-appropriate durations; the client embeds no network-speed
+assumption. Creating the client sends no network request and reads no credential
+or certificate file.
+
+Only HTTP 200 is accepted. Non-success bodies are discarded without parsing or
+exposing remote diagnostics. Declared and collected response bytes are capped at
+the existing 2 MiB transfer budget; incomplete/oversized JSON is never returned.
+The decoded instance and master IDs must both match the enrolled master and the
+group must match the pin. Basic revision/state/hash syntax is checked. Successful
+output is still a candidate: the receiving service must fully validate canonical
+content, all hashes/paths/schema and monotonic revisions, fence concurrent
+enrollment changes, and atomically apply the snapshot. No currentness claim or
+runtime activation follows merely from constructing the client or fetching data.
+
 ## Initial local master designation
 
 Protocol `0.27.0` adds authenticated `POST /v1/configuration-sync/master` with a

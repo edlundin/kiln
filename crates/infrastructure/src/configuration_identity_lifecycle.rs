@@ -89,6 +89,166 @@ pub enum ConfigurationIdentityLifecycleError {
 }
 use ConfigurationIdentityLifecycleError as Error;
 
+/// Application-facing command adapter with an explicit wall clock. Constructing
+/// it performs no vault effects. Retain command ownership while awaiting it.
+#[derive(Clone)]
+pub struct ConfigurationIdentityCommands {
+    provisioner: ConfigurationIdentityProvisioner,
+    clock: std::sync::Arc<dyn Fn() -> i64 + Send + Sync>,
+}
+impl ConfigurationIdentityCommands {
+    pub fn new(
+        provisioner: ConfigurationIdentityProvisioner,
+        clock: impl Fn() -> i64 + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            provisioner,
+            clock: std::sync::Arc::new(clock),
+        }
+    }
+}
+impl kiln_core::ConfigurationIdentityAdministration for ConfigurationIdentityCommands {
+    async fn configure_master_identity(
+        &self,
+        command: kiln_core::ConfigureMasterIdentity,
+        idempotency_key: String,
+    ) -> Result<
+        kiln_core::ConfigurationIdentitySetupReceipt,
+        kiln_core::ConfigurationIdentityCommandError,
+    > {
+        use kiln_core::ConfigurationIdentityCommandError as CommandError;
+        if idempotency_key.is_empty()
+            || !idempotency_key.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(CommandError::InvalidRequest);
+        }
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let _guard = owner
+                .provisioner
+                .store
+                .configuration_identity_operations
+                .lock()
+                .await;
+            let existing = {
+                let mut connection = owner.provisioner.store.connection.lock().await;
+                let reference: Option<String> = sqlx::query_scalar(
+                    "SELECT ca_ref FROM configuration_master_identities WHERE request_key = ?",
+                )
+                .bind(&idempotency_key)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(|_| CommandError::Unavailable)?;
+                if let Some(reference) = reference {
+                    let reference =
+                        SecretRef::parse(reference).map_err(|_| CommandError::Unavailable)?;
+                    Some(
+                        load(&mut connection, &reference)
+                            .await
+                            .map_err(command_error)?
+                            .ok_or(CommandError::Unavailable)?,
+                    )
+                } else {
+                    None
+                }
+            };
+            let request = if let Some(stored) = existing {
+                let request = stored.record.request;
+                if request.ca_binding.instance_id() != &command.expected_instance_id
+                    || request.ca_binding.authority().group_id() != &command.expected_group_id
+                    || request.expected_version != command.expected_state_version
+                    || request.server_name != command.server_name
+                    || request.validity != command.validity
+                {
+                    return Err(CommandError::IdempotencyConflict);
+                }
+                request
+            } else {
+                ConfigurationIdentityRequest::from_parts(
+                    ConfigurationAuthority::new(
+                        command.expected_group_id,
+                        command.expected_instance_id,
+                    ),
+                    command.expected_state_version,
+                    SecretRef::from_ulid(ulid::Ulid::generate()),
+                    SecretRef::from_ulid(ulid::Ulid::generate()),
+                    command.server_name,
+                    command.validity,
+                )
+                .map_err(command_error)?
+            };
+            let record = owner
+                .provisioner
+                .provision_owned(request, &*owner.clock, Some(&idempotency_key))
+                .await
+                .map_err(command_error)?;
+            Ok(kiln_core::ConfigurationIdentitySetupReceipt {
+                instance_id: record.request.ca_binding.instance_id().clone(),
+                group_id: record.request.ca_binding.authority().group_id().clone(),
+                reserved_state_version: record.request.expected_version,
+                identity_id: record.request.ca_binding.secret_ref().clone(),
+            })
+        })
+        .await
+        .map_err(|_| CommandError::Unavailable)?
+    }
+
+    async fn retire_master_identity(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        setup_idempotency_key: String,
+    ) -> Result<(), kiln_core::ConfigurationIdentityCommandError> {
+        use kiln_core::ConfigurationIdentityCommandError as CommandError;
+        if setup_idempotency_key.is_empty()
+            || !setup_idempotency_key
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(CommandError::InvalidRequest);
+        }
+        let identity_id = {
+            let mut connection = self.provisioner.store.connection.lock().await;
+            let reference: Option<String> = sqlx::query_scalar(
+                "SELECT ca_ref FROM configuration_master_identities WHERE request_key = ?",
+            )
+            .bind(&setup_idempotency_key)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|_| CommandError::Unavailable)?;
+            SecretRef::parse(reference.ok_or(CommandError::Conflict)?)
+                .map_err(|_| CommandError::Unavailable)?
+        };
+        let record = self
+            .provisioner
+            .get(&identity_id)
+            .await
+            .map_err(command_error)?
+            .ok_or(CommandError::Conflict)?;
+        if record.request.ca_binding.instance_id() != &expected_instance_id {
+            return Err(CommandError::Conflict);
+        }
+        self.provisioner
+            .retire_and_cleanup(identity_id)
+            .await
+            .map_err(command_error)
+    }
+}
+
+fn command_error(error: Error) -> kiln_core::ConfigurationIdentityCommandError {
+    use kiln_core::ConfigurationIdentityCommandError as CommandError;
+    match error {
+        Error::InvalidRequest
+        | Error::Identity(
+            ConfigurationIdentityError::InvalidBinding
+            | ConfigurationIdentityError::InvalidServerName
+            | ConfigurationIdentityError::InvalidValidity,
+        ) => CommandError::InvalidRequest,
+        Error::Conflict | Error::ReferenceConflict | Error::Retired => CommandError::Conflict,
+        Error::RecoveryRequired => CommandError::RecoveryRequired,
+        _ => CommandError::Unavailable,
+    }
+}
+
 /// Immutable setup command. Keep this exact request for an ambiguous retry.
 /// The CA reference is its durable idempotency identity; both refs must be fresh.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,7 +394,7 @@ impl ConfigurationIdentityProvisioner {
         // can still finish. The task owns the lock through readback/activation.
         tokio::spawn(async move {
             let _guard = owner.store.configuration_identity_operations.lock().await;
-            owner.provision_owned(request, &clock).await
+            owner.provision_owned(request, &clock, None).await
         })
         .await
         .map_err(|_| Error::Unavailable)?
@@ -303,7 +463,8 @@ impl ConfigurationIdentityProvisioner {
     async fn provision_owned(
         &self,
         request: ConfigurationIdentityRequest,
-        clock: &(impl Fn() -> i64 + Sync),
+        clock: &(impl Fn() -> i64 + Sync + ?Sized),
+        request_key: Option<&str>,
     ) -> Result<ConfigurationIdentityRecord, Error> {
         let ca_ref = request.ca_binding.secret_ref();
         let mut existing = {
@@ -344,7 +505,7 @@ impl ConfigurationIdentityProvisioner {
                     certificate_authority_fingerprint: generated.certificate_authority_fingerprint,
                 },
             };
-            self.reserve(&stored).await?;
+            self.reserve(&stored, request_key).await?;
             self.vault
                 .put_at(&request.ca_binding, generated.certificate_authority_key)
                 .await
@@ -408,7 +569,11 @@ impl ConfigurationIdentityProvisioner {
         retire(&mut connection, ca_ref).await
     }
 
-    async fn reserve(&self, stored: &StoredIdentity) -> Result<(), Error> {
+    async fn reserve(
+        &self,
+        stored: &StoredIdentity,
+        request_key: Option<&str>,
+    ) -> Result<(), Error> {
         let request = &stored.record.request;
         let mut connection = self.store.connection.lock().await;
         let mut transaction = connection
@@ -436,13 +601,14 @@ impl ConfigurationIdentityProvisioner {
         if occupied != 0 {
             return Err(Error::Conflict);
         }
-        sqlx::query("INSERT INTO configuration_master_identities (ca_ref, tls_ref, group_id, master_instance_id, reserved_state_version, server_name, not_before, leaf_not_after, ca_not_after, ca_der, tls_der, ca_key_hash, tls_key_hash, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')")
+        sqlx::query("INSERT INTO configuration_master_identities (ca_ref, tls_ref, group_id, master_instance_id, reserved_state_version, server_name, not_before, leaf_not_after, ca_not_after, ca_der, tls_der, ca_key_hash, tls_key_hash, status, request_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)")
             .bind(request.ca_binding.secret_ref().as_str()).bind(request.tls_binding.secret_ref().as_str())
             .bind(request.ca_binding.authority().group_id().as_str()).bind(request.ca_binding.instance_id().as_str())
             .bind(request.expected_version as i64).bind(&request.server_name)
             .bind(request.validity.not_before).bind(request.validity.leaf_not_after).bind(request.validity.ca_not_after)
             .bind(&stored.record.certificate_authority_der).bind(&stored.record.server_certificate_der)
             .bind(stored.ca_key_hash.as_str()).bind(stored.tls_key_hash.as_str())
+            .bind(request_key)
             .execute(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
         transaction.commit().await.map_err(|_| Error::Unavailable)
     }

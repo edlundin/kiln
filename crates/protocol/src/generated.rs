@@ -1,4 +1,9 @@
 use crate::{
+    CONFIGURATION_IDENTITY_RETIRE_PATH, CONFIGURE_MASTER_IDENTITY_OPERATION_ID,
+    RETIRE_MASTER_IDENTITY_OPERATION_ID, ConfigureMasterIdentityRequest,
+    ConfigurationIdentitySetupResponse, RetireMasterIdentityRequest,
+};
+use crate::{
     CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
     ConfigurationIdentityStatusResponse, ConfigurationIdentitySummaryResponse,
     GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID,
@@ -298,6 +303,18 @@ fn schema() -> String {
             "ConfigurationIdentityPhase",
             schema_for!(ConfigurationIdentityPhase),
         ),
+        (
+            "ConfigureMasterIdentityRequest",
+            schema_for!(ConfigureMasterIdentityRequest),
+        ),
+        (
+            "ConfigurationIdentitySetupResponse",
+            schema_for!(ConfigurationIdentitySetupResponse),
+        ),
+        (
+            "RetireMasterIdentityRequest",
+            schema_for!(RetireMasterIdentityRequest),
+        ),
         ("ClientIdentity", schema_for!(ClientIdentity)),
         ("NegotiateRequest", schema_for!(NegotiateRequest)),
         ("NegotiateResponse", schema_for!(NegotiateResponse)),
@@ -488,6 +505,9 @@ fn typescript() -> String {
         ConfigurationIdentityStatusResponse::decl(&config),
         ConfigurationIdentitySummaryResponse::decl(&config),
         ConfigurationIdentityPhase::decl(&config),
+        ConfigureMasterIdentityRequest::decl(&config),
+        ConfigurationIdentitySetupResponse::decl(&config),
+        RetireMasterIdentityRequest::decl(&config),
         ClientIdentity::decl(&config),
         NegotiateRequest::decl(&config),
         NegotiateResponse::decl(&config),
@@ -598,6 +618,14 @@ fn catalogue() -> String {
             "method": "GET",
             "path": CONFIGURATION_IDENTITY_STATUS_PATH,
             "operation": GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_IDENTITY_STATUS_PATH,
+            "operation": CONFIGURE_MASTER_IDENTITY_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_IDENTITY_RETIRE_PATH,
+            "operation": RETIRE_MASTER_IDENTITY_OPERATION_ID
         }, {
             "method": "POST",
             "path": CONFIGURATION_MASTER_PATH,
@@ -1388,7 +1416,53 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  {CONFIGURATION_IDENTITY_RETIRE_PATH}:
+    post:
+      operationId: {RETIRE_MASTER_IDENTITY_OPERATION_ID}
+      description: Explicit permanent retirement followed by retryable deletion of both vault keys. No idempotency key is needed for an exact repeated retirement.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireMasterIdentityRequest'
+      responses:
+        '204':
+          description: Identity retired and both vault deletions completed; historical references remain reserved.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   {CONFIGURATION_IDENTITY_STATUS_PATH}:
+    post:
+      operationId: {CONFIGURE_MASTER_IDENTITY_OPERATION_ID}
+      description: Explicit managed CA/TLS setup, with exact current-master preconditions for a new command and immutable references on retry. No listener or follower trust is enabled.
+      parameters:
+        - name: {IDEMPOTENCY_KEY_HEADER}
+          in: header
+          required: true
+          schema: {{type: string, minLength: 1}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigureMasterIdentityRequest'
+      responses:
+        '200':
+          description: Original setup receipt after activation; reload status for current identity and authority.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationIdentitySetupResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
     get:
       operationId: {GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID}
       responses:
@@ -2355,6 +2429,18 @@ components:
         (
             "ConfigurationIdentityPhase",
             openapi_schema::<ConfigurationIdentityPhase>(),
+        ),
+        (
+            "ConfigureMasterIdentityRequest",
+            openapi_schema::<ConfigureMasterIdentityRequest>(),
+        ),
+        (
+            "ConfigurationIdentitySetupResponse",
+            openapi_schema::<ConfigurationIdentitySetupResponse>(),
+        ),
+        (
+            "RetireMasterIdentityRequest",
+            openapi_schema::<RetireMasterIdentityRequest>(),
         ),
         ("WorkspaceResponse", openapi_schema::<WorkspaceResponse>()),
         (

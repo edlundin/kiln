@@ -670,6 +670,8 @@ pub struct AppState<W, S, R> {
         Option<Arc<dyn configuration_sync::ConfigurationStatusOperations>>,
     configuration_identity_status_operations:
         Option<Arc<dyn configuration_identity::ConfigurationIdentityStatusOperations>>,
+    configuration_identity_command_operations:
+        Option<Arc<dyn configuration_identity::ConfigurationIdentityCommandOperations>>,
     configuration_administration_operations:
         Option<Arc<dyn configuration_sync::ConfigurationAdministrationOperations>>,
     configuration_publication_operations:
@@ -697,6 +699,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
                 .map(Arc::clone),
             configuration_identity_status_operations: self
                 .configuration_identity_status_operations
+                .as_ref()
+                .map(Arc::clone),
+            configuration_identity_command_operations: self
+                .configuration_identity_command_operations
                 .as_ref()
                 .map(Arc::clone),
             configuration_administration_operations: self
@@ -762,6 +768,7 @@ impl<W, S, R> AppState<W, S, R> {
             provider_account_operations: Arc::new(UnavailableProviderAccountOperations),
             configuration_status_operations: None,
             configuration_identity_status_operations: None,
+            configuration_identity_command_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
             event_broadcaster,
@@ -797,6 +804,7 @@ impl<W, S, R> AppState<W, S, R> {
             provider_account_operations,
             configuration_status_operations: None,
             configuration_identity_status_operations: None,
+            configuration_identity_command_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
             event_broadcaster,
@@ -826,6 +834,18 @@ impl<W, S, R> AppState<W, S, R> {
     ) -> Self {
         self.configuration_identity_status_operations = Some(Arc::new(
             configuration_identity::ConfigurationIdentityStatusAdapter(store),
+        ));
+        self
+    }
+
+    pub fn with_configuration_identity_administration<
+        T: kiln_core::ConfigurationIdentityAdministration + 'static,
+    >(
+        mut self,
+        administration: T,
+    ) -> Self {
+        self.configuration_identity_command_operations = Some(Arc::new(
+            configuration_identity::ConfigurationIdentityCommandAdapter(administration),
         ));
         self
     }
@@ -866,7 +886,11 @@ where
     Router::new()
         .route(
             kiln_protocol::CONFIGURATION_IDENTITY_STATUS_PATH,
-            get(configuration_identity::get_status),
+            get(configuration_identity::get_status).post(configuration_identity::configure),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_IDENTITY_RETIRE_PATH,
+            post(configuration_identity::retire),
         )
         .route(
             kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
@@ -3013,6 +3037,8 @@ enum PublicError {
     ConfigurationSyncUnavailable,
     #[error("configuration master designation failed")]
     ConfigurationMaster(kiln_core::ConfigurationMasterError),
+    #[error("configuration identity command failed")]
+    ConfigurationIdentity(kiln_core::ConfigurationIdentityCommandError),
     #[error("configuration publication failed")]
     ConfigurationPublication(kiln_core::ConfigurationSnapshotError),
     #[error("no snapshot is stored for the active configuration group")]
@@ -3227,6 +3253,28 @@ impl PublicError {
                     StatusCode::SERVICE_UNAVAILABLE,
                     error_code::CONFIGURATION_SYNC_UNAVAILABLE,
                     "Configuration synchronization unavailable",
+                ),
+            },
+            Self::ConfigurationIdentity(error) => match error {
+                kiln_core::ConfigurationIdentityCommandError::InvalidRequest => (
+                    StatusCode::BAD_REQUEST, error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
+                    "Invalid configuration identity request",
+                ),
+                kiln_core::ConfigurationIdentityCommandError::Conflict => (
+                    StatusCode::CONFLICT, error_code::CONFIGURATION_SYNC_CONFLICT,
+                    "Configuration authority, state or identity changed",
+                ),
+                kiln_core::ConfigurationIdentityCommandError::IdempotencyConflict => (
+                    StatusCode::CONFLICT, error_code::IDEMPOTENCY_CONFLICT,
+                    "Idempotency key was reused with a different identity request",
+                ),
+                kiln_core::ConfigurationIdentityCommandError::RecoveryRequired => (
+                    StatusCode::CONFLICT, error_code::CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
+                    "Incomplete identity retired; clean up and use a fresh setup request",
+                ),
+                kiln_core::ConfigurationIdentityCommandError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE, error_code::CONFIGURATION_SYNC_UNAVAILABLE,
+                    "Configuration identity unavailable",
                 ),
             },
             Self::DaemonShuttingDown => (

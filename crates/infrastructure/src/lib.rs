@@ -7,7 +7,8 @@ pub use configuration_credential::ConfigurationReadCredential;
 mod configuration_identity;
 mod configuration_identity_lifecycle;
 pub use configuration_identity_lifecycle::{
-    ConfigurationIdentityLifecycleError, ConfigurationIdentityProvisioner,
+    ConfigurationIdentityCommands, ConfigurationIdentityLifecycleError,
+    ConfigurationIdentityProvisioner,
     ConfigurationIdentityRecord, ConfigurationIdentityRequest, ConfigurationIdentityStatus,
 };
 pub use configuration_identity::{

@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.30.0";
+pub const PROTOCOL_VERSION: &str = "0.31.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -23,6 +23,9 @@ pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
 pub const CONFIGURATION_MASTER_PATH: &str = "/v1/configuration-sync/master";
 pub const CONFIGURATION_IDENTITY_STATUS_PATH: &str = "/v1/configuration-sync/identity";
+pub const CONFIGURATION_IDENTITY_RETIRE_PATH: &str = "/v1/configuration-sync/identity/retire";
+pub const CONFIGURE_MASTER_IDENTITY_OPERATION_ID: &str = "configure_master_identity";
+pub const RETIRE_MASTER_IDENTITY_OPERATION_ID: &str = "retire_master_identity";
 pub const GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID: &str =
     "get_configuration_identity_status";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
@@ -178,6 +181,8 @@ pub mod error_code {
     pub const CONFIGURATION_SYNC_UNAVAILABLE: &str = "configuration_sync_unavailable";
     pub const CONFIGURATION_SYNC_INVALID_REQUEST: &str = "configuration_sync_invalid_request";
     pub const CONFIGURATION_SYNC_CONFLICT: &str = "configuration_sync_conflict";
+    pub const CONFIGURATION_IDENTITY_RECOVERY_REQUIRED: &str =
+        "configuration_identity_recovery_required";
     pub const CONFIGURATION_SNAPSHOT_NOT_FOUND: &str = "configuration_snapshot_not_found";
     pub const CONFIGURATION_SNAPSHOT_TOO_LARGE: &str = "configuration_snapshot_too_large";
     pub const PROVIDER_ACCOUNT_STORE_UNAVAILABLE: &str = "provider_account_store_unavailable";
@@ -263,6 +268,7 @@ pub mod error_code {
         CONFIGURATION_SYNC_UNAVAILABLE,
         CONFIGURATION_SYNC_INVALID_REQUEST,
         CONFIGURATION_SYNC_CONFLICT,
+        CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
         CONFIGURATION_SNAPSHOT_NOT_FOUND,
         CONFIGURATION_SNAPSHOT_TOO_LARGE,
         PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
@@ -515,6 +521,33 @@ pub struct ConfigurationIdentityStatusResponse {
     pub master_instance_id: Option<String>,
     #[schemars(with = "RequiredNullableConfigurationIdentity")]
     pub identity: Option<ConfigurationIdentitySummaryResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureMasterIdentityRequest {
+    pub expected_instance_id: String,
+    pub expected_group_id: String,
+    pub expected_state_version: u64,
+    pub server_name: String,
+    pub not_before_unix_seconds: i64,
+    pub leaf_not_after_unix_seconds: i64,
+    pub ca_not_after_unix_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationIdentitySetupResponse {
+    pub instance_id: String,
+    pub group_id: String,
+    pub reserved_state_version: u64,
+    pub identity_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetireMasterIdentityRequest {
+    pub expected_instance_id: String,
+    pub setup_idempotency_key: String,
 }
 
 struct RequiredNullableConfigurationIdentity;

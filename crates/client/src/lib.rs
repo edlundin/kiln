@@ -264,6 +264,55 @@ impl Client {
         .await
     }
 
+    /// Explicitly create a managed master identity. Preserve the exact key and
+    /// request for ambiguous retries, and reload identity status after success.
+    pub async fn configure_master_identity(
+        &self,
+        idempotency_key: &str,
+        request: &kiln_protocol::ConfigureMasterIdentityRequest,
+    ) -> Result<kiln_protocol::ConfigurationIdentitySetupResponse, Error> {
+        // The same key later travels in JSON for cleanup. Exclude HTTP optional
+        // whitespace so transport normalization cannot change its identity.
+        if idempotency_key.is_empty()
+            || !idempotency_key.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(Error::InvalidIdempotencyKey);
+        }
+        self.send_json(
+            kiln_protocol::CONFIGURE_MASTER_IDENTITY_OPERATION_ID,
+            with_idempotency_key(
+                self.http
+                    .post(self.http_url(kiln_protocol::CONFIGURATION_IDENTITY_STATUS_PATH)),
+                idempotency_key,
+            )?
+            .json(request),
+        )
+        .await
+    }
+
+    /// Permanently retire the exact identity and delete its vault keys. Retrying
+    /// this same request is safe after an uncertain result or cleanup failure.
+    pub async fn retire_master_identity(
+        &self,
+        request: &kiln_protocol::RetireMasterIdentityRequest,
+    ) -> Result<(), Error> {
+        let operation = kiln_protocol::RETIRE_MASTER_IDENTITY_OPERATION_ID;
+        let response = self
+            .http
+            .post(self.http_url(kiln_protocol::CONFIGURATION_IDENTITY_RETIRE_PATH))
+            .json(request)
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport { operation, source })?;
+        let response = successful_response(response).await?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(Error::UnexpectedResponse {
+                status: response.status().as_u16(),
+            });
+        }
+        Ok(())
+    }
+
     /// Export the verified stored bundle. Both success and error bodies are
     /// bounded while streaming; an oversized response is never truncated into JSON.
     pub async fn get_configuration_snapshot(

@@ -275,6 +275,19 @@ async fn main() -> ExitCode {
 
     let provider_account_operations: Arc<dyn kiln_server::ProviderAccountOperations> =
         provider_logins.clone();
+    let identity_commands = kiln_infrastructure::ConfigurationIdentityCommands::new(
+        kiln_infrastructure::ConfigurationIdentityProvisioner::new(
+            store.clone(),
+            kiln_infrastructure::OsConfigurationSecretStore::open_default(),
+        ),
+        || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+                .unwrap_or(i64::MIN)
+        },
+    );
     let state = AppState::with_provider_account_operations(
         StoreMetadata::default(),
         bound_address,
@@ -288,6 +301,7 @@ async fn main() -> ExitCode {
     )
     .with_configuration_status_store(store.clone())
     .with_configuration_identity_status_store(store.clone())
+    .with_configuration_identity_administration(identity_commands)
     .with_configuration_administration_store(store.clone(), UlidIdGenerator)
     .with_configuration_publication_store(store);
     let lifecycle = state.lifecycle();

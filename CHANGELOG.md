@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Add explicit authenticated master TLS setup and retirement, with durable command retries and shutdown ownership through vault work.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Expose current master identity setup status through the authenticated local API and Rust client, with coherent authority metadata and no vault access.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

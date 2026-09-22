@@ -399,8 +399,8 @@ cleanup work; they do not perform OS effects inside SQLite transactions.
 Validation currently covers compilation/build, source review, fresh migration
 39 startup and SQL preparation only. No tests, actual certificate generation,
 vault operations, cancellation/recovery scenarios or TLS handshakes have run.
-Authenticated setup/retirement routes, private follower enrollment and
-credential delivery, daemon composition, follower fetch/apply and consumers
+Private follower enrollment and credential delivery, remote daemon composition,
+follower fetch/apply and consumers
 remain open; remote synchronization is not enabled.
 
 ## Local managed identity status
@@ -424,8 +424,68 @@ current certificate validity, follower trust or a running remote listener.
 Successful responses have `Cache-Control: no-store`. The route inherits the
 local API's bearer, Host and Origin protections. Unavailable/invalid persistence
 returns content-free `503 configuration_sync_unavailable`; no pending identity is
-silently treated as ready. Setup/retirement commands and desktop presentation are
+silently treated as ready. Setup/retirement commands are described below; desktop presentation is
 still pending. The separate follower router does not expose this route.
+
+## Explicit managed identity setup and retirement
+
+Protocol `0.31.0` enables authenticated local
+`POST /v1/configuration-sync/identity`. Its strict request supplies
+`expected_instance_id`, `expected_group_id`, `expected_state_version`, canonical
+`server_name`, and explicit `not_before_unix_seconds`,
+`leaf_not_after_unix_seconds`, `ca_not_after_unix_seconds`. A nonempty
+`Idempotency-Key` of visible ASCII characters without whitespace is required.
+The key is also used in a JSON cleanup request; this restriction prevents HTTP
+whitespace normalization from changing its identity. This is an explicit
+key-creation command: no
+validity defaults or automatic setup are inferred from status reads or startup.
+
+Migration 40 binds the command key to the immutable identity journal in the same
+reservation transaction, before any vault write. Fresh commands allocate random
+CA/TLS references inside the daemon and require the exact current master/version.
+An existing key is resolved before allocating references; changed instance,
+group, version, name or validity yields `409 idempotency_conflict`. Exact retries
+use the original references and envelopes. No row or vault write exists if
+validation/generation fails before reservation, so that attempt has no durable
+receipt. Legacy explicit-reference identities have a null command key and remain
+manageable through the internal lifecycle API.
+
+A successful `200` receipt contains `instance_id`, `group_id`,
+`reserved_state_version` and opaque `identity_id`. Reload status after success;
+the original reserved version is not current authority status. Malformed input
+or invalid validity yields `400 configuration_sync_invalid_request`; stale
+state, occupied identity or retired work yields `409 configuration_sync_conflict`.
+Incomplete/changed vault material is retired and yields
+`409 configuration_identity_recovery_required`. Storage/vault failures yield
+content-free `503 configuration_sync_unavailable`. No error includes private
+material or vault diagnostics.
+
+`POST /v1/configuration-sync/identity/retire` takes a strict body containing
+`expected_instance_id` and the original `setup_idempotency_key`. It resolves the
+same permanent journal binding even when setup never returned an identity ID,
+checks local ownership, retires it, and attempts deletion of both keys. Success
+is `204`; missing/wrong-instance targets are conflicts. Retrying the exact body
+is safe after an uncertain result or deletion failure. The original setup key
+can never create another identity, even after successful cleanup; use a fresh key
+and current state for a replacement. Internal explicit-reference identities and
+historical cleanup enumeration remain available through the lifecycle adapter.
+
+Both commands inherit the local API's bearer/Host/Origin protections and return
+no-store on success. The command gate rejects new writes once shutdown starts.
+An owned handler task retains its command permit while the lifecycle's owned
+vault task runs, so a client disconnect cannot cause graceful shutdown to
+release database/process ownership early. Shutdown waits for those accepted
+operations; there is no arbitrary timeout that abandons an uncertain OS write.
+The supplied daemon wall clock is sampled after queueing and at activation.
+
+The Rust client exposes `configure_master_identity(key, request)` and
+`retire_master_identity(request)`; it does not automatically retry either. The
+retirement client requires HTTP 204. Persist the exact setup key/request for
+uncertain retries and keep the key for future cleanup. No remote listener,
+follower credential, trust installation or snapshot publication is created by
+these commands. Replacement root trust still needs explicit follower approval;
+listener teardown/reenrollment integration must precede remote runtime activation.
+Desktop controls and live vault/cancellation/shutdown acceptance remain pending.
 
 ## Initial local master designation
 

@@ -20,14 +20,7 @@ pub enum ConfigurationIdentityError {
     Unavailable,
 }
 
-/// Caller-selected validity in UTC Unix seconds. Both certificates start at
-/// not_before; the leaf must currently be valid and cannot outlive its CA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ConfigurationCertificateValidity {
-    pub not_before: i64,
-    pub leaf_not_after: i64,
-    pub ca_not_after: i64,
-}
+pub use kiln_core::ConfigurationCertificateValidity;
 
 /// Public certificate bytes and separate redacted vault envelopes. A generated
 /// identity is not active and does not establish trust on any other instance.

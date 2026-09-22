@@ -1472,3 +1472,13 @@ are excluded. No vault access, private-key material, setup or cleanup occurs.
 Successful responses are no-store. Active is durable setup metadata, not evidence
 of current certificate/key validity or a running listener. See the
 [identity status contract](configuration-sync.md#local-managed-identity-status).
+
+Protocol `0.31.0` adds explicit local managed identity setup/retirement commands
+through `ConfigurationIdentityAdministration`. Setup binds an idempotency key to
+immutable request metadata/references before OS-vault writes, and revalidates
+master authority and current validity before activation. Retirement resolves the
+original setup key, checks expected local instance, and retains tombstones before
+retryable deletion. The HTTP composition retains its shutdown command permit
+through owned vault work even when the request disconnects. These commands enable
+no remote listener or follower trust. See the
+[setup contract](configuration-sync.md#explicit-managed-identity-setup-and-retirement).

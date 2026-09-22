@@ -240,3 +240,13 @@ identity return `identity: None`. Retired/historical identities are excluded.
 This reads no vault secrets and performs no setup, recovery or retirement. An
 active phase does not establish current key availability, certificate validity
 or remote serving. See the [identity status contract](../spec/configuration-sync.md#local-managed-identity-status).
+
+Protocol `0.31.0` adds explicit `configure_master_identity(key, request)` and
+`retire_master_identity(request)` commands. Setup requires current master
+instance/group/version plus exact name/validity values; retain the same key and
+request for uncertain retries. Success returns the original reservation receipt,
+so reload status. Retirement uses expected local instance and the original setup
+key, allowing cleanup even after a lost setup response; it requires HTTP 204 and
+can be retried with the same body. A retired key never provisions a replacement.
+These commands write/delete OS-vault keys but enable no listener or follower trust.
+See the [setup contract](../spec/configuration-sync.md#explicit-managed-identity-setup-and-retirement).

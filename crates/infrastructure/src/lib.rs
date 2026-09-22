@@ -1,6 +1,9 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
 mod assistant_message;
+mod configuration_access;
+mod configuration_credential;
+pub use configuration_credential::ConfigurationReadCredential;
 mod configuration_snapshot;
 mod configuration_sync;
 mod daemon_lock;

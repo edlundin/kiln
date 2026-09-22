@@ -261,6 +261,17 @@ pub(super) async fn save(
     if current == next {
         return Ok(());
     }
+    if current.role() != next.role() {
+        // Leaving a master authority permanently invalidates its credentials.
+        // Rejoining the historical group must never revive remote access.
+        if let ConfigurationRole::Master(authority) = current.role() {
+            sqlx::query("UPDATE configuration_read_grants SET revoked = 1 WHERE group_id = ? AND revoked = 0")
+                .bind(authority.group_id().as_str())
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| Error::Unavailable)?;
+        }
+    }
     let role = match next.role() {
         ConfigurationRole::Unassigned => "unassigned",
         ConfigurationRole::Master(_) => "master",

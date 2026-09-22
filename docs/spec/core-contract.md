@@ -1434,3 +1434,13 @@ in one transaction, with aggregate metadata/file preflight budgets and a bounded
 and integrity/storage failures 503. Successful content is marked `no-store`, and
 the Rust client independently caps both success and error body buffering. Reading
 does not materialize files, authorize remote enrollment, or activate consumers.
+
+The internal `ConfigurationAccessStore` now registers and permanently revokes
+follower-specific read credentials under current-master state preconditions.
+Migration 38 persists only domain-separated credential digests and immutable
+bindings/tombstones. Leaving a master role revokes its grants atomically.
+Authorized follower snapshot acquisition checks the current authority and grant
+in the same transaction as bounded content validation, without issuing a reusable
+authorization proof. No protocol change or remote listener is enabled by this
+storage boundary; authenticated encrypted enrollment, master identity pinning and
+private credential delivery remain required.

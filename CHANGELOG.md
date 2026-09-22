@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Add the internal follower read-credential boundary with permanent revocation, automatic invalidation on master role changes, and atomic authorized snapshot reads. Remote enrollment remains disabled.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Import and review complete configuration bundles in Settings before publication, retain uncertain retries, and export stored bundles to a new file without overwriting existing data.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

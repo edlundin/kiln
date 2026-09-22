@@ -214,45 +214,53 @@ impl ConfigurationSnapshotStore for SqliteStore {
         &self,
         limits: ConfigurationSnapshotReadLimits,
     ) -> Result<Option<StoredConfigurationSnapshot>, Error> {
-        if limits.max_total_metadata_bytes == 0 {
-            return Err(Error::InvalidLimits);
-        }
-        limits
-            .configuration
-            .validate()
-            .map_err(|_| Error::InvalidLimits)?;
-        limits.skill.validate().map_err(|_| Error::InvalidLimits)?;
         let mut connection = self.connection.lock().await;
         let mut transaction = connection.begin().await.map_err(|_| Error::Unavailable)?;
         let state = configuration_sync::load(&mut transaction)
             .await
             .map_err(Error::State)?
             .ok_or(Error::State(ConfigurationStateError::Uninitialized))?;
-        let Some(authority) = state.role().authority() else {
-            transaction.commit().await.map_err(|_| Error::Unavailable)?;
-            return Ok(None);
-        };
-        let Some(revision) = load_revision(&mut transaction, authority).await? else {
-            transaction.commit().await.map_err(|_| Error::Unavailable)?;
-            return Ok(None);
-        };
-        if let ConfigurationRole::Follower(authority) = state.role() {
-            ConfigurationFollowerCursor::from_persisted(
-                state.instance_id().clone(),
-                authority.clone(),
-                Some(revision.clone()),
-                state.observed().cloned(),
-            )
-            .map_err(|_| Error::IntegrityViolation)?;
-        }
-        let snapshot = read_snapshot(&mut transaction, &revision, limits).await?;
+        let snapshot = read_current_snapshot(&mut transaction, state, limits).await?;
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
-        Ok(Some(StoredConfigurationSnapshot {
-            state,
-            revision,
-            snapshot,
-        }))
+        Ok(snapshot)
     }
+}
+
+/// Caller holds one transaction across authorization, state and content reads.
+pub(super) async fn read_current_snapshot(
+    connection: &mut SqliteConnection,
+    state: kiln_core::ConfigurationInstanceState,
+    limits: ConfigurationSnapshotReadLimits,
+) -> Result<Option<StoredConfigurationSnapshot>, Error> {
+    if limits.max_total_metadata_bytes == 0 {
+        return Err(Error::InvalidLimits);
+    }
+    limits
+        .configuration
+        .validate()
+        .map_err(|_| Error::InvalidLimits)?;
+    limits.skill.validate().map_err(|_| Error::InvalidLimits)?;
+    let Some(authority) = state.role().authority() else {
+        return Ok(None);
+    };
+    let Some(revision) = load_revision(connection, authority).await? else {
+        return Ok(None);
+    };
+    if let ConfigurationRole::Follower(authority) = state.role() {
+        ConfigurationFollowerCursor::from_persisted(
+            state.instance_id().clone(),
+            authority.clone(),
+            Some(revision.clone()),
+            state.observed().cloned(),
+        )
+        .map_err(|_| Error::IntegrityViolation)?;
+    }
+    let snapshot = read_snapshot(connection, &revision, limits).await?;
+    Ok(Some(StoredConfigurationSnapshot {
+        state,
+        revision,
+        snapshot,
+    }))
 }
 
 async fn publish(

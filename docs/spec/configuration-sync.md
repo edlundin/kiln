@@ -4,7 +4,8 @@ EDL-322 requires one explicitly designated master Kiln instance to supply shared
 settings, global MCP configuration, and global skills to followers, including
 remote hosts. Durable authority/snapshot storage, status, initial local master
 designation, explicit local snapshot publication, and bounded snapshot export are
-implemented. Remote enrollment, synchronization transport, and
+implemented. Internal follower read-credential registration, revocation and
+authorized snapshot acquisition are also implemented. Remote enrollment, synchronization transport, and
 runtime activation remain incomplete.
 
 ## Authority and enrollment
@@ -119,9 +120,49 @@ rejoining restores its highest observed revision. Integer storage uses SQLite's
 signed 64-bit positive range and rejects exhaustion/overflow.
 
 Migration 35 adds coherent snapshot payloads and active revisions as described
-below. Enrollment credentials and remote endpoint associations remain absent.
+below. Migration 38 adds master-side credential digests and permanent revocation
+records. Follower credential delivery/storage and remote endpoint associations remain absent.
 The local API exposes status and initial master designation, described below.
 Remote enrollment and consumers remain subsequent work.
+
+## Internal follower read credentials
+
+`ConfigurationReadCredential` generates a fresh `kcfg1_` bearer followed by 80
+lowercase hexadecimal characters using the existing CSPRNG construction (320
+random bits). It never reads or derives from the local API bearer. Parsing accepts
+only that exact format; local API tokens and digest strings are not accepted.
+The type deliberately has no Debug, Clone or serialization implementation.
+Its SHA-256 digest covers the complete prefixed credential and is the only
+credential representation stored in SQLite. Raw material must remain confined to
+private enrollment delivery/storage and sensitive transport headers.
+
+`ConfigurationAccessStore` is an internal boundary, with no protocol routes or
+network listener. Local administrative authorization must precede registration
+and revocation. Registration binds one digest permanently to the master/group,
+follower instance and original master state version. It rejects self-enrollment,
+non-master roles, stale state and changed reuse of a digest. Exact retries return
+the existing record, including its current revoked flag, without reactivation.
+Registration does not advance the configuration state version or publish content.
+
+Revocation is permanent and repeatable under the matching current master state.
+Leaving a master role revokes all of that group's active credentials in the role
+change transaction; rejoining cannot revive them. Publication and unchanged-role
+operations retain credentials. Replacement requires fresh random material and
+explicit registration. Tombstones are retained; there is no automatic expiry or
+garbage collection yet.
+
+`read_configuration_for_follower` verifies the current master/group, follower and
+unrevoked digest, then acquires the bounded, fully validated snapshot in the same
+read transaction. Unknown, revoked and mismatched bindings receive the same denied
+category, including when no snapshot exists. Revocation prevents later reads;
+already-acquired content cannot be recalled. The result grants no general local
+API, publication, credential-vault or execution access. The eventual transport
+must parse and hash a presented bearer itself, never accept a client-supplied
+digest as proof. No reusable authorization decision is returned.
+
+This is not completed enrollment. Master identity pinning, encrypted authenticated
+transport, explicit approval/delivery, follower secret storage, administration UI,
+audit/recovery and reconnect remain to be wired before remote access is enabled.
 
 ## Initial local master designation
 

@@ -6,6 +6,7 @@ use ulid::Ulid;
 
 mod assistant_message;
 mod child_activity;
+mod configuration_access;
 mod configuration_snapshot;
 mod configuration_sync;
 mod model_continuation;
@@ -30,6 +31,7 @@ mod usage_store;
 mod workspace_file_read;
 pub use assistant_message::*;
 pub use child_activity::*;
+pub use configuration_access::*;
 pub use configuration_snapshot::*;
 pub use configuration_sync::*;
 pub use model_continuation::*;

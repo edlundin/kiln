@@ -1444,3 +1444,11 @@ in the same transaction as bounded content validation, without issuing a reusabl
 authorization proof. No protocol change or remote listener is enabled by this
 storage boundary; authenticated encrypted enrollment, master identity pinning and
 private credential delivery remain required.
+
+`configuration_follower_router` is a separate, currently unmounted server router
+for restricted snapshot GETs. It requires exact Host and singular bearer/identity
+headers, excludes browser/WebSocket/query inputs and uses the transactional
+follower access store. It shares the bounded local snapshot encoder but exposes
+no administrative operations. Responses are no-store and failures are content-free.
+The owning daemon must still supply authenticated HTTPS, explicit enrollment,
+credential-adapter composition, resource limits and shutdown handling before serving it.

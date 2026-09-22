@@ -1,5 +1,10 @@
 //! HTTP and WebSocket transport for the current Kiln protocol slice.
 
+mod configuration_follower;
+pub use configuration_follower::{
+    InvalidConfigurationFollowerHost, configuration_follower_router,
+};
+
 mod configuration_publication;
 mod configuration_sync;
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};

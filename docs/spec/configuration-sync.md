@@ -168,9 +168,9 @@ audit/recovery and reconnect remain to be wired before remote access is enabled.
 
 The Rust `ConfigurationSyncClient` is the restricted outgoing transport component.
 It is not wired into daemon synchronization and does not enable a remote listener.
-Local protocol `0.29.0` remains unchanged. A future isolated HTTPS read listener
-must serve `GET /v1/configuration-sync/snapshot` with the existing snapshot response
-and check `kiln-configuration-master`, `kiln-configuration-group` and
+Local protocol `0.29.0` remains unchanged. The isolated follower router described
+below serves `GET /v1/configuration-sync/snapshot` with the existing snapshot response
+and checks `kiln-configuration-master`, `kiln-configuration-group` and
 `kiln-configuration-follower` headers against the presented read credential. These
 headers carry claimed IDs, never authentication proof. The existing local API
 does not recognize them as authorization and rejects the distinct sync bearer.
@@ -203,6 +203,41 @@ output is still a candidate: the receiving service must fully validate canonical
 content, all hashes/paths/schema and monotonic revisions, fence concurrent
 enrollment changes, and atomically apply the snapshot. No currentness claim or
 runtime activation follows merely from constructing the client or fetching data.
+
+## Isolated follower read service
+
+`kiln-server::configuration_follower_router` builds a separate router with only
+the snapshot GET. The daemon does not mount or serve it yet. It must never be
+merged into the local administrative router. Its owner must supply authenticated
+HTTPS for the enrolled master certificate, connection/request resource limits
+and shutdown handling before exposing it. The router itself binds no socket and
+does not provision certificates, create grants or perform enrollment.
+
+Construction takes the access store, an explicit expected HTTP Host authority,
+and the trusted adapter's strict credential parser/one-way digest function.
+Composition must use `ConfigurationReadCredential` parsing and hashing; raw
+credential storage, digest-as-bearer acceptance and derivation from local API
+authentication are forbidden. The server excludes the local bearer and digest
+formats before invoking the adapter.
+
+Only GET is accepted, including explicit rejection of Axum's automatic HEAD
+fallback. Host must occur exactly once and match the configured authority.
+Requests containing Origin or WebSocket protocol headers are rejected. Query
+strings are rejected. Authorization and each claimed identity header must occur
+exactly once. IDs use the canonical domain parsers, and self-enrollment is rejected.
+The claimed IDs and credential digest go to `read_configuration_for_follower`,
+which checks current authority and the grant in the snapshot read transaction.
+
+Unknown, revoked and mismatched grants yield content-free HTTP 401 with a Bearer
+challenge. Missing content yields 404 only after authorization. Transfer budget
+failures yield 413; storage/integrity failures yield 503. The router shares local
+export's full bounded JSON encoder and validator limits. Every response, including
+fallbacks/errors, has `Cache-Control: no-store`. Other paths have no registered
+operations, and no general API, publication, vault or execution access is available.
+
+Router compilation is not remote-delivery acceptance. TLS serving, concrete
+credential-adapter composition, explicit enrollment and audit/recovery remain
+unwired, and no remote HTTP interaction has been verified.
 
 ## Initial local master designation
 

@@ -126,6 +126,12 @@ where
             _ => PublicError::ConfigurationSyncUnavailable,
         })?
         .ok_or(PublicError::ConfigurationSnapshotNotFound)?;
+    encode_snapshot(stored)
+}
+
+pub(super) fn encode_snapshot(
+    stored: StoredConfigurationSnapshot,
+) -> Result<impl IntoResponse, PublicError> {
     let response = ConfigurationSnapshotResponse {
         instance_id: stored.state.instance_id().as_str().to_owned(),
         group_id: stored.revision.authority().group_id().as_str().to_owned(),
@@ -205,7 +211,7 @@ impl std::io::Write for BoundedJson {
     }
 }
 
-fn bundle_limits() -> ConfigurationSnapshotReadLimits {
+pub(super) fn bundle_limits() -> ConfigurationSnapshotReadLimits {
     // Reuse the existing Axum 2 MiB JSON ceiling. Imports cap the serialized body;
     // exports preflight aggregate stored metadata/data and cap encoded output.
     // These are transfer budgets, not recommended catalog sizes or memory bounds.

@@ -1426,3 +1426,11 @@ republishing; changed key reuse or stale authority/state conflict. Publication
 does not distribute or activate content. Enrollment, role replacement and follower
 application are not public commands yet. See the
 [configuration synchronization contract](configuration-sync.md).
+
+Protocol `0.29.0` adds authenticated `GET /v1/configuration-sync/snapshot`. It reads
+and verifies the active group's full stored bundle and authority/revision metadata
+in one transaction, with aggregate metadata/file preflight budgets and a bounded
+2 MiB encoded response. Missing snapshots return 404, transfer-budget failures 413,
+and integrity/storage failures 503. Successful content is marked `no-store`, and
+the Rust client independently caps both success and error body buffering. Reading
+does not materialize files, authorize remote enrollment, or activate consumers.

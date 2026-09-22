@@ -86,6 +86,8 @@ pub enum Error {
     UnexpectedWebSocketMessage { kind: &'static str },
     #[error("artifact preview limit must be greater than zero")]
     InvalidArtifactPreviewLimit,
+    #[error("configuration snapshot response exceeds the transfer budget")]
+    ConfigurationSnapshotTooLarge,
 }
 
 /// A downloaded immutable artifact and its public response metadata.
@@ -241,6 +243,49 @@ impl Client {
                 .get(self.http_url(kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH)),
         )
         .await
+    }
+
+    /// Export the verified stored bundle. Both success and error bodies are
+    /// bounded while streaming; an oversized response is never truncated into JSON.
+    pub async fn get_configuration_snapshot(
+        &self,
+    ) -> Result<kiln_protocol::ConfigurationSnapshotResponse, Error> {
+        let operation = kiln_protocol::GET_CONFIGURATION_SNAPSHOT_OPERATION_ID;
+        let cap = kiln_protocol::CONFIGURATION_PUBLICATION_MAX_BYTES;
+        let response = self
+            .http
+            .get(self.http_url(kiln_protocol::CONFIGURATION_SNAPSHOT_PATH))
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport { operation, source })?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|bytes| bytes > cap as u64)
+        {
+            return Err(Error::ConfigurationSnapshotTooLarge);
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|source| Error::HttpTransport { operation, source })?;
+            if chunk.len() > cap.saturating_sub(bytes.len()) {
+                return Err(Error::ConfigurationSnapshotTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return match serde_json::from_slice(&bytes) {
+                Ok(problem) => Err(Error::Api {
+                    status: status.as_u16(),
+                    problem,
+                }),
+                Err(_) => Err(Error::UnexpectedResponse {
+                    status: status.as_u16(),
+                }),
+            };
+        }
+        serde_json::from_slice(&bytes).map_err(|source| Error::Decode { operation, source })
     }
 
     /// Publish a complete explicitly prepared bundle. Exact retries return the

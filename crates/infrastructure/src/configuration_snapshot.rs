@@ -214,6 +214,9 @@ impl ConfigurationSnapshotStore for SqliteStore {
         &self,
         limits: ConfigurationSnapshotReadLimits,
     ) -> Result<Option<StoredConfigurationSnapshot>, Error> {
+        if limits.max_total_metadata_bytes == 0 {
+            return Err(Error::InvalidLimits);
+        }
         limits
             .configuration
             .validate()
@@ -398,10 +401,10 @@ async fn read_snapshot(
     if revision.schema_version() != SHARED_CONFIGURATION_SCHEMA_VERSION {
         return Err(Error::InvalidSnapshot);
     }
-    let metadata_bytes: i64 = sqlx::query_scalar("SELECT length(CAST(metadata_json AS BLOB)) FROM configuration_snapshots WHERE group_id = ?")
+    let mut metadata_bytes: i64 = sqlx::query_scalar("SELECT length(CAST(metadata_json AS BLOB)) FROM configuration_snapshots WHERE group_id = ?")
         .bind(group).fetch_one(&mut *connection).await.map_err(|_| Error::Unavailable)?;
     bounded(metadata_bytes, limits.configuration.max_metadata_bytes)?;
-    let counts = sqlx::query("SELECT count(*) AS files, coalesce(sum(length(CAST(content AS BLOB))), 0) AS bytes, coalesce(max(length(CAST(content AS BLOB))), 0) AS max_file, coalesce(max(length(CAST(path AS BLOB))), 0) AS max_path FROM configuration_skill_files WHERE group_id = ?")
+    let counts = sqlx::query("SELECT count(*) AS files, coalesce(sum(length(CAST(content AS BLOB))), 0) AS bytes, coalesce(max(length(CAST(content AS BLOB))), 0) AS max_file, coalesce(max(length(CAST(path AS BLOB))), 0) AS max_path, coalesce(sum(length(CAST(path AS BLOB)) + length(CAST(content_hash AS BLOB))), 0) AS metadata_bytes FROM configuration_skill_files WHERE group_id = ?")
         .bind(group).fetch_one(&mut *connection).await.map_err(|_| Error::Unavailable)?;
     for (field, limit) in [
         ("files", limits.configuration.max_total_skill_files),
@@ -416,14 +419,22 @@ async fn read_snapshot(
             limit,
         )?;
     }
+    metadata_bytes = metadata_bytes
+        .checked_add(
+            counts
+                .try_get("metadata_bytes")
+                .map_err(|_| Error::IntegrityViolation)?,
+        )
+        .ok_or(Error::LimitExceeded)?;
+    bounded(metadata_bytes, limits.max_total_metadata_bytes)?;
     let dependency_bytes = limits
         .skill
         .max_identifier_bytes
-        .checked_add(3)
-        .and_then(|value| value.checked_mul(limits.skill.max_dependencies))
-        .and_then(|value| value.checked_add(2))
-        .ok_or(Error::LimitExceeded)?;
-    let counts = sqlx::query("SELECT count(*) AS packages, coalesce(max(length(CAST(skill_id AS BLOB))), 0) AS max_id, coalesce(max(length(CAST(version AS BLOB))), 0) AS max_version, coalesce(max(length(CAST(dependencies_json AS BLOB))), 0) AS max_dependencies FROM configuration_skill_packages WHERE group_id = ?")
+        .saturating_add(3)
+        .saturating_mul(limits.skill.max_dependencies)
+        .saturating_add(2)
+        .min(limits.max_total_metadata_bytes);
+    let counts = sqlx::query("SELECT count(*) AS packages, coalesce(max(length(CAST(skill_id AS BLOB))), 0) AS max_id, coalesce(max(length(CAST(version AS BLOB))), 0) AS max_version, coalesce(max(length(CAST(dependencies_json AS BLOB))), 0) AS max_dependencies, coalesce(sum(length(CAST(skill_id AS BLOB)) + length(CAST(version AS BLOB)) + length(CAST(dependencies_json AS BLOB)) + length(CAST(content_hash AS BLOB))), 0) AS metadata_bytes FROM configuration_skill_packages WHERE group_id = ?")
         .bind(group).fetch_one(&mut *connection).await.map_err(|_| Error::Unavailable)?;
     for (field, limit) in [
         ("packages", limits.configuration.max_skills),
@@ -444,6 +455,14 @@ async fn read_snapshot(
             limit,
         )?;
     }
+    metadata_bytes = metadata_bytes
+        .checked_add(
+            counts
+                .try_get("metadata_bytes")
+                .map_err(|_| Error::IntegrityViolation)?,
+        )
+        .ok_or(Error::LimitExceeded)?;
+    bounded(metadata_bytes, limits.max_total_metadata_bytes)?;
     let rows = sqlx::query("SELECT skill_id, version, enabled, dependencies_json, content_hash FROM configuration_skill_packages WHERE group_id = ? ORDER BY skill_id")
         .bind(group).fetch_all(&mut *connection).await.map_err(|_| Error::Unavailable)?;
     let mut skills = Vec::with_capacity(rows.len());

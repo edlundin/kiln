@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.28.0";
+pub const PROTOCOL_VERSION: &str = "0.29.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -23,6 +23,8 @@ pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
 pub const CONFIGURATION_MASTER_PATH: &str = "/v1/configuration-sync/master";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
+pub const CONFIGURATION_SNAPSHOT_PATH: &str = "/v1/configuration-sync/snapshot";
+pub const GET_CONFIGURATION_SNAPSHOT_OPERATION_ID: &str = "get_configuration_snapshot";
 pub const PUBLISH_CONFIGURATION_OPERATION_ID: &str = "publish_configuration_snapshot";
 /// Keep explicit snapshot imports within the existing Axum JSON request ceiling.
 /// This bounds the whole serialized request, including metadata and byte arrays.
@@ -173,6 +175,8 @@ pub mod error_code {
     pub const CONFIGURATION_SYNC_UNAVAILABLE: &str = "configuration_sync_unavailable";
     pub const CONFIGURATION_SYNC_INVALID_REQUEST: &str = "configuration_sync_invalid_request";
     pub const CONFIGURATION_SYNC_CONFLICT: &str = "configuration_sync_conflict";
+    pub const CONFIGURATION_SNAPSHOT_NOT_FOUND: &str = "configuration_snapshot_not_found";
+    pub const CONFIGURATION_SNAPSHOT_TOO_LARGE: &str = "configuration_snapshot_too_large";
     pub const PROVIDER_ACCOUNT_STORE_UNAVAILABLE: &str = "provider_account_store_unavailable";
     pub const PROVIDER_ACCOUNT_INVALID_STATE: &str = "provider_account_invalid_state";
     pub const PROVIDER_ACCOUNT_LOGIN_NOT_FOUND: &str = "provider_account_login_not_found";
@@ -256,6 +260,8 @@ pub mod error_code {
         CONFIGURATION_SYNC_UNAVAILABLE,
         CONFIGURATION_SYNC_INVALID_REQUEST,
         CONFIGURATION_SYNC_CONFLICT,
+        CONFIGURATION_SNAPSHOT_NOT_FOUND,
+        CONFIGURATION_SNAPSHOT_TOO_LARGE,
         PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
         PROVIDER_ACCOUNT_INVALID_STATE,
         PROVIDER_ACCOUNT_LOGIN_NOT_FOUND,
@@ -438,6 +444,18 @@ pub struct ConfigurationPublicationResponse {
     pub group_id: String,
     pub state_version: u64,
     pub revision: ConfigurationRevisionResponse,
+}
+
+/// Verified stored content read with its authority/revision in one transaction.
+/// Reading does not activate it or attest to remote connectivity.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationSnapshotResponse {
+    pub instance_id: String,
+    pub group_id: String,
+    pub master_instance_id: String,
+    pub state_version: u64,
+    pub revision: ConfigurationRevisionResponse,
+    pub snapshot: SharedConfigurationBundle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

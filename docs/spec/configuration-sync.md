@@ -3,7 +3,8 @@
 EDL-322 requires one explicitly designated master Kiln instance to supply shared
 settings, global MCP configuration, and global skills to followers, including
 remote hosts. Durable authority/snapshot storage, status, initial local master
-designation, and explicit local snapshot publication are implemented. Remote enrollment, synchronization transport, and
+designation, explicit local snapshot publication, and bounded snapshot export are
+implemented. Remote enrollment, synchronization transport, and
 runtime activation remain incomplete.
 
 ## Authority and enrollment
@@ -207,6 +208,35 @@ stored revision. Publication does not establish remote currentness or activate
 configuration consumers. Desktop bundle import, authenticated remote distribution,
 and runtime activation remain incomplete.
 
+## Verified local snapshot export
+
+Protocol `0.29.0` adds authenticated `GET /v1/configuration-sync/snapshot` and the
+Rust client's `get_configuration_snapshot`. It reads the active group's complete
+stored bundle and its instance, group, master, state version, and revision metadata
+in one transaction. The existing reader revalidates canonical metadata, package
+and file hashes, portable paths and dependency consistency before returning data.
+No active group or no stored snapshot returns `404 configuration_snapshot_not_found`.
+Corrupt/unavailable content returns `503 configuration_sync_unavailable`.
+
+Before fetching metadata/payload rows, the reader bounds combined canonical,
+package, dependency, path and hash metadata at 2 MiB and total file bytes at 2 MiB,
+in addition to individual and count budgets. A bounded serializer then caps the
+complete encoded JSON response at 2 MiB, including byte-array expansion and the
+response envelope. Exceeding a read or encoded-output budget returns
+`413 configuration_snapshot_too_large`; no partial JSON or file content is sent.
+Import and export envelopes differ, so publication acceptance does not guarantee
+that a bundle at the size ceiling is exportable in this format. These budgets
+bound data, not total process memory.
+
+Successful responses use `Cache-Control: no-store`. The Rust client bounds both
+success and error response bodies while streaming, rejects an oversized declared
+or observed body with `ConfigurationSnapshotTooLarge`, and parses only complete
+JSON. It returns the original explicit file bytes and hashes; it does not write
+files, install packages, alter host bindings, or activate runtime consumers.
+Use the response's `snapshot` to prepare a later complete publication, after
+checking the current local master and preconditions. Exported identity/hash fields
+are metadata, not follower enrollment or remote peer authentication proof.
+
 ## Portable skill package validation
 
 The initial core package validator accepts explicitly supplied regular-file bytes
@@ -306,6 +336,7 @@ authorized caller; they do not enroll or authenticate peers.
 
 Reads select the current group's state and snapshot in one transaction. They
 check metadata size, package/file counts and byte lengths before loading payloads,
+including an explicit aggregate metadata budget before fetching package/file rows,
 then revalidate file hashes, package hashes/paths/dependencies, canonical metadata,
 snapshot hash and revision binding. Lower caller budgets fail explicitly. This is
 a data budget, not a process-memory bound. Returned snapshots own their verified

@@ -185,3 +185,21 @@ the resulting state version, not current content or an activation result. Reload
 reuse is `idempotency_conflict`; stale state/wrong master is
 `configuration_sync_conflict`. Publication stores the complete snapshot locally;
 remote distribution and runtime consumers are not yet wired.
+
+## Configuration snapshot export
+
+Protocol `0.29.0` adds `get_configuration_snapshot()`. It returns a
+`ConfigurationSnapshotResponse` containing the fully verified stored `snapshot`
+bundle together with instance/group/master IDs, state version and revision.
+`configuration_snapshot_not_found` means the active group has no snapshot.
+`configuration_snapshot_too_large` means the daemon cannot export it within the
+local data/encoded-response budgets; storage or integrity failure is
+`configuration_sync_unavailable`.
+
+The client caps declared and streamed success/error bodies at 2 MiB and rejects
+oversized responses as `ConfigurationSnapshotTooLarge` before parsing. It never
+returns truncated JSON. Read/export does not save files or activate content.
+For a later publication, deliberately prepare the full replacement from the
+returned bundle and confirm the current master/state. Export metadata does not
+authenticate a remote peer or enroll a follower. See the
+[export contract](../spec/configuration-sync.md#verified-local-snapshot-export).

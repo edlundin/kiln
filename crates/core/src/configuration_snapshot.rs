@@ -9,6 +9,9 @@ use std::future::Future;
 pub struct ConfigurationSnapshotReadLimits {
     pub configuration: SharedConfigurationLimits,
     pub skill: SharedSkillLimits,
+    /// Combined canonical, package, dependency, file-path and hash metadata bytes.
+    /// Payload bytes remain bounded by configuration.max_total_skill_bytes.
+    pub max_total_metadata_bytes: usize,
 }
 
 /// Durable metadata only; this does not attest to transport connectivity or

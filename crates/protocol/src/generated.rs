@@ -1,6 +1,7 @@
 use crate::{
     CONFIGURATION_PUBLICATION_MAX_BYTES, CONFIGURATION_PUBLICATIONS_PATH,
-    ConfigurationPublicationResponse, PUBLISH_CONFIGURATION_OPERATION_ID,
+    CONFIGURATION_SNAPSHOT_PATH, ConfigurationPublicationResponse, ConfigurationSnapshotResponse,
+    GET_CONFIGURATION_SNAPSHOT_OPERATION_ID, PUBLISH_CONFIGURATION_OPERATION_ID,
     PublishConfigurationSnapshotRequest, SharedConfigurationBundle, SharedSkillFileBundle,
     SharedSkillPackageBundle,
 };
@@ -239,6 +240,10 @@ fn schema() -> String {
     let mut defs = serde_json::Map::new();
     for (name, value) in [
         (
+            "ConfigurationSnapshotResponse",
+            schema_for!(ConfigurationSnapshotResponse),
+        ),
+        (
             "PublishConfigurationSnapshotRequest",
             schema_for!(PublishConfigurationSnapshotRequest),
         ),
@@ -451,6 +456,7 @@ fn schema() -> String {
 fn typescript() -> String {
     let config = Config::default();
     [
+        ConfigurationSnapshotResponse::decl(&config),
         PublishConfigurationSnapshotRequest::decl(&config),
         SharedConfigurationBundle::decl(&config),
         SharedSkillPackageBundle::decl(&config),
@@ -576,6 +582,10 @@ fn catalogue() -> String {
             "method": "POST",
             "path": CONFIGURATION_PUBLICATIONS_PATH,
             "operation": PUBLISH_CONFIGURATION_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": CONFIGURATION_SNAPSHOT_PATH,
+            "operation": GET_CONFIGURATION_SNAPSHOT_OPERATION_ID
         }, {
             "method": "GET",
             "path": WORKSPACE_PATH,
@@ -1281,6 +1291,23 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
         '500':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_SNAPSHOT_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_SNAPSHOT_OPERATION_ID}
+      description: Verified active-group bundle and revision from one storage transaction. Encoded response is limited to {CONFIGURATION_PUBLICATION_MAX_BYTES} bytes and is not cached. Reading does not activate or synchronize content.
+      responses:
+        '200':
+          description: Complete verified stored configuration bundle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationSnapshotResponse'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '503':
           $ref: '#/components/responses/Problem'
   {CONFIGURATION_PUBLICATIONS_PATH}:
     post:
@@ -2229,6 +2256,10 @@ components:
         (
             "WorkspaceRootResponse",
             openapi_schema::<WorkspaceRootResponse>(),
+        ),
+        (
+            "ConfigurationSnapshotResponse",
+            openapi_schema::<ConfigurationSnapshotResponse>(),
         ),
         (
             "PublishConfigurationSnapshotRequest",

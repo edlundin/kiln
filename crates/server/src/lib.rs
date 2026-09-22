@@ -800,7 +800,7 @@ impl<W, S, R> AppState<W, S, R> {
     }
 
     pub fn with_configuration_publication_store<
-        T: kiln_core::ConfigurationPublicationStore + 'static,
+        T: kiln_core::ConfigurationPublicationStore + kiln_core::ConfigurationSnapshotStore + 'static,
     >(
         mut self,
         store: T,
@@ -846,6 +846,10 @@ where
             post(configuration_publication::publish).layer(axum::extract::DefaultBodyLimit::max(
                 kiln_protocol::CONFIGURATION_PUBLICATION_MAX_BYTES,
             )),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_SNAPSHOT_PATH,
+            get(configuration_publication::get_snapshot),
         )
         .route(NEGOTIATE_PATH, post(negotiate))
         .route(WORKSPACES_PATH, get(list_workspaces).post(create_workspace))
@@ -2976,6 +2980,10 @@ enum PublicError {
     ConfigurationMaster(kiln_core::ConfigurationMasterError),
     #[error("configuration publication failed")]
     ConfigurationPublication(kiln_core::ConfigurationSnapshotError),
+    #[error("no snapshot is stored for the active configuration group")]
+    ConfigurationSnapshotNotFound,
+    #[error("stored configuration exceeds the local transfer budget")]
+    ConfigurationSnapshotTooLarge,
     #[error("daemon is shutting down")]
     DaemonShuttingDown,
 }
@@ -3126,6 +3134,16 @@ impl PublicError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 error_code::CONFIGURATION_SYNC_UNAVAILABLE,
                 "Configuration synchronization unavailable",
+            ),
+            Self::ConfigurationSnapshotNotFound => (
+                StatusCode::NOT_FOUND,
+                error_code::CONFIGURATION_SNAPSHOT_NOT_FOUND,
+                "Configuration snapshot not found",
+            ),
+            Self::ConfigurationSnapshotTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                error_code::CONFIGURATION_SNAPSHOT_TOO_LARGE,
+                "Configuration snapshot exceeds transfer budget",
             ),
             Self::ConfigurationPublication(error) => match error {
                 kiln_core::ConfigurationSnapshotError::InvalidSnapshot

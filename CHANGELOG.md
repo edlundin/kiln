@@ -2,6 +2,14 @@
 
 ## 2026-09-22 — `feat`
 
+- Import and review complete configuration bundles in Settings before publication, retain uncertain retries, and export stored bundles to a new file without overwriting existing data.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-22 — `feat`
+
 - Export verified stored configuration bundles through the local API and Rust client, with aggregate metadata and encoded-response limits and no partial content.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

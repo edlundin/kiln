@@ -95,11 +95,36 @@ designation** reuses the original request and cannot create another group.
 The view reloads current status after success. An existing master or follower
 cannot be reassigned through this control.
 
-Designation records the role only. The Rust client can now
-[publish an explicitly prepared snapshot](rust-client.md#configuration-snapshot-publication);
-**Refresh status** shows its stored revision. Desktop bundle import, follower
-enrollment, and distribution of shared settings, global MCP servers, and skills
-remain unavailable. Provider credentials remain local to each instance.
+Designation records the role only. On a master, **Import bundle…** opens a single
+explicit JSON bundle file. Settings previews the model-default presence and
+MCP/skill/file counts, identifies the target instance and group, and requires
+**Publish replacement** before sending it. This replaces all shared categories;
+entries absent from the bundle are removed. **Discard import** cancels locally.
+The daemon performs the full content/hash validation before storage. Importing
+does not inspect local skill directories or extract files from packages.
+
+Import reads at most 2 MiB, rejects symlinks and non-regular files on Unix, and
+checks the serialized publication size including preconditions. Refresh or
+disconnect clears an unsubmitted preview. Unconfirmed submissions retain the exact
+payload/key within the connection view for **Retry publication**; confirmed
+rejection requires a fresh status read and import. Success reports the recorded
+revision, then reloads current status. Replacing the daemon connection discards
+pending UI state and loads durable status, without automatically resubmitting.
+
+**Export stored bundle…** is available when a stored revision exists. Choose a
+new filename; existing files are never overwritten. The client fetches verified
+content under the API's transfer limit and checks that the instance/group/state
+still match the displayed selection before saving. The file contains the portable
+bundle only, suitable for a later explicit import; authority IDs and API receipts
+are not part of the file. Export writes a temporary file in the chosen folder,
+finishes its contents, and persists it without replacing an existing destination.
+A save already started may finish after the view disconnects or closes. On Unix,
+the temporary/exported file is private to the user.
+
+The Rust client also supports [publication](rust-client.md#configuration-snapshot-publication)
+and [export](rust-client.md#configuration-snapshot-export). **Refresh status** shows
+the stored revision. Follower enrollment, remote distribution and runtime
+activation remain unavailable. Provider credentials remain local to each instance.
 
 ## Provider accounts
 

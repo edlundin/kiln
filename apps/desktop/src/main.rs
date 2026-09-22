@@ -1,6 +1,7 @@
 mod accounts;
 mod app;
 mod components;
+mod configuration_bundle;
 mod configuration_sync;
 mod connection;
 mod conversation;

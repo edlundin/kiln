@@ -205,8 +205,9 @@ payloads. Storage/integrity failures return content-free
 The `200` response includes the original instance/group IDs, resulting state
 version, and revision number/schema/content hash. Reload status to see the current
 stored revision. Publication does not establish remote currentness or activate
-configuration consumers. Desktop bundle import, authenticated remote distribution,
-and runtime activation remain incomplete.
+configuration consumers. Desktop Settings supports explicit bundle import with a
+replacement preview/confirmation and exact retries within the connection view.
+Authenticated remote distribution and runtime activation remain incomplete.
 
 ## Verified local snapshot export
 
@@ -236,6 +237,15 @@ files, install packages, alter host bindings, or activate runtime consumers.
 Use the response's `snapshot` to prepare a later complete publication, after
 checking the current local master and preconditions. Exported identity/hash fields
 are metadata, not follower enrollment or remote peer authentication proof.
+
+Desktop **Export stored bundle…** saves only the returned `snapshot` after checking
+that the selected instance/group/state still match. It uses an explicitly chosen
+new destination and never overwrites an existing file. **Import bundle…** reads
+one regular JSON bundle, previews category counts, and freezes the displayed master
+preconditions for confirmation. It does not copy the imported file's origin
+authority or enroll a follower. Full validation stays in the daemon's publication
+boundary; the desktop preview is not an integrity verdict. See the
+[desktop controls](../operations/desktop.md#configuration-synchronization-status).
 
 ## Portable skill package validation
 

@@ -98,8 +98,12 @@ pub enum Error {
     InvalidConfigurationGrantPageLimit,
     #[error("configuration follower enrollment page limit must be between 1 and 100")]
     InvalidConfigurationFollowerEnrollmentPageLimit,
+    #[error("configuration follower enrollment request page limit must be between 1 and 100")]
+    InvalidConfigurationFollowerEnrollmentRequestPageLimit,
     #[error("configuration follower enrollment request has an empty or oversized CA DER value")]
     InvalidConfigurationFollowerEnrollmentRequest,
+    #[error("decision request ID must match its configuration follower enrollment path")]
+    InvalidConfigurationFollowerEnrollmentDecision,
     #[error("configuration snapshot response exceeds the transfer budget")]
     ConfigurationSnapshotTooLarge,
 }
@@ -488,6 +492,121 @@ impl Client {
             });
         }
         Ok(())
+    }
+
+    /// List bounded credential-free master-side request metadata in stable
+    /// request-ID order. Follower IDs and their asserted TLS pin are claims.
+    pub async fn list_configuration_follower_enrollment_requests(
+        &self,
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentRequestListResponse, Error> {
+        if !(1..=kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE)
+            .contains(&limit)
+        {
+            return Err(Error::InvalidConfigurationFollowerEnrollmentRequestPageLimit);
+        }
+        if after.is_some_and(|value| !valid_public_configuration_id(value, "cfr_")) {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment request cursor",
+            });
+        }
+        let mut url = self.http_url(kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH);
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("limit", &limit.to_string());
+            if let Some(after) = after {
+                query.append_pair("after", after);
+            }
+        }
+        self.send_json(
+            kiln_protocol::LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID,
+            self.http.get(url),
+        )
+        .await
+    }
+
+    /// Recover credential-free metadata for one master request by its stable ID.
+    pub async fn get_configuration_follower_enrollment_request(
+        &self,
+        request_id: &str,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentRequestResponse, Error> {
+        if !valid_public_configuration_id(request_id, "cfr_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment request ID",
+            });
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH,
+            "{request_id}",
+            "configuration follower enrollment request ID",
+            request_id,
+        )?;
+        self.send_json(
+            kiln_protocol::GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    /// Approve only after the complete immutable request binding and current
+    /// master state version have been confirmed locally. Exact retries are safe.
+    pub async fn approve_configuration_follower_enrollment_request(
+        &self,
+        request_id: &str,
+        request: &kiln_protocol::ConfigurationFollowerEnrollmentDecisionRequest,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentRequestResponse, Error> {
+        self.decide_configuration_follower_enrollment_request(
+            request_id,
+            request,
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH,
+            kiln_protocol::APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
+        )
+        .await
+    }
+
+    /// Permanently reject only after the complete immutable request binding and
+    /// current master state version have been confirmed locally. Exact retries are safe.
+    pub async fn reject_configuration_follower_enrollment_request(
+        &self,
+        request_id: &str,
+        request: &kiln_protocol::ConfigurationFollowerEnrollmentDecisionRequest,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentRequestResponse, Error> {
+        self.decide_configuration_follower_enrollment_request(
+            request_id,
+            request,
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH,
+            kiln_protocol::REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
+        )
+        .await
+    }
+
+    async fn decide_configuration_follower_enrollment_request(
+        &self,
+        request_id: &str,
+        request: &kiln_protocol::ConfigurationFollowerEnrollmentDecisionRequest,
+        path_template: &str,
+        operation: &'static str,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentRequestResponse, Error> {
+        if !valid_public_configuration_id(request_id, "cfr_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment request ID",
+            });
+        }
+        if request.request_id != request_id {
+            return Err(Error::InvalidConfigurationFollowerEnrollmentDecision);
+        }
+        let path = path_with_segment(
+            path_template,
+            "{request_id}",
+            "configuration follower enrollment request ID",
+            request_id,
+        )?;
+        self.send_json(
+            operation,
+            self.http.post(self.http_url(&path)).json(request),
+        )
+        .await
     }
 
     /// Read the current authority and its managed identity setup metadata.

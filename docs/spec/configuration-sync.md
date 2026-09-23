@@ -7,6 +7,8 @@ designation, explicit local snapshot publication, and bounded snapshot export ar
 implemented. Internal follower read-credential registration, revocation and
 authorized snapshot acquisition are also implemented, along with durable local
 follower-credential reservation and authenticated request preparation/recovery.
+The master also exposes local request review, exact approval and permanent
+rejection for its internal follower-request journal.
 Remote enrollment, synchronization transport and runtime activation remain
 incomplete.
 
@@ -25,10 +27,12 @@ loopback alone does not prove the identity of a forwarded peer. Enrollment must
 pin the master identity and provision a follower-specific, revocable credential
 with read-only shared-configuration access. The existing unrestricted local API
 bearer is not a synchronization credential and must not be copied to followers.
-The local API can now reserve and recover the follower's request inputs, but it
-does not contact or authenticate a master, approve a remote request, change the
-local role, or deliver a credential. Remote enrollment and network listeners
-remain disabled until their separate authentication and approval boundaries exist.
+The follower's local API can reserve and recover its request inputs, but it does
+not contact or authenticate a master, change the local role, or deliver a
+credential. A master's local API can review an already journaled request and
+approve or reject its exact binding; that operation does not authenticate the
+follower. Remote request submission and network listeners remain disabled until
+their separate authentication boundaries exist.
 
 The first release has no automatic failover or master election. A master cannot
 be replaced by accepting a newer snapshot or a numerically larger revision.
@@ -235,9 +239,13 @@ trust and full fingerprint confirmation. Approval checks the current master stat
 and creates the read grant in the same SQLite transaction as the permanent
 decision. Exact approval retries recover that grant's current state, including
 revocation; they never reactivate it. Master role/authority drift fails closed.
-These internal ports are not wired to local HTTP or a remote listener. Master-side
-local review routes and remote request/acknowledgement remain pending. Before
-remote exchange is composed, it must bind incoming requests to the actual
+The local authenticated API now exposes bounded list/get and exact approve/reject
+operations for the master journal. Decisions include every confirmation field
+and the expected current master instance/version; approval creates the read
+grant atomically and returns its current revoked state on retries. The routes do
+not accept a new request, expose the digest/bearer/vault reference, or establish
+remote caller identity. Remote request submission and acknowledgement remain
+pending. Before remote exchange is composed, it must bind incoming requests to the actual
 connection and current managed TLS identity, including certificate rotation;
 the stored server-name/CA-fingerprint claims alone do not establish that binding.
 
@@ -258,11 +266,22 @@ tombstone first, then retries vault deletion on repeated requests.
 The shared strict JSON extractor rejects a request over its 2 MiB body limit with
 HTTP 400 `invalid_json`; it does not return HTTP 413 for this local route.
 
+Master-local `GET /v1/configuration-sync/follower-enrollment-requests` pages
+requests by stable `cfr_` ID, defaulting to 50 and accepting 1–100 rows with one
+lookahead. `GET .../{request_id}` recovers one metadata record. The `POST
+.../{request_id}/approve` and `/reject` routes accept strict confirmation JSON
+bounded to 2 MiB. That body binds the path request ID, follower attempt/ID/version,
+authority, asserted server name and CA fingerprint, received master version, and
+the full confirmation fingerprint; it also fences the current master
+instance/version. Responses expose those claims and the full fingerprint but no
+credential digest, bearer, or vault reference. Follower ID and asserted TLS
+metadata remain unverified claims.
+
 The local preparer does not change the local role or make a network request.
 The master journal does not establish device identity: pinned TLS authenticates
 the master to the follower, not the follower to the master. A locally
 authenticated administrator must review and confirm the exact request before a
-read grant is issued. Master-side local review routes and UI, remote request
+read grant is issued. The local review API exists; UI, remote request
 submission/acknowledgement, follower role transition, active credential
 retrieval, automatic reconnect and listener composition remain unimplemented.
 

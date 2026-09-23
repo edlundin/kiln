@@ -678,8 +678,8 @@ pub struct AppState<W, S, R> {
         Option<Arc<dyn configuration_sync::ConfigurationAdministrationOperations>>,
     configuration_publication_operations:
         Option<Arc<dyn configuration_publication::ConfigurationPublicationOperations>>,
-    configuration_read_grant_operations:
-        Option<Arc<dyn configuration_access::ConfigurationReadGrantOperations>>,
+    configuration_access_operations:
+        Option<Arc<dyn configuration_access::ConfigurationAccessOperations>>,
     configuration_follower_enrollment_operations:
         Option<Arc<dyn configuration_enrollment::ConfigurationFollowerEnrollmentOperations>>,
     event_broadcaster: EventBroadcaster,
@@ -719,8 +719,8 @@ impl<W, S, R> Clone for AppState<W, S, R> {
                 .configuration_publication_operations
                 .as_ref()
                 .map(Arc::clone),
-            configuration_read_grant_operations: self
-                .configuration_read_grant_operations
+            configuration_access_operations: self
+                .configuration_access_operations
                 .as_ref()
                 .map(Arc::clone),
             configuration_follower_enrollment_operations: self
@@ -785,7 +785,7 @@ impl<W, S, R> AppState<W, S, R> {
             configuration_identity_command_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
-            configuration_read_grant_operations: None,
+            configuration_access_operations: None,
             configuration_follower_enrollment_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
@@ -823,7 +823,7 @@ impl<W, S, R> AppState<W, S, R> {
             configuration_identity_command_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
-            configuration_read_grant_operations: None,
+            configuration_access_operations: None,
             configuration_follower_enrollment_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
@@ -846,8 +846,8 @@ impl<W, S, R> AppState<W, S, R> {
         mut self,
         store: T,
     ) -> Self {
-        self.configuration_read_grant_operations = Some(Arc::new(
-            configuration_access::ConfigurationReadGrantAdapter(store),
+        self.configuration_access_operations = Some(Arc::new(
+            configuration_access::ConfigurationAccessAdapter(store),
         ));
         self
     }
@@ -973,6 +973,30 @@ where
         .route(
             kiln_protocol::CONFIGURATION_READ_GRANT_REVOKE_PATH,
             post(configuration_access::revoke),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
+            get(configuration_access::list_enrollment_requests),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH,
+            get(configuration_access::get_enrollment_request),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH,
+            post(configuration_access::approve_enrollment_request).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES,
+                ),
+            ),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH,
+            post(configuration_access::reject_enrollment_request).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES,
+                ),
+            ),
         )
         .route(
             kiln_protocol::CONFIGURATION_MASTER_PATH,
@@ -3117,6 +3141,10 @@ enum PublicError {
     ConfigurationReadGrantNotFound,
     #[error("configuration read grant operation failed")]
     ConfigurationReadGrant(kiln_core::ConfigurationAccessError),
+    #[error("configuration follower enrollment request was not found")]
+    ConfigurationFollowerEnrollmentRequestNotFound,
+    #[error("configuration follower enrollment request operation failed")]
+    ConfigurationFollowerEnrollmentRequest(kiln_core::ConfigurationAccessError),
     #[error("configuration follower enrollment was not found")]
     ConfigurationFollowerEnrollmentNotFound,
     #[error("configuration follower enrollment operation failed")]
@@ -3316,6 +3344,42 @@ impl PublicError {
                     StatusCode::SERVICE_UNAVAILABLE,
                     error_code::CONFIGURATION_SYNC_UNAVAILABLE,
                     "Configuration grant metadata unavailable",
+                ),
+            },
+            Self::ConfigurationFollowerEnrollmentRequestNotFound => (
+                StatusCode::NOT_FOUND,
+                error_code::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_NOT_FOUND,
+                "Configuration follower enrollment request not found",
+            ),
+            Self::ConfigurationFollowerEnrollmentRequest(error) => match error {
+                kiln_core::ConfigurationAccessError::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
+                    "Invalid configuration follower enrollment confirmation",
+                ),
+                kiln_core::ConfigurationAccessError::Conflict
+                | kiln_core::ConfigurationAccessError::CredentialConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::CONFIGURATION_SYNC_CONFLICT,
+                    "Configuration follower enrollment request state changed",
+                ),
+                kiln_core::ConfigurationAccessError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Confirmation did not match the immutable follower request",
+                ),
+                kiln_core::ConfigurationAccessError::Denied => (
+                    StatusCode::NOT_FOUND,
+                    error_code::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_NOT_FOUND,
+                    "Configuration follower enrollment request not found",
+                ),
+                kiln_core::ConfigurationAccessError::State(_)
+                | kiln_core::ConfigurationAccessError::Snapshot(_)
+                | kiln_core::ConfigurationAccessError::IntegrityViolation
+                | kiln_core::ConfigurationAccessError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::CONFIGURATION_SYNC_UNAVAILABLE,
+                    "Configuration follower enrollment request metadata unavailable",
                 ),
             },
             Self::ConfigurationFollowerEnrollmentNotFound => (

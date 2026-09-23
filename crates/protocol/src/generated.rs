@@ -1,20 +1,31 @@
 use crate::{
+    APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES, CONFIGURATION_FOLLOWER_ENROLLMENT_PATH,
-    CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH, CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH,
-    CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH, CONFIGURATION_IDENTITY_RETIRE_PATH,
-    CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH, CONFIGURATION_READ_GRANT_PATH,
-    CONFIGURATION_READ_GRANT_REVOKE_PATH, CONFIGURATION_READ_GRANTS_PATH,
-    CONFIGURE_MASTER_IDENTITY_OPERATION_ID, ConfigurationFollowerEnrollmentListResponse,
-    ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentResponse,
-    ConfigurationIdentitySetupResponse, ConfigurationReadGrantListResponse,
-    ConfigurationReadGrantResponse, ConfigureMasterIdentityRequest,
-    GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_DEFAULT_PAGE_SIZE,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH, CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH, CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH,
+    CONFIGURATION_IDENTITY_RETIRE_PATH, CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH,
+    CONFIGURATION_READ_GRANT_PATH, CONFIGURATION_READ_GRANT_REVOKE_PATH,
+    CONFIGURATION_READ_GRANTS_PATH, CONFIGURE_MASTER_IDENTITY_OPERATION_ID,
+    ConfigurationFollowerEnrollmentDecisionRequest, ConfigurationFollowerEnrollmentListResponse,
+    ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentRequestListResponse,
+    ConfigurationFollowerEnrollmentRequestPhase, ConfigurationFollowerEnrollmentRequestResponse,
+    ConfigurationFollowerEnrollmentResponse, ConfigurationIdentitySetupResponse,
+    ConfigurationReadGrantListResponse, ConfigurationReadGrantResponse,
+    ConfigureMasterIdentityRequest, GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_OPERATION_ID,
+    LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID,
     LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID,
     LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID,
     PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     PrepareConfigurationFollowerEnrollmentRequest,
+    REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID, RETIRE_MASTER_IDENTITY_OPERATION_ID,
     REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID, RetireConfigurationFollowerEnrollmentRequest,
@@ -552,6 +563,11 @@ fn typescript() -> String {
         ConfigurationFollowerEnrollmentPhase::decl(&config),
         ConfigurationFollowerEnrollmentResponse::decl(&config),
         ConfigurationFollowerEnrollmentListResponse::decl(&config),
+        ConfigurationFollowerEnrollmentRequestPhase::decl(&config),
+        ConfigurationFollowerEnrollmentRequestResponse::decl(&config),
+        ConfigurationFollowerEnrollmentRequestListResponse::decl(&config),
+        ConfigurationFollowerEnrollmentDecisionRequest::decl(&config),
+        ConfigurationReadGrantResponse::decl(&config),
         PrepareConfigurationFollowerEnrollmentRequest::decl(&config),
         RetireConfigurationFollowerEnrollmentRequest::decl(&config),
         RetireMasterIdentityRequest::decl(&config),
@@ -642,7 +658,7 @@ fn typescript() -> String {
 }
 
 fn catalogue() -> String {
-    serde_json::to_string_pretty(&json!({
+    let mut catalogue = json!({
         "protocol_version": PROTOCOL_VERSION,
         "capabilities": [WEBSOCKET_CAPABILITY],
         "error_codes": error_code::ALL,
@@ -840,9 +856,34 @@ fn catalogue() -> String {
             "path": EVENTS_WEBSOCKET_PATH,
             "operation": EVENT_STREAM_OPERATION_ID
         }]
-    }))
-    .expect("catalogue is serializable")
-        + "\n"
+    });
+    catalogue
+        .get_mut("http")
+        .and_then(Value::as_array_mut)
+        .expect("catalogue HTTP operations are an array")
+        .extend([
+            json!({
+                "method": "GET",
+                "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
+                "operation": LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID
+            }),
+            json!({
+                "method": "GET",
+                "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH,
+                "operation": GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID
+            }),
+            json!({
+                "method": "POST",
+                "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH,
+                "operation": APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID
+            }),
+            json!({
+                "method": "POST",
+                "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH,
+                "operation": REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID
+            }),
+        ]);
+    serde_json::to_string_pretty(&catalogue).expect("catalogue is serializable") + "\n"
 }
 
 fn fixture_negotiate_request() -> String {
@@ -1665,6 +1706,126 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  {CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH}:
+    get:
+      operationId: {LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID}
+      description: List credential-free master-side follower request metadata in stable request-ID order. Follower identity, server name, and CA fingerprint are claims, not proof of remote identity or verification against the managed TLS identity. The credential fingerprint binds the immutable request and credential digest, but the digest and bearer are never returned.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {{type: integer, minimum: 1, maximum: {CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE}, default: {CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_DEFAULT_PAGE_SIZE}}}
+        - name: after
+          in: query
+          required: false
+          schema: {{type: string, pattern: '^cfr_[0-9a-f]{{32}}$'}}
+      responses:
+        '200':
+          description: One bounded metadata page; next_cursor is null when the page is final.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentRequestListResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  {CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID}
+      description: Recover one credential-free master-side request by its stable request ID. The follower ID, server name, and CA fingerprint are follower claims, not authentication proof or pin validation.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cfr_[0-9a-f]{{32}}$'}}
+      responses:
+        '200':
+          description: Credential-free request metadata and, when approved, the current grant state.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentRequestResponse'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  {CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH}:
+    post:
+      operationId: {APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID}
+      description: Approve the exact displayed request under the expected current master instance and state version. The strict confirmation body must match every immutable journal field and the request ID in the path. The full JSON body is limited to {CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES} bytes; an oversized body is rejected with HTTP 400 invalid_json. This local decision issues a read grant but does not authenticate the claimed follower or verify the asserted server name/CA fingerprint against the managed TLS identity.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cfr_[0-9a-f]{{32}}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigurationFollowerEnrollmentDecisionRequest'
+      responses:
+        '200':
+          description: Approved request metadata and the grant's current state. Exact retries do not reactivate a revoked grant.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentRequestResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
+  {CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH}:
+    post:
+      operationId: {REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID}
+      description: Permanently reject the exact displayed request under the expected current master instance and state version. The strict confirmation body must match every immutable journal field and the request ID in the path. The full JSON body is limited to {CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES} bytes; an oversized body is rejected with HTTP 400 invalid_json. Rejection is terminal and cannot later be approved.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cfr_[0-9a-f]{{32}}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigurationFollowerEnrollmentDecisionRequest'
+      responses:
+        '200':
+          description: Rejected request metadata; exact retries return the same terminal state.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentRequestResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+
   {CONFIGURATION_READ_GRANTS_PATH}:
     get:
       operationId: {LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID}
@@ -2735,6 +2896,22 @@ components:
         (
             "ConfigurationFollowerEnrollmentListResponse",
             openapi_schema::<ConfigurationFollowerEnrollmentListResponse>(),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentRequestPhase",
+            openapi_schema::<ConfigurationFollowerEnrollmentRequestPhase>(),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentRequestResponse",
+            openapi_schema::<ConfigurationFollowerEnrollmentRequestResponse>(),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentRequestListResponse",
+            openapi_schema::<ConfigurationFollowerEnrollmentRequestListResponse>(),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentDecisionRequest",
+            openapi_schema::<ConfigurationFollowerEnrollmentDecisionRequest>(),
         ),
         (
             "PrepareConfigurationFollowerEnrollmentRequest",

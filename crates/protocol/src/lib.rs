@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.34.0";
+pub const PROTOCOL_VERSION: &str = "0.35.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -38,6 +38,14 @@ pub const CONFIGURATION_FOLLOWER_ENROLLMENT_PATH: &str =
     "/v1/configuration-sync/follower-enrollments/{attempt_id}";
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH: &str =
     "/v1/configuration-sync/follower-enrollments/{attempt_id}/retire";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH: &str =
+    "/v1/configuration-sync/follower-enrollment-requests";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH: &str =
+    "/v1/configuration-sync/follower-enrollment-requests/{request_id}";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH: &str =
+    "/v1/configuration-sync/follower-enrollment-requests/{request_id}/approve";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH: &str =
+    "/v1/configuration-sync/follower-enrollment-requests/{request_id}/reject";
 pub const CONFIGURE_MASTER_IDENTITY_OPERATION_ID: &str = "configure_master_identity";
 pub const RETIRE_MASTER_IDENTITY_OPERATION_ID: &str = "retire_master_identity";
 pub const RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID: &str = "retire_master_identity_by_id";
@@ -56,6 +64,14 @@ pub const GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
     "get_configuration_follower_enrollment";
 pub const RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
     "retire_configuration_follower_enrollment";
+pub const LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID: &str =
+    "list_configuration_follower_enrollment_requests";
+pub const GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
+    "get_configuration_follower_enrollment_request";
+pub const APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
+    "approve_configuration_follower_enrollment_request";
+pub const REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
+    "reject_configuration_follower_enrollment_request";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
 pub const CONFIGURATION_SNAPSHOT_PATH: &str = "/v1/configuration-sync/snapshot";
 pub const GET_CONFIGURATION_SNAPSHOT_OPERATION_ID: &str = "get_configuration_snapshot";
@@ -65,6 +81,8 @@ pub const PUBLISH_CONFIGURATION_OPERATION_ID: &str = "publish_configuration_snap
 pub const CONFIGURATION_PUBLICATION_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Bounds follower-enrollment JSON bodies and their submitted CA DER field.
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES: usize = CONFIGURATION_PUBLICATION_MAX_BYTES;
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_DEFAULT_PAGE_SIZE: usize = 50;
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE: usize = 100;
 pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configuration_master";
 pub const GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID: &str = "get_configuration_sync_status";
 pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
@@ -212,6 +230,8 @@ pub mod error_code {
     pub const CONFIGURATION_SYNC_INVALID_REQUEST: &str = "configuration_sync_invalid_request";
     pub const CONFIGURATION_SYNC_CONFLICT: &str = "configuration_sync_conflict";
     pub const CONFIGURATION_READ_GRANT_NOT_FOUND: &str = "configuration_read_grant_not_found";
+    pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_NOT_FOUND: &str =
+        "configuration_follower_enrollment_request_not_found";
     pub const CONFIGURATION_IDENTITY_RECOVERY_REQUIRED: &str =
         "configuration_identity_recovery_required";
     pub const CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND: &str =
@@ -306,6 +326,7 @@ pub mod error_code {
         CONFIGURATION_SYNC_INVALID_REQUEST,
         CONFIGURATION_SYNC_CONFLICT,
         CONFIGURATION_READ_GRANT_NOT_FOUND,
+        CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_NOT_FOUND,
         CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
         CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND,
         CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRED,
@@ -606,6 +627,75 @@ pub struct ConfigurationReadGrantListResponse {
     #[serde(deserialize_with = "deserialize_required_nullable_string")]
     #[schemars(with = "RequiredNullableString")]
     pub next_cursor: Option<String>,
+}
+
+/// Current lifecycle state of one master-side follower enrollment request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationFollowerEnrollmentRequestPhase {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// Credential-free metadata for one exact master-side follower request.
+/// `follower_id`, `server_name`, and `master_ca_fingerprint` are claims made by
+/// the follower and are not proof of its identity or validation against the
+/// master's currently managed TLS identity. `credential_fingerprint` binds the
+/// full request and credential digest, but is not the digest itself.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationFollowerEnrollmentRequestResponse {
+    pub request_id: String,
+    pub attempt_id: String,
+    pub follower_id: String,
+    pub follower_state_version: u64,
+    pub group_id: String,
+    pub master_instance_id: String,
+    /// Follower-asserted server name; it has not been compared with the
+    /// master's managed TLS identity.
+    pub server_name: String,
+    /// Follower-asserted CA fingerprint; it is not verified against the
+    /// master's managed TLS identity.
+    pub master_ca_fingerprint: String,
+    /// Full confirmation fingerprint over the immutable request and the
+    /// credential digest. The digest and bearer remain private.
+    pub credential_fingerprint: String,
+    pub received_master_state_version: u64,
+    pub phase: ConfigurationFollowerEnrollmentRequestPhase,
+    #[serde(deserialize_with = "deserialize_required_nullable_configuration_read_grant")]
+    #[schemars(with = "RequiredNullableConfigurationReadGrant")]
+    pub grant: Option<ConfigurationReadGrantResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationFollowerEnrollmentRequestListResponse {
+    pub requests: Vec<ConfigurationFollowerEnrollmentRequestResponse>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub next_cursor: Option<String>,
+}
+
+/// Exact confirmation values displayed by the master before a local decision.
+/// The request ID must match the URL path. Expected instance/version fence the
+/// current master state; all remaining fields must match the immutable journal.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationFollowerEnrollmentDecisionRequest {
+    pub expected_instance_id: String,
+    pub expected_state_version: u64,
+    pub request_id: String,
+    pub attempt_id: String,
+    /// Follower-asserted instance ID; this is not an identity proof.
+    pub follower_id: String,
+    pub follower_state_version: u64,
+    pub group_id: String,
+    pub master_instance_id: String,
+    /// Follower-asserted and not checked against the master's managed identity.
+    pub server_name: String,
+    /// Follower-asserted and not checked against the master's managed identity.
+    pub master_ca_fingerprint: String,
+    pub received_master_state_version: u64,
+    pub credential_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -1447,6 +1537,15 @@ where
     Option::deserialize(deserializer)
 }
 
+fn deserialize_required_nullable_configuration_read_grant<'de, D>(
+    deserializer: D,
+) -> Result<Option<ConfigurationReadGrantResponse>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
 struct RequiredNullableString;
 
 impl JsonSchema for RequiredNullableString {
@@ -1543,5 +1642,22 @@ impl JsonSchema for RequiredNullableArtifact {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let artifact = generator.subschema_for::<ArtifactResponse>();
         json_schema!({"anyOf": [artifact, {"type": "null"}]})
+    }
+}
+
+struct RequiredNullableConfigurationReadGrant;
+
+impl JsonSchema for RequiredNullableConfigurationReadGrant {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableConfigurationReadGrant".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let grant = generator.subschema_for::<ConfigurationReadGrantResponse>();
+        json_schema!({"anyOf": [grant, {"type": "null"}]})
     }
 }

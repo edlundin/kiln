@@ -10,6 +10,7 @@ pub use configuration_tls::{
     serve_configuration_followers,
 };
 
+mod configuration_access;
 mod configuration_identity;
 mod configuration_publication;
 mod configuration_sync;
@@ -676,6 +677,8 @@ pub struct AppState<W, S, R> {
         Option<Arc<dyn configuration_sync::ConfigurationAdministrationOperations>>,
     configuration_publication_operations:
         Option<Arc<dyn configuration_publication::ConfigurationPublicationOperations>>,
+    configuration_read_grant_operations:
+        Option<Arc<dyn configuration_access::ConfigurationReadGrantOperations>>,
     event_broadcaster: EventBroadcaster,
     lifecycle: LifecycleCoordinator,
 }
@@ -711,6 +714,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
                 .map(Arc::clone),
             configuration_publication_operations: self
                 .configuration_publication_operations
+                .as_ref()
+                .map(Arc::clone),
+            configuration_read_grant_operations: self
+                .configuration_read_grant_operations
                 .as_ref()
                 .map(Arc::clone),
             event_broadcaster: self.event_broadcaster.clone(),
@@ -771,6 +778,7 @@ impl<W, S, R> AppState<W, S, R> {
             configuration_identity_command_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
+            configuration_read_grant_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -807,6 +815,7 @@ impl<W, S, R> AppState<W, S, R> {
             configuration_identity_command_operations: None,
             configuration_administration_operations: None,
             configuration_publication_operations: None,
+            configuration_read_grant_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -818,6 +827,18 @@ impl<W, S, R> AppState<W, S, R> {
     ) -> Self {
         self.configuration_status_operations = Some(Arc::new(
             configuration_sync::ConfigurationStatusAdapter(store),
+        ));
+        self
+    }
+
+    pub fn with_configuration_access_store<
+        T: kiln_core::ConfigurationAccessStore + kiln_core::ConfigurationStateStore + 'static,
+    >(
+        mut self,
+        store: T,
+    ) -> Self {
+        self.configuration_read_grant_operations = Some(Arc::new(
+            configuration_access::ConfigurationReadGrantAdapter(store),
         ));
         self
     }
@@ -899,6 +920,22 @@ where
         .route(
             kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
             get(configuration_sync::get_status),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_READ_GRANTS_PATH,
+            get(configuration_access::list),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_READ_GRANT_PATH,
+            get(configuration_access::get),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH,
+            get(configuration_access::get_by_attempt),
+        )
+        .route(
+            kiln_protocol::CONFIGURATION_READ_GRANT_REVOKE_PATH,
+            post(configuration_access::revoke),
         )
         .route(
             kiln_protocol::CONFIGURATION_MASTER_PATH,
@@ -3039,6 +3076,10 @@ enum PublicError {
     ProviderAccount(ProviderAccountOperationError),
     #[error("configuration synchronization status is unavailable")]
     ConfigurationSyncUnavailable,
+    #[error("configuration read grant was not found")]
+    ConfigurationReadGrantNotFound,
+    #[error("configuration read grant operation failed")]
+    ConfigurationReadGrant(kiln_core::ConfigurationAccessError),
     #[error("configuration master designation failed")]
     ConfigurationMaster(kiln_core::ConfigurationMasterError),
     #[error("configuration identity command failed")]
@@ -3200,6 +3241,42 @@ impl PublicError {
                 error_code::CONFIGURATION_SYNC_UNAVAILABLE,
                 "Configuration synchronization unavailable",
             ),
+            Self::ConfigurationReadGrantNotFound => (
+                StatusCode::NOT_FOUND,
+                error_code::CONFIGURATION_READ_GRANT_NOT_FOUND,
+                "Configuration read grant not found",
+            ),
+            Self::ConfigurationReadGrant(error) => match error {
+                kiln_core::ConfigurationAccessError::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
+                    "Invalid configuration grant request",
+                ),
+                kiln_core::ConfigurationAccessError::Conflict
+                | kiln_core::ConfigurationAccessError::CredentialConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::CONFIGURATION_SYNC_CONFLICT,
+                    "Configuration grant state changed",
+                ),
+                kiln_core::ConfigurationAccessError::IdempotencyConflict => (
+                    StatusCode::CONFLICT,
+                    error_code::IDEMPOTENCY_CONFLICT,
+                    "Grant attempt ID was reused with different request data",
+                ),
+                kiln_core::ConfigurationAccessError::Denied => (
+                    StatusCode::NOT_FOUND,
+                    error_code::CONFIGURATION_READ_GRANT_NOT_FOUND,
+                    "Configuration read grant not found",
+                ),
+                kiln_core::ConfigurationAccessError::State(_)
+                | kiln_core::ConfigurationAccessError::Snapshot(_)
+                | kiln_core::ConfigurationAccessError::IntegrityViolation
+                | kiln_core::ConfigurationAccessError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::CONFIGURATION_SYNC_UNAVAILABLE,
+                    "Configuration grant metadata unavailable",
+                ),
+            },
             Self::ConfigurationSnapshotNotFound => (
                 StatusCode::NOT_FOUND,
                 error_code::CONFIGURATION_SNAPSHOT_NOT_FOUND,

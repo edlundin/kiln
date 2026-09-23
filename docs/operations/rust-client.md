@@ -261,3 +261,14 @@ after the instance has left its former master role. The existing
 setup idempotency key when the setup response was lost. Either retirement request
 is safe to repeat after an uncertain result; the client does not retry
 automatically. Status does not enumerate retired or historical IDs.
+
+Protocol `0.33.0` adds local grant metadata methods: `list_configuration_read_grants(limit, after)`,
+`get_configuration_read_grant(grant_id)`,
+`get_configuration_read_grant_by_attempt(attempt_id)`, and
+`revoke_configuration_read_grant(grant_id, request)`. The list is bounded to 100
+rows per page and returns a stable cursor. Grant and attempt lookups support
+metadata recovery after an uncertain enrollment result; responses contain no
+bearer or credential digest. Revocation requires the expected local instance and
+current state version, is permanent, and is safe to repeat. These endpoints do
+not create or deliver a credential, approve a pending request, or enable a
+listener.

@@ -303,6 +303,7 @@ async fn main() -> ExitCode {
     .with_configuration_identity_status_store(store.clone())
     .with_configuration_identity_administration(identity_commands)
     .with_configuration_administration_store(store.clone(), UlidIdGenerator)
+    .with_configuration_access_store(store.clone())
     .with_configuration_publication_store(store);
     let lifecycle = state.lifecycle();
     let signal_lifecycle = lifecycle.clone();

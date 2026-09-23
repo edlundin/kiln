@@ -17,21 +17,23 @@ use kiln_protocol::{
     CREATE_PROVIDER_ACCOUNT_OPERATION_ID, CREATE_SESSION_OPERATION_ID,
     CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateProviderAccountRequest,
     CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
-    GET_ARTIFACT_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    GET_ARTIFACT_OPERATION_ID, GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
+    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
     GET_PROVIDER_ACCOUNT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
     GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
-    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
-    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse,
-    ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse,
-    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
+    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID, LIST_PROVIDER_ACCOUNTS_OPERATION_ID,
+    LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
+    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_USAGE_OPERATION_ID,
+    LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse, ListSessionsResponse,
+    ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse, NEGOTIATE_OPERATION_ID,
+    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
     PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH,
     PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse, ProviderAccountResponse,
-    REACT_TO_RUN_ACTIVITY_OPERATION_ID, RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH,
-    RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunResponse,
-    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
-    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
-    START_CHILD_RUN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
+    REACT_TO_RUN_ACTIVITY_OPERATION_ID, REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID,
+    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH,
+    ReactToRunActivityRequest, RunResponse, SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH,
+    SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, START_CHILD_RUN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
     START_RUN_OPERATION_ID, SessionChangeDiffResponse, SessionChangesResponse,
     SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
     StartProviderAccountLoginResponse, StartRunRequest, TOOL_CALL_APPROVAL_PATH,
@@ -92,6 +94,8 @@ pub enum Error {
     UnexpectedWebSocketMessage { kind: &'static str },
     #[error("artifact preview limit must be greater than zero")]
     InvalidArtifactPreviewLimit,
+    #[error("configuration grant page limit must be between 1 and 100")]
+    InvalidConfigurationGrantPageLimit,
     #[error("configuration snapshot response exceeds the transfer budget")]
     ConfigurationSnapshotTooLarge,
 }
@@ -249,6 +253,122 @@ impl Client {
                 .get(self.http_url(kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH)),
         )
         .await
+    }
+
+    /// List stable follower-grant metadata without returning bearer credentials
+    /// or their digests. Pass the returned cursor to continue in ID order.
+    pub async fn list_configuration_read_grants(
+        &self,
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<kiln_protocol::ConfigurationReadGrantListResponse, Error> {
+        if !(1..=100).contains(&limit) {
+            return Err(Error::InvalidConfigurationGrantPageLimit);
+        }
+        if let Some(after) = after
+            && !valid_public_configuration_id(after, "crg_")
+        {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration grant cursor",
+            });
+        }
+        let mut url = self.http_url(kiln_protocol::CONFIGURATION_READ_GRANTS_PATH);
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("limit", &limit.to_string());
+            if let Some(after) = after {
+                query.append_pair("after", after);
+            }
+        }
+        self.send_json(
+            LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID,
+            self.http.get(url),
+        )
+        .await
+    }
+
+    /// Read credential-free metadata for one grant ID.
+    pub async fn get_configuration_read_grant(
+        &self,
+        grant_id: &str,
+    ) -> Result<kiln_protocol::ConfigurationReadGrantResponse, Error> {
+        if !valid_public_configuration_id(grant_id, "crg_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration grant ID",
+            });
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_READ_GRANT_PATH,
+            "{grant_id}",
+            "configuration grant ID",
+            grant_id,
+        )?;
+        self.send_json(
+            GET_CONFIGURATION_READ_GRANT_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    /// Recover the metadata receipt for an uncertain issuance response using
+    /// its original stable attempt ID; this never recovers the bearer.
+    pub async fn get_configuration_read_grant_by_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<kiln_protocol::ConfigurationReadGrantResponse, Error> {
+        if !valid_public_configuration_id(attempt_id, "cra_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration grant attempt ID",
+            });
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH,
+            "{attempt_id}",
+            "configuration grant attempt ID",
+            attempt_id,
+        )?;
+        self.send_json(
+            GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    /// Permanently revoke a follower grant under the exact current master state.
+    /// Repeating this command is safe if the response was lost.
+    pub async fn revoke_configuration_read_grant(
+        &self,
+        grant_id: &str,
+        request: &kiln_protocol::RevokeConfigurationReadGrantRequest,
+    ) -> Result<(), Error> {
+        if !valid_public_configuration_id(grant_id, "crg_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration grant ID",
+            });
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_READ_GRANT_REVOKE_PATH,
+            "{grant_id}",
+            "configuration grant ID",
+            grant_id,
+        )?;
+        let response = self
+            .http
+            .post(self.http_url(&path))
+            .json(request)
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport {
+                operation: REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID,
+                source,
+            })?;
+        let response = successful_response(response).await?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(Error::UnexpectedResponse {
+                status: response.status().as_u16(),
+            });
+        }
+        Ok(())
     }
 
     /// Read the current authority and its managed identity setup metadata.
@@ -1125,6 +1245,15 @@ fn path_with_segments(
     }
     drop(segments);
     Ok(url.path().to_owned())
+}
+
+fn valid_public_configuration_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn is_http_token_byte(byte: u8) -> bool {

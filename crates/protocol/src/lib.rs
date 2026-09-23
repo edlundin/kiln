@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.32.0";
+pub const PROTOCOL_VERSION: &str = "0.33.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -26,11 +26,22 @@ pub const CONFIGURATION_IDENTITY_STATUS_PATH: &str = "/v1/configuration-sync/ide
 pub const CONFIGURATION_IDENTITY_RETIRE_PATH: &str = "/v1/configuration-sync/identity/retire";
 pub const CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH: &str =
     "/v1/configuration-sync/identity/retire/by-id";
+pub const CONFIGURATION_READ_GRANTS_PATH: &str = "/v1/configuration-sync/grants";
+pub const CONFIGURATION_READ_GRANT_PATH: &str = "/v1/configuration-sync/grants/{grant_id}";
+pub const CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH: &str =
+    "/v1/configuration-sync/grants/attempts/{attempt_id}";
+pub const CONFIGURATION_READ_GRANT_REVOKE_PATH: &str =
+    "/v1/configuration-sync/grants/{grant_id}/revoke";
 pub const CONFIGURE_MASTER_IDENTITY_OPERATION_ID: &str = "configure_master_identity";
 pub const RETIRE_MASTER_IDENTITY_OPERATION_ID: &str = "retire_master_identity";
 pub const RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID: &str = "retire_master_identity_by_id";
 pub const GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID: &str =
     "get_configuration_identity_status";
+pub const LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID: &str = "list_configuration_read_grants";
+pub const GET_CONFIGURATION_READ_GRANT_OPERATION_ID: &str = "get_configuration_read_grant";
+pub const GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID: &str =
+    "get_configuration_read_grant_by_attempt";
+pub const REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID: &str = "revoke_configuration_read_grant";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
 pub const CONFIGURATION_SNAPSHOT_PATH: &str = "/v1/configuration-sync/snapshot";
 pub const GET_CONFIGURATION_SNAPSHOT_OPERATION_ID: &str = "get_configuration_snapshot";
@@ -184,6 +195,7 @@ pub mod error_code {
     pub const CONFIGURATION_SYNC_UNAVAILABLE: &str = "configuration_sync_unavailable";
     pub const CONFIGURATION_SYNC_INVALID_REQUEST: &str = "configuration_sync_invalid_request";
     pub const CONFIGURATION_SYNC_CONFLICT: &str = "configuration_sync_conflict";
+    pub const CONFIGURATION_READ_GRANT_NOT_FOUND: &str = "configuration_read_grant_not_found";
     pub const CONFIGURATION_IDENTITY_RECOVERY_REQUIRED: &str =
         "configuration_identity_recovery_required";
     pub const CONFIGURATION_SNAPSHOT_NOT_FOUND: &str = "configuration_snapshot_not_found";
@@ -271,6 +283,7 @@ pub mod error_code {
         CONFIGURATION_SYNC_UNAVAILABLE,
         CONFIGURATION_SYNC_INVALID_REQUEST,
         CONFIGURATION_SYNC_CONFLICT,
+        CONFIGURATION_READ_GRANT_NOT_FOUND,
         CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
         CONFIGURATION_SNAPSHOT_NOT_FOUND,
         CONFIGURATION_SNAPSHOT_TOO_LARGE,
@@ -545,6 +558,36 @@ pub struct ConfigurationIdentitySetupResponse {
     pub group_id: String,
     pub reserved_state_version: u64,
     pub identity_id: String,
+}
+
+/// Public grant metadata only. Bearer credentials and their SHA-256 digests are
+/// deliberately excluded from local status/list responses.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationReadGrantResponse {
+    pub grant_id: String,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub issuance_attempt_id: Option<String>,
+    pub group_id: String,
+    pub master_instance_id: String,
+    pub follower_instance_id: String,
+    pub issued_state_version: u64,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationReadGrantListResponse {
+    pub grants: Vec<ConfigurationReadGrantResponse>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeConfigurationReadGrantRequest {
+    pub expected_instance_id: String,
+    pub expected_state_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

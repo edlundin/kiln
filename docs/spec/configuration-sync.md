@@ -121,9 +121,11 @@ signed 64-bit positive range and rejects exhaustion/overflow.
 
 Migration 35 adds coherent snapshot payloads and active revisions as described
 below. Migration 38 adds master-side credential digests and permanent revocation
-records. Follower credential delivery/storage and remote endpoint associations remain absent.
-The local API exposes status and initial master designation, described below.
-Remote enrollment and consumers remain subsequent work.
+records; migration 42 adds stable grant and request-attempt IDs. Follower
+credential delivery/storage and remote endpoint associations remain absent. The
+local API exposes status, initial master designation, and credential-free grant
+metadata/list/revoke operations. Remote enrollment and consumers remain
+subsequent work.
 
 ## Internal follower read credentials
 
@@ -136,20 +138,27 @@ Its SHA-256 digest covers the complete prefixed credential and is the only
 credential representation stored in SQLite. Raw material must remain confined to
 private enrollment delivery/storage and sensitive transport headers.
 
-`ConfigurationAccessStore` is an internal boundary, with no protocol routes or
-network listener. Local administrative authorization must precede registration
-and revocation. Registration binds one digest permanently to the master/group,
-follower instance and original master state version. It rejects self-enrollment,
-non-master roles, stale state and changed reuse of a digest. Exact retries return
-the existing record, including its current revoked flag, without reactivation.
-Registration does not advance the configuration state version or publish content.
+`ConfigurationAccessStore` is an internal issuance/read boundary, with no
+enrollment or credential-delivery route and no network listener. Registration
+binds one digest permanently to a stable grant ID, the master/group, claimed
+follower instance and original master state version. A stable request-attempt ID
+deduplicates issuance and permits metadata-only recovery after a lost response.
+Exact retries return the original record, including its current revoked flag,
+without reactivation. A new request is rejected while any active grant exists
+for the same group/follower. It does not advance the configuration state version
+or publish content.
 
-Revocation is permanent and repeatable under the matching current master state.
-Leaving a master role revokes all of that group's active credentials in the role
-change transaction; rejoining cannot revive them. Publication and unchanged-role
-operations retain credentials. Replacement requires fresh random material and
-explicit registration. Tombstones are retained; there is no automatic expiry or
-garbage collection yet.
+Revocation is permanent and repeatable by stable grant ID under the matching
+current master state. Leaving a master role revokes all of that group's active
+credentials in the role-change transaction; rejoining cannot revive them.
+Publication and unchanged-role operations retain credentials. Reenrollment after
+revocation requires a new request and explicit approval. Tombstones are retained;
+there is no automatic expiry or garbage collection yet. A credential-free local
+API lists and reads grant metadata, looks up an issuance attempt after an
+uncertain response, and revokes by grant ID. It never returns a bearer or digest.
+Existing legacy active duplicates are preserved during migration; new issuance
+for that follower remains blocked until an administrator explicitly revokes the
+old active grants.
 
 `read_configuration_for_follower` verifies the current master/group, follower and
 unrevoked digest, then acquires the bounded, fully validated snapshot in the same
@@ -164,12 +173,41 @@ This is not completed enrollment. Master identity pinning, encrypted authenticat
 transport, explicit approval/delivery, follower secret storage, administration UI,
 audit/recovery and reconnect remain to be wired before remote access is enabled.
 
+## Selected automatic enrollment direction
+
+The selected design has the follower generate the final random `kcfg1_` bearer
+and reserve it in the follower's OS vault before it contacts the master. The
+follower approves the master's CA, server name, group and master instance over a
+locally authenticated action, then submits an exact request over HTTPS pinned to
+that identity. The request carries a stable request-attempt ID, the claimed
+follower instance ID and the digest of the follower-held bearer; only the digest
+is registered on the master. The raw bearer stays in the follower vault and is
+never escrowed or re-delivered by the master.
+
+The claimed follower ID and request digest are not remote identity proof. The
+master's local administrator must approve that exact pending request, with the
+request ID, claimed follower ID and displayed digest fingerprint bound together.
+That approval is the trust decision for this initial design; the pinned TLS
+connection authenticates the master to the follower, not the follower to the
+master. A different request or digest requires separate review. Exact retries
+reuse the follower's vaulted bearer and request ID. The master returns only the
+same grant metadata on a retry and never reactivates a revoked attempt. A follower
+that needs a new credential first receives explicit revocation of its old grant,
+then creates a new secret and request for approval.
+
+The stable grant and request-attempt IDs, digest-only registration, exact retry
+deduplication, metadata recovery, and local list/revoke API are implemented.
+Pending requests, master-side approval UI, follower vault reservation, remote
+redemption/acknowledgement, automatic reconnect, and listener composition remain
+unimplemented. No remote enrollment route is mounted. The current slice does not
+establish device identity beyond an administrator's approval of the exact request.
+
 ## Pinned HTTPS follower client
 
 The Rust `ConfigurationSyncClient` is the restricted outgoing transport component.
 It is not wired into daemon synchronization and does not enable a remote listener.
-Local protocol `0.29.0` remains unchanged. The isolated follower router described
-below serves `GET /v1/configuration-sync/snapshot` with the existing snapshot response
+The isolated follower router described below serves
+`GET /v1/configuration-sync/snapshot` with the existing snapshot response
 and checks `kiln-configuration-master`, `kiln-configuration-group` and
 `kiln-configuration-follower` headers against the presented read credential. These
 headers carry claimed IDs, never authentication proof. The existing local API
@@ -472,6 +510,11 @@ is `204`; missing/wrong-instance targets are conflicts. Retrying the exact body
 is safe after an uncertain result or deletion failure. The original setup key
 can never create another identity, even after successful cleanup; use a fresh key
 and current state for a replacement.
+
+Protocol `0.33.0` adds credential-free grant list, status, attempt-recovery and
+permanent-revocation endpoints under `/v1/configuration-sync/grants`. Exact
+request-attempt retries return the same immutable metadata, including a revoked
+tombstone; no endpoint returns a bearer or digest.
 
 Protocol `0.32.0` adds `POST /v1/configuration-sync/identity/retire/by-id`, which
 takes a strict body with

@@ -1,9 +1,14 @@
 use crate::{
     CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH, CONFIGURATION_IDENTITY_RETIRE_PATH,
+    CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH, CONFIGURATION_READ_GRANT_PATH,
+    CONFIGURATION_READ_GRANT_REVOKE_PATH, CONFIGURATION_READ_GRANTS_PATH,
     CONFIGURE_MASTER_IDENTITY_OPERATION_ID, ConfigurationIdentitySetupResponse,
-    ConfigureMasterIdentityRequest, RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID,
-    RETIRE_MASTER_IDENTITY_OPERATION_ID, RetireMasterIdentityByIdRequest,
-    RetireMasterIdentityRequest,
+    ConfigurationReadGrantListResponse, ConfigurationReadGrantResponse,
+    ConfigureMasterIdentityRequest, GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
+    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID,
+    RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID, RETIRE_MASTER_IDENTITY_OPERATION_ID,
+    REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID, RetireMasterIdentityByIdRequest,
+    RetireMasterIdentityRequest, RevokeConfigurationReadGrantRequest,
 };
 use crate::{
     CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
@@ -1507,6 +1512,104 @@ paths:
                 $ref: '#/components/schemas/ConfigurationIdentityStatusResponse'
         '503':
           $ref: '#/components/responses/Problem'
+  {CONFIGURATION_READ_GRANTS_PATH}:
+    get:
+      operationId: {LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID}
+      description: List credential-free current and historical follower grant metadata in stable ID order. Results are bounded and paginated; bearer credentials and digests are never returned.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {{type: integer, minimum: 1, maximum: 100, default: 50}}
+        - name: after
+          in: query
+          required: false
+          schema: {{type: string}}
+      responses:
+        '200':
+          description: One bounded page of grant metadata; next_cursor is null when the page is final.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationReadGrantListResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_READ_GRANT_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_READ_GRANT_OPERATION_ID}
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^crg_[0-9a-f]{{32}}$'}}
+      responses:
+        '200':
+          description: Credential-free metadata for one grant.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationReadGrantResponse'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID}
+      description: Recover credential-free grant metadata after an ambiguous issuance response using the original attempt ID.
+      parameters:
+        - name: attempt_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cra_[0-9a-f]{{32}}$'}}
+      responses:
+        '200':
+          description: Credential-free metadata for the original issuance attempt.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationReadGrantResponse'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_READ_GRANT_REVOKE_PATH}:
+    post:
+      operationId: {REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID}
+      description: Permanently revoke one grant under the exact current master instance and state version. Repeating the request is safe.
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^crg_[0-9a-f]{{32}}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeConfigurationReadGrantRequest'
+      responses:
+        '204':
+          description: Grant is permanently revoked.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   {CONFIGURATION_SYNC_STATUS_PATH}:
     get:
       operationId: {GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID}
@@ -2475,6 +2578,18 @@ components:
         (
             "RetireMasterIdentityByIdRequest",
             openapi_schema::<RetireMasterIdentityByIdRequest>(),
+        ),
+        (
+            "ConfigurationReadGrantResponse",
+            openapi_schema::<ConfigurationReadGrantResponse>(),
+        ),
+        (
+            "ConfigurationReadGrantListResponse",
+            openapi_schema::<ConfigurationReadGrantListResponse>(),
+        ),
+        (
+            "RevokeConfigurationReadGrantRequest",
+            openapi_schema::<RevokeConfigurationReadGrantRequest>(),
         ),
         ("WorkspaceResponse", openapi_schema::<WorkspaceResponse>()),
         (

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-23 — `feat`
+
+- Add stable configuration grant IDs and local metadata listing, recovery, and revocation with active-grant safeguards.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+
+[Commit](pending)
+
+
 ## 2026-09-22 — `feat`
 
 - Add stable public managed identity IDs and confirmed desktop setup and retirement controls with exact retry handling.

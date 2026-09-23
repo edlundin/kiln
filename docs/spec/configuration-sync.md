@@ -196,11 +196,25 @@ that needs a new credential first receives explicit revocation of its old grant,
 then creates a new secret and request for approval.
 
 The stable grant and request-attempt IDs, digest-only registration, exact retry
-deduplication, metadata recovery, and local list/revoke API are implemented.
-Pending requests, master-side approval UI, follower vault reservation, remote
-redemption/acknowledgement, automatic reconnect, and listener composition remain
-unimplemented. No remote enrollment route is mounted. The current slice does not
-establish device identity beyond an administrator's approval of the exact request.
+deduplication, metadata recovery, and local list/revoke API are implemented. An
+internal follower preparer now reserves the immutable request binding, approved
+master trust data, fresh vault reference, and credential digest in SQLite before
+writing the final bearer to the separate OS vault. It verifies vault readback;
+exact retries never generate or overwrite reserved material. Missing, malformed,
+or changed material permanently retires the attempt before retryable cleanup.
+The bounded journal returns credential-free metadata, while a separate outbound
+submission value contains the exact request digest only when the local instance
+is still unassigned at the recorded state version. Request identity and mutable
+reserved/prepared/retired state are stored separately. Trust inputs require a
+canonical DNS/IP server name and CA DER no larger than 2^24−1 bytes, the uint24
+maximum length of one TLS Certificate entry.
+
+This internal preparer does not change the local role, make a network request,
+or mount an enrollment route. Pending request approval UI, master-side approval,
+remote redemption/acknowledgement, active credential retrieval, automatic
+reconnect, and listener composition remain unimplemented. The current slice does
+not establish device identity beyond an administrator's approval of the exact
+request.
 
 ## Pinned HTTPS follower client
 

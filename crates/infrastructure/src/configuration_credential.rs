@@ -1,4 +1,5 @@
 use kiln_core::ConfigurationCredentialDigest;
+use zeroize::{Zeroize, Zeroizing};
 
 const PREFIX: &[u8; 6] = b"kcfg1_";
 const LENGTH: usize = PREFIX.len() + super::AUTH_TOKEN_LENGTH;
@@ -13,7 +14,8 @@ impl ConfigurationReadCredential {
     pub fn generate() -> Self {
         let mut bytes = [0; LENGTH];
         bytes[..PREFIX.len()].copy_from_slice(PREFIX);
-        bytes[PREFIX.len()..].copy_from_slice(&super::generated_auth_token());
+        let token = Zeroizing::new(super::generated_auth_token());
+        bytes[PREFIX.len()..].copy_from_slice(&token[..]);
         Self(bytes)
     }
 
@@ -37,5 +39,11 @@ impl ConfigurationReadCredential {
     /// Authorization header. Never put this value in URLs, logs or events.
     pub fn expose_secret(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl Drop for ConfigurationReadCredential {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }

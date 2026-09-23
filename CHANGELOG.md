@@ -2,6 +2,16 @@
 
 ## 2026-09-23 — `feat`
 
+- Add durable follower credential reservation and exact-retry recovery with immutable trust bindings, state-version fencing, and bounded metadata recovery.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+
+[Commit](pending)
+
+
+## 2026-09-23 — `feat`
+
 - Add stable configuration grant IDs and local metadata listing, recovery, and revocation with active-grant safeguards.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

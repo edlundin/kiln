@@ -4,6 +4,12 @@ mod assistant_message;
 mod configuration_access;
 mod configuration_credential;
 pub use configuration_credential::ConfigurationReadCredential;
+mod configuration_enrollment;
+pub use configuration_enrollment::{
+    ConfigurationFollowerEnrollmentChoice, ConfigurationFollowerEnrollmentError,
+    ConfigurationFollowerEnrollmentManager, ConfigurationFollowerEnrollmentMetadata,
+    ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentSubmission,
+};
 mod configuration_identity;
 mod configuration_identity_lifecycle;
 pub use configuration_identity_lifecycle::{
@@ -514,6 +520,7 @@ fn open_artifact_file(path: &Path) -> io::Result<fs::File> {
 pub struct SqliteStore {
     connection: Arc<Mutex<SqliteConnection>>,
     configuration_identity_operations: Arc<Mutex<()>>,
+    configuration_enrollment_operations: Arc<Mutex<()>>,
 }
 
 pub const DETERMINISTIC_SUBPROCESS_ARGUMENT: &str = "--kiln-deterministic-subprocess";
@@ -846,6 +853,7 @@ impl SqliteStore {
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             configuration_identity_operations: Arc::new(Mutex::new(())),
+            configuration_enrollment_operations: Arc::new(Mutex::new(())),
         })
     }
 

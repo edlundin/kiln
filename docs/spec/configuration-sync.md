@@ -196,10 +196,11 @@ request ID, claimed follower ID and displayed digest fingerprint bound together.
 That approval is the trust decision for this initial design; the pinned TLS
 connection authenticates the master to the follower, not the follower to the
 master. A different request or digest requires separate review. Exact retries
-reuse the follower's vaulted bearer and request ID. The master returns only the
-same grant metadata on a retry and never reactivates a revoked attempt. A follower
-that needs a new credential first receives explicit revocation of its old grant,
-then creates a new secret and request for approval.
+reuse the follower's vaulted bearer and request ID. Once remote acknowledgement
+is implemented, a retry will recover the original request/grant state and will
+never reactivate a revoked attempt. A follower that needs a new credential first
+receives explicit revocation of its old grant, then creates a new secret and
+request for approval.
 
 The stable grant and request-attempt IDs, digest-only registration, exact retry
 deduplication, metadata recovery, and local list/revoke API are implemented. An
@@ -214,6 +215,31 @@ is still unassigned at the recorded state version. Request identity and mutable
 reserved/prepared/retired state are stored separately. Trust inputs require a
 canonical DNS/IP server name and CA DER no larger than 2^24−1 bytes, the uint24
 maximum length of one TLS Certificate entry.
+
+The master now has an internal durable request journal for digest-only follower
+claims. Exact retries are keyed by the follower attempt ID; the stable master
+request ID binds that attempt, claimed follower and follower state version,
+master/group authority, the follower-asserted server name and master CA
+fingerprint, the credential digest, and the master state version at receipt.
+Metadata exposes a full SHA-256 confirmation fingerprint over this immutable
+binding without returning the raw digest or bearer. The claimed follower ID and
+endpoint trust remain claims; the master checks the server name's syntax but
+does not compare the name or CA fingerprint with its current managed TLS
+identity. Current master/group state fencing does not authenticate the caller
+or validate its pin. There is no uniqueness rule per claimed follower, so an
+unverified ID cannot reserve that identity.
+
+The internal master port lists and recovers requests, then atomically approves
+or permanently rejects one only after exact request, attempt, follower, authority,
+trust and full fingerprint confirmation. Approval checks the current master state
+and creates the read grant in the same SQLite transaction as the permanent
+decision. Exact approval retries recover that grant's current state, including
+revocation; they never reactivate it. Master role/authority drift fails closed.
+These internal ports are not wired to local HTTP or a remote listener. Master-side
+local review routes and remote request/acknowledgement remain pending. Before
+remote exchange is composed, it must bind incoming requests to the actual
+connection and current managed TLS identity, including certificate rotation;
+the stored server-name/CA-fingerprint claims alone do not establish that binding.
 
 An authenticated local API exposes `POST
 /v1/configuration-sync/follower-enrollments` with a stable `cra_` attempt ID,
@@ -233,11 +259,12 @@ The shared strict JSON extractor rejects a request over its 2 MiB body limit wit
 HTTP 400 `invalid_json`; it does not return HTTP 413 for this local route.
 
 The local preparer does not change the local role or make a network request.
-Pending request approval UI, master-side approval, remote
-redemption/acknowledgement, active credential retrieval, automatic reconnect and
-listener composition remain unimplemented. The current slice does not establish
-device identity beyond a locally authenticated administrator's review of the
-exact request inputs.
+The master journal does not establish device identity: pinned TLS authenticates
+the master to the follower, not the follower to the master. A locally
+authenticated administrator must review and confirm the exact request before a
+read grant is issued. Master-side local review routes and UI, remote request
+submission/acknowledgement, follower role transition, active credential
+retrieval, automatic reconnect and listener composition remain unimplemented.
 
 ## Pinned HTTPS follower client
 

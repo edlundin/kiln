@@ -2,6 +2,16 @@
 
 ## 2026-09-23 — `feat`
 
+- Add durable master enrollment request review with exact confirmation and atomic grant approval.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+
+[Commit](pending)
+
+
+## 2026-09-23 — `feat`
+
 - Add authenticated local follower enrollment preparation, recovery, and retirement with credential-free metadata.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

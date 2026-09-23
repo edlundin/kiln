@@ -1,59 +1,202 @@
 use super::{SqliteStore, configuration_snapshot, configuration_sync};
 use kiln_core::{
     ConfigurationAccessError as Error, ConfigurationAccessStore, ConfigurationAuthority,
-    ConfigurationCredentialDigest, ConfigurationGroupId, ConfigurationInstanceState,
-    ConfigurationReadGrant, ConfigurationReadGrantAttemptId, ConfigurationReadGrantId,
+    ConfigurationCredentialDigest, ConfigurationFollowerEnrollmentRequest,
+    ConfigurationFollowerEnrollmentRequestConfirmation, ConfigurationFollowerEnrollmentRequestId,
+    ConfigurationFollowerEnrollmentRequestPhase, ConfigurationFollowerEnrollmentRequestSubmission,
+    ConfigurationGroupId, ConfigurationInstanceState, ConfigurationReadGrant,
+    ConfigurationReadGrantAttemptId, ConfigurationReadGrantId, ConfigurationReadGrantSummary,
     ConfigurationRole, ConfigurationSnapshotReadLimits, ConfigurationStateError, ContentHash,
     KilnInstanceId, StoredConfigurationSnapshot,
 };
+use sha2::{Digest as _, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteRow};
 
+const MAX_ENROLLMENT_REQUEST_PAGE_SIZE: usize = 101;
+
+macro_rules! enrollment_request_select {
+    ($suffix:literal) => {
+        concat!(
+            "SELECT r.request_id, r.attempt_id, r.follower_instance_id, r.follower_state_version, r.group_id, r.master_instance_id, r.server_name, r.master_ca_fingerprint, r.credential_digest, r.received_master_state_version, l.phase AS request_phase, l.grant_id AS request_grant_id, g.grant_id AS issued_grant_id, g.credential_digest AS issued_credential_digest, g.issuance_attempt_id AS issued_attempt_id, g.group_id AS issued_group_id, g.master_instance_id AS issued_master_instance_id, g.follower_instance_id AS issued_follower_instance_id, g.issued_state_version AS issued_state_version, g.revoked AS issued_revoked FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_request_lifecycle l USING (request_id) LEFT JOIN configuration_read_grants g ON g.grant_id = l.grant_id",
+            $suffix
+        )
+    };
+}
+
 impl ConfigurationAccessStore for SqliteStore {
-    async fn register_configuration_reader(
+    async fn submit_configuration_follower_enrollment_request(
         &self,
         expected: &ConfigurationInstanceState,
-        follower: &KilnInstanceId,
-        attempt_id: &ConfigurationReadGrantAttemptId,
-        proposed_grant_id: &ConfigurationReadGrantId,
-        digest: &ConfigurationCredentialDigest,
-    ) -> Result<ConfigurationReadGrant, Error> {
-        let authority = registration_authority(expected, follower)?;
+        submission: &ConfigurationFollowerEnrollmentRequestSubmission,
+        proposed_request_id: &ConfigurationFollowerEnrollmentRequestId,
+    ) -> Result<ConfigurationFollowerEnrollmentRequest, Error> {
+        let follower_state_version = i64::try_from(submission.follower_state_version)
+            .ok()
+            .filter(|version| *version > 0)
+            .ok_or(Error::InvalidRequest)?;
+        if !super::configuration_identity::valid_server_name(&submission.server_name) {
+            return Err(Error::InvalidRequest);
+        }
+        let authority = registration_authority(expected, &submission.follower_id)?;
+        if authority != &submission.authority {
+            return Err(Error::InvalidRequest);
+        }
+
         let mut connection = self.connection.lock().await;
         let mut transaction = connection
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|_| Error::Unavailable)?;
+        require_current(&mut transaction, expected).await?;
 
-        if let Some(grant) = load_by_attempt(&mut transaction, attempt_id).await? {
-            if grant.authority != *authority
-                || grant.follower_id != *follower
-                || grant.credential_digest != *digest
-                || grant.issued_state_version != expected.version()
-                || grant.issuance_attempt_id.as_ref() != Some(attempt_id)
-            {
+        if let Some(existing) =
+            load_enrollment_request_by_attempt(&mut transaction, &submission.attempt_id).await?
+        {
+            if !existing.matches_submission(submission) {
                 return Err(Error::IdempotencyConflict);
             }
             transaction.commit().await.map_err(|_| Error::Unavailable)?;
-            return Ok(grant);
+            return Ok(existing.metadata);
         }
 
+        sqlx::query(
+            "INSERT INTO configuration_follower_enrollment_requests (request_id, attempt_id, follower_instance_id, follower_state_version, group_id, master_instance_id, server_name, master_ca_fingerprint, credential_digest, received_master_state_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(proposed_request_id.as_str())
+        .bind(submission.attempt_id.as_str())
+        .bind(submission.follower_id.as_str())
+        .bind(follower_state_version)
+        .bind(submission.authority.group_id().as_str())
+        .bind(submission.authority.master_id().as_str())
+        .bind(&submission.server_name)
+        .bind(submission.master_ca_fingerprint.as_str())
+        .bind(submission.credential_digest.as_str())
+        .bind(expected.version() as i64)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|database| database.is_unique_violation())
+            {
+                Error::Conflict
+            } else {
+                Error::Unavailable
+            }
+        })?;
+        sqlx::query(
+            "INSERT INTO configuration_follower_enrollment_request_lifecycle (request_id, phase, grant_id) VALUES (?, 'pending', NULL)",
+        )
+        .bind(proposed_request_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+
+        let request = load_enrollment_request_by_id(&mut transaction, proposed_request_id)
+            .await?
+            .ok_or(Error::IntegrityViolation)?;
+        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(request.metadata)
+    }
+
+    async fn get_configuration_follower_enrollment_request(
+        &self,
+        request_id: &ConfigurationFollowerEnrollmentRequestId,
+    ) -> Result<Option<ConfigurationFollowerEnrollmentRequest>, Error> {
+        let mut connection = self.connection.lock().await;
+        load_enrollment_request_by_id(&mut connection, request_id)
+            .await
+            .map(|request| request.map(|request| request.metadata))
+    }
+
+    async fn get_configuration_follower_enrollment_request_by_attempt(
+        &self,
+        attempt_id: &ConfigurationReadGrantAttemptId,
+    ) -> Result<Option<ConfigurationFollowerEnrollmentRequest>, Error> {
+        let mut connection = self.connection.lock().await;
+        load_enrollment_request_by_attempt(&mut connection, attempt_id)
+            .await
+            .map(|request| request.map(|request| request.metadata))
+    }
+
+    async fn list_configuration_follower_enrollment_requests(
+        &self,
+        after: Option<&ConfigurationFollowerEnrollmentRequestId>,
+        limit: usize,
+    ) -> Result<Vec<ConfigurationFollowerEnrollmentRequest>, Error> {
+        if !(1..=MAX_ENROLLMENT_REQUEST_PAGE_SIZE).contains(&limit) {
+            return Err(Error::InvalidRequest);
+        }
+        let mut connection = self.connection.lock().await;
+        let rows = sqlx::query(enrollment_request_select!(
+            " WHERE (? IS NULL OR r.request_id > ?) ORDER BY r.request_id LIMIT ?"
+        ))
+        .bind(after.map(ConfigurationFollowerEnrollmentRequestId::as_str))
+        .bind(after.map(ConfigurationFollowerEnrollmentRequestId::as_str))
+        .bind(limit as i64)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+        rows.into_iter()
+            .map(decode_enrollment_request)
+            .map(|result| result.map(|request| request.metadata))
+            .collect()
+    }
+
+    async fn approve_configuration_follower_enrollment_request(
+        &self,
+        expected: &ConfigurationInstanceState,
+        confirmation: &ConfigurationFollowerEnrollmentRequestConfirmation,
+        proposed_grant_id: &ConfigurationReadGrantId,
+    ) -> Result<ConfigurationFollowerEnrollmentRequest, Error> {
+        let authority = registration_authority(expected, &confirmation.follower_id)?;
+        if authority != &confirmation.authority {
+            return Err(Error::Conflict);
+        }
+
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
         require_current(&mut transaction, expected).await?;
-        let active_count =
-            active_grants_for_follower(&mut transaction, authority, follower).await?;
-        if active_count != 0 {
-            // Existing duplicate legacy rows are preserved by migration and
-            // must be explicitly revoked before a new single grant is approved.
+        let request = load_enrollment_request_by_id(&mut transaction, &confirmation.request_id)
+            .await?
+            .ok_or(Error::Denied)?;
+        if !request.matches_confirmation(confirmation) {
+            return Err(Error::IdempotencyConflict);
+        }
+
+        match request.metadata.phase {
+            ConfigurationFollowerEnrollmentRequestPhase::Approved => {
+                transaction.commit().await.map_err(|_| Error::Unavailable)?;
+                return Ok(request.metadata);
+            }
+            ConfigurationFollowerEnrollmentRequestPhase::Rejected => {
+                return Err(Error::Conflict);
+            }
+            ConfigurationFollowerEnrollmentRequestPhase::Pending => {}
+        }
+
+        if active_grants_for_follower(
+            &mut transaction,
+            &request.metadata.authority,
+            &request.metadata.follower_id,
+        )
+        .await?
+            != 0
+        {
             return Err(Error::CredentialConflict);
         }
 
         sqlx::query("INSERT INTO configuration_read_grants (credential_digest, group_id, master_instance_id, follower_instance_id, issued_state_version, grant_id, issuance_attempt_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
-            .bind(digest.as_str())
-            .bind(authority.group_id().as_str())
-            .bind(authority.master_id().as_str())
-            .bind(follower.as_str())
+            .bind(request.credential_digest.as_str())
+            .bind(request.metadata.authority.group_id().as_str())
+            .bind(request.metadata.authority.master_id().as_str())
+            .bind(request.metadata.follower_id.as_str())
             .bind(expected.version() as i64)
             .bind(proposed_grant_id.as_str())
-            .bind(attempt_id.as_str())
+            .bind(request.metadata.attempt_id.as_str())
             .execute(&mut *transaction)
             .await
             .map_err(|error| {
@@ -66,17 +209,75 @@ impl ConfigurationAccessStore for SqliteStore {
                     Error::Unavailable
                 }
             })?;
+        let updated = sqlx::query(
+            "UPDATE configuration_follower_enrollment_request_lifecycle SET phase = 'approved', grant_id = ? WHERE request_id = ? AND phase = 'pending' AND grant_id IS NULL",
+        )
+        .bind(proposed_grant_id.as_str())
+        .bind(confirmation.request_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(Error::IntegrityViolation);
+        }
 
+        let approved = load_enrollment_request_by_id(&mut transaction, &confirmation.request_id)
+            .await?
+            .ok_or(Error::IntegrityViolation)?;
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
-        Ok(ConfigurationReadGrant {
-            grant_id: proposed_grant_id.clone(),
-            issuance_attempt_id: Some(attempt_id.clone()),
-            authority: authority.clone(),
-            follower_id: follower.clone(),
-            credential_digest: digest.clone(),
-            issued_state_version: expected.version(),
-            revoked: false,
-        })
+        Ok(approved.metadata)
+    }
+
+    async fn reject_configuration_follower_enrollment_request(
+        &self,
+        expected: &ConfigurationInstanceState,
+        confirmation: &ConfigurationFollowerEnrollmentRequestConfirmation,
+    ) -> Result<ConfigurationFollowerEnrollmentRequest, Error> {
+        let authority = registration_authority(expected, &confirmation.follower_id)?;
+        if authority != &confirmation.authority {
+            return Err(Error::Conflict);
+        }
+
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        require_current(&mut transaction, expected).await?;
+        let request = load_enrollment_request_by_id(&mut transaction, &confirmation.request_id)
+            .await?
+            .ok_or(Error::Denied)?;
+        if !request.matches_confirmation(confirmation) {
+            return Err(Error::IdempotencyConflict);
+        }
+
+        match request.metadata.phase {
+            ConfigurationFollowerEnrollmentRequestPhase::Rejected => {
+                transaction.commit().await.map_err(|_| Error::Unavailable)?;
+                return Ok(request.metadata);
+            }
+            ConfigurationFollowerEnrollmentRequestPhase::Approved => {
+                return Err(Error::Conflict);
+            }
+            ConfigurationFollowerEnrollmentRequestPhase::Pending => {}
+        }
+
+        let updated = sqlx::query(
+            "UPDATE configuration_follower_enrollment_request_lifecycle SET phase = 'rejected' WHERE request_id = ? AND phase = 'pending' AND grant_id IS NULL",
+        )
+        .bind(confirmation.request_id.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(Error::IntegrityViolation);
+        }
+
+        let rejected = load_enrollment_request_by_id(&mut transaction, &confirmation.request_id)
+            .await?
+            .ok_or(Error::IntegrityViolation)?;
+        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(rejected.metadata)
     }
 
     async fn get_configuration_read_grant(
@@ -186,6 +387,276 @@ impl ConfigurationAccessStore for SqliteStore {
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
         Ok(snapshot)
     }
+}
+
+struct StoredEnrollmentRequest {
+    metadata: ConfigurationFollowerEnrollmentRequest,
+    credential_digest: ConfigurationCredentialDigest,
+}
+
+impl StoredEnrollmentRequest {
+    fn matches_submission(
+        &self,
+        submission: &ConfigurationFollowerEnrollmentRequestSubmission,
+    ) -> bool {
+        self.metadata.attempt_id == submission.attempt_id
+            && self.metadata.follower_id == submission.follower_id
+            && self.metadata.follower_state_version == submission.follower_state_version
+            && self.metadata.authority == submission.authority
+            && self.metadata.server_name == submission.server_name
+            && self.metadata.master_ca_fingerprint == submission.master_ca_fingerprint
+            && self.credential_digest == submission.credential_digest
+    }
+
+    fn matches_confirmation(
+        &self,
+        confirmation: &ConfigurationFollowerEnrollmentRequestConfirmation,
+    ) -> bool {
+        self.metadata.request_id == confirmation.request_id
+            && self.metadata.attempt_id == confirmation.attempt_id
+            && self.metadata.follower_id == confirmation.follower_id
+            && self.metadata.follower_state_version == confirmation.follower_state_version
+            && self.metadata.authority == confirmation.authority
+            && self.metadata.server_name == confirmation.server_name
+            && self.metadata.master_ca_fingerprint == confirmation.master_ca_fingerprint
+            && self.metadata.received_master_state_version
+                == confirmation.received_master_state_version
+            && self.metadata.credential_fingerprint == confirmation.credential_fingerprint
+    }
+}
+
+async fn load_enrollment_request_by_id(
+    connection: &mut SqliteConnection,
+    request_id: &ConfigurationFollowerEnrollmentRequestId,
+) -> Result<Option<StoredEnrollmentRequest>, Error> {
+    let row = sqlx::query(enrollment_request_select!(" WHERE r.request_id = ?"))
+        .bind(request_id.as_str())
+        .fetch_optional(connection)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    row.map(decode_enrollment_request).transpose()
+}
+
+async fn load_enrollment_request_by_attempt(
+    connection: &mut SqliteConnection,
+    attempt_id: &ConfigurationReadGrantAttemptId,
+) -> Result<Option<StoredEnrollmentRequest>, Error> {
+    let row = sqlx::query(enrollment_request_select!(" WHERE r.attempt_id = ?"))
+        .bind(attempt_id.as_str())
+        .fetch_optional(connection)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    row.map(decode_enrollment_request).transpose()
+}
+
+fn decode_enrollment_request(row: SqliteRow) -> Result<StoredEnrollmentRequest, Error> {
+    let request_id = ConfigurationFollowerEnrollmentRequestId::parse(
+        row.try_get::<String, _>("request_id")
+            .map_err(|_| Error::IntegrityViolation)?,
+    )
+    .map_err(|_| Error::IntegrityViolation)?;
+    let attempt_id = ConfigurationReadGrantAttemptId::parse(
+        row.try_get::<String, _>("attempt_id")
+            .map_err(|_| Error::IntegrityViolation)?,
+    )
+    .map_err(|_| Error::IntegrityViolation)?;
+    let follower_id = KilnInstanceId::parse(
+        row.try_get::<String, _>("follower_instance_id")
+            .map_err(|_| Error::IntegrityViolation)?,
+    )
+    .map_err(|_| Error::IntegrityViolation)?;
+    let follower_state_version = read_positive_version(&row, "follower_state_version")?;
+    let group_id = ConfigurationGroupId::parse(
+        row.try_get::<String, _>("group_id")
+            .map_err(|_| Error::IntegrityViolation)?,
+    )
+    .map_err(|_| Error::IntegrityViolation)?;
+    let master_id = KilnInstanceId::parse(
+        row.try_get::<String, _>("master_instance_id")
+            .map_err(|_| Error::IntegrityViolation)?,
+    )
+    .map_err(|_| Error::IntegrityViolation)?;
+    if follower_id == master_id {
+        return Err(Error::IntegrityViolation);
+    }
+    let authority = ConfigurationAuthority::new(group_id, master_id);
+    let server_name: String = row
+        .try_get("server_name")
+        .map_err(|_| Error::IntegrityViolation)?;
+    if !super::configuration_identity::valid_server_name(&server_name) {
+        return Err(Error::IntegrityViolation);
+    }
+    let master_ca_fingerprint = ContentHash::parse(
+        row.try_get::<String, _>("master_ca_fingerprint")
+            .map_err(|_| Error::IntegrityViolation)?,
+    )
+    .map_err(|_| Error::IntegrityViolation)?;
+    let credential_digest = ConfigurationCredentialDigest::from_sha256(
+        ContentHash::parse(
+            row.try_get::<String, _>("credential_digest")
+                .map_err(|_| Error::IntegrityViolation)?,
+        )
+        .map_err(|_| Error::IntegrityViolation)?,
+    );
+    let received_master_state_version =
+        read_positive_version(&row, "received_master_state_version")?;
+    let phase = match row
+        .try_get::<String, _>("request_phase")
+        .map_err(|_| Error::IntegrityViolation)?
+        .as_str()
+    {
+        "pending" => ConfigurationFollowerEnrollmentRequestPhase::Pending,
+        "approved" => ConfigurationFollowerEnrollmentRequestPhase::Approved,
+        "rejected" => ConfigurationFollowerEnrollmentRequestPhase::Rejected,
+        _ => return Err(Error::IntegrityViolation),
+    };
+    let grant_id = row
+        .try_get::<Option<String>, _>("request_grant_id")
+        .map_err(|_| Error::IntegrityViolation)?
+        .map(ConfigurationReadGrantId::parse)
+        .transpose()
+        .map_err(|_| Error::IntegrityViolation)?;
+
+    let grant = match (phase, grant_id) {
+        (ConfigurationFollowerEnrollmentRequestPhase::Approved, Some(grant_id)) => {
+            let issued_grant_id = ConfigurationReadGrantId::parse(
+                row.try_get::<String, _>("issued_grant_id")
+                    .map_err(|_| Error::IntegrityViolation)?,
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+            let issued_digest = row
+                .try_get::<String, _>("issued_credential_digest")
+                .map_err(|_| Error::IntegrityViolation)?;
+            let issued_attempt = ConfigurationReadGrantAttemptId::parse(
+                row.try_get::<String, _>("issued_attempt_id")
+                    .map_err(|_| Error::IntegrityViolation)?,
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+            let issued_group = ConfigurationGroupId::parse(
+                row.try_get::<String, _>("issued_group_id")
+                    .map_err(|_| Error::IntegrityViolation)?,
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+            let issued_master = KilnInstanceId::parse(
+                row.try_get::<String, _>("issued_master_instance_id")
+                    .map_err(|_| Error::IntegrityViolation)?,
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+            let issued_follower = KilnInstanceId::parse(
+                row.try_get::<String, _>("issued_follower_instance_id")
+                    .map_err(|_| Error::IntegrityViolation)?,
+            )
+            .map_err(|_| Error::IntegrityViolation)?;
+            let issued_state_version = read_positive_version(&row, "issued_state_version")?;
+            let issued_revoked = read_revocation_flag(&row, "issued_revoked")?;
+            if grant_id != issued_grant_id
+                || issued_digest != credential_digest.as_str()
+                || issued_attempt != attempt_id
+                || issued_group != *authority.group_id()
+                || issued_master != *authority.master_id()
+                || issued_follower != follower_id
+            {
+                return Err(Error::IntegrityViolation);
+            }
+            Some(ConfigurationReadGrantSummary {
+                grant_id,
+                issuance_attempt_id: Some(attempt_id.clone()),
+                authority: authority.clone(),
+                follower_id: follower_id.clone(),
+                issued_state_version,
+                revoked: issued_revoked,
+            })
+        }
+        (ConfigurationFollowerEnrollmentRequestPhase::Approved, None)
+        | (ConfigurationFollowerEnrollmentRequestPhase::Pending, Some(_))
+        | (ConfigurationFollowerEnrollmentRequestPhase::Rejected, Some(_)) => {
+            return Err(Error::IntegrityViolation);
+        }
+        (_, None) => None,
+    };
+
+    let credential_fingerprint = enrollment_request_fingerprint(
+        &request_id,
+        &attempt_id,
+        &follower_id,
+        follower_state_version,
+        &authority,
+        &server_name,
+        &master_ca_fingerprint,
+        received_master_state_version,
+        &credential_digest,
+    )?;
+    Ok(StoredEnrollmentRequest {
+        metadata: ConfigurationFollowerEnrollmentRequest {
+            request_id,
+            attempt_id,
+            follower_id,
+            follower_state_version,
+            authority,
+            server_name,
+            master_ca_fingerprint,
+            credential_fingerprint,
+            received_master_state_version,
+            phase,
+            grant,
+        },
+        credential_digest,
+    })
+}
+
+fn read_positive_version(row: &SqliteRow, column: &str) -> Result<u64, Error> {
+    let value: i64 = row.try_get(column).map_err(|_| Error::IntegrityViolation)?;
+    u64::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or(Error::IntegrityViolation)
+}
+
+fn read_revocation_flag(row: &SqliteRow, column: &str) -> Result<bool, Error> {
+    match row
+        .try_get::<i64, _>(column)
+        .map_err(|_| Error::IntegrityViolation)?
+    {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Error::IntegrityViolation),
+    }
+}
+
+fn enrollment_request_fingerprint(
+    request_id: &ConfigurationFollowerEnrollmentRequestId,
+    attempt_id: &ConfigurationReadGrantAttemptId,
+    follower_id: &KilnInstanceId,
+    follower_state_version: u64,
+    authority: &ConfigurationAuthority,
+    server_name: &str,
+    master_ca_fingerprint: &ContentHash,
+    received_master_state_version: u64,
+    credential_digest: &ConfigurationCredentialDigest,
+) -> Result<ContentHash, Error> {
+    let mut hash = Sha256::new();
+    hash.update(b"kiln configuration follower enrollment confirmation v1\0");
+    for value in [
+        request_id.as_str(),
+        attempt_id.as_str(),
+        follower_id.as_str(),
+        authority.group_id().as_str(),
+        authority.master_id().as_str(),
+        server_name,
+        master_ca_fingerprint.as_str(),
+        credential_digest.as_str(),
+    ] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.update(follower_state_version.to_be_bytes());
+    hash.update(received_master_state_version.to_be_bytes());
+    let mut encoded = String::with_capacity(64);
+    for byte in hash.finalize() {
+        encoded.push(b"0123456789abcdef"[(byte >> 4) as usize] as char);
+        encoded.push(b"0123456789abcdef"[(byte & 0x0f) as usize] as char);
+    }
+    ContentHash::parse(encoded).map_err(|_| Error::IntegrityViolation)
 }
 
 fn registration_authority<'a>(

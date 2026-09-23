@@ -47,6 +47,25 @@ impl ConfigurationReadGrantAttemptId {
     }
 }
 
+/// Stable master-side identifier for one exact incoming follower request.
+/// The follower's attempt ID remains a separate idempotency key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConfigurationFollowerEnrollmentRequestId(String);
+
+impl ConfigurationFollowerEnrollmentRequestId {
+    pub fn from_ulid(value: Ulid) -> Self {
+        Self(format!("cfr_{:032x}", value.0))
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, InvalidKilnId> {
+        parse_public_id(value.into(), "cfr_").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 fn parse_public_id(value: String, prefix: &str) -> Result<String, InvalidKilnId> {
     let Some(suffix) = value.strip_prefix(prefix) else {
         return Err(InvalidKilnId);
@@ -98,6 +117,61 @@ pub struct ConfigurationReadGrantSummary {
     pub revoked: bool,
 }
 
+/// Follower-claimed input accepted by the internal master-side journal. It
+/// carries the one-way credential digest, never the bearer itself. The claimed
+/// follower ID and its pinned master endpoint are request data, not proof of
+/// identity or transport authentication.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConfigurationFollowerEnrollmentRequestSubmission {
+    pub attempt_id: ConfigurationReadGrantAttemptId,
+    pub follower_id: KilnInstanceId,
+    pub follower_state_version: u64,
+    pub authority: ConfigurationAuthority,
+    pub server_name: String,
+    pub master_ca_fingerprint: ContentHash,
+    pub credential_digest: ConfigurationCredentialDigest,
+}
+
+/// Exact values an administrator must confirm before the master issues a
+/// follower read grant. The fingerprint covers every immutable request field
+/// plus the full credential digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationFollowerEnrollmentRequestConfirmation {
+    pub request_id: ConfigurationFollowerEnrollmentRequestId,
+    pub attempt_id: ConfigurationReadGrantAttemptId,
+    pub follower_id: KilnInstanceId,
+    pub follower_state_version: u64,
+    pub authority: ConfigurationAuthority,
+    pub server_name: String,
+    pub master_ca_fingerprint: ContentHash,
+    pub received_master_state_version: u64,
+    pub credential_fingerprint: ContentHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationFollowerEnrollmentRequestPhase {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// Credential-free metadata from the master-side request journal. An approved
+/// request points to the existing grant record, including its revoked state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationFollowerEnrollmentRequest {
+    pub request_id: ConfigurationFollowerEnrollmentRequestId,
+    pub attempt_id: ConfigurationReadGrantAttemptId,
+    pub follower_id: KilnInstanceId,
+    pub follower_state_version: u64,
+    pub authority: ConfigurationAuthority,
+    pub server_name: String,
+    pub master_ca_fingerprint: ContentHash,
+    pub credential_fingerprint: ContentHash,
+    pub received_master_state_version: u64,
+    pub phase: ConfigurationFollowerEnrollmentRequestPhase,
+    pub grant: Option<ConfigurationReadGrantSummary>,
+}
+
 impl From<&ConfigurationReadGrant> for ConfigurationReadGrantSummary {
     fn from(grant: &ConfigurationReadGrant) -> Self {
         Self {
@@ -124,21 +198,69 @@ pub enum ConfigurationAccessError {
     Unavailable,
 }
 
-/// Internal storage boundary. Issuance is not enrollment: a caller must bind the
-/// digest to an exact pending request and obtain local approval before passing
-/// this boundary. No API in this trait delivers the bearer credential.
+/// Internal storage boundary. Grant issuance is only available through an exact
+/// pending-request approval transaction. No API in this trait delivers the
+/// bearer credential or treats claimed remote IDs as authentication proof.
 pub trait ConfigurationAccessStore: Send + Sync {
-    /// Issue only against the exact current master state. Exact attempt retries
-    /// return the original grant, including its current revocation state. An
-    /// second active grant for the same group/follower is rejected.
-    fn register_configuration_reader(
+    /// Durably accept an exact follower claim while this instance is the
+    /// matching master. Caller IDs remain claims until local approval; this
+    /// method does not authenticate a remote instance or issue a grant.
+    fn submit_configuration_follower_enrollment_request(
         &self,
         expected: &ConfigurationInstanceState,
-        follower: &KilnInstanceId,
+        submission: &ConfigurationFollowerEnrollmentRequestSubmission,
+        proposed_request_id: &ConfigurationFollowerEnrollmentRequestId,
+    ) -> impl Future<
+        Output = Result<ConfigurationFollowerEnrollmentRequest, ConfigurationAccessError>,
+    > + Send;
+
+    /// Recover one immutable request by its master-generated stable ID.
+    fn get_configuration_follower_enrollment_request(
+        &self,
+        request_id: &ConfigurationFollowerEnrollmentRequestId,
+    ) -> impl Future<
+        Output = Result<Option<ConfigurationFollowerEnrollmentRequest>, ConfigurationAccessError>,
+    > + Send;
+
+    /// Recover the master request corresponding to one follower attempt. This
+    /// is metadata-only and does not assert ownership of the claimed ID.
+    fn get_configuration_follower_enrollment_request_by_attempt(
+        &self,
         attempt_id: &ConfigurationReadGrantAttemptId,
+    ) -> impl Future<
+        Output = Result<Option<ConfigurationFollowerEnrollmentRequest>, ConfigurationAccessError>,
+    > + Send;
+
+    /// Stable request-ID ordered page of pending and terminal request metadata.
+    fn list_configuration_follower_enrollment_requests(
+        &self,
+        after: Option<&ConfigurationFollowerEnrollmentRequestId>,
+        limit: usize,
+    ) -> impl Future<
+        Output = Result<Vec<ConfigurationFollowerEnrollmentRequest>, ConfigurationAccessError>,
+    > + Send;
+
+    /// Atomically confirm the complete request binding and issue its read grant
+    /// under the exact current master state. Retries return the existing grant,
+    /// including permanent revocation; they never reactivate it.
+    fn approve_configuration_follower_enrollment_request(
+        &self,
+        expected: &ConfigurationInstanceState,
+        confirmation: &ConfigurationFollowerEnrollmentRequestConfirmation,
         proposed_grant_id: &ConfigurationReadGrantId,
-        digest: &ConfigurationCredentialDigest,
-    ) -> impl Future<Output = Result<ConfigurationReadGrant, ConfigurationAccessError>> + Send;
+    ) -> impl Future<
+        Output = Result<ConfigurationFollowerEnrollmentRequest, ConfigurationAccessError>,
+    > + Send;
+
+    /// Permanently reject one exact pending request. Repeating the same
+    /// confirmation is safe; rejected requests cannot later be approved.
+    fn reject_configuration_follower_enrollment_request(
+        &self,
+        expected: &ConfigurationInstanceState,
+        confirmation: &ConfigurationFollowerEnrollmentRequestConfirmation,
+    ) -> impl Future<
+        Output = Result<ConfigurationFollowerEnrollmentRequest, ConfigurationAccessError>,
+    > + Send;
 
     /// Read credential-free grant metadata by its stable public identifier.
     fn get_configuration_read_grant(

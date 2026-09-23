@@ -96,6 +96,10 @@ pub enum Error {
     InvalidArtifactPreviewLimit,
     #[error("configuration grant page limit must be between 1 and 100")]
     InvalidConfigurationGrantPageLimit,
+    #[error("configuration follower enrollment page limit must be between 1 and 100")]
+    InvalidConfigurationFollowerEnrollmentPageLimit,
+    #[error("configuration follower enrollment request has an empty or oversized CA DER value")]
+    InvalidConfigurationFollowerEnrollmentRequest,
     #[error("configuration snapshot response exceeds the transfer budget")]
     ConfigurationSnapshotTooLarge,
 }
@@ -362,6 +366,121 @@ impl Client {
                 operation: REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID,
                 source,
             })?;
+        let response = successful_response(response).await?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            return Err(Error::UnexpectedResponse {
+                status: response.status().as_u16(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Prepare or exactly retry a follower enrollment using the same stable
+    /// attempt ID and request data after an uncertain response. The response
+    /// contains metadata only; the local bearer stays in the daemon vault.
+    pub async fn prepare_configuration_follower_enrollment(
+        &self,
+        request: &kiln_protocol::PrepareConfigurationFollowerEnrollmentRequest,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentResponse, Error> {
+        if !valid_public_configuration_id(&request.attempt_id, "cra_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment attempt ID",
+            });
+        }
+        if request.certificate_authority_der.is_empty()
+            || request.certificate_authority_der.len()
+                > kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES
+        {
+            return Err(Error::InvalidConfigurationFollowerEnrollmentRequest);
+        }
+        self.send_json(
+            kiln_protocol::PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+            self.http
+                .post(self.http_url(kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH))
+                .json(request),
+        )
+        .await
+    }
+
+    /// List credential-free follower enrollment recovery metadata in stable
+    /// attempt-ID order.
+    pub async fn list_configuration_follower_enrollments(
+        &self,
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentListResponse, Error> {
+        if !(1..=100).contains(&limit) {
+            return Err(Error::InvalidConfigurationFollowerEnrollmentPageLimit);
+        }
+        if after.is_some_and(|value| !valid_public_configuration_id(value, "cra_")) {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment cursor",
+            });
+        }
+        let mut url = self.http_url(kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH);
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("limit", &limit.to_string());
+            if let Some(after) = after {
+                query.append_pair("after", after);
+            }
+        }
+        self.send_json(
+            kiln_protocol::LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID,
+            self.http.get(url),
+        )
+        .await
+    }
+
+    /// Recover metadata for one follower attempt without recovering its bearer.
+    pub async fn get_configuration_follower_enrollment(
+        &self,
+        attempt_id: &str,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentResponse, Error> {
+        if !valid_public_configuration_id(attempt_id, "cra_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment attempt ID",
+            });
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_PATH,
+            "{attempt_id}",
+            "configuration follower enrollment attempt ID",
+            attempt_id,
+        )?;
+        self.send_json(
+            kiln_protocol::GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    /// Permanently retire one follower enrollment and retry vault cleanup after
+    /// an uncertain response using the same attempt and expected instance IDs.
+    pub async fn retire_configuration_follower_enrollment(
+        &self,
+        attempt_id: &str,
+        request: &kiln_protocol::RetireConfigurationFollowerEnrollmentRequest,
+    ) -> Result<(), Error> {
+        if !valid_public_configuration_id(attempt_id, "cra_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment attempt ID",
+            });
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH,
+            "{attempt_id}",
+            "configuration follower enrollment attempt ID",
+            attempt_id,
+        )?;
+        let operation = kiln_protocol::RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID;
+        let response = self
+            .http
+            .post(self.http_url(&path))
+            .json(request)
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport { operation, source })?;
         let response = successful_response(response).await?;
         if response.status() != reqwest::StatusCode::NO_CONTENT {
             return Err(Error::UnexpectedResponse {

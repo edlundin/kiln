@@ -1,14 +1,25 @@
 use crate::{
+    CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES, CONFIGURATION_FOLLOWER_ENROLLMENT_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH, CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH,
     CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH, CONFIGURATION_IDENTITY_RETIRE_PATH,
     CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH, CONFIGURATION_READ_GRANT_PATH,
     CONFIGURATION_READ_GRANT_REVOKE_PATH, CONFIGURATION_READ_GRANTS_PATH,
-    CONFIGURE_MASTER_IDENTITY_OPERATION_ID, ConfigurationIdentitySetupResponse,
-    ConfigurationReadGrantListResponse, ConfigurationReadGrantResponse,
-    ConfigureMasterIdentityRequest, GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
-    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID,
+    CONFIGURE_MASTER_IDENTITY_OPERATION_ID, ConfigurationFollowerEnrollmentListResponse,
+    ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentResponse,
+    ConfigurationIdentitySetupResponse, ConfigurationReadGrantListResponse,
+    ConfigurationReadGrantResponse, ConfigureMasterIdentityRequest,
+    GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
+    GET_CONFIGURATION_READ_GRANT_OPERATION_ID,
+    LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID,
+    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID,
+    PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    PrepareConfigurationFollowerEnrollmentRequest,
+    RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID, RETIRE_MASTER_IDENTITY_OPERATION_ID,
-    REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID, RetireMasterIdentityByIdRequest,
-    RetireMasterIdentityRequest, RevokeConfigurationReadGrantRequest,
+    REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID, RetireConfigurationFollowerEnrollmentRequest,
+    RetireMasterIdentityByIdRequest, RetireMasterIdentityRequest,
+    RevokeConfigurationReadGrantRequest,
 };
 use crate::{
     CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
@@ -319,6 +330,26 @@ fn schema() -> String {
             schema_for!(ConfigurationIdentitySetupResponse),
         ),
         (
+            "ConfigurationFollowerEnrollmentPhase",
+            schema_for!(ConfigurationFollowerEnrollmentPhase),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentResponse",
+            schema_for!(ConfigurationFollowerEnrollmentResponse),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentListResponse",
+            schema_for!(ConfigurationFollowerEnrollmentListResponse),
+        ),
+        (
+            "PrepareConfigurationFollowerEnrollmentRequest",
+            schema_for!(PrepareConfigurationFollowerEnrollmentRequest),
+        ),
+        (
+            "RetireConfigurationFollowerEnrollmentRequest",
+            schema_for!(RetireConfigurationFollowerEnrollmentRequest),
+        ),
+        (
             "RetireMasterIdentityRequest",
             schema_for!(RetireMasterIdentityRequest),
         ),
@@ -518,6 +549,11 @@ fn typescript() -> String {
         ConfigurationIdentityPhase::decl(&config),
         ConfigureMasterIdentityRequest::decl(&config),
         ConfigurationIdentitySetupResponse::decl(&config),
+        ConfigurationFollowerEnrollmentPhase::decl(&config),
+        ConfigurationFollowerEnrollmentResponse::decl(&config),
+        ConfigurationFollowerEnrollmentListResponse::decl(&config),
+        PrepareConfigurationFollowerEnrollmentRequest::decl(&config),
+        RetireConfigurationFollowerEnrollmentRequest::decl(&config),
         RetireMasterIdentityRequest::decl(&config),
         RetireMasterIdentityByIdRequest::decl(&config),
         ClientIdentity::decl(&config),
@@ -642,6 +678,22 @@ fn catalogue() -> String {
             "method": "POST",
             "path": CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH,
             "operation": RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH,
+            "operation": LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH,
+            "operation": PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": CONFIGURATION_FOLLOWER_ENROLLMENT_PATH,
+            "operation": GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH,
+            "operation": RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID
         }, {
             "method": "POST",
             "path": CONFIGURATION_MASTER_PATH,
@@ -1510,6 +1562,107 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConfigurationIdentityStatusResponse'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH}:
+    get:
+      operationId: {LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID}
+      description: List credential-free follower enrollment reservation metadata in stable attempt-ID order. Each page is limited to 100 entries; bearer credentials, digests, vault references, and submitted CA bytes are never returned.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {{type: integer, minimum: 1, maximum: 100, default: 50}}
+        - name: after
+          in: query
+          required: false
+          schema: {{type: string, pattern: '^cra_[0-9a-f]{{32}}$'}}
+      responses:
+        '200':
+          description: One bounded metadata page; next_cursor is null when the page is final.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentListResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: {PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID}
+      description: Prepare or exactly retry a follower request using its stable attempt ID and exact current unassigned-instance preconditions. The entire JSON body and CA DER field are limited to {CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES} bytes; a request exceeding the shared JSON body limit is rejected with HTTP 400 invalid_json. No remote request, role transition, or bearer delivery occurs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrepareConfigurationFollowerEnrollmentRequest'
+      responses:
+        '200':
+          description: Credential-free recovery metadata for the prepared attempt.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_FOLLOWER_ENROLLMENT_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID}
+      description: Recover credential-free metadata for one stable attempt ID without reading its bearer credential.
+      parameters:
+        - name: attempt_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cra_[0-9a-f]{{32}}$'}}
+      responses:
+        '200':
+          description: Credential-free metadata for the original follower request.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentResponse'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH}:
+    post:
+      operationId: {RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID}
+      description: Permanently retire one enrollment attempt after verifying the expected follower instance ID. Cleanup may be retried with the same request.
+      parameters:
+        - name: attempt_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cra_[0-9a-f]{{32}}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetireConfigurationFollowerEnrollmentRequest'
+      responses:
+        '204':
+          description: Enrollment attempt is permanently retired and vault cleanup is complete.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
   {CONFIGURATION_READ_GRANTS_PATH}:
@@ -2570,6 +2723,26 @@ components:
         (
             "ConfigurationIdentitySetupResponse",
             openapi_schema::<ConfigurationIdentitySetupResponse>(),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentPhase",
+            openapi_schema::<ConfigurationFollowerEnrollmentPhase>(),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentResponse",
+            openapi_schema::<ConfigurationFollowerEnrollmentResponse>(),
+        ),
+        (
+            "ConfigurationFollowerEnrollmentListResponse",
+            openapi_schema::<ConfigurationFollowerEnrollmentListResponse>(),
+        ),
+        (
+            "PrepareConfigurationFollowerEnrollmentRequest",
+            openapi_schema::<PrepareConfigurationFollowerEnrollmentRequest>(),
+        ),
+        (
+            "RetireConfigurationFollowerEnrollmentRequest",
+            openapi_schema::<RetireConfigurationFollowerEnrollmentRequest>(),
         ),
         (
             "RetireMasterIdentityRequest",

@@ -272,3 +272,21 @@ bearer or credential digest. Revocation requires the expected local instance and
 current state version, is permanent, and is safe to repeat. These endpoints do
 not create or deliver a credential, approve a pending request, or enable a
 listener.
+
+Protocol `0.34.0` adds local follower enrollment methods:
+`prepare_configuration_follower_enrollment(request)`,
+`list_configuration_follower_enrollments(limit, after)`,
+`get_configuration_follower_enrollment(attempt_id)`, and
+`retire_configuration_follower_enrollment(attempt_id, request)`. Prepare takes a
+stable `cra_` attempt ID, expected unassigned instance/version, selected
+group/master, server name and CA DER. Reuse the exact full request and attempt ID
+after an uncertain response. The complete JSON body and CA DER value are each
+limited to 2 MiB; the shared JSON extractor reports an over-limit body as HTTP 400
+`invalid_json`. Prepare, list and get return lifecycle/authority metadata and a
+CA fingerprint only; they never return CA bytes, a vault reference, credential
+digest or bearer. The list accepts 1–100 rows (default 50) and uses a stable
+continuation cursor. Retirement requires the expected follower instance ID,
+permanently tombstones the attempt, and is safe to retry after a lost response.
+These authenticated local calls do not contact a master, assign a local role,
+approve a remote request, or enable listener composition. See the
+[local enrollment request contract](../spec/configuration-sync.md#selected-automatic-enrollment-direction).

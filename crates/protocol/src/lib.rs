@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.33.0";
+pub const PROTOCOL_VERSION: &str = "0.34.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -32,6 +32,12 @@ pub const CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH: &str =
     "/v1/configuration-sync/grants/attempts/{attempt_id}";
 pub const CONFIGURATION_READ_GRANT_REVOKE_PATH: &str =
     "/v1/configuration-sync/grants/{grant_id}/revoke";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH: &str =
+    "/v1/configuration-sync/follower-enrollments";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_PATH: &str =
+    "/v1/configuration-sync/follower-enrollments/{attempt_id}";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH: &str =
+    "/v1/configuration-sync/follower-enrollments/{attempt_id}/retire";
 pub const CONFIGURE_MASTER_IDENTITY_OPERATION_ID: &str = "configure_master_identity";
 pub const RETIRE_MASTER_IDENTITY_OPERATION_ID: &str = "retire_master_identity";
 pub const RETIRE_MASTER_IDENTITY_BY_ID_OPERATION_ID: &str = "retire_master_identity_by_id";
@@ -42,6 +48,14 @@ pub const GET_CONFIGURATION_READ_GRANT_OPERATION_ID: &str = "get_configuration_r
 pub const GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID: &str =
     "get_configuration_read_grant_by_attempt";
 pub const REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID: &str = "revoke_configuration_read_grant";
+pub const LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID: &str =
+    "list_configuration_follower_enrollments";
+pub const PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
+    "prepare_configuration_follower_enrollment";
+pub const GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
+    "get_configuration_follower_enrollment";
+pub const RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
+    "retire_configuration_follower_enrollment";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
 pub const CONFIGURATION_SNAPSHOT_PATH: &str = "/v1/configuration-sync/snapshot";
 pub const GET_CONFIGURATION_SNAPSHOT_OPERATION_ID: &str = "get_configuration_snapshot";
@@ -49,6 +63,8 @@ pub const PUBLISH_CONFIGURATION_OPERATION_ID: &str = "publish_configuration_snap
 /// Keep explicit snapshot imports within the existing Axum JSON request ceiling.
 /// This bounds the whole serialized request, including metadata and byte arrays.
 pub const CONFIGURATION_PUBLICATION_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// Bounds follower-enrollment JSON bodies and their submitted CA DER field.
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES: usize = CONFIGURATION_PUBLICATION_MAX_BYTES;
 pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configuration_master";
 pub const GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID: &str = "get_configuration_sync_status";
 pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
@@ -198,6 +214,12 @@ pub mod error_code {
     pub const CONFIGURATION_READ_GRANT_NOT_FOUND: &str = "configuration_read_grant_not_found";
     pub const CONFIGURATION_IDENTITY_RECOVERY_REQUIRED: &str =
         "configuration_identity_recovery_required";
+    pub const CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND: &str =
+        "configuration_follower_enrollment_not_found";
+    pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRED: &str =
+        "configuration_follower_enrollment_retired";
+    pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RECOVERY_REQUIRED: &str =
+        "configuration_follower_enrollment_recovery_required";
     pub const CONFIGURATION_SNAPSHOT_NOT_FOUND: &str = "configuration_snapshot_not_found";
     pub const CONFIGURATION_SNAPSHOT_TOO_LARGE: &str = "configuration_snapshot_too_large";
     pub const PROVIDER_ACCOUNT_STORE_UNAVAILABLE: &str = "provider_account_store_unavailable";
@@ -285,6 +307,9 @@ pub mod error_code {
         CONFIGURATION_SYNC_CONFLICT,
         CONFIGURATION_READ_GRANT_NOT_FOUND,
         CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
+        CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND,
+        CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRED,
+        CONFIGURATION_FOLLOWER_ENROLLMENT_RECOVERY_REQUIRED,
         CONFIGURATION_SNAPSHOT_NOT_FOUND,
         CONFIGURATION_SNAPSHOT_TOO_LARGE,
         PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
@@ -581,6 +606,54 @@ pub struct ConfigurationReadGrantListResponse {
     #[serde(deserialize_with = "deserialize_required_nullable_string")]
     #[schemars(with = "RequiredNullableString")]
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationFollowerEnrollmentPhase {
+    Reserved,
+    Prepared,
+    Retired,
+}
+
+/// Public follower-request metadata only. It omits CA bytes, vault references,
+/// credential digests, and bearer credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationFollowerEnrollmentResponse {
+    pub attempt_id: String,
+    pub follower_instance_id: String,
+    pub expected_state_version: u64,
+    pub group_id: String,
+    pub master_instance_id: String,
+    pub server_name: String,
+    pub certificate_authority_fingerprint: String,
+    pub phase: ConfigurationFollowerEnrollmentPhase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationFollowerEnrollmentListResponse {
+    pub enrollments: Vec<ConfigurationFollowerEnrollmentResponse>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareConfigurationFollowerEnrollmentRequest {
+    pub attempt_id: String,
+    pub expected_instance_id: String,
+    pub expected_state_version: u64,
+    pub group_id: String,
+    pub master_instance_id: String,
+    pub server_name: String,
+    pub certificate_authority_der: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetireConfigurationFollowerEnrollmentRequest {
+    pub expected_instance_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

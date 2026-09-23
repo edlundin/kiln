@@ -5,8 +5,10 @@ settings, global MCP configuration, and global skills to followers, including
 remote hosts. Durable authority/snapshot storage, status, initial local master
 designation, explicit local snapshot publication, and bounded snapshot export are
 implemented. Internal follower read-credential registration, revocation and
-authorized snapshot acquisition are also implemented. Remote enrollment, synchronization transport, and
-runtime activation remain incomplete.
+authorized snapshot acquisition are also implemented, along with durable local
+follower-credential reservation and authenticated request preparation/recovery.
+Remote enrollment, synchronization transport and runtime activation remain
+incomplete.
 
 ## Authority and enrollment
 
@@ -23,7 +25,10 @@ loopback alone does not prove the identity of a forwarded peer. Enrollment must
 pin the master identity and provision a follower-specific, revocable credential
 with read-only shared-configuration access. The existing unrestricted local API
 bearer is not a synchronization credential and must not be copied to followers.
-Network listeners and enrollment routes remain disabled until that boundary exists.
+The local API can now reserve and recover the follower's request inputs, but it
+does not contact or authenticate a master, approve a remote request, change the
+local role, or deliver a credential. Remote enrollment and network listeners
+remain disabled until their separate authentication and approval boundaries exist.
 
 The first release has no automatic failover or master election. A master cannot
 be replaced by accepting a newer snapshot or a numerically larger revision.
@@ -121,11 +126,11 @@ signed 64-bit positive range and rejects exhaustion/overflow.
 
 Migration 35 adds coherent snapshot payloads and active revisions as described
 below. Migration 38 adds master-side credential digests and permanent revocation
-records; migration 42 adds stable grant and request-attempt IDs. Follower
-credential delivery/storage and remote endpoint associations remain absent. The
-local API exposes status, initial master designation, and credential-free grant
-metadata/list/revoke operations. Remote enrollment and consumers remain
-subsequent work.
+records; migration 42 adds stable grant and request-attempt IDs; migration 43 adds
+the immutable follower request journal and permanent lifecycle tombstones. The
+local API exposes status, initial master designation, credential-free grant
+metadata/list/revoke, and local follower-request preparation/recovery/retirement.
+Remote enrollment, exchange and consumers remain subsequent work.
 
 ## Internal follower read credentials
 
@@ -138,9 +143,9 @@ Its SHA-256 digest covers the complete prefixed credential and is the only
 credential representation stored in SQLite. Raw material must remain confined to
 private enrollment delivery/storage and sensitive transport headers.
 
-`ConfigurationAccessStore` is an internal issuance/read boundary, with no
-enrollment or credential-delivery route and no network listener. Registration
-binds one digest permanently to a stable grant ID, the master/group, claimed
+`ConfigurationAccessStore` is an internal master-side issuance/read boundary,
+with no remote enrollment or bearer-delivery route and no network listener.
+Registration binds one digest permanently to a stable grant ID, the master/group, claimed
 follower instance and original master state version. A stable request-attempt ID
 deduplicates issuance and permits metadata-only recovery after a lost response.
 Exact retries return the original record, including its current revoked flag,
@@ -169,9 +174,10 @@ API, publication, credential-vault or execution access. The eventual transport
 must parse and hash a presented bearer itself, never accept a client-supplied
 digest as proof. No reusable authorization decision is returned.
 
-This is not completed enrollment. Master identity pinning, encrypted authenticated
-transport, explicit approval/delivery, follower secret storage, administration UI,
-audit/recovery and reconnect remain to be wired before remote access is enabled.
+This does not complete remote enrollment. Master identity pinning over a live
+connection, encrypted authenticated transport, master-side request approval and
+acknowledgement, administration UI, reconnect and listener composition remain
+to be wired before remote access is enabled.
 
 ## Selected automatic enrollment direction
 
@@ -209,12 +215,29 @@ reserved/prepared/retired state are stored separately. Trust inputs require a
 canonical DNS/IP server name and CA DER no larger than 2^24−1 bytes, the uint24
 maximum length of one TLS Certificate entry.
 
-This internal preparer does not change the local role, make a network request,
-or mount an enrollment route. Pending request approval UI, master-side approval,
-remote redemption/acknowledgement, active credential retrieval, automatic
-reconnect, and listener composition remain unimplemented. The current slice does
-not establish device identity beyond an administrator's approval of the exact
-request.
+An authenticated local API exposes `POST
+/v1/configuration-sync/follower-enrollments` with a stable `cra_` attempt ID,
+expected follower instance/version, group/master IDs, approved server name and CA
+DER. An exact retry reuses the original vault reference and bearer; changing any
+request input with the same attempt ID conflicts. The response, `GET` lookup and
+cursor-based `GET /v1/configuration-sync/follower-enrollments` return only attempt,
+authority, follower/version, server name, CA fingerprint and lifecycle phase.
+They never return CA bytes, a vault reference, digest or bearer. The list accepts
+limits from 1 through 100 (default 50) and reads one lookahead row. CA DER and the
+entire JSON prepare request are bounded to 2 MiB. `POST
+/v1/configuration-sync/follower-enrollments/{attempt_id}/retire` requires the
+expected follower instance ID, checks it against the journal, writes the permanent
+tombstone first, then retries vault deletion on repeated requests.
+
+The shared strict JSON extractor rejects a request over its 2 MiB body limit with
+HTTP 400 `invalid_json`; it does not return HTTP 413 for this local route.
+
+The local preparer does not change the local role or make a network request.
+Pending request approval UI, master-side approval, remote
+redemption/acknowledgement, active credential retrieval, automatic reconnect and
+listener composition remain unimplemented. The current slice does not establish
+device identity beyond a locally authenticated administrator's review of the
+exact request inputs.
 
 ## Pinned HTTPS follower client
 
@@ -451,9 +474,9 @@ cleanup work; they do not perform OS effects inside SQLite transactions.
 Validation currently covers compilation/build, source review, fresh migration
 39 startup and SQL preparation only. No tests, actual certificate generation,
 vault operations, cancellation/recovery scenarios or TLS handshakes have run.
-Private follower enrollment and credential delivery, remote daemon composition,
-follower fetch/apply and consumers
-remain open; remote synchronization is not enabled.
+Remote follower enrollment/exchange and credential delivery, remote daemon
+composition, follower fetch/apply and consumers remain open; remote
+synchronization is not enabled.
 
 ## Local managed identity status
 

@@ -6,21 +6,26 @@ use super::{
     configuration_identity::valid_server_name, configuration_sync,
 };
 use kiln_core::{
-    ConfigurationAuthority, ConfigurationCredentialDigest, ConfigurationReadGrantAttemptId,
-    ConfigurationRole, ConfigurationSecretBinding, ConfigurationSecretPurpose,
-    ConfigurationSecretStore, ContentHash, KilnInstanceId, SecretRef, SecretStoreError,
-    SecretValue,
+    ConfigurationAuthority, ConfigurationCredentialDigest,
+    ConfigurationFollowerEnrollmentAdministration, ConfigurationFollowerEnrollmentChoice,
+    ConfigurationFollowerEnrollmentError as CoreError, ConfigurationFollowerEnrollmentMetadata,
+    ConfigurationFollowerEnrollmentPhase, ConfigurationReadGrantAttemptId, ConfigurationRole,
+    ConfigurationSecretBinding, ConfigurationSecretPurpose, ConfigurationSecretStore, ContentHash,
+    KilnInstanceId, SecretRef, SecretStoreError, SecretValue,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 use std::num::NonZeroU32;
 
-const MAX_PAGE_SIZE: u32 = 100;
+// A 100-row API page fetches one additional row to determine whether a next
+// cursor is available.
+const MAX_PAGE_SIZE: u32 = 101;
 // A TLS Certificate entry has a uint24 length field (RFC 8446, section 4.4.2).
 const MAX_CERTIFICATE_DER_BYTES: usize = 0xFF_FFFF;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigurationFollowerEnrollmentError {
+enum ConfigurationFollowerEnrollmentManagerError {
     InvalidRequest,
+    NotFound,
     Conflict,
     IdempotencyConflict,
     Retired,
@@ -29,92 +34,12 @@ pub enum ConfigurationFollowerEnrollmentError {
     Vault(SecretStoreError),
     Unavailable,
 }
-use ConfigurationFollowerEnrollmentError as Error;
-
-/// Caller-approved trust for one follower request. The constructor validates
-/// the binding grammar; approval and certificate review belong to the local
-/// authenticated action that creates this value.
-pub struct ConfigurationFollowerEnrollmentChoice {
-    expected_instance_id: KilnInstanceId,
-    expected_state_version: u64,
-    authority: ConfigurationAuthority,
-    server_name: String,
-    certificate_authority_der: Vec<u8>,
-}
-
-impl ConfigurationFollowerEnrollmentChoice {
-    pub fn new(
-        expected_instance_id: KilnInstanceId,
-        expected_state_version: u64,
-        authority: ConfigurationAuthority,
-        server_name: String,
-        certificate_authority_der: Vec<u8>,
-    ) -> Result<Self, Error> {
-        if expected_state_version == 0
-            || expected_state_version >= i64::MAX as u64
-            || authority.master_id() == &expected_instance_id
-            || !valid_server_name(&server_name)
-            || certificate_authority_der.is_empty()
-            || certificate_authority_der.len() > MAX_CERTIFICATE_DER_BYTES
-        {
-            return Err(Error::InvalidRequest);
-        }
-        Ok(Self {
-            expected_instance_id,
-            expected_state_version,
-            authority,
-            server_name,
-            certificate_authority_der,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfigurationFollowerEnrollmentPhase {
-    Reserved,
-    Prepared,
-    Retired,
-}
-
-/// Credential-free, reference-free journal metadata for local recovery.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigurationFollowerEnrollmentMetadata {
-    attempt_id: ConfigurationReadGrantAttemptId,
-    follower_instance_id: KilnInstanceId,
-    expected_state_version: u64,
-    authority: ConfigurationAuthority,
-    server_name: String,
-    certificate_authority_fingerprint: ContentHash,
-    phase: ConfigurationFollowerEnrollmentPhase,
-}
-
-impl ConfigurationFollowerEnrollmentMetadata {
-    pub fn attempt_id(&self) -> &ConfigurationReadGrantAttemptId {
-        &self.attempt_id
-    }
-    pub fn follower_instance_id(&self) -> &KilnInstanceId {
-        &self.follower_instance_id
-    }
-    pub fn expected_state_version(&self) -> u64 {
-        self.expected_state_version
-    }
-    pub fn authority(&self) -> &ConfigurationAuthority {
-        &self.authority
-    }
-    pub fn server_name(&self) -> &str {
-        &self.server_name
-    }
-    pub fn certificate_authority_fingerprint(&self) -> &ContentHash {
-        &self.certificate_authority_fingerprint
-    }
-    pub fn phase(&self) -> ConfigurationFollowerEnrollmentPhase {
-        self.phase
-    }
-}
+use ConfigurationFollowerEnrollmentManagerError as Error;
 
 /// Exact initial request fields. It carries only the one-way credential digest,
 /// never the bearer. Keep this value out of logs and general-purpose events.
-pub struct ConfigurationFollowerEnrollmentSubmission {
+#[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
+pub(crate) struct ConfigurationFollowerEnrollmentSubmission {
     attempt_id: ConfigurationReadGrantAttemptId,
     follower_instance_id: KilnInstanceId,
     authority: ConfigurationAuthority,
@@ -124,26 +49,27 @@ pub struct ConfigurationFollowerEnrollmentSubmission {
     credential_digest: ConfigurationCredentialDigest,
 }
 
+#[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
 impl ConfigurationFollowerEnrollmentSubmission {
-    pub fn attempt_id(&self) -> &ConfigurationReadGrantAttemptId {
+    pub(crate) fn attempt_id(&self) -> &ConfigurationReadGrantAttemptId {
         &self.attempt_id
     }
-    pub fn follower_instance_id(&self) -> &KilnInstanceId {
+    pub(crate) fn follower_instance_id(&self) -> &KilnInstanceId {
         &self.follower_instance_id
     }
-    pub fn authority(&self) -> &ConfigurationAuthority {
+    pub(crate) fn authority(&self) -> &ConfigurationAuthority {
         &self.authority
     }
-    pub fn server_name(&self) -> &str {
+    pub(crate) fn server_name(&self) -> &str {
         &self.server_name
     }
-    pub fn certificate_authority_der(&self) -> &[u8] {
+    pub(crate) fn certificate_authority_der(&self) -> &[u8] {
         &self.certificate_authority_der
     }
-    pub fn certificate_authority_fingerprint(&self) -> &ContentHash {
+    pub(crate) fn certificate_authority_fingerprint(&self) -> &ContentHash {
         &self.certificate_authority_fingerprint
     }
-    pub fn credential_digest(&self) -> &ConfigurationCredentialDigest {
+    pub(crate) fn credential_digest(&self) -> &ConfigurationCredentialDigest {
         &self.credential_digest
     }
 }
@@ -165,7 +91,7 @@ impl ConfigurationFollowerEnrollmentManager {
     /// Persist a fresh attempt before its first vault write. Exact retries load
     /// and verify the original vault value; they never generate or overwrite it.
     /// The caller supplies an attempt ID so it can retry after an uncertain result.
-    pub async fn prepare(
+    async fn prepare(
         &self,
         attempt_id: ConfigurationReadGrantAttemptId,
         choice: ConfigurationFollowerEnrollmentChoice,
@@ -181,7 +107,7 @@ impl ConfigurationFollowerEnrollmentManager {
 
     /// Recover bounded journal metadata, including permanent tombstones. The
     /// caller may resume after the last attempt ID; no secret data is returned.
-    pub async fn list(
+    async fn list(
         &self,
         after: Option<&ConfigurationReadGrantAttemptId>,
         limit: NonZeroU32,
@@ -204,7 +130,18 @@ impl ConfigurationFollowerEnrollmentManager {
 
     /// Produce the digest-only request after rechecking local state and the
     /// vaulted bearer. A stale or changed reservation is retired before return.
-    pub async fn submission(
+    #[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
+    pub(crate) async fn submission(
+        &self,
+        attempt_id: &ConfigurationReadGrantAttemptId,
+    ) -> Result<ConfigurationFollowerEnrollmentSubmission, CoreError> {
+        self.submission_internal(attempt_id)
+            .await
+            .map_err(map_manager_error)
+    }
+
+    #[allow(dead_code, reason = "used only by the internal submission boundary")]
+    async fn submission_internal(
         &self,
         attempt_id: &ConfigurationReadGrantAttemptId,
     ) -> Result<ConfigurationFollowerEnrollmentSubmission, Error> {
@@ -230,17 +167,36 @@ impl ConfigurationFollowerEnrollmentManager {
 
     /// Permanently retire the attempt before retryable vault cleanup. Exact
     /// retries repeat deletion; a tombstoned reference is never reused.
-    pub async fn retire_and_cleanup(
+    async fn retire_checked(
         &self,
+        expected_instance_id: KilnInstanceId,
         attempt_id: ConfigurationReadGrantAttemptId,
     ) -> Result<(), Error> {
         let owner = self.clone();
         tokio::spawn(async move {
             let _guard = owner.store.configuration_enrollment_operations.lock().await;
-            owner.retire_and_cleanup_owned(&attempt_id).await
+            owner
+                .retire_and_cleanup_expected_owned(&attempt_id, &expected_instance_id)
+                .await
         })
         .await
         .map_err(|_| Error::Unavailable)?
+    }
+
+    async fn get_metadata(
+        &self,
+        attempt_id: &ConfigurationReadGrantAttemptId,
+    ) -> Result<Option<ConfigurationFollowerEnrollmentMetadata>, Error> {
+        let mut connection = self.store.connection.lock().await;
+        sqlx::query(
+            "SELECT r.attempt_id, r.follower_instance_id, r.expected_state_version, r.group_id, r.master_instance_id, r.server_name, r.ca_fingerprint, l.phase FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_lifecycle l USING (attempt_id) WHERE r.attempt_id = ?",
+        )
+        .bind(attempt_id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| Error::Unavailable)?
+        .map(decode_metadata)
+        .transpose()
     }
 
     async fn prepare_owned(
@@ -248,6 +204,7 @@ impl ConfigurationFollowerEnrollmentManager {
         attempt_id: ConfigurationReadGrantAttemptId,
         choice: ConfigurationFollowerEnrollmentChoice,
     ) -> Result<ConfigurationFollowerEnrollmentMetadata, Error> {
+        validate_choice(&choice)?;
         let existing = {
             let mut connection = self.store.connection.lock().await;
             load_request(&mut connection, &attempt_id).await?
@@ -414,6 +371,7 @@ impl ConfigurationFollowerEnrollmentManager {
         }))
     }
 
+    #[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
     async fn confirm_submission_ready(&self, request: &StoredRequest) -> Result<(), Error> {
         let mut connection = self.store.connection.lock().await;
         let mut transaction = connection
@@ -537,6 +495,24 @@ impl ConfigurationFollowerEnrollmentManager {
         &self,
         attempt_id: &ConfigurationReadGrantAttemptId,
     ) -> Result<(), Error> {
+        self.retire_and_cleanup_owned_with_expected(attempt_id, None)
+            .await
+    }
+
+    async fn retire_and_cleanup_expected_owned(
+        &self,
+        attempt_id: &ConfigurationReadGrantAttemptId,
+        expected_instance_id: &KilnInstanceId,
+    ) -> Result<(), Error> {
+        self.retire_and_cleanup_owned_with_expected(attempt_id, Some(expected_instance_id))
+            .await
+    }
+
+    async fn retire_and_cleanup_owned_with_expected(
+        &self,
+        attempt_id: &ConfigurationReadGrantAttemptId,
+        expected_instance_id: Option<&KilnInstanceId>,
+    ) -> Result<(), Error> {
         let request = {
             let mut connection = self.store.connection.lock().await;
             let mut transaction = connection
@@ -545,7 +521,12 @@ impl ConfigurationFollowerEnrollmentManager {
                 .map_err(|_| Error::Unavailable)?;
             let request = load_request(&mut transaction, attempt_id)
                 .await?
-                .ok_or(Error::InvalidRequest)?;
+                .ok_or(Error::NotFound)?;
+            if expected_instance_id
+                .is_some_and(|expected| expected != &request.follower_instance_id)
+            {
+                return Err(Error::Conflict);
+            }
             sqlx::query(
                 "UPDATE configuration_follower_enrollment_lifecycle SET phase = 'retired' WHERE attempt_id = ? AND phase != 'retired'",
             )
@@ -566,6 +547,91 @@ impl ConfigurationFollowerEnrollmentManager {
             Err(error) => Err(Error::Vault(error)),
         }
     }
+}
+
+impl ConfigurationFollowerEnrollmentAdministration for ConfigurationFollowerEnrollmentManager {
+    fn prepare_configuration_follower_enrollment(
+        &self,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        choice: ConfigurationFollowerEnrollmentChoice,
+    ) -> impl std::future::Future<
+        Output = Result<ConfigurationFollowerEnrollmentMetadata, CoreError>,
+    > + Send {
+        async move {
+            self.prepare(attempt_id, choice)
+                .await
+                .map_err(map_manager_error)
+        }
+    }
+
+    fn list_configuration_follower_enrollments(
+        &self,
+        after: Option<&ConfigurationReadGrantAttemptId>,
+        limit: usize,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<ConfigurationFollowerEnrollmentMetadata>, CoreError>,
+    > + Send {
+        async move {
+            if limit == 0 || limit > MAX_PAGE_SIZE as usize {
+                return Err(CoreError::InvalidRequest);
+            }
+            let limit = u32::try_from(limit)
+                .ok()
+                .and_then(NonZeroU32::new)
+                .ok_or(CoreError::InvalidRequest)?;
+            self.list(after, limit).await.map_err(map_manager_error)
+        }
+    }
+
+    fn get_configuration_follower_enrollment(
+        &self,
+        attempt_id: &ConfigurationReadGrantAttemptId,
+    ) -> impl std::future::Future<
+        Output = Result<Option<ConfigurationFollowerEnrollmentMetadata>, CoreError>,
+    > + Send {
+        async move {
+            self.get_metadata(attempt_id)
+                .await
+                .map_err(map_manager_error)
+        }
+    }
+
+    fn retire_configuration_follower_enrollment(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+    ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send {
+        async move {
+            self.retire_checked(expected_instance_id, attempt_id)
+                .await
+                .map_err(map_manager_error)
+        }
+    }
+}
+
+fn map_manager_error(error: Error) -> CoreError {
+    match error {
+        Error::InvalidRequest => CoreError::InvalidRequest,
+        Error::NotFound => CoreError::NotFound,
+        Error::Conflict => CoreError::Conflict,
+        Error::IdempotencyConflict => CoreError::IdempotencyConflict,
+        Error::Retired => CoreError::Retired,
+        Error::RecoveryRequired => CoreError::RecoveryRequired,
+        Error::IntegrityViolation | Error::Vault(_) | Error::Unavailable => CoreError::Unavailable,
+    }
+}
+
+fn validate_choice(choice: &ConfigurationFollowerEnrollmentChoice) -> Result<(), Error> {
+    if choice.expected_state_version == 0
+        || choice.expected_state_version >= i64::MAX as u64
+        || choice.authority.master_id() == &choice.expected_instance_id
+        || !valid_server_name(&choice.server_name)
+        || choice.certificate_authority_der.is_empty()
+        || choice.certificate_authority_der.len() > MAX_CERTIFICATE_DER_BYTES
+    {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(())
 }
 
 enum ReserveResult {
@@ -612,6 +678,7 @@ impl StoredRequest {
                 == super::hash_bytes(&choice.certificate_authority_der)
     }
 
+    #[allow(dead_code, reason = "used by the deferred internal exchange slice")]
     fn same_identity(&self, other: &Self) -> bool {
         self.attempt_id == other.attempt_id
             && self.follower_instance_id == other.follower_instance_id

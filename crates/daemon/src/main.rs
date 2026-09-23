@@ -275,10 +275,11 @@ async fn main() -> ExitCode {
 
     let provider_account_operations: Arc<dyn kiln_server::ProviderAccountOperations> =
         provider_logins.clone();
+    let configuration_vault = kiln_infrastructure::OsConfigurationSecretStore::open_default();
     let identity_commands = kiln_infrastructure::ConfigurationIdentityCommands::new(
         kiln_infrastructure::ConfigurationIdentityProvisioner::new(
             store.clone(),
-            kiln_infrastructure::OsConfigurationSecretStore::open_default(),
+            configuration_vault.clone(),
         ),
         || {
             SystemTime::now()
@@ -287,6 +288,10 @@ async fn main() -> ExitCode {
                 .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
                 .unwrap_or(i64::MIN)
         },
+    );
+    let follower_enrollment = kiln_infrastructure::ConfigurationFollowerEnrollmentManager::new(
+        store.clone(),
+        configuration_vault,
     );
     let state = AppState::with_provider_account_operations(
         StoreMetadata::default(),
@@ -304,6 +309,7 @@ async fn main() -> ExitCode {
     .with_configuration_identity_administration(identity_commands)
     .with_configuration_administration_store(store.clone(), UlidIdGenerator)
     .with_configuration_access_store(store.clone())
+    .with_configuration_follower_enrollment_administration(follower_enrollment)
     .with_configuration_publication_store(store);
     let lifecycle = state.lifecycle();
     let signal_lifecycle = lifecycle.clone();

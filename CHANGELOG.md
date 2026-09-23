@@ -2,6 +2,16 @@
 
 ## 2026-09-23 — `feat`
 
+- Add authenticated local follower enrollment preparation, recovery, and retirement with credential-free metadata.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+
+[Commit](pending)
+
+
+## 2026-09-23 — `feat`
+
 - Add durable follower credential reservation and exact-retry recovery with immutable trust bindings, state-version fencing, and bounded metadata recovery.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322

@@ -1,4 +1,4 @@
-use super::{SqliteStore, configuration_snapshot, configuration_sync};
+use super::{SqliteStore, configuration_snapshot, configuration_sync, hash_bytes};
 use kiln_core::{
     ConfigurationAccessError as Error, ConfigurationAccessStore, ConfigurationAuthority,
     ConfigurationCredentialDigest, ConfigurationFollowerEnrollmentRequest,
@@ -58,6 +58,14 @@ impl ConfigurationAccessStore for SqliteStore {
             transaction.commit().await.map_err(|_| Error::Unavailable)?;
             return Ok(existing.metadata);
         }
+
+        require_active_identity_binding(
+            &mut transaction,
+            &submission.authority,
+            &submission.server_name,
+            &submission.master_ca_fingerprint,
+        )
+        .await?;
 
         sqlx::query(
             "INSERT INTO configuration_follower_enrollment_requests (request_id, attempt_id, follower_instance_id, follower_state_version, group_id, master_instance_id, server_name, master_ca_fingerprint, credential_digest, received_master_state_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -177,6 +185,14 @@ impl ConfigurationAccessStore for SqliteStore {
             }
             ConfigurationFollowerEnrollmentRequestPhase::Pending => {}
         }
+
+        require_active_identity_binding(
+            &mut transaction,
+            &request.metadata.authority,
+            &request.metadata.server_name,
+            &request.metadata.master_ca_fingerprint,
+        )
+        .await?;
 
         if active_grants_for_follower(
             &mut transaction,
@@ -678,6 +694,36 @@ async fn require_current(
         .map_err(Error::State)?
         .ok_or(Error::State(ConfigurationStateError::Uninitialized))?;
     if current != *expected {
+        return Err(Error::Conflict);
+    }
+    Ok(())
+}
+
+async fn require_active_identity_binding(
+    connection: &mut SqliteConnection,
+    authority: &ConfigurationAuthority,
+    server_name: &str,
+    ca_fingerprint: &ContentHash,
+) -> Result<(), Error> {
+    let row = sqlx::query(
+        "SELECT server_name, ca_der FROM configuration_master_identities WHERE group_id = ? AND master_instance_id = ? AND status = 'active'",
+    )
+    .bind(authority.group_id().as_str())
+    .bind(authority.master_id().as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| Error::Unavailable)?
+    .ok_or(Error::Conflict)?;
+    let current_server_name: String = row
+        .try_get("server_name")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let ca_der: Vec<u8> = row
+        .try_get("ca_der")
+        .map_err(|_| Error::IntegrityViolation)?;
+    if ca_der.is_empty() {
+        return Err(Error::IntegrityViolation);
+    }
+    if current_server_name != server_name || hash_bytes(&ca_der) != *ca_fingerprint {
         return Err(Error::Conflict);
     }
     Ok(())

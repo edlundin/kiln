@@ -203,8 +203,10 @@ pub enum ConfigurationAccessError {
 /// bearer credential or treats claimed remote IDs as authentication proof.
 pub trait ConfigurationAccessStore: Send + Sync {
     /// Durably accept an exact follower claim while this instance is the
-    /// matching master. Caller IDs remain claims until local approval; this
-    /// method does not authenticate a remote instance or issue a grant.
+    /// matching master and the claimed server name/CA fingerprint match its
+    /// active managed identity. Exact retries recover their original journal
+    /// entry. Caller IDs remain claims until local approval; this method does
+    /// not authenticate a remote instance or issue a grant.
     fn submit_configuration_follower_enrollment_request(
         &self,
         expected: &ConfigurationInstanceState,
@@ -241,8 +243,10 @@ pub trait ConfigurationAccessStore: Send + Sync {
     > + Send;
 
     /// Atomically confirm the complete request binding and issue its read grant
-    /// under the exact current master state. Retries return the existing grant,
-    /// including permanent revocation; they never reactivate it.
+    /// under the exact current master state and active managed identity. An
+    /// exact already-approved retry returns the original grant metadata,
+    /// including permanent revocation; it never reactivates it. A pending
+    /// request whose identity is no longer active cannot be approved.
     fn approve_configuration_follower_enrollment_request(
         &self,
         expected: &ConfigurationInstanceState,

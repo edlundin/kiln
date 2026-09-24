@@ -651,11 +651,11 @@ pub struct ConfigurationFollowerEnrollmentRequestResponse {
     pub follower_state_version: u64,
     pub group_id: String,
     pub master_instance_id: String,
-    /// Follower-asserted server name; it has not been compared with the
-    /// master's managed TLS identity.
+    /// Follower-asserted server name, checked against active managed identity
+    /// metadata on new admission and first approval, not on metadata reads.
     pub server_name: String,
-    /// Follower-asserted CA fingerprint; it is not verified against the
-    /// master's managed TLS identity.
+    /// Follower-asserted CA fingerprint, checked against active managed identity
+    /// metadata on new admission and first approval, not on metadata reads.
     pub master_ca_fingerprint: String,
     /// Full confirmation fingerprint over the immutable request and the
     /// credential digest. The digest and bearer remain private.
@@ -690,9 +690,9 @@ pub struct ConfigurationFollowerEnrollmentDecisionRequest {
     pub follower_state_version: u64,
     pub group_id: String,
     pub master_instance_id: String,
-    /// Follower-asserted and not checked against the master's managed identity.
+    /// First approval requires this name to match the active managed identity.
     pub server_name: String,
-    /// Follower-asserted and not checked against the master's managed identity.
+    /// First approval requires this pin to match the active managed identity.
     pub master_ca_fingerprint: String,
     pub received_master_state_version: u64,
     pub credential_fingerprint: String,

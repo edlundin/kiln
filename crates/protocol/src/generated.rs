@@ -1761,7 +1761,7 @@ paths:
   {CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH}:
     post:
       operationId: {APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID}
-      description: Approve the exact displayed request under the expected current master instance and state version. The strict confirmation body must match every immutable journal field and the request ID in the path. The full JSON body is limited to {CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES} bytes; an oversized body is rejected with HTTP 400 invalid_json. This local decision issues a read grant but does not authenticate the claimed follower or verify the asserted server name/CA fingerprint against the managed TLS identity.
+      description: Approve the exact displayed request under the expected current master instance and state version. The strict confirmation body must match every immutable journal field and the request ID in the path. The full JSON body is limited to {CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES} bytes; an oversized body is rejected with HTTP 400 invalid_json. First approval requires the asserted server name and CA fingerprint to match active managed identity metadata in the grant transaction; missing, retired or changed identity yields HTTP 409 configuration_sync_conflict. Exact approved retries return the current grant state without rechecking identity metadata. This local decision does not authenticate the claimed follower, validate certificate lifetime or vault material, or bind a live TLS connection.
       parameters:
         - name: request_id
           in: path

@@ -290,3 +290,13 @@ permanently tombstones the attempt, and is safe to retry after a lost response.
 These authenticated local calls do not contact a master, assign a local role,
 approve a remote request, or enable listener composition. See the
 [local enrollment request contract](../spec/configuration-sync.md#selected-automatic-enrollment-direction).
+
+Protocol `0.35.0` exposes local master request list/get/approve/reject methods.
+First approval requires the request's server name and CA fingerprint to match
+the active managed master identity in the same transaction as grant issuance.
+A missing, pending, retired or changed identity returns HTTP 409
+`configuration_sync_conflict`. Exact approved retries still return the current
+grant, including revocation, and pending requests can still be rejected after
+identity retirement. Metadata reads do not assert current certificate validity
+or live TLS readiness. These calls do not authenticate the claimed follower or
+enable remote intake.

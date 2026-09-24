@@ -226,28 +226,37 @@ request ID binds that attempt, claimed follower and follower state version,
 master/group authority, the follower-asserted server name and master CA
 fingerprint, the credential digest, and the master state version at receipt.
 Metadata exposes a full SHA-256 confirmation fingerprint over this immutable
-binding without returning the raw digest or bearer. The claimed follower ID and
-endpoint trust remain claims; the master checks the server name's syntax but
-does not compare the name or CA fingerprint with its current managed TLS
-identity. Current master/group state fencing does not authenticate the caller
-or validate its pin. There is no uniqueness rule per claimed follower, so an
-unverified ID cannot reserve that identity.
+binding without returning the raw digest or bearer. New admission requires the
+server name and CA fingerprint to match the current authority's active managed
+identity metadata in the same transaction as the journal write. The fingerprint
+is computed from the stored CA DER. Missing, pending, retired or changed identity
+fails closed. Exact admission retries recover the existing immutable request
+without this check, after the current master state and full submission binding
+are checked. There is no uniqueness rule per claimed follower, so an unverified
+ID cannot reserve that identity.
 
 The internal master port lists and recovers requests, then atomically approves
 or permanently rejects one only after exact request, attempt, follower, authority,
 trust and full fingerprint confirmation. Approval checks the current master state
-and creates the read grant in the same SQLite transaction as the permanent
-decision. Exact approval retries recover that grant's current state, including
-revocation; they never reactivate it. Master role/authority drift fails closed.
+and requires the recorded server name and CA fingerprint to match the active
+managed identity before creating the read grant in the same SQLite transaction
+as the permanent decision. Retirement or replacement therefore blocks first
+approval of an old pending request. Exact approval retries recover that grant's
+current state, including revocation, without rechecking identity metadata; they
+never reactivate it. Rejection remains possible after identity retirement.
+Master role/authority drift fails closed.
 The local authenticated API now exposes bounded list/get and exact approve/reject
 operations for the master journal. Decisions include every confirmation field
 and the expected current master instance/version; approval creates the read
 grant atomically and returns its current revoked state on retries. The routes do
 not accept a new request, expose the digest/bearer/vault reference, or establish
 remote caller identity. Remote request submission and acknowledgement remain
-pending. Before remote exchange is composed, it must bind incoming requests to the actual
-connection and current managed TLS identity, including certificate rotation;
-the stored server-name/CA-fingerprint claims alone do not establish that binding.
+pending. These checks compare durable identity metadata only: they do not check
+certificate lifetime, resolve vault material, authenticate a follower, or prove
+which certificate served a live connection. Before remote exchange is composed,
+it must bind incoming requests to the actual connection and current managed TLS
+identity, including certificate rotation and validity. The stored claims alone
+do not establish that connection binding.
 
 An authenticated local API exposes `POST
 /v1/configuration-sync/follower-enrollments` with a stable `cra_` attempt ID,
@@ -274,8 +283,11 @@ bounded to 2 MiB. That body binds the path request ID, follower attempt/ID/versi
 authority, asserted server name and CA fingerprint, received master version, and
 the full confirmation fingerprint; it also fences the current master
 instance/version. Responses expose those claims and the full fingerprint but no
-credential digest, bearer, or vault reference. Follower ID and asserted TLS
-metadata remain unverified claims.
+credential digest, bearer, or vault reference. Follower ID remains an unverified
+claim. Returned TLS metadata is historical request data, not a current identity
+or serving-readiness assertion. First approval reports HTTP 409
+`configuration_sync_conflict` when the active managed identity is missing or no
+longer matches.
 
 The local preparer does not change the local role or make a network request.
 The master journal does not establish device identity: pinned TLS authenticates

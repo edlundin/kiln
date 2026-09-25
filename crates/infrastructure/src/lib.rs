@@ -16,7 +16,7 @@ pub use configuration_identity::{
 pub use configuration_identity_lifecycle::{
     ConfigurationIdentityCommands, ConfigurationIdentityLifecycleError,
     ConfigurationIdentityProvisioner, ConfigurationIdentityRecord, ConfigurationIdentityRequest,
-    ConfigurationIdentityStatus,
+    ConfigurationIdentityStatus, ConfigurationTlsIdentity,
 };
 mod configuration_snapshot;
 mod configuration_sync;

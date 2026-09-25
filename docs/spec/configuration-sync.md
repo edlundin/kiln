@@ -9,8 +9,10 @@ authorized snapshot acquisition are also implemented, along with durable local
 follower-credential reservation and authenticated request preparation/recovery.
 The master also exposes local request review, exact approval and permanent
 rejection for its internal follower-request journal.
-Remote enrollment, synchronization transport and runtime activation remain
-incomplete.
+Active master TLS material can now be acquired from an explicitly selected
+managed identity and composed into the restricted TLS server configuration.
+Remote enrollment, daemon listener composition, and runtime synchronization
+remain incomplete.
 
 ## Authority and enrollment
 
@@ -368,10 +370,11 @@ export's full bounded JSON encoder and validator limits. Every response, includi
 fallbacks/errors, has `Cache-Control: no-store`. Other paths have no registered
 operations, and no general API, publication, vault or execution access is available.
 
-Router compilation is not remote-delivery acceptance. The TLS serving component
-below is not wired into daemon startup. Concrete credential-adapter composition,
-explicit enrollment and audit/recovery remain unwired, and no remote HTTP
-interaction has been verified.
+Router compilation and managed TLS acquisition are not remote-delivery
+acceptance. Active master TLS material can be checked and converted to TLS
+configuration, but that composition is not wired into daemon startup. The
+follower reader credential adapter, explicit enrollment and audit/recovery
+remain unwired, and no remote HTTP interaction has been verified.
 
 ## Bounded TLS serving component
 
@@ -383,6 +386,16 @@ advertises only HTTP/1.1, disables session storage/tickets, and retains disabled
 early-data/key-logging defaults. Followers authenticate with their restricted
 bearer; client certificates are not required. Enrollment must separately approve
 the master CA/hostname/group binding, and followers still verify that binding.
+
+`ConfigurationFollowerTls::from_borrowed_der` accepts the same public chain and
+a borrowed private DER slice. A managed key owner can retain its zeroizing buffer
+through construction without copying that buffer into an ordinary `Vec`.
+The ring backend parses the key into its owned signing representation, and
+`CertifiedKey::keys_match` rejects an empty chain, unusable leaf, mismatched key
+or unknown key consistency. The resulting TLS wrapper retains no borrowed key
+bytes. Both constructors use the same protocol/session settings. Neither checks
+current master authority, certificate lifetime or certificate-chain trust;
+those remain the composition owner's responsibilities.
 
 `serve_configuration_followers` accepts an already-bound listener, the opaque
 `ConfigurationFollowerRouter`, TLS configuration, explicit resource budgets and
@@ -514,6 +527,44 @@ proof of current role, certificate validity or permission to open a listener.
 Matching a loaded public certificate/key and verifying its chain remains part of
 TLS composition; database contents are host-local trusted metadata.
 
+`acquire_active_tls_identity(expected, identity_id, clock)` performs read-only
+managed TLS material acquisition. It requires the exact current master state
+and public identity ID, not the older state version at identity reservation.
+It checks active status, matching authority and the validity window before
+reading only the server-key vault envelope. The immutable envelope hash and
+full reference/authority/purpose binding must match before the DER key is used.
+It then reloads state and identity metadata and samples the explicit clock again;
+state advancement, retirement, identity change or expiry during the vault read
+fails closed. The caller must reload state and retry after even an ordinary
+publication advances the expected version.
+
+The returned `ConfigurationTlsIdentity` owns public leaf-first certificate bytes
+and a private key in the existing zeroizing wrapper. It implements neither
+Debug nor Clone and exposes private DER only by borrowing; vault references and
+the CA private key are not returned. Pass the public chain and borrowed key to
+`ConfigurationFollowerTls::from_borrowed_der`, which checks leaf/key consistency:
+
+```rust
+let identity = provisioner
+    .acquire_active_tls_identity(&expected_state, &identity_id, clock)
+    .await?;
+let tls = ConfigurationFollowerTls::from_borrowed_der(
+    identity.certificate_chain_der().to_vec(),
+    identity.private_key_der(),
+)?;
+```
+
+The acquisition task retains the lifecycle operation lock through vault read,
+decode and final validation even if its caller disconnects. Read failures do not
+write, retire, delete or replace identity material; explicit retirement/recovery
+remains available through the existing lifecycle operations.
+
+Acquisition is a checked snapshot, not a lease: authority, identity or time may
+change after it returns. The eventual runtime owner must fence activation and
+stop or revalidate serving on retirement, role changes and expiry. This method
+does not enable a listener, verify a live TLS connection or establish follower
+trust, and startup does not call it.
+
 Provisioning and cleanup share a store-owned mutex across clones. Spawned tasks
 retain ownership through vault work even when the caller disconnects, preventing
 another lifecycle operation from overtaking a late OS effect. Callers must use
@@ -529,12 +580,14 @@ remain after success, so uncertain deletions can always be retried and reference
 can never be reused. Role changes and incomplete recovery retain discoverable
 cleanup work; they do not perform OS effects inside SQLite transactions.
 
-Validation currently covers compilation/build, source review, fresh migration
-39 startup and SQL preparation only. No tests, actual certificate generation,
-vault operations, cancellation/recovery scenarios or TLS handshakes have run.
-Remote follower enrollment/exchange and credential delivery, remote daemon
-composition, follower fetch/apply and consumers remain open; remote
-synchronization is not enabled.
+Validation includes `rtk cargo check --locked -p kiln-infrastructure -p
+kiln-server -p kiln-daemon`, focused Rust formatting checks, and `rtk git diff
+--check`. Independent reviews of the borrowed-DER TLS constructor and active
+identity acquisition found no actionable defects. No tests, actual certificate
+generation, vault operations, cancellation/recovery scenarios or TLS handshakes
+have run. Remote follower enrollment/exchange and
+credential delivery, daemon listener composition, follower fetch/apply and
+consumers remain open; remote synchronization is not enabled.
 
 ## Local managed identity status
 

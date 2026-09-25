@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-25 — `feat`
+
+- Continue managed TLS identity handling with active identity snapshots and borrowed-DER TLS construction.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+
+[Commit](pending)
+
 ## 2026-09-23 — `feat`
 
 - Add local master review and exact approval or rejection of pending enrollment requests.

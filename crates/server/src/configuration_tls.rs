@@ -54,7 +54,7 @@ impl ConfigurationFollowerTls {
         let key = rustls::pki_types::PrivateKeyDer::try_from(private_key)
             .map_err(|_| ConfigurationTlsError::InvalidIdentity)?;
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        let config = rustls::ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
             .map_err(|_| ConfigurationTlsError::InvalidIdentity)?
             // Follower identity is authenticated by its restricted read bearer,
@@ -62,11 +62,47 @@ impl ConfigurationFollowerTls {
             .with_no_client_auth()
             .with_single_cert(certificates, key)
             .map_err(|_| ConfigurationTlsError::InvalidIdentity)?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Borrow private DER so the caller need not copy its zeroizing buffer.
+    /// The caller retains its key owner through this call. Ring owns
+    /// the parsed signing key afterward; no borrowed bytes escape into TLS.
+    /// As with `from_der`, current authority, lifetime and chain trust are the
+    /// composition owner's responsibility. This checks leaf/key consistency.
+    pub fn from_borrowed_der(
+        certificate_chain: Vec<Vec<u8>>,
+        private_key: &[u8],
+    ) -> Result<Self, ConfigurationTlsError> {
+        let key = rustls::pki_types::PrivateKeyDer::try_from(private_key)
+            .map_err(|_| ConfigurationTlsError::InvalidIdentity)?;
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+            .map_err(|_| ConfigurationTlsError::InvalidIdentity)?;
+        let certificates = certificate_chain
+            .into_iter()
+            .map(rustls::pki_types::CertificateDer::from)
+            .collect();
+        let certified_key = rustls::sign::CertifiedKey::new(certificates, signing_key);
+        certified_key
+            .keys_match()
+            .map_err(|_| ConfigurationTlsError::InvalidIdentity)?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .map_err(|_| ConfigurationTlsError::InvalidIdentity)?
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(
+                certified_key,
+            )));
+        Ok(Self::from_config(config))
+    }
+
+    fn from_config(mut config: rustls::ServerConfig) -> Self {
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
         config.send_tls13_tickets = 0;
         // Fresh config retains rustls defaults: no key log and no early data.
-        Ok(Self(TlsAcceptor::from(Arc::new(config))))
+        Self(TlsAcceptor::from(Arc::new(config)))
     }
 }
 

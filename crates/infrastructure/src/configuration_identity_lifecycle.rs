@@ -2,9 +2,10 @@
 //! explicit setup approval belong to the caller; this adapter opens no listener.
 
 use super::{
-    ConfigurationCertificateValidity, ConfigurationIdentityError, OsConfigurationSecretStore,
-    SqliteStore, configuration_identity::valid_server_name, configuration_sync,
-    decode_configuration_private_key, generate_configuration_identity, hash_bytes,
+    ConfigurationCertificateValidity, ConfigurationIdentityError, ConfigurationPrivateKey,
+    OsConfigurationSecretStore, SqliteStore, configuration_identity::valid_server_name,
+    configuration_sync, decode_configuration_private_key, generate_configuration_identity,
+    hash_bytes,
 };
 use kiln_core::{
     ConfigurationAuthority, ConfigurationGroupId, ConfigurationInstanceState,
@@ -371,6 +372,55 @@ pub struct ConfigurationIdentityRecord {
     pub server_certificate_der: Vec<u8>,
     pub certificate_authority_fingerprint: ContentHash,
 }
+
+/// Private serving material acquired for one explicit active master identity.
+/// Its state is the exact current state checked both before and after reading
+/// the TLS key from the OS vault. This is an acquisition snapshot, not a lease:
+/// callers must drop derived TLS configuration when authority, identity status
+/// or certificate validity changes; active connections also need draining.
+pub struct ConfigurationTlsIdentity {
+    state: ConfigurationInstanceState,
+    authority: ConfigurationAuthority,
+    identity_id: ConfigurationMasterIdentityId,
+    server_name: String,
+    certificate_chain_der: Vec<Vec<u8>>,
+    leaf_not_after_unix_seconds: i64,
+    private_key: ConfigurationPrivateKey,
+}
+
+impl ConfigurationTlsIdentity {
+    pub fn state(&self) -> &ConfigurationInstanceState {
+        &self.state
+    }
+
+    pub fn authority(&self) -> &ConfigurationAuthority {
+        &self.authority
+    }
+
+    pub fn identity_id(&self) -> &ConfigurationMasterIdentityId {
+        &self.identity_id
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Leaf certificate first, followed by the public self-signed CA.
+    pub fn certificate_chain_der(&self) -> &[Vec<u8>] {
+        &self.certificate_chain_der
+    }
+
+    pub fn leaf_not_after_unix_seconds(&self) -> i64 {
+        self.leaf_not_after_unix_seconds
+    }
+
+    /// Borrow the zeroizing TLS private-key DER without copying it into a
+    /// caller-owned `Vec`.
+    pub fn private_key_der(&self) -> &[u8] {
+        self.private_key.expose_der()
+    }
+}
+
 struct StoredIdentity {
     record: ConfigurationIdentityRecord,
     ca_key_hash: ContentHash,
@@ -423,6 +473,113 @@ impl ConfigurationIdentityProvisioner {
         Ok(load(&mut connection, ca_ref)
             .await?
             .map(|stored| stored.record))
+    }
+
+    /// Acquire the active TLS identity for exactly the caller's current master
+    /// state and public identity ID. The vault read is serialized with identity
+    /// setup/retirement; authority, active status, metadata and time are checked
+    /// again after the vault returns. A successful result is a point-in-time
+    /// snapshot, not a serving lease or proof of future readiness.
+    pub async fn acquire_active_tls_identity(
+        &self,
+        expected: &ConfigurationInstanceState,
+        identity_id: &ConfigurationMasterIdentityId,
+        clock: impl Fn() -> i64 + Send + Sync + 'static,
+    ) -> Result<ConfigurationTlsIdentity, Error> {
+        let owner = self.clone();
+        let expected = expected.clone();
+        let identity_id = identity_id.clone();
+        // As with provision/retirement, a dropped caller cannot abandon an OS
+        // vault read before its raw result is wrapped and zeroized.
+        tokio::spawn(async move {
+            let _guard = owner.store.configuration_identity_operations.lock().await;
+            owner
+                .acquire_active_tls_identity_owned(&expected, &identity_id, &clock)
+                .await
+        })
+        .await
+        .map_err(|_| Error::Unavailable)?
+    }
+
+    async fn acquire_active_tls_identity_owned(
+        &self,
+        expected: &ConfigurationInstanceState,
+        identity_id: &ConfigurationMasterIdentityId,
+        clock: &(impl Fn() -> i64 + Sync + ?Sized),
+    ) -> Result<ConfigurationTlsIdentity, Error> {
+        let initial = {
+            let mut connection = self.store.connection.lock().await;
+            let mut transaction = connection.begin().await.map_err(|_| Error::Unavailable)?;
+            let current = configuration_sync::load(&mut transaction)
+                .await
+                .map_err(|_| Error::Unavailable)?
+                .ok_or(Error::Conflict)?;
+            if current != *expected {
+                return Err(Error::Conflict);
+            }
+            let stored = load_by_identity_id(&mut transaction, identity_id)
+                .await?
+                .ok_or(Error::Conflict)?;
+            require_active_identity(&current, identity_id, &stored)?;
+            transaction.commit().await.map_err(|_| Error::Unavailable)?;
+            stored
+        };
+
+        let now = clock();
+        require_identity_time(&initial.record.request, now)?;
+
+        let binding = initial.record.request.tls_binding();
+        let secret = self.vault.get(binding).await.map_err(|error| match error {
+            SecretStoreError::NotFound | SecretStoreError::InvalidSecret => Error::RecoveryRequired,
+            error => Error::Vault(error),
+        })?;
+        if hash_bytes(secret.as_bytes()) != initial.tls_key_hash {
+            return Err(Error::RecoveryRequired);
+        }
+        let private_key = decode_configuration_private_key(binding, &secret)
+            .map_err(|_| Error::IntegrityViolation)?;
+        drop(secret);
+
+        let final_state = {
+            let mut connection = self.store.connection.lock().await;
+            let mut transaction = connection.begin().await.map_err(|_| Error::Unavailable)?;
+            let current = configuration_sync::load(&mut transaction)
+                .await
+                .map_err(|_| Error::Unavailable)?
+                .ok_or(Error::Conflict)?;
+            if current != *expected {
+                return Err(Error::Conflict);
+            }
+            let current_identity = load_by_identity_id(&mut transaction, identity_id)
+                .await?
+                .ok_or(Error::Conflict)?;
+            require_active_identity(&current, identity_id, &current_identity)?;
+            if !same_identity_metadata(&initial, &current_identity) {
+                return Err(Error::IntegrityViolation);
+            }
+            transaction.commit().await.map_err(|_| Error::Unavailable)?;
+            current
+        };
+
+        // Sample after all queued/database/vault work, as close to handing the
+        // material to the caller as possible.
+        require_identity_time(&initial.record.request, clock())?;
+        let authority = match final_state.role() {
+            ConfigurationRole::Master(authority) => authority.clone(),
+            _ => return Err(Error::Conflict),
+        };
+        Ok(ConfigurationTlsIdentity {
+            state: final_state,
+            authority,
+            identity_id: initial.record.identity_id,
+            server_name: initial.record.request.server_name,
+            certificate_chain_der: vec![
+                initial.record.server_certificate_der,
+                initial.record.certificate_authority_der,
+            ],
+            leaf_not_after_unix_seconds: initial.record.request.validity.leaf_not_after,
+            private_key,
+        })
     }
 
     /// Bounded journal enumeration for restart recovery, including tombstones
@@ -673,6 +830,63 @@ fn is_master(current: &ConfigurationInstanceState, request: &ConfigurationIdenti
     current.instance_id() == request.ca_binding.instance_id()
         && matches!(current.role(), ConfigurationRole::Master(authority) if authority == request.ca_binding.authority())
 }
+
+async fn load_by_identity_id(
+    connection: &mut SqliteConnection,
+    identity_id: &ConfigurationMasterIdentityId,
+) -> Result<Option<StoredIdentity>, Error> {
+    let reference: Option<String> = sqlx::query_scalar(
+        "SELECT ca_ref FROM configuration_master_identities WHERE identity_id = ?",
+    )
+    .bind(identity_id.as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    let reference = SecretRef::parse(reference).map_err(|_| Error::IntegrityViolation)?;
+    load(connection, &reference).await
+}
+
+fn require_active_identity(
+    current: &ConfigurationInstanceState,
+    identity_id: &ConfigurationMasterIdentityId,
+    stored: &StoredIdentity,
+) -> Result<(), Error> {
+    if stored.record.identity_id != *identity_id {
+        return Err(Error::IntegrityViolation);
+    }
+    if !is_master(current, &stored.record.request) {
+        return Err(Error::Conflict);
+    }
+    match stored.record.status {
+        ConfigurationIdentityStatus::Active => Ok(()),
+        ConfigurationIdentityStatus::Pending => Err(Error::Conflict),
+        ConfigurationIdentityStatus::Retired => Err(Error::Retired),
+    }
+}
+
+fn require_identity_time(request: &ConfigurationIdentityRequest, now: i64) -> Result<(), Error> {
+    let validity = request.validity();
+    if now < validity.not_before || now >= validity.leaf_not_after || now >= validity.ca_not_after {
+        return Err(Error::Identity(ConfigurationIdentityError::InvalidValidity));
+    }
+    Ok(())
+}
+
+fn same_identity_metadata(left: &StoredIdentity, right: &StoredIdentity) -> bool {
+    left.record.identity_id == right.record.identity_id
+        && left.record.request == right.record.request
+        && left.record.status == right.record.status
+        && left.record.certificate_authority_der == right.record.certificate_authority_der
+        && left.record.server_certificate_der == right.record.server_certificate_der
+        && left.record.certificate_authority_fingerprint
+            == right.record.certificate_authority_fingerprint
+        && left.ca_key_hash == right.ca_key_hash
+        && left.tls_key_hash == right.tls_key_hash
+}
+
 async fn require_live(
     connection: &mut SqliteConnection,
     request: &ConfigurationIdentityRequest,

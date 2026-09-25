@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-25 — `build`
+
+- Enable reqwest streaming support for bounded response body handling.
+
+[Commit](pending)
+
 ## 2026-09-25 — `feat`
 
 - Continue managed TLS identity handling with active identity snapshots and borrowed-DER TLS construction.

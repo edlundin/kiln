@@ -138,7 +138,7 @@ impl FollowerPreparation {
                         if status.role != ConfigurationSyncRole::Unassigned {
                             return Err("Only an unassigned instance can prepare a new follower enrollment.".into());
                         }
-                        let request = Prepare { attempt_id: format!("cra_{}", Ulid::generate()), expected_instance_id: status.instance_id,
+                        let request = Prepare { attempt_id: format!("cra_{:032x}", Ulid::generate().0), expected_instance_id: status.instance_id,
                             expected_state_version: status.state_version, group_id: group, master_instance_id: master,
                             server_name: server, certificate_authority_der };
                         let bytes = serde_json::to_vec(&request).map_err(|_| "Could not encode the enrollment request.".to_owned())?;

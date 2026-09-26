@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `fix`
+
+- EDL-322: Generate follower enrollment attempt IDs in the canonical lowercase
+  hexadecimal format accepted by the client and daemon.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
 ## 2026-09-27 — `feat`
 
 - EDL-322: Add follower preparation in desktop Settings with explicit public CA

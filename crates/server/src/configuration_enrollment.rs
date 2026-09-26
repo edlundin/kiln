@@ -7,14 +7,20 @@ use axum::{
 };
 use kiln_core::{
     ConfigurationAuthority, ConfigurationFollowerEnrollmentChoice,
-    ConfigurationFollowerEnrollmentError, ConfigurationFollowerEnrollmentMetadata,
-    ConfigurationFollowerEnrollmentPhase, ConfigurationGroupId, ConfigurationReadGrantAttemptId,
-    KilnInstanceId,
+    ConfigurationFollowerEnrollmentError, ConfigurationFollowerEnrollmentExchangeResult,
+    ConfigurationFollowerEnrollmentExchangeSettings, ConfigurationFollowerEnrollmentMetadata,
+    ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentRemoteGrant,
+    ConfigurationFollowerEnrollmentRemotePhase, ConfigurationFollowerEnrollmentRemoteReceipt,
+    ConfigurationGroupId, ConfigurationReadGrantAttemptId, KilnInstanceId,
 };
 use kiln_protocol::{
+    ConfigurationFollowerEnrollmentExchangeResult as ProtocolExchangeResult,
     ConfigurationFollowerEnrollmentListResponse,
-    ConfigurationFollowerEnrollmentPhase as ProtocolPhase, ConfigurationFollowerEnrollmentResponse,
-    PrepareConfigurationFollowerEnrollmentRequest, RetireConfigurationFollowerEnrollmentRequest,
+    ConfigurationFollowerEnrollmentPhase as ProtocolPhase,
+    ConfigurationFollowerEnrollmentRequestPhase, ConfigurationFollowerEnrollmentRequestResponse,
+    ConfigurationFollowerEnrollmentResponse, ConfigurationReadGrantResponse,
+    ExchangeConfigurationFollowerEnrollmentRequest, PrepareConfigurationFollowerEnrollmentRequest,
+    RetireConfigurationFollowerEnrollmentRequest,
 };
 use serde::Deserialize;
 use std::{future::Future, pin::Pin};
@@ -72,6 +78,23 @@ pub(super) trait ConfigurationFollowerEnrollmentOperations: Send + Sync {
         expected_instance_id: KilnInstanceId,
         attempt_id: ConfigurationReadGrantAttemptId,
     ) -> Pin<Box<dyn Future<Output = Result<(), ConfigurationFollowerEnrollmentError>> + Send + '_>>;
+
+    fn exchange(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ConfigurationFollowerEnrollmentMetadata,
+                        ConfigurationFollowerEnrollmentError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >;
 }
 
 pub(super) struct ConfigurationFollowerEnrollmentAdapter<T>(pub T);
@@ -153,6 +176,29 @@ impl<T: kiln_core::ConfigurationFollowerEnrollmentAdministration>
             self.0
                 .retire_configuration_follower_enrollment(expected_instance_id, attempt_id),
         )
+    }
+
+    fn exchange(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ConfigurationFollowerEnrollmentMetadata,
+                        ConfigurationFollowerEnrollmentError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(self.0.exchange_configuration_follower_enrollment(
+            expected_instance_id,
+            attempt_id,
+            settings,
+        ))
     }
 }
 
@@ -314,6 +360,45 @@ where
     ))
 }
 
+pub(super) async fn exchange<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(attempt_id): Path<String>,
+    super::StrictJson(request): super::StrictJson<ExchangeConfigurationFollowerEnrollmentRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let permit = state.lifecycle.begin_command()?;
+    let attempt_id =
+        ConfigurationReadGrantAttemptId::parse(attempt_id).map_err(|_| enrollment_invalid())?;
+    let expected_instance_id =
+        KilnInstanceId::parse(request.expected_instance_id).map_err(|_| enrollment_invalid())?;
+    let settings = ConfigurationFollowerEnrollmentExchangeSettings {
+        origin: request.origin,
+        connect_timeout_ms: request.connect_timeout_ms,
+        request_timeout_ms: request.request_timeout_ms,
+    };
+    let operations = state
+        .configuration_follower_enrollment_operations
+        .clone()
+        .ok_or(PublicError::ConfigurationSyncUnavailable)?;
+    let metadata = tokio::spawn(async move {
+        let _permit = permit;
+        operations
+            .exchange(expected_instance_id, attempt_id, settings)
+            .await
+    })
+    .await
+    .map_err(|_| PublicError::ConfigurationSyncUnavailable)?
+    .map_err(PublicError::ConfigurationFollowerEnrollment)?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(enrollment_response(&metadata)),
+    ))
+}
+
 fn enrollment_invalid() -> PublicError {
     PublicError::ConfigurationFollowerEnrollment(
         ConfigurationFollowerEnrollmentError::InvalidRequest,
@@ -339,5 +424,69 @@ fn enrollment_response(
             ConfigurationFollowerEnrollmentPhase::Prepared => ProtocolPhase::Prepared,
             ConfigurationFollowerEnrollmentPhase::Retired => ProtocolPhase::Retired,
         },
+        exchange_result: metadata.exchange_result.map(|result| match result {
+            ConfigurationFollowerEnrollmentExchangeResult::Pending => {
+                ProtocolExchangeResult::Pending
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::Approved => {
+                ProtocolExchangeResult::Approved
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::Rejected => {
+                ProtocolExchangeResult::Rejected
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::Revoked => {
+                ProtocolExchangeResult::Revoked
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::RoleConflict => {
+                ProtocolExchangeResult::RoleConflict
+            }
+        }),
+        last_observed_receipt: metadata
+            .last_observed_receipt
+            .as_ref()
+            .map(protocol_receipt),
+    }
+}
+
+fn protocol_receipt(
+    receipt: &ConfigurationFollowerEnrollmentRemoteReceipt,
+) -> ConfigurationFollowerEnrollmentRequestResponse {
+    ConfigurationFollowerEnrollmentRequestResponse {
+        request_id: receipt.request_id.clone(),
+        attempt_id: receipt.attempt_id.clone(),
+        follower_id: receipt.follower_id.clone(),
+        follower_state_version: receipt.follower_state_version,
+        group_id: receipt.group_id.clone(),
+        master_instance_id: receipt.master_instance_id.clone(),
+        server_name: receipt.server_name.clone(),
+        master_ca_fingerprint: receipt.master_ca_fingerprint.clone(),
+        credential_fingerprint: receipt.credential_fingerprint.clone(),
+        received_master_state_version: receipt.received_master_state_version,
+        phase: match receipt.phase {
+            ConfigurationFollowerEnrollmentRemotePhase::Pending => {
+                ConfigurationFollowerEnrollmentRequestPhase::Pending
+            }
+            ConfigurationFollowerEnrollmentRemotePhase::Approved => {
+                ConfigurationFollowerEnrollmentRequestPhase::Approved
+            }
+            ConfigurationFollowerEnrollmentRemotePhase::Rejected => {
+                ConfigurationFollowerEnrollmentRequestPhase::Rejected
+            }
+        },
+        grant: receipt.grant.as_ref().map(protocol_grant),
+    }
+}
+
+fn protocol_grant(
+    grant: &ConfigurationFollowerEnrollmentRemoteGrant,
+) -> ConfigurationReadGrantResponse {
+    ConfigurationReadGrantResponse {
+        grant_id: grant.grant_id.clone(),
+        issuance_attempt_id: grant.issuance_attempt_id.clone(),
+        group_id: grant.group_id.clone(),
+        master_instance_id: grant.master_instance_id.clone(),
+        follower_instance_id: grant.follower_instance_id.clone(),
+        issued_state_version: grant.issued_state_version,
+        revoked: grant.revoked,
     }
 }

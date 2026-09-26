@@ -1,7 +1,7 @@
 use crate::{
     APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
-    CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES, CONFIGURATION_FOLLOWER_ENROLLMENT_PATH,
-    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_PATH, CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_PATH, CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_APPROVE_PATH,
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_DEFAULT_PAGE_SIZE,
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE,
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH,
@@ -12,12 +12,15 @@ use crate::{
     CONFIGURATION_IDENTITY_RETIRE_PATH, CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH,
     CONFIGURATION_READ_GRANT_PATH, CONFIGURATION_READ_GRANT_REVOKE_PATH,
     CONFIGURATION_READ_GRANTS_PATH, CONFIGURE_MASTER_IDENTITY_OPERATION_ID,
-    ConfigurationFollowerEnrollmentDecisionRequest, ConfigurationFollowerEnrollmentListResponse,
-    ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentRequestListResponse,
+    ConfigurationFollowerEnrollmentDecisionRequest, ConfigurationFollowerEnrollmentExchangeResult,
+    ConfigurationFollowerEnrollmentListResponse, ConfigurationFollowerEnrollmentPhase,
+    ConfigurationFollowerEnrollmentRequestListResponse,
     ConfigurationFollowerEnrollmentRequestPhase, ConfigurationFollowerEnrollmentRequestResponse,
     ConfigurationFollowerEnrollmentResponse, ConfigurationIdentitySetupResponse,
     ConfigurationReadGrantListResponse, ConfigurationReadGrantResponse,
-    ConfigureMasterIdentityRequest, GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    ConfigureMasterIdentityRequest, EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    ExchangeConfigurationFollowerEnrollmentRequest,
+    GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_OPERATION_ID,
@@ -348,6 +351,10 @@ fn schema() -> String {
             schema_for!(ConfigurationFollowerEnrollmentPhase),
         ),
         (
+            "ConfigurationFollowerEnrollmentExchangeResult",
+            schema_for!(ConfigurationFollowerEnrollmentExchangeResult),
+        ),
+        (
             "ConfigurationFollowerEnrollmentResponse",
             schema_for!(ConfigurationFollowerEnrollmentResponse),
         ),
@@ -366,6 +373,10 @@ fn schema() -> String {
         (
             "RetireConfigurationFollowerEnrollmentRequest",
             schema_for!(RetireConfigurationFollowerEnrollmentRequest),
+        ),
+        (
+            "ExchangeConfigurationFollowerEnrollmentRequest",
+            schema_for!(ExchangeConfigurationFollowerEnrollmentRequest),
         ),
         (
             "RetireMasterIdentityRequest",
@@ -568,6 +579,7 @@ fn typescript() -> String {
         ConfigureMasterIdentityRequest::decl(&config),
         ConfigurationIdentitySetupResponse::decl(&config),
         ConfigurationFollowerEnrollmentPhase::decl(&config),
+        ConfigurationFollowerEnrollmentExchangeResult::decl(&config),
         ConfigurationFollowerEnrollmentResponse::decl(&config),
         ConfigurationFollowerEnrollmentListResponse::decl(&config),
         ConfigurationFollowerEnrollmentRequestPhase::decl(&config),
@@ -578,6 +590,7 @@ fn typescript() -> String {
         ConfigurationReadGrantResponse::decl(&config),
         PrepareConfigurationFollowerEnrollmentRequest::decl(&config),
         RetireConfigurationFollowerEnrollmentRequest::decl(&config),
+        ExchangeConfigurationFollowerEnrollmentRequest::decl(&config),
         RetireMasterIdentityRequest::decl(&config),
         RetireMasterIdentityByIdRequest::decl(&config),
         ClientIdentity::decl(&config),
@@ -718,6 +731,10 @@ fn catalogue() -> String {
             "method": "POST",
             "path": CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH,
             "operation": RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID
+        }, {
+            "method": "POST",
+            "path": CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_PATH,
+            "operation": EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID
         }, {
             "method": "POST",
             "path": CONFIGURATION_MASTER_PATH,
@@ -1711,6 +1728,39 @@ paths:
       responses:
         '204':
           description: Enrollment attempt is permanently retired and vault cleanup is complete.
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_PATH}:
+    post:
+      operationId: {EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID}
+      description: Explicitly submit the durable digest-only claim to the supplied pinned HTTPS origin using caller-selected connection and request deadlines. The origin and deadlines are transport settings and must be supplied again for retries. The remote POST carries no bearer header. Pending receipts are retained and the local role remains unassigned; rejected or revoked grants retire the local credential. An approved, active grant and the follower role change commit atomically. If the local state changed while the request was in flight, the receipt is retained as a role conflict and no role transition occurs. Exact finalized retries return the stored local outcome without reapplying the role change. `last_observed_receipt` is historical metadata and does not prove current grant liveness.
+      parameters:
+        - name: attempt_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cra_[0-9a-f]{{32}}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExchangeConfigurationFollowerEnrollmentRequest'
+      responses:
+        '200':
+          description: Durable credential-free local outcome and last-observed remote receipt.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentResponse'
         '400':
           $ref: '#/components/responses/Problem'
         '404':

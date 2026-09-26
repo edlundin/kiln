@@ -2,6 +2,17 @@
 
 ## 2026-09-26 — `feat`
 
+- EDL-322: Add explicit authenticated follower enrollment exchange over
+  caller-selected pinned HTTPS, with durable receipts and retries, atomic
+  approved-grant role transition, retained read credential, and recoverable
+  terminal cleanup.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-26 — `feat`
+
 - EDL-322: Add bounded digest-only remote follower enrollment intake, exact
   serving-identity admission and durable current-state receipts through the
   isolated pinned HTTPS client.

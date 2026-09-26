@@ -11,8 +11,11 @@ The master also exposes local request review, exact approval and permanent
 rejection for its internal follower-request journal.
 Active master TLS material can now be acquired from an explicitly selected
 managed identity and served by an opt-in daemon TLS listener around the
-restricted follower router. Automatic enrollment, follower role transition,
-credential delivery, and runtime settings synchronization remain incomplete.
+restricted follower router. An explicit local follower-exchange command now
+submits prepared requests over pinned HTTPS and transitions the follower role
+after exact master approval. The successful follower-read credential remains in
+the OS vault. Snapshot fetching, application, and ongoing settings synchronization
+remain incomplete.
 
 ## Authority and enrollment
 
@@ -140,8 +143,9 @@ exposes status, initial master designation, credential-free grant
 metadata/list/revoke, and local follower-request preparation/recovery/retirement.
 Remote intake is available only through the isolated router. The daemon serves it
 only when `KILN_CONFIGURATION_FOLLOWER_LISTEN_ADDR` is set and the current master
-has a usable active managed identity. Follower role changes and consumers remain
-subsequent work.
+has a usable active managed identity. An explicit follower exchange can record an
+approved active grant and follower role in one transaction; snapshot consumers
+remain subsequent work.
 
 ## Internal follower read credentials
 
@@ -202,9 +206,11 @@ proof, and no reusable authorization decision is returned.
 
 The digest-only intake route, local exact approval/rejection, pinned client and
 receipt validation are implemented. The daemon mounts the isolated router only
-with explicit listener configuration and supervises the acquired identity.
-End-to-end enrollment still needs a connected administration workflow before
-remote access can issue a grant. No live remote interaction has been verified.
+with explicit listener configuration and supervises the acquired identity. The
+authenticated local exchange connects follower preparation to that pinned
+client. A master administrator must still approve each exact request through the
+local review API before the follower changes role. No live remote interaction
+has been verified.
 
 ## Selected automatic enrollment direction
 
@@ -242,6 +248,31 @@ is still unassigned at the recorded state version. Request identity and mutable
 reserved/prepared/retired state are stored separately. Trust inputs require a
 canonical DNS/IP server name and CA DER no larger than 2^24−1 bytes, the uint24
 maximum length of one TLS Certificate entry.
+
+The authenticated local `POST
+/v1/configuration-sync/follower-enrollments/{attempt_id}/exchange` accepts the
+expected follower instance, an HTTPS origin, and positive connect/request
+timeouts on every call. The origin and timeouts are transport options, not part
+of the durable enrollment identity. The strict exchange request body is capped
+at 4 KiB; timeouts must be positive with connect no greater than request. Invalid
+origin/pin or timeout values fail before remote submission. Infrastructure
+verifies the vaulted bearer against its reserved digest, then passes the pinned
+request and secret through a narrow core transport port; the daemon adapts that
+port with `kiln-client`, so infrastructure does not depend on HTTP or protocol
+types. The remote POST contains only the digest and binding claims and has no
+Authorization header.
+
+A pending receipt is persisted while the follower remains unassigned. A receipt
+with an approved, active grant is recorded atomically with the follower's role
+compare-and-swap; the credential stays in the OS vault for later snapshot reads.
+Rejected, revoked, and role-conflict outcomes retire the local attempt before
+retryable vault cleanup. Explicit local retirement also removes the credential
+and leaves an already joined follower role unchanged. Finalized exchange retries
+and exact re-preparation return durable metadata without another remote request
+or role change, and never recreate a credential removed by explicit retirement.
+Retry explicit retirement after a vault-cleanup error. The returned receipt is
+last-observed metadata, not a live grant check; master-side revocation still
+blocks subsequent snapshot reads.
 
 The master now has an internal durable request journal for digest-only follower
 claims. Exact retries are keyed by the follower attempt ID; the stable master
@@ -335,18 +366,22 @@ deliberately after exhaustion. The remote POST is available only on the isolated
 router; the daemon enables it only with the opt-in listener configuration.
 
 The local preparer does not change the local role or make a network request.
-The master journal does not establish device identity: pinned TLS authenticates
-the master to the follower, not the follower to the master. A locally
-authenticated administrator must review and confirm the exact request before a
-read grant is issued. The local review API and isolated remote intake/receipt
-component exist; UI, follower role transition, active credential retrieval and
-automatic reconnect remain unimplemented.
+The explicit exchange does contact the selected pinned HTTPS origin and only
+changes the follower role after observing an approved active grant. The master
+journal does not establish device identity: pinned TLS authenticates the master
+to the follower, not the follower to the master. A locally authenticated
+administrator must review and confirm the exact request before a read grant is
+issued. The local review API and exchange are implemented; a review UI, snapshot
+fetch/application, and automatic reconnect remain unimplemented.
 
 ## Pinned HTTPS follower client
 
-The Rust `ConfigurationSyncClient` is the restricted outgoing transport component.
-It is not wired into daemon synchronization and does not configure the master's
-separate opt-in listener.
+The Rust `ConfigurationSyncClient` is the restricted outgoing transport
+component. The daemon uses it through a narrow core transport port for explicit
+follower enrollment exchange; infrastructure stays independent of client and
+protocol crates. Snapshot fetching is not yet wired into ongoing daemon
+synchronization, and the client does not configure the master's separate opt-in
+listener.
 The isolated follower router described below serves
 `GET /v1/configuration-sync/snapshot` with the existing snapshot response
 and checks `kiln-configuration-master`, `kiln-configuration-group` and
@@ -810,9 +845,11 @@ Replacing the connection discards pending UI state and loads durable status.
 
 Designation records authority only: it publishes no snapshot, reads or copies no
 credentials, grants no remote access, and starts no MCP/skill consumer. Explicit
-publication is a separate command described below. Follower enrollment, role
-replacement, and remote transport remain open. Shutdown rejects new designations
-through the existing command gate.
+publication is a separate command described below. Follower enrollment is a
+separate explicit exchange and requires master approval; this command does not
+replace or promote an assigned instance. Snapshot fetching and runtime consumers
+remain open. Shutdown rejects new designations through the existing command
+gate.
 
 ## Explicit local snapshot publication
 
@@ -1027,8 +1064,9 @@ metadata (revision number, schema and content hash). These fields are read in on
 transaction. No snapshot payload, skill file, endpoint, host binding, or credential
 is returned.
 
-`transport` is explicitly `unconfigured` until authenticated follower transport
-exists. Equal applied/observed revisions alone do not establish currentness.
+`transport` remains `unconfigured` until ongoing authenticated snapshot fetching
+and application are connected. Enrollment exchange alone does not establish
+currentness. Equal applied/observed revisions alone do not establish currentness.
 The endpoint reports committed metadata, not a fresh validation of every stored
 payload byte. Store/integrity failures produce content-free HTTP 503
 `configuration_sync_unavailable`. This endpoint cannot designate a master,

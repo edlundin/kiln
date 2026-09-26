@@ -956,6 +956,12 @@ where
             post(configuration_enrollment::retire),
         )
         .route(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_PATH,
+            post(configuration_enrollment::exchange).layer(axum::extract::DefaultBodyLimit::max(
+                kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_MAX_BYTES,
+            )),
+        )
+        .route(
             kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
             get(configuration_sync::get_status),
         )

@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.36.0";
+pub const PROTOCOL_VERSION: &str = "0.37.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -38,6 +38,8 @@ pub const CONFIGURATION_FOLLOWER_ENROLLMENT_PATH: &str =
     "/v1/configuration-sync/follower-enrollments/{attempt_id}";
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH: &str =
     "/v1/configuration-sync/follower-enrollments/{attempt_id}/retire";
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_PATH: &str =
+    "/v1/configuration-sync/follower-enrollments/{attempt_id}/exchange";
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH: &str =
     "/v1/configuration-sync/follower-enrollment-requests";
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH: &str =
@@ -64,6 +66,8 @@ pub const GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
     "get_configuration_follower_enrollment";
 pub const RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
     "retire_configuration_follower_enrollment";
+pub const EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
+    "exchange_configuration_follower_enrollment";
 pub const LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID: &str =
     "list_configuration_follower_enrollment_requests";
 pub const GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
@@ -88,6 +92,8 @@ pub const CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES: usize = CONFIGURATION_PUB
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES: usize = 4 * 1024;
 /// Client-side cap for a credential-free remote request receipt.
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RECEIPT_MAX_BYTES: usize = 4 * 1024;
+/// Cap for the explicit local follower-exchange command body.
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_MAX_BYTES: usize = 4 * 1024;
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_DEFAULT_PAGE_SIZE: usize = 50;
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE: usize = 100;
 pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configuration_master";
@@ -733,6 +739,16 @@ pub enum ConfigurationFollowerEnrollmentPhase {
     Retired,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationFollowerEnrollmentExchangeResult {
+    Pending,
+    Approved,
+    Rejected,
+    Revoked,
+    RoleConflict,
+}
+
 /// Public follower-request metadata only. It omits CA bytes, vault references,
 /// credential digests, and bearer credentials.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -745,6 +761,19 @@ pub struct ConfigurationFollowerEnrollmentResponse {
     pub server_name: String,
     pub certificate_authority_fingerprint: String,
     pub phase: ConfigurationFollowerEnrollmentPhase,
+    /// Durable result of the latest exchange. This is not a live grant check.
+    #[serde(
+        deserialize_with = "deserialize_required_nullable_configuration_follower_enrollment_exchange_result"
+    )]
+    #[schemars(with = "RequiredNullableConfigurationFollowerEnrollmentExchangeResult")]
+    pub exchange_result: Option<ConfigurationFollowerEnrollmentExchangeResult>,
+    /// Last credential-free master receipt observed by this follower. The
+    /// remote grant may have changed since it was stored.
+    #[serde(
+        deserialize_with = "deserialize_required_nullable_configuration_follower_enrollment_request_response"
+    )]
+    #[schemars(with = "RequiredNullableConfigurationFollowerEnrollmentRequestResponse")]
+    pub last_observed_receipt: Option<ConfigurationFollowerEnrollmentRequestResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -771,6 +800,17 @@ pub struct PrepareConfigurationFollowerEnrollmentRequest {
 #[serde(deny_unknown_fields)]
 pub struct RetireConfigurationFollowerEnrollmentRequest {
     pub expected_instance_id: String,
+}
+
+/// Explicit outbound exchange settings. `origin` is supplied again on retry;
+/// it is not part of the durable enrollment identity.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExchangeConfigurationFollowerEnrollmentRequest {
+    pub expected_instance_id: String,
+    pub origin: String,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -1573,6 +1613,24 @@ where
     Option::deserialize(deserializer)
 }
 
+fn deserialize_required_nullable_configuration_follower_enrollment_exchange_result<'de, D>(
+    deserializer: D,
+) -> Result<Option<ConfigurationFollowerEnrollmentExchangeResult>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
+fn deserialize_required_nullable_configuration_follower_enrollment_request_response<'de, D>(
+    deserializer: D,
+) -> Result<Option<ConfigurationFollowerEnrollmentRequestResponse>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::deserialize(deserializer)
+}
+
 struct RequiredNullableString;
 
 impl JsonSchema for RequiredNullableString {
@@ -1686,5 +1744,39 @@ impl JsonSchema for RequiredNullableConfigurationReadGrant {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let grant = generator.subschema_for::<ConfigurationReadGrantResponse>();
         json_schema!({"anyOf": [grant, {"type": "null"}]})
+    }
+}
+
+struct RequiredNullableConfigurationFollowerEnrollmentExchangeResult;
+
+impl JsonSchema for RequiredNullableConfigurationFollowerEnrollmentExchangeResult {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableConfigurationFollowerEnrollmentExchangeResult".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let result = generator.subschema_for::<ConfigurationFollowerEnrollmentExchangeResult>();
+        json_schema!({"anyOf": [result, {"type": "null"}]})
+    }
+}
+
+struct RequiredNullableConfigurationFollowerEnrollmentRequestResponse;
+
+impl JsonSchema for RequiredNullableConfigurationFollowerEnrollmentRequestResponse {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableConfigurationFollowerEnrollmentRequestResponse".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let receipt = generator.subschema_for::<ConfigurationFollowerEnrollmentRequestResponse>();
+        json_schema!({"anyOf": [receipt, {"type": "null"}]})
     }
 }

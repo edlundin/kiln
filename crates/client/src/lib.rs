@@ -98,6 +98,8 @@ pub enum Error {
     InvalidConfigurationGrantPageLimit,
     #[error("configuration follower enrollment page limit must be between 1 and 100")]
     InvalidConfigurationFollowerEnrollmentPageLimit,
+    #[error("configuration follower enrollment exchange settings are invalid")]
+    InvalidConfigurationFollowerEnrollmentExchangeRequest,
     #[error("configuration follower enrollment request page limit must be between 1 and 100")]
     InvalidConfigurationFollowerEnrollmentRequestPageLimit,
     #[error("configuration follower enrollment request has an empty or oversized CA DER value")]
@@ -455,6 +457,43 @@ impl Client {
         self.send_json(
             kiln_protocol::GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
             self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    /// Explicitly exchange a prepared follower attempt with a caller-selected
+    /// pinned HTTPS origin. Exact retries return the durable local outcome;
+    /// this client does not retry automatically.
+    pub async fn exchange_configuration_follower_enrollment(
+        &self,
+        attempt_id: &str,
+        request: &kiln_protocol::ExchangeConfigurationFollowerEnrollmentRequest,
+    ) -> Result<kiln_protocol::ConfigurationFollowerEnrollmentResponse, Error> {
+        if !valid_public_configuration_id(attempt_id, "cra_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment attempt ID",
+            });
+        }
+        if request.origin.is_empty()
+            || request
+                .origin
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+            || request.connect_timeout_ms == 0
+            || request.request_timeout_ms == 0
+            || request.connect_timeout_ms > request.request_timeout_ms
+        {
+            return Err(Error::InvalidConfigurationFollowerEnrollmentExchangeRequest);
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_PATH,
+            "{attempt_id}",
+            "configuration follower enrollment attempt ID",
+            attempt_id,
+        )?;
+        self.send_json(
+            kiln_protocol::EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+            self.http.post(self.http_url(&path)).json(request),
         )
         .await
     }

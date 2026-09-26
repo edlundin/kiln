@@ -206,10 +206,12 @@ authenticate a remote peer or enroll a follower. See the
 
 ## Restricted follower transport
 
-`ConfigurationSyncClient` is a separate HTTPS-only client component for future
-enrolled followers. It is not the local `Client`, has no general request method,
-and exposes only `get_snapshot()`. No remote daemon listener or enrollment flow
-is enabled yet; this API alone does not make synchronization operational.
+`ConfigurationSyncClient` is a separate HTTPS-only component for enrolled
+followers. It is not the local `Client` and has no general request method. The
+daemon also uses its pinned transport for explicit enrollment exchange through a
+narrow core port; infrastructure does not depend on the client or protocol
+crates. This does not connect snapshot fetching to ongoing daemon synchronization
+or configure the master's separate opt-in listener.
 
 Supply `ConfigurationMasterPin` with the HTTPS origin, a dedicated master CA in
 DER format, canonical master/group/follower IDs, the follower-specific `kcfg1_`
@@ -313,5 +315,29 @@ matches the submitted digest and complete binding; approved receipts
 include the grant's current revoked state. Exact retries recover current pending
 or terminal state. The isolated router's caller configures a positive
 per-authority cap over all retained rows; at exhaustion, new attempts return HTTP
-429 and exact retries remain available. No daemon listener, follower role
-transition or local-admin POST route is enabled.
+429 and exact retries remain available. The remote intake remains on the master's
+separately configured TLS listener; this client method does not configure it.
+
+Protocol `0.37.0` adds the authenticated local
+`exchange_configuration_follower_enrollment(attempt_id, request)` command. It
+requires a prepared local attempt and supplies the HTTPS origin plus positive
+connect and request timeouts on that call; the origin and budgets are not stored
+with the attempt. The strict request body is capped at 4 KiB; timeouts must be
+positive, with connect no greater than request. The durable preparation still
+pins the master server name and CA. The daemon reads and verifies the follower
+bearer in its OS vault and uses the restricted client to send only the digest
+and request binding, without an Authorization header.
+
+A pending receipt is stored while the local instance remains unassigned. An
+approved, active grant and the follower role compare-and-swap commit together,
+and the read credential remains in the OS vault for later snapshot reads.
+Rejected, revoked, and role-conflict results retire the attempt before retryable
+vault cleanup. Explicit retirement also removes the credential and does not
+change a role that already joined. Finalized exchange and exact prepare retries
+return durable metadata without another remote request or role transition, and
+never recreate a credential removed by explicit retirement. Retry explicit
+retirement after a vault-cleanup error. The response includes only
+credential-free exchange status and the last-observed receipt; a later master
+revocation may change the grant state. The client does not retry the command
+automatically. Enrollment exchange does not fetch or apply snapshots, establish
+currentness, or start automatic reconnect.

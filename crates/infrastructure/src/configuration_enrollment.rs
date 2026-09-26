@@ -1,5 +1,4 @@
-//! Durable follower credential reservation. This prepares an exact outbound
-//! request but does not change local role, contact a master, or grant access.
+//! Durable follower credential reservation, explicit exchange, and recovery.
 
 use super::{
     ConfigurationReadCredential, OsConfigurationSecretStore, SqliteStore,
@@ -8,19 +7,28 @@ use super::{
 use kiln_core::{
     ConfigurationAuthority, ConfigurationCredentialDigest,
     ConfigurationFollowerEnrollmentAdministration, ConfigurationFollowerEnrollmentChoice,
-    ConfigurationFollowerEnrollmentError as CoreError, ConfigurationFollowerEnrollmentMetadata,
-    ConfigurationFollowerEnrollmentPhase, ConfigurationReadGrantAttemptId, ConfigurationRole,
-    ConfigurationSecretBinding, ConfigurationSecretPurpose, ConfigurationSecretStore, ContentHash,
-    KilnInstanceId, SecretRef, SecretStoreError, SecretValue,
+    ConfigurationFollowerEnrollmentError as CoreError,
+    ConfigurationFollowerEnrollmentExchangeResult, ConfigurationFollowerEnrollmentExchangeSettings,
+    ConfigurationFollowerEnrollmentMetadata, ConfigurationFollowerEnrollmentPhase,
+    ConfigurationFollowerEnrollmentRemotePhase, ConfigurationFollowerEnrollmentRemoteReceipt,
+    ConfigurationFollowerEnrollmentSubmission, ConfigurationFollowerEnrollmentTransport,
+    ConfigurationFollowerEnrollmentTransportError, ConfigurationReadGrantAttemptId,
+    ConfigurationRole, ConfigurationSecretBinding, ConfigurationSecretPurpose,
+    ConfigurationSecretStore, ContentHash, KilnInstanceId, SecretRef, SecretStoreError,
+    SecretValue,
 };
+use sha2::{Digest as _, Sha256};
 use sqlx::{Connection, Row, SqliteConnection};
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, sync::Arc};
 
 // A 100-row API page fetches one additional row to determine whether a next
 // cursor is available.
 const MAX_PAGE_SIZE: u32 = 101;
 // A TLS Certificate entry has a uint24 length field (RFC 8446, section 4.4.2).
 const MAX_CERTIFICATE_DER_BYTES: usize = 0xFF_FFFF;
+// Kept equal to the protocol's bounded receipt budget; infrastructure does not
+// depend on the wire crate.
+const MAX_RECEIPT_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigurationFollowerEnrollmentManagerError {
@@ -36,56 +44,297 @@ enum ConfigurationFollowerEnrollmentManagerError {
 }
 use ConfigurationFollowerEnrollmentManagerError as Error;
 
-/// Exact initial request fields. It carries only the one-way credential digest,
-/// never the bearer. Keep this value out of logs and general-purpose events.
-#[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
-pub(crate) struct ConfigurationFollowerEnrollmentSubmission {
-    attempt_id: ConfigurationReadGrantAttemptId,
-    follower_instance_id: KilnInstanceId,
-    authority: ConfigurationAuthority,
-    server_name: String,
-    certificate_authority_der: Vec<u8>,
-    certificate_authority_fingerprint: ContentHash,
-    credential_digest: ConfigurationCredentialDigest,
-}
-
-#[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
-impl ConfigurationFollowerEnrollmentSubmission {
-    pub(crate) fn attempt_id(&self) -> &ConfigurationReadGrantAttemptId {
-        &self.attempt_id
-    }
-    pub(crate) fn follower_instance_id(&self) -> &KilnInstanceId {
-        &self.follower_instance_id
-    }
-    pub(crate) fn authority(&self) -> &ConfigurationAuthority {
-        &self.authority
-    }
-    pub(crate) fn server_name(&self) -> &str {
-        &self.server_name
-    }
-    pub(crate) fn certificate_authority_der(&self) -> &[u8] {
-        &self.certificate_authority_der
-    }
-    pub(crate) fn certificate_authority_fingerprint(&self) -> &ContentHash {
-        &self.certificate_authority_fingerprint
-    }
-    pub(crate) fn credential_digest(&self) -> &ConfigurationCredentialDigest {
-        &self.credential_digest
-    }
-}
-
-/// Owns the reservation-to-vault sequence for one SQLite store. Do not create
-/// independent owners for the same database; the local operation lock covers
-/// vault effects within this owner while SQLite transactions fence state writes.
+/// Owns reservation, exchange, receipt and vault lifecycles for one SQLite
+/// store. Do not create independent owners for the same database; the local
+/// operation lock covers network and vault effects while SQLite transactions
+/// fence durable state writes.
 #[derive(Clone)]
 pub struct ConfigurationFollowerEnrollmentManager {
     store: SqliteStore,
     vault: OsConfigurationSecretStore,
+    transport: Option<Arc<dyn ConfigurationFollowerEnrollmentTransport>>,
 }
 
 impl ConfigurationFollowerEnrollmentManager {
     pub fn new(store: SqliteStore, vault: OsConfigurationSecretStore) -> Self {
-        Self { store, vault }
+        Self {
+            store,
+            vault,
+            transport: None,
+        }
+    }
+
+    pub fn with_exchange_transport(
+        mut self,
+        transport: Arc<dyn ConfigurationFollowerEnrollmentTransport>,
+    ) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
+    async fn exchange(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Result<ConfigurationFollowerEnrollmentMetadata, Error> {
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let _guard = owner.store.configuration_enrollment_operations.lock().await;
+            owner
+                .exchange_owned(expected_instance_id, attempt_id, settings)
+                .await
+        })
+        .await
+        .map_err(|_| Error::Unavailable)?
+    }
+
+    async fn exchange_owned(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Result<ConfigurationFollowerEnrollmentMetadata, Error> {
+        let mut request = {
+            let mut connection = self.store.connection.lock().await;
+            load_request(&mut connection, &attempt_id)
+                .await?
+                .ok_or(Error::NotFound)?
+        };
+        if request.follower_instance_id != expected_instance_id {
+            return Err(Error::Conflict);
+        }
+        if request.phase == ConfigurationFollowerEnrollmentPhase::Retired {
+            // Approval is a finalized result, not a request to clean up the
+            // active credential. Explicit retirement owns later deletion.
+            if request.exchange_result
+                != Some(ConfigurationFollowerEnrollmentExchangeResult::Approved)
+            {
+                self.cleanup_vault(&request).await?;
+            }
+            return Ok(request.metadata());
+        }
+        if !self.current_state_matches(&request).await? {
+            self.retire_for_role_conflict(&mut request, None).await?;
+            return Ok(request.metadata());
+        }
+        if !valid_exchange_settings(&settings) {
+            return Err(Error::InvalidRequest);
+        }
+        let transport = self.transport.as_ref().ok_or(Error::Unavailable)?.clone();
+        request = match self.recover_request(request).await {
+            Ok(request) => request,
+            Err(Error::Conflict) => {
+                return self
+                    .get_metadata(&attempt_id)
+                    .await?
+                    .ok_or(Error::IntegrityViolation);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = self.confirm_submission_ready(&request).await {
+            if error == Error::Conflict {
+                return self
+                    .get_metadata(&attempt_id)
+                    .await?
+                    .ok_or(Error::IntegrityViolation);
+            }
+            return Err(error);
+        }
+        let credential = match self.read_and_verify_credential(&request).await {
+            Ok(credential) => credential,
+            Err(VerifySecretError::Changed) => {
+                self.retire_and_cleanup_owned(&request.attempt_id).await?;
+                return Err(Error::RecoveryRequired);
+            }
+            Err(VerifySecretError::Unavailable(error)) => return Err(Error::Vault(error)),
+        };
+        let receipt = transport
+            .submit(submission_from_request(&request), credential, settings)
+            .await
+            .map_err(|error| match error {
+                ConfigurationFollowerEnrollmentTransportError::InvalidSettings => {
+                    Error::InvalidRequest
+                }
+                ConfigurationFollowerEnrollmentTransportError::Failed => Error::Unavailable,
+            })?;
+        if !valid_remote_receipt(&request, &receipt) {
+            return Err(Error::IntegrityViolation);
+        }
+        self.finalize_exchange(&mut request, receipt).await?;
+        Ok(request.metadata())
+    }
+
+    async fn finalize_exchange(
+        &self,
+        request: &mut StoredRequest,
+        receipt: ConfigurationFollowerEnrollmentRemoteReceipt,
+    ) -> Result<(), Error> {
+        use ConfigurationFollowerEnrollmentExchangeResult as ResultPhase;
+
+        let mut connection = self.store.connection.lock().await;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let current_request = load_request(&mut transaction, &request.attempt_id)
+            .await?
+            .ok_or(Error::IntegrityViolation)?;
+        if !request.same_identity(&current_request) {
+            return Err(Error::IntegrityViolation);
+        }
+        if current_request.phase == ConfigurationFollowerEnrollmentPhase::Retired {
+            transaction.commit().await.map_err(|_| Error::Unavailable)?;
+            drop(connection);
+            request.phase = ConfigurationFollowerEnrollmentPhase::Retired;
+            request.exchange_result = current_request.exchange_result;
+            request.last_observed_receipt = current_request.last_observed_receipt;
+            self.cleanup_vault(request).await?;
+            return Ok(());
+        }
+        if current_request.phase != ConfigurationFollowerEnrollmentPhase::Prepared {
+            return Err(Error::IntegrityViolation);
+        }
+        let current_state = configuration_sync::load(&mut transaction)
+            .await
+            .map_err(state_error)?;
+        let current = current_state.as_ref().is_some_and(|state| {
+            state.instance_id() == &request.follower_instance_id
+                && state.version() == request.expected_state_version
+                && matches!(state.role(), ConfigurationRole::Unassigned)
+        });
+        if !current {
+            retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+            store_observation(
+                &mut transaction,
+                &request.attempt_id,
+                ResultPhase::RoleConflict,
+                Some(&receipt),
+            )
+            .await?;
+            transaction.commit().await.map_err(|_| Error::Unavailable)?;
+            drop(connection);
+            request.phase = ConfigurationFollowerEnrollmentPhase::Retired;
+            request.exchange_result = Some(ResultPhase::RoleConflict);
+            request.last_observed_receipt = Some(receipt);
+            self.cleanup_vault(request).await?;
+            return Ok(());
+        }
+
+        match receipt.phase {
+            ConfigurationFollowerEnrollmentRemotePhase::Pending => {
+                store_observation(
+                    &mut transaction,
+                    &request.attempt_id,
+                    ResultPhase::Pending,
+                    Some(&receipt),
+                )
+                .await?;
+                transaction.commit().await.map_err(|_| Error::Unavailable)?;
+                request.exchange_result = Some(ResultPhase::Pending);
+                request.last_observed_receipt = Some(receipt);
+            }
+            ConfigurationFollowerEnrollmentRemotePhase::Rejected => {
+                retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+                store_observation(
+                    &mut transaction,
+                    &request.attempt_id,
+                    ResultPhase::Rejected,
+                    Some(&receipt),
+                )
+                .await?;
+                transaction.commit().await.map_err(|_| Error::Unavailable)?;
+                drop(connection);
+                request.phase = ConfigurationFollowerEnrollmentPhase::Retired;
+                request.exchange_result = Some(ResultPhase::Rejected);
+                request.last_observed_receipt = Some(receipt);
+                self.cleanup_vault(request).await?;
+            }
+            ConfigurationFollowerEnrollmentRemotePhase::Approved => {
+                let grant = receipt.grant.as_ref().ok_or(Error::IntegrityViolation)?;
+                if grant.revoked {
+                    retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+                    store_observation(
+                        &mut transaction,
+                        &request.attempt_id,
+                        ResultPhase::Revoked,
+                        Some(&receipt),
+                    )
+                    .await?;
+                    transaction.commit().await.map_err(|_| Error::Unavailable)?;
+                    drop(connection);
+                    request.phase = ConfigurationFollowerEnrollmentPhase::Retired;
+                    request.exchange_result = Some(ResultPhase::Revoked);
+                    request.last_observed_receipt = Some(receipt);
+                    self.cleanup_vault(request).await?;
+                } else {
+                    let state = current_state.ok_or(Error::IntegrityViolation)?;
+                    let known_master: Option<String> = sqlx::query_scalar(
+                        "SELECT master_instance_id FROM configuration_authorities WHERE group_id = ?",
+                    )
+                    .bind(request.authority.group_id().as_str())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(|_| Error::Unavailable)?;
+                    if known_master
+                        .as_ref()
+                        .is_some_and(|master| master != request.authority.master_id().as_str())
+                    {
+                        retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+                        store_observation(
+                            &mut transaction,
+                            &request.attempt_id,
+                            ResultPhase::RoleConflict,
+                            Some(&receipt),
+                        )
+                        .await?;
+                        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+                        drop(connection);
+                        request.phase = ConfigurationFollowerEnrollmentPhase::Retired;
+                        request.exchange_result = Some(ResultPhase::RoleConflict);
+                        request.last_observed_receipt = Some(receipt);
+                        self.cleanup_vault(request).await?;
+                        return Ok(());
+                    }
+                    sqlx::query(
+                        "INSERT INTO configuration_authorities (group_id, master_instance_id) VALUES (?, ?) ON CONFLICT(group_id) DO NOTHING",
+                    )
+                    .bind(request.authority.group_id().as_str())
+                    .bind(request.authority.master_id().as_str())
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| Error::Unavailable)?;
+                    let next = state
+                        .change_role(ConfigurationRole::Follower(request.authority.clone()))
+                        .map_err(state_error)?;
+                    configuration_sync::save(&mut transaction, &state, &next)
+                        .await
+                        .map_err(state_error)?;
+                    retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+                    store_observation(
+                        &mut transaction,
+                        &request.attempt_id,
+                        ResultPhase::Approved,
+                        Some(&receipt),
+                    )
+                    .await?;
+                    let reloaded = configuration_sync::load(&mut transaction)
+                        .await
+                        .map_err(state_error)?
+                        .ok_or(Error::IntegrityViolation)?;
+                    if reloaded.role() != &ConfigurationRole::Follower(request.authority.clone()) {
+                        return Err(Error::IntegrityViolation);
+                    }
+                    transaction.commit().await.map_err(|_| Error::Unavailable)?;
+                    drop(connection);
+                    self.store.notify_configuration_serving_change();
+                    request.phase = ConfigurationFollowerEnrollmentPhase::Retired;
+                    request.exchange_result = Some(ResultPhase::Approved);
+                    request.last_observed_receipt = Some(receipt);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Persist a fresh attempt before its first vault write. Exact retries load
@@ -117,7 +366,7 @@ impl ConfigurationFollowerEnrollmentManager {
         }
         let mut connection = self.store.connection.lock().await;
         let rows = sqlx::query(
-            "SELECT r.attempt_id, r.follower_instance_id, r.expected_state_version, r.group_id, r.master_instance_id, r.server_name, r.ca_fingerprint, l.phase FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_lifecycle l USING (attempt_id) WHERE (? IS NULL OR r.attempt_id > ?) ORDER BY r.attempt_id LIMIT ?",
+            "SELECT r.attempt_id, r.follower_instance_id, r.expected_state_version, r.group_id, r.master_instance_id, r.server_name, r.ca_fingerprint, l.phase, o.result AS exchange_result, o.receipt_json FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_lifecycle l USING (attempt_id) LEFT JOIN configuration_follower_enrollment_observations o USING (attempt_id) WHERE (? IS NULL OR r.attempt_id > ?) ORDER BY r.attempt_id LIMIT ?",
         )
         .bind(after.map(ConfigurationReadGrantAttemptId::as_str))
         .bind(after.map(ConfigurationReadGrantAttemptId::as_str))
@@ -126,43 +375,6 @@ impl ConfigurationFollowerEnrollmentManager {
         .await
         .map_err(|_| Error::Unavailable)?;
         rows.into_iter().map(decode_metadata).collect()
-    }
-
-    /// Produce the digest-only request after rechecking local state and the
-    /// vaulted bearer. A stale or changed reservation is retired before return.
-    #[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
-    pub(crate) async fn submission(
-        &self,
-        attempt_id: &ConfigurationReadGrantAttemptId,
-    ) -> Result<ConfigurationFollowerEnrollmentSubmission, CoreError> {
-        self.submission_internal(attempt_id)
-            .await
-            .map_err(map_manager_error)
-    }
-
-    #[allow(dead_code, reason = "used only by the internal submission boundary")]
-    async fn submission_internal(
-        &self,
-        attempt_id: &ConfigurationReadGrantAttemptId,
-    ) -> Result<ConfigurationFollowerEnrollmentSubmission, Error> {
-        let _guard = self.store.configuration_enrollment_operations.lock().await;
-        let request = {
-            let mut connection = self.store.connection.lock().await;
-            load_request(&mut connection, attempt_id)
-                .await?
-                .ok_or(Error::InvalidRequest)?
-        };
-        let request = self.recover_request(request).await?;
-        self.confirm_submission_ready(&request).await?;
-        Ok(ConfigurationFollowerEnrollmentSubmission {
-            attempt_id: request.attempt_id,
-            follower_instance_id: request.follower_instance_id,
-            authority: request.authority,
-            server_name: request.server_name,
-            certificate_authority_der: request.certificate_authority_der,
-            certificate_authority_fingerprint: request.certificate_authority_fingerprint,
-            credential_digest: request.credential_digest,
-        })
     }
 
     /// Permanently retire the attempt before retryable vault cleanup. Exact
@@ -189,7 +401,7 @@ impl ConfigurationFollowerEnrollmentManager {
     ) -> Result<Option<ConfigurationFollowerEnrollmentMetadata>, Error> {
         let mut connection = self.store.connection.lock().await;
         sqlx::query(
-            "SELECT r.attempt_id, r.follower_instance_id, r.expected_state_version, r.group_id, r.master_instance_id, r.server_name, r.ca_fingerprint, l.phase FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_lifecycle l USING (attempt_id) WHERE r.attempt_id = ?",
+            "SELECT r.attempt_id, r.follower_instance_id, r.expected_state_version, r.group_id, r.master_instance_id, r.server_name, r.ca_fingerprint, l.phase, o.result AS exchange_result, o.receipt_json FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_lifecycle l USING (attempt_id) LEFT JOIN configuration_follower_enrollment_observations o USING (attempt_id) WHERE r.attempt_id = ?",
         )
         .bind(attempt_id.as_str())
         .fetch_optional(&mut *connection)
@@ -238,7 +450,7 @@ impl ConfigurationFollowerEnrollmentManager {
                     return Err(Error::Vault(error));
                 }
                 match self.read_and_verify_credential(&request).await {
-                    Ok(()) => {}
+                    Ok(_) => {}
                     Err(VerifySecretError::Changed) => {
                         self.retire_and_cleanup_owned(&request.attempt_id).await?;
                         return Err(Error::RecoveryRequired);
@@ -306,6 +518,8 @@ impl ConfigurationFollowerEnrollmentManager {
             secret_ref,
             credential_digest,
             phase: ConfigurationFollowerEnrollmentPhase::Reserved,
+            exchange_result: None,
+            last_observed_receipt: None,
         };
         sqlx::query(
             "INSERT INTO configuration_follower_enrollment_requests (attempt_id, follower_instance_id, expected_state_version, group_id, master_instance_id, server_name, ca_der, ca_fingerprint, secret_ref, credential_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -337,15 +551,23 @@ impl ConfigurationFollowerEnrollmentManager {
 
     async fn recover_request(&self, mut request: StoredRequest) -> Result<StoredRequest, Error> {
         if request.phase == ConfigurationFollowerEnrollmentPhase::Retired {
+            if request.exchange_result
+                == Some(ConfigurationFollowerEnrollmentExchangeResult::Approved)
+            {
+                // Preserve the durable result after approval. A prior explicit
+                // retirement may already have deleted the credential; do not
+                // recreate it or change the joined role on retry.
+                return Ok(request);
+            }
             self.retire_and_cleanup_owned(&request.attempt_id).await?;
             return Err(Error::Retired);
         }
         if !self.current_state_matches(&request).await? {
-            self.retire_and_cleanup_owned(&request.attempt_id).await?;
+            self.retire_for_role_conflict(&mut request, None).await?;
             return Err(Error::Conflict);
         }
         match self.read_and_verify_credential(&request).await {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(VerifySecretError::Changed) => {
                 self.retire_and_cleanup_owned(&request.attempt_id).await?;
                 return Err(Error::RecoveryRequired);
@@ -371,7 +593,42 @@ impl ConfigurationFollowerEnrollmentManager {
         }))
     }
 
-    #[allow(dead_code, reason = "consumed by the deferred internal exchange slice")]
+    async fn retire_for_role_conflict(
+        &self,
+        request: &mut StoredRequest,
+        receipt: Option<&ConfigurationFollowerEnrollmentRemoteReceipt>,
+    ) -> Result<(), Error> {
+        let mut connection = self.store.connection.lock().await;
+        let mut transaction = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let current_request = load_request(&mut transaction, &request.attempt_id)
+            .await?
+            .ok_or(Error::IntegrityViolation)?;
+        if !request.same_identity(&current_request) {
+            return Err(Error::IntegrityViolation);
+        }
+        if current_request.phase != ConfigurationFollowerEnrollmentPhase::Retired {
+            retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+        }
+        store_observation(
+            &mut transaction,
+            &request.attempt_id,
+            ConfigurationFollowerEnrollmentExchangeResult::RoleConflict,
+            receipt,
+        )
+        .await?;
+        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        drop(connection);
+        request.phase = ConfigurationFollowerEnrollmentPhase::Retired;
+        request.exchange_result = Some(ConfigurationFollowerEnrollmentExchangeResult::RoleConflict);
+        if let Some(receipt) = receipt {
+            request.last_observed_receipt = Some(receipt.clone());
+        }
+        self.cleanup_vault(request).await
+    }
+
     async fn confirm_submission_ready(&self, request: &StoredRequest) -> Result<(), Error> {
         let mut connection = self.store.connection.lock().await;
         let mut transaction = connection
@@ -399,13 +656,14 @@ impl ConfigurationFollowerEnrollmentManager {
                 && matches!(state.role(), ConfigurationRole::Unassigned)
         });
         if !current {
-            sqlx::query(
-                "UPDATE configuration_follower_enrollment_lifecycle SET phase = 'retired' WHERE attempt_id = ? AND phase != 'retired'",
+            retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+            store_observation(
+                &mut transaction,
+                &request.attempt_id,
+                ConfigurationFollowerEnrollmentExchangeResult::RoleConflict,
+                None,
             )
-            .bind(request.attempt_id.as_str())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| Error::Unavailable)?;
+            .await?;
             transaction.commit().await.map_err(|_| Error::Unavailable)?;
             drop(connection);
             self.cleanup_vault(request).await?;
@@ -439,13 +697,14 @@ impl ConfigurationFollowerEnrollmentManager {
             return Err(Error::Retired);
         }
         if !current {
-            sqlx::query(
-                "UPDATE configuration_follower_enrollment_lifecycle SET phase = 'retired' WHERE attempt_id = ? AND phase != 'retired'",
+            retire_lifecycle(&mut transaction, &request.attempt_id).await?;
+            store_observation(
+                &mut transaction,
+                &request.attempt_id,
+                ConfigurationFollowerEnrollmentExchangeResult::RoleConflict,
+                None,
             )
-            .bind(request.attempt_id.as_str())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| Error::Unavailable)?;
+            .await?;
             transaction.commit().await.map_err(|_| Error::Unavailable)?;
             drop(connection);
             self.cleanup_vault(request).await?;
@@ -469,7 +728,7 @@ impl ConfigurationFollowerEnrollmentManager {
     async fn read_and_verify_credential(
         &self,
         request: &StoredRequest,
-    ) -> Result<(), VerifySecretError> {
+    ) -> Result<SecretValue, VerifySecretError> {
         let binding = request.binding().map_err(|_| VerifySecretError::Changed)?;
         let value = match self.vault.get(&binding).await {
             Ok(value) => value,
@@ -488,7 +747,8 @@ impl ConfigurationFollowerEnrollmentManager {
         if credential.digest() != request.credential_digest {
             return Err(VerifySecretError::Changed);
         }
-        Ok(())
+        drop(credential);
+        Ok(value)
     }
 
     async fn retire_and_cleanup_owned(
@@ -607,6 +867,21 @@ impl ConfigurationFollowerEnrollmentAdministration for ConfigurationFollowerEnro
                 .map_err(map_manager_error)
         }
     }
+
+    fn exchange_configuration_follower_enrollment(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> impl std::future::Future<
+        Output = Result<ConfigurationFollowerEnrollmentMetadata, CoreError>,
+    > + Send {
+        async move {
+            self.exchange(expected_instance_id, attempt_id, settings)
+                .await
+                .map_err(map_manager_error)
+        }
+    }
 }
 
 fn map_manager_error(error: Error) -> CoreError {
@@ -655,6 +930,8 @@ struct StoredRequest {
     secret_ref: SecretRef,
     credential_digest: ConfigurationCredentialDigest,
     phase: ConfigurationFollowerEnrollmentPhase,
+    exchange_result: Option<ConfigurationFollowerEnrollmentExchangeResult>,
+    last_observed_receipt: Option<ConfigurationFollowerEnrollmentRemoteReceipt>,
 }
 
 impl StoredRequest {
@@ -678,7 +955,6 @@ impl StoredRequest {
                 == super::hash_bytes(&choice.certificate_authority_der)
     }
 
-    #[allow(dead_code, reason = "used by the deferred internal exchange slice")]
     fn same_identity(&self, other: &Self) -> bool {
         self.attempt_id == other.attempt_id
             && self.follower_instance_id == other.follower_instance_id
@@ -700,6 +976,8 @@ impl StoredRequest {
             server_name: self.server_name.clone(),
             certificate_authority_fingerprint: self.certificate_authority_fingerprint.clone(),
             phase: self.phase,
+            exchange_result: self.exchange_result,
+            last_observed_receipt: self.last_observed_receipt.clone(),
         }
     }
 }
@@ -709,7 +987,7 @@ async fn load_request(
     attempt_id: &ConfigurationReadGrantAttemptId,
 ) -> Result<Option<StoredRequest>, Error> {
     sqlx::query(
-        "SELECT r.attempt_id, r.follower_instance_id, r.expected_state_version, r.group_id, r.master_instance_id, r.server_name, r.ca_der, r.ca_fingerprint, r.secret_ref, r.credential_digest, l.phase FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_lifecycle l USING (attempt_id) WHERE r.attempt_id = ?",
+        "SELECT r.attempt_id, r.follower_instance_id, r.expected_state_version, r.group_id, r.master_instance_id, r.server_name, r.ca_der, r.ca_fingerprint, r.secret_ref, r.credential_digest, l.phase, o.result AS exchange_result, o.receipt_json FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_lifecycle l USING (attempt_id) LEFT JOIN configuration_follower_enrollment_observations o USING (attempt_id) WHERE r.attempt_id = ?",
     )
     .bind(attempt_id.as_str())
     .fetch_optional(connection)
@@ -801,7 +1079,7 @@ fn decode_request(row: sqlx::sqlite::SqliteRow) -> Result<StoredRequest, Error> 
         &row.try_get::<String, _>("phase")
             .map_err(|_| Error::IntegrityViolation)?,
     )?;
-    Ok(StoredRequest {
+    let mut request = StoredRequest {
         attempt_id,
         follower_instance_id,
         expected_state_version,
@@ -812,7 +1090,20 @@ fn decode_request(row: sqlx::sqlite::SqliteRow) -> Result<StoredRequest, Error> 
         secret_ref,
         credential_digest,
         phase,
-    })
+        exchange_result: None,
+        last_observed_receipt: None,
+    };
+    (request.exchange_result, request.last_observed_receipt) = decode_observation(
+        &row,
+        &request.attempt_id,
+        &request.follower_instance_id,
+        request.expected_state_version,
+        &request.authority,
+        &request.server_name,
+        &request.certificate_authority_fingerprint,
+        request.phase,
+    )?;
+    Ok(request)
 }
 
 fn decode_metadata(
@@ -862,6 +1153,16 @@ fn decode_metadata(
         &row.try_get::<String, _>("phase")
             .map_err(|_| Error::IntegrityViolation)?,
     )?;
+    let (exchange_result, last_observed_receipt) = decode_observation(
+        &row,
+        &attempt_id,
+        &follower_instance_id,
+        expected_state_version,
+        &authority,
+        &server_name,
+        &certificate_authority_fingerprint,
+        phase,
+    )?;
     Ok(ConfigurationFollowerEnrollmentMetadata {
         attempt_id,
         follower_instance_id,
@@ -870,6 +1171,8 @@ fn decode_metadata(
         server_name,
         certificate_authority_fingerprint,
         phase,
+        exchange_result,
+        last_observed_receipt,
     })
 }
 
@@ -879,6 +1182,322 @@ fn parse_phase(phase: &str) -> Result<ConfigurationFollowerEnrollmentPhase, Erro
         "prepared" => Ok(ConfigurationFollowerEnrollmentPhase::Prepared),
         "retired" => Ok(ConfigurationFollowerEnrollmentPhase::Retired),
         _ => Err(Error::IntegrityViolation),
+    }
+}
+
+fn decode_observation(
+    row: &sqlx::sqlite::SqliteRow,
+    attempt_id: &ConfigurationReadGrantAttemptId,
+    follower_instance_id: &KilnInstanceId,
+    follower_state_version: u64,
+    authority: &ConfigurationAuthority,
+    server_name: &str,
+    ca_fingerprint: &ContentHash,
+    phase: ConfigurationFollowerEnrollmentPhase,
+) -> Result<
+    (
+        Option<ConfigurationFollowerEnrollmentExchangeResult>,
+        Option<ConfigurationFollowerEnrollmentRemoteReceipt>,
+    ),
+    Error,
+> {
+    let result = row
+        .try_get::<Option<String>, _>("exchange_result")
+        .map_err(|_| Error::IntegrityViolation)?
+        .map(|value| parse_exchange_result(&value))
+        .transpose()?;
+    let receipt_json: Option<String> = row
+        .try_get("receipt_json")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let receipt: Option<ConfigurationFollowerEnrollmentRemoteReceipt> = receipt_json
+        .map(|value| serde_json::from_str(&value).map_err(|_| Error::IntegrityViolation))
+        .transpose()?;
+    match (result, receipt.as_ref()) {
+        (None, None) => return Ok((None, None)),
+        (None, Some(_)) => return Err(Error::IntegrityViolation),
+        (Some(ConfigurationFollowerEnrollmentExchangeResult::RoleConflict), None) => {}
+        (Some(_), None) => return Err(Error::IntegrityViolation),
+        (Some(_), Some(receipt))
+            if !valid_remote_receipt_binding(
+                receipt,
+                attempt_id,
+                follower_instance_id,
+                follower_state_version,
+                authority,
+                server_name,
+                ca_fingerprint,
+            ) =>
+        {
+            return Err(Error::IntegrityViolation);
+        }
+        _ => {}
+    }
+    let Some(result) = result else {
+        return Ok((None, None));
+    };
+    if matches!(
+        result,
+        ConfigurationFollowerEnrollmentExchangeResult::Pending
+    ) {
+        if phase == ConfigurationFollowerEnrollmentPhase::Reserved
+            || !receipt.as_ref().is_some_and(|receipt| {
+                receipt.phase == ConfigurationFollowerEnrollmentRemotePhase::Pending
+            })
+        {
+            return Err(Error::IntegrityViolation);
+        }
+    } else if phase != ConfigurationFollowerEnrollmentPhase::Retired {
+        return Err(Error::IntegrityViolation);
+    }
+    if let Some(receipt) = &receipt {
+        let outcome_matches = match result {
+            ConfigurationFollowerEnrollmentExchangeResult::Pending => {
+                receipt.phase == ConfigurationFollowerEnrollmentRemotePhase::Pending
+                    && receipt.grant.is_none()
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::Approved => {
+                receipt.phase == ConfigurationFollowerEnrollmentRemotePhase::Approved
+                    && receipt.grant.as_ref().is_some_and(|grant| !grant.revoked)
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::Rejected => {
+                receipt.phase == ConfigurationFollowerEnrollmentRemotePhase::Rejected
+                    && receipt.grant.is_none()
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::Revoked => {
+                receipt.phase == ConfigurationFollowerEnrollmentRemotePhase::Approved
+                    && receipt.grant.as_ref().is_some_and(|grant| grant.revoked)
+            }
+            ConfigurationFollowerEnrollmentExchangeResult::RoleConflict => true,
+        };
+        if !outcome_matches {
+            return Err(Error::IntegrityViolation);
+        }
+    }
+    Ok((Some(result), receipt))
+}
+
+fn parse_exchange_result(
+    result: &str,
+) -> Result<ConfigurationFollowerEnrollmentExchangeResult, Error> {
+    match result {
+        "pending" => Ok(ConfigurationFollowerEnrollmentExchangeResult::Pending),
+        "approved" => Ok(ConfigurationFollowerEnrollmentExchangeResult::Approved),
+        "rejected" => Ok(ConfigurationFollowerEnrollmentExchangeResult::Rejected),
+        "revoked" => Ok(ConfigurationFollowerEnrollmentExchangeResult::Revoked),
+        "role_conflict" => Ok(ConfigurationFollowerEnrollmentExchangeResult::RoleConflict),
+        _ => Err(Error::IntegrityViolation),
+    }
+}
+
+async fn retire_lifecycle(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    attempt_id: &ConfigurationReadGrantAttemptId,
+) -> Result<(), Error> {
+    let result = sqlx::query(
+        "UPDATE configuration_follower_enrollment_lifecycle SET phase = 'retired' WHERE attempt_id = ? AND phase != 'retired'",
+    )
+    .bind(attempt_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    if result.rows_affected() != 1 {
+        return Err(Error::IntegrityViolation);
+    }
+    Ok(())
+}
+
+async fn store_observation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    attempt_id: &ConfigurationReadGrantAttemptId,
+    result: ConfigurationFollowerEnrollmentExchangeResult,
+    receipt: Option<&ConfigurationFollowerEnrollmentRemoteReceipt>,
+) -> Result<(), Error> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT receipt_json FROM configuration_follower_enrollment_observations WHERE attempt_id = ?",
+    )
+    .bind(attempt_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| Error::Unavailable)?
+    .flatten();
+    let receipt_json = match receipt {
+        Some(receipt) => {
+            Some(serde_json::to_string(receipt).map_err(|_| Error::IntegrityViolation)?)
+        }
+        None => existing,
+    };
+    if receipt_json
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_RECEIPT_BYTES)
+    {
+        return Err(Error::IntegrityViolation);
+    }
+    if !matches!(
+        result,
+        ConfigurationFollowerEnrollmentExchangeResult::RoleConflict
+    ) && receipt_json.is_none()
+    {
+        return Err(Error::IntegrityViolation);
+    }
+    sqlx::query(
+        "INSERT INTO configuration_follower_enrollment_observations (attempt_id, result, receipt_json) VALUES (?, ?, ?) ON CONFLICT(attempt_id) DO UPDATE SET result = excluded.result, receipt_json = excluded.receipt_json",
+    )
+    .bind(attempt_id.as_str())
+    .bind(exchange_result_label(result))
+    .bind(receipt_json)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| Error::IntegrityViolation)?;
+    Ok(())
+}
+
+fn exchange_result_label(result: ConfigurationFollowerEnrollmentExchangeResult) -> &'static str {
+    match result {
+        ConfigurationFollowerEnrollmentExchangeResult::Pending => "pending",
+        ConfigurationFollowerEnrollmentExchangeResult::Approved => "approved",
+        ConfigurationFollowerEnrollmentExchangeResult::Rejected => "rejected",
+        ConfigurationFollowerEnrollmentExchangeResult::Revoked => "revoked",
+        ConfigurationFollowerEnrollmentExchangeResult::RoleConflict => "role_conflict",
+    }
+}
+
+fn valid_exchange_settings(settings: &ConfigurationFollowerEnrollmentExchangeSettings) -> bool {
+    if settings.origin.is_empty()
+        || settings
+            .origin
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        || settings.connect_timeout_ms == 0
+        || settings.request_timeout_ms == 0
+        || settings.connect_timeout_ms > settings.request_timeout_ms
+    {
+        return false;
+    }
+    std::time::Instant::now()
+        .checked_add(std::time::Duration::from_millis(
+            settings.request_timeout_ms,
+        ))
+        .is_some()
+}
+
+fn submission_from_request(request: &StoredRequest) -> ConfigurationFollowerEnrollmentSubmission {
+    ConfigurationFollowerEnrollmentSubmission::new(
+        request.attempt_id.clone(),
+        request.follower_instance_id.clone(),
+        request.expected_state_version,
+        request.authority.clone(),
+        request.server_name.clone(),
+        request.certificate_authority_der.clone(),
+        request.certificate_authority_fingerprint.clone(),
+        request.credential_digest.clone(),
+    )
+}
+
+fn valid_remote_receipt(
+    request: &StoredRequest,
+    receipt: &ConfigurationFollowerEnrollmentRemoteReceipt,
+) -> bool {
+    if !valid_remote_receipt_binding(
+        receipt,
+        &request.attempt_id,
+        &request.follower_instance_id,
+        request.expected_state_version,
+        &request.authority,
+        &request.server_name,
+        &request.certificate_authority_fingerprint,
+    ) {
+        return false;
+    }
+    receipt.credential_fingerprint == enrollment_confirmation_fingerprint(request, receipt)
+}
+
+fn enrollment_confirmation_fingerprint(
+    request: &StoredRequest,
+    receipt: &ConfigurationFollowerEnrollmentRemoteReceipt,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"kiln configuration follower enrollment confirmation v1\0");
+    for value in [
+        receipt.request_id.as_str(),
+        request.attempt_id.as_str(),
+        request.follower_instance_id.as_str(),
+        request.authority.group_id().as_str(),
+        request.authority.master_id().as_str(),
+        request.server_name.as_str(),
+        request.certificate_authority_fingerprint.as_str(),
+        request.credential_digest.as_str(),
+    ] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.update(request.expected_state_version.to_be_bytes());
+    hash.update(receipt.received_master_state_version.to_be_bytes());
+    lower_hex(&hash.finalize())
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(HEX[(byte >> 4) as usize] as char);
+        value.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    value
+}
+
+fn valid_remote_receipt_binding(
+    receipt: &ConfigurationFollowerEnrollmentRemoteReceipt,
+    attempt_id: &ConfigurationReadGrantAttemptId,
+    follower_instance_id: &KilnInstanceId,
+    follower_state_version: u64,
+    authority: &ConfigurationAuthority,
+    server_name: &str,
+    ca_fingerprint: &ContentHash,
+) -> bool {
+    let valid_hex_32 = |value: &str| {
+        value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let valid_fingerprint = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !receipt.request_id.starts_with("cfr_")
+        || !valid_hex_32(&receipt.request_id[4..])
+        || receipt.attempt_id != attempt_id.as_str()
+        || receipt.follower_id != follower_instance_id.as_str()
+        || receipt.follower_state_version != follower_state_version
+        || receipt.group_id != authority.group_id().as_str()
+        || receipt.master_instance_id != authority.master_id().as_str()
+        || receipt.server_name != server_name
+        || receipt.master_ca_fingerprint != ca_fingerprint.as_str()
+        || !valid_fingerprint(&receipt.credential_fingerprint)
+        || receipt.received_master_state_version == 0
+        || receipt.received_master_state_version > i64::MAX as u64
+    {
+        return false;
+    }
+    match (receipt.phase, receipt.grant.as_ref()) {
+        (ConfigurationFollowerEnrollmentRemotePhase::Approved, Some(grant)) => {
+            grant.grant_id.starts_with("crg_")
+                && valid_hex_32(&grant.grant_id[4..])
+                && grant.issuance_attempt_id.as_deref() == Some(attempt_id.as_str())
+                && grant.group_id == authority.group_id().as_str()
+                && grant.master_instance_id == authority.master_id().as_str()
+                && grant.follower_instance_id == follower_instance_id.as_str()
+                && grant.issued_state_version > 0
+                && grant.issued_state_version <= i64::MAX as u64
+        }
+        (
+            ConfigurationFollowerEnrollmentRemotePhase::Pending
+            | ConfigurationFollowerEnrollmentRemotePhase::Rejected,
+            None,
+        ) => true,
+        _ => false,
     }
 }
 

@@ -95,6 +95,7 @@ components:
     role: process_composition_and_lifecycle
     depends_on:
       - core
+      - client
       - adapters
       - providers
       - mcp

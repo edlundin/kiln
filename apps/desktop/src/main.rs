@@ -7,6 +7,7 @@ mod connection;
 mod conversation;
 mod enrollment_requests;
 mod follower_enrollment;
+mod follower_prepare;
 mod model_bindings;
 mod theme;
 

@@ -20,7 +20,7 @@ use kiln_protocol::{
 use tokio::{runtime::Runtime, sync::mpsc};
 use ulid::Ulid;
 
-use crate::{connection, theme};
+use crate::{connection, follower_prepare::FollowerPreparation, theme};
 
 enum Update {
     Page(Result<Page, String>),
@@ -36,6 +36,7 @@ enum Confirmation {
 }
 
 pub struct FollowerEnrollment {
+    preparation: Entity<FollowerPreparation>,
     client: Client,
     runtime: Arc<Runtime>,
     updates: mpsc::UnboundedSender<(Ulid, Update)>,
@@ -67,6 +68,7 @@ impl FollowerEnrollment {
         })
         .detach();
         Self {
+            preparation: cx.new(|cx| FollowerPreparation::new(client.clone(), runtime.clone(), cx)),
             client,
             runtime,
             updates,
@@ -85,6 +87,8 @@ impl FollowerEnrollment {
     }
 
     pub fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
+        self.preparation
+            .update(cx, |preparation, cx| preparation.set_online(online, cx));
         if self.online != online {
             self.online = online;
             self.operation = None;
@@ -270,7 +274,9 @@ impl FollowerEnrollment {
                 self.page = page.enrollments;
                 self.next_cursor = page.next_cursor;
                 if self.page.is_empty() {
-                    self.notice = Some("No follower attempts on this page. Prepare an enrollment through the local API first.".into());
+                    self.notice = Some(
+                        "No follower attempts on this page. Prepare an enrollment above.".into(),
+                    );
                 }
             }
             Update::Loaded(Ok(selected)) => self.selected = Some(selected),
@@ -351,6 +357,7 @@ impl Render for FollowerEnrollment {
         let disabled = !self.online || self.operation.is_some();
         let mut view = div().flex().flex_col().gap_3().min_w_0()
             .child(div().text_lg().child("Follower enrollment"))
+            .child(self.preparation.clone())
             .child(div().text_sm().text_color(theme::MUTED).child("Submit a prepared enrollment to its pinned master, check approval, or retire its local credential. The daemon keeps the bearer in its OS vault. Receipt status is historical, not a live connectivity or grant check."))
             .when(!self.online, |v| v.child(div().text_sm().text_color(theme::ATTENTION).child("Reconnect and reload the enrollment before continuing.")))
             .child(div().flex().flex_wrap().gap_2()

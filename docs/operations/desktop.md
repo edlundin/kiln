@@ -179,8 +179,30 @@ Provider credentials remain local to each instance.
 Settings → Follower enrollment lists attempts on the connected daemon in bounded
 pages, including when the instance is still unassigned. Select an attempt to
 reload its durable state, pinned server name/CA fingerprint, authority and latest
-receipt. Preparation currently uses the local API; the desktop can submit and
-manage an already prepared attempt.
+receipt.
+
+On an unassigned instance, **Prepare a new follower** accepts the master’s group
+ID, instance ID and exact server name. **Choose public CA certificate…** reads an
+explicitly selected regular DER file off the UI thread, rejecting links/special
+files on Unix and limiting both file bytes and the encoded request to the existing
+2 MiB budget. Obtain the public certificate through a trusted channel; do not
+select a private key. The desktop does not yet export the master’s public CA.
+
+Compare the preview’s full SHA-256 fingerprint, authority and server name against
+the master before **Fingerprint verified — prepare**. The frozen request includes
+the local unassigned instance/version and a new stable attempt ID. Preparation
+stores the pin and reserves a credential in the daemon vault but does not contact
+the master or change the local role. The pinned transport checks certificate
+usability at exchange; preparation alone is not proof of TLS readiness.
+
+An uncertain response offers **Retry exact preparation**, retaining the original
+attempt, version and certificate bytes across reconnects within this Settings
+connection. **Discard local retry (keeps daemon attempt)** clears only that local
+retry payload. Refresh enrollments and recover/retire any live attempt before
+starting again; the daemon prevents concurrent live preparations. After closing
+the app, recover the attempt through the enrollment list; a reserved/incomplete
+attempt can be retired to retry vault cleanup. A canceled file picker or preview
+makes no daemon mutation, and stale picker/read replies after disconnect are ignored.
 
 For a prepared attempt, enter the master HTTPS origin and explicit positive
 connect and whole-request deadlines in milliseconds. Connect must not exceed the

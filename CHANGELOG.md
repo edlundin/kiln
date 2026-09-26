@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-322: Add follower preparation in desktop Settings with explicit public CA
+  selection, pinned authority preview, and exact retries for uncertain outcomes.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-322: Add desktop controls to list and inspect follower enrollment attempts,
   exchange prepared attempts through their pinned master with explicit origin and
   deadlines, and retire attempts or retry local credential cleanup.

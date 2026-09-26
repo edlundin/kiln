@@ -5,8 +5,8 @@ use kiln_core::{
     ConfigurationSnapshotStore, ConfigurationSyncStatus,
 };
 use kiln_protocol::{
-    ConfigurationRevisionResponse, ConfigurationSyncRole, ConfigurationSyncStatusResponse,
-    ConfigurationSyncTransportState,
+    ConfigurationRevisionResponse, ConfigurationSyncRefreshOutcome, ConfigurationSyncRefreshState,
+    ConfigurationSyncRole, ConfigurationSyncStatusResponse, ConfigurationSyncTransportState,
 };
 use std::{future::Future, pin::Pin};
 
@@ -145,7 +145,28 @@ where
         .status()
         .await
         .map_err(|_| PublicError::ConfigurationSyncUnavailable)?;
+    let mut refresh = state
+        .configuration_refresh_status
+        .as_ref()
+        .map(|status| status())
+        .unwrap_or_else(kiln_protocol::ConfigurationSyncRefreshStatusResponse::unconfigured);
     let authority = status.state.role().authority();
+    if refresh.enabled
+        && (!matches!(status.state.role(), ConfigurationRole::Follower(_))
+            || refresh.follower_instance_id.as_deref() != Some(status.state.instance_id().as_str())
+            || refresh.enrolled_group_id.as_deref().is_some_and(|group| {
+                Some(group) != authority.map(|value| value.group_id().as_str())
+            })
+            || refresh
+                .enrolled_master_instance_id
+                .as_deref()
+                .is_some_and(|master| {
+                    Some(master) != authority.map(|value| value.master_id().as_str())
+                }))
+    {
+        refresh.state = ConfigurationSyncRefreshState::EnrollmentInactive;
+        refresh.last_outcome = Some(ConfigurationSyncRefreshOutcome::EnrollmentInactive);
+    }
     Ok(Json(ConfigurationSyncStatusResponse {
         instance_id: status.state.instance_id().as_str().to_owned(),
         state_version: status.state.version(),
@@ -158,9 +179,14 @@ where
         master_instance_id: authority.map(|value| value.master_id().as_str().to_owned()),
         applied_revision: status.applied_revision.as_ref().map(revision_response),
         observed_revision: status.state.observed().map(revision_response),
-        // No transport/enrollment implementation exists yet. Matching durable
-        // revisions cannot establish currentness or a live master connection.
-        transport: ConfigurationSyncTransportState::Unconfigured,
+        // Configured means only that the opt-in scheduler is enabled. The
+        // refresh object reports historical check recency without a live lease.
+        transport: if refresh.enabled {
+            ConfigurationSyncTransportState::Configured
+        } else {
+            ConfigurationSyncTransportState::Unconfigured
+        },
+        refresh,
     }))
 }
 fn revision_response(revision: &ConfigurationRevision) -> ConfigurationRevisionResponse {

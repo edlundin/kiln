@@ -293,7 +293,7 @@ fn decode_bundle(bundle: SharedConfigurationBundle) -> Result<SharedConfiguratio
     .map_err(|_| Error::InvalidSnapshot)
 }
 
-pub(super) fn decode_follower_snapshot_candidate(
+pub fn validate_follower_snapshot_candidate(
     candidate: ConfigurationFollowerSnapshotCandidate,
 ) -> Result<SharedConfigurationSnapshot, Error> {
     decode_bundle(SharedConfigurationBundle {

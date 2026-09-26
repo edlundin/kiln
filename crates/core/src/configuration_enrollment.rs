@@ -272,6 +272,8 @@ pub trait ConfigurationFollowerEnrollmentTransport: Send + Sync {
 pub enum ConfigurationFollowerEnrollmentError {
     InvalidRequest,
     NotFound,
+    /// The exact attempt or its local follower relationship is verified inactive.
+    EnrollmentInactive,
     Conflict,
     IdempotencyConflict,
     Retired,

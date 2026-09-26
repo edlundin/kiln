@@ -15,6 +15,7 @@ mod configuration_access;
 mod configuration_enrollment;
 mod configuration_identity;
 mod configuration_publication;
+pub use configuration_publication::validate_follower_snapshot_candidate;
 mod configuration_sync;
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 
@@ -567,6 +568,15 @@ impl LifecycleCoordinator {
         changed
     }
 
+    pub fn is_quiescing(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .expect("lifecycle state lock is not poisoned")
+            .phase
+            == LifecyclePhase::Quiescing
+    }
+
     pub async fn wait_for_shutdown_request(&self) {
         loop {
             let changed = self.inner.changed.notified();
@@ -671,6 +681,9 @@ pub struct AppState<W, S, R> {
     provider_account_operations: Arc<dyn ProviderAccountOperations>,
     configuration_status_operations:
         Option<Arc<dyn configuration_sync::ConfigurationStatusOperations>>,
+    configuration_refresh_status: Option<
+        Arc<dyn Fn() -> kiln_protocol::ConfigurationSyncRefreshStatusResponse + Send + Sync>,
+    >,
     configuration_identity_status_operations:
         Option<Arc<dyn configuration_identity::ConfigurationIdentityStatusOperations>>,
     configuration_identity_command_operations:
@@ -702,6 +715,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
             provider_account_operations: Arc::clone(&self.provider_account_operations),
             configuration_status_operations: self
                 .configuration_status_operations
+                .as_ref()
+                .map(Arc::clone),
+            configuration_refresh_status: self
+                .configuration_refresh_status
                 .as_ref()
                 .map(Arc::clone),
             configuration_identity_status_operations: self
@@ -782,6 +799,7 @@ impl<W, S, R> AppState<W, S, R> {
             usage_operations: Arc::new(usage_operations),
             provider_account_operations: Arc::new(UnavailableProviderAccountOperations),
             configuration_status_operations: None,
+            configuration_refresh_status: None,
             configuration_identity_status_operations: None,
             configuration_identity_command_operations: None,
             configuration_administration_operations: None,
@@ -820,6 +838,7 @@ impl<W, S, R> AppState<W, S, R> {
             usage_operations: Arc::new(usage_operations),
             provider_account_operations,
             configuration_status_operations: None,
+            configuration_refresh_status: None,
             configuration_identity_status_operations: None,
             configuration_identity_command_operations: None,
             configuration_administration_operations: None,
@@ -838,6 +857,14 @@ impl<W, S, R> AppState<W, S, R> {
         self.configuration_status_operations = Some(Arc::new(
             configuration_sync::ConfigurationStatusAdapter(store),
         ));
+        self
+    }
+
+    pub fn with_configuration_follower_refresh_status<F>(mut self, status: F) -> Self
+    where
+        F: Fn() -> kiln_protocol::ConfigurationSyncRefreshStatusResponse + Send + Sync + 'static,
+    {
+        self.configuration_refresh_status = Some(Arc::new(status));
         self
     }
 
@@ -3422,6 +3449,11 @@ impl PublicError {
                     StatusCode::NOT_FOUND,
                     error_code::CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND,
                     "Configuration follower enrollment not found",
+                ),
+                kiln_core::ConfigurationFollowerEnrollmentError::EnrollmentInactive => (
+                    StatusCode::CONFLICT,
+                    error_code::CONFIGURATION_SYNC_CONFLICT,
+                    "Configuration authority, follower state or enrollment changed",
                 ),
                 kiln_core::ConfigurationFollowerEnrollmentError::Conflict => (
                     StatusCode::CONFLICT,

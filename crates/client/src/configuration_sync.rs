@@ -76,6 +76,21 @@ pub struct ConfigurationSyncClient {
 }
 
 impl ConfigurationSyncClient {
+    /// Validates the caller-selected HTTPS origin before daemon startup without
+    /// resolving DNS or changing the enrollment's separately stored pin.
+    pub fn validate_origin_syntax(origin: &str) -> Result<(), ConfigurationSyncError> {
+        parse_origin(origin).map(|_| ())
+    }
+
+    /// Checks the caller-selected origin against the enrolled canonical TLS
+    /// name without resolving DNS or changing any enrollment data.
+    pub fn validate_origin_for_server_name(
+        origin: &str,
+        server_name: &str,
+    ) -> Result<(), ConfigurationSyncError> {
+        parse_origin_for_server_name(origin, server_name).map(|_| ())
+    }
+
     /// Constructs transport only; performs no DNS, network or filesystem work.
     /// The caller must obtain the pin and follower-specific bearer through an
     /// authenticated enrollment flow. Supplying arbitrary public CA roots here
@@ -90,27 +105,10 @@ impl ConfigurationSyncClient {
             || !valid_id(&pin.follower_instance_id, "ins_")
             || !valid_id(&pin.group_id, "cfg_")
             || pin.master_instance_id == pin.follower_instance_id
-            || !valid_server_name(&pin.server_name)
-            || pin
-                .origin
-                .bytes()
-                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
         {
             return Err(Error::InvalidPin);
         }
-        let base_url = reqwest::Url::parse(&pin.origin).map_err(|_| Error::InvalidPin)?;
-        if base_url.scheme() != "https"
-            || base_url.host().is_none()
-            || !url_host_matches(&base_url, &pin.server_name)
-            || base_url.port_or_known_default() == Some(0)
-            || !base_url.username().is_empty()
-            || base_url.password().is_some()
-            || base_url.path() != "/"
-            || base_url.query().is_some()
-            || base_url.fragment().is_some()
-        {
-            return Err(Error::InvalidPin);
-        }
+        let base_url = parse_origin_for_server_name(&pin.origin, &pin.server_name)?;
         let mut snapshot_url = base_url.clone();
         snapshot_url.set_path(CONFIGURATION_SNAPSHOT_PATH);
         let mut enrollment_request_url = base_url;
@@ -300,6 +298,40 @@ impl ConfigurationSyncClient {
         }
         Ok(receipt)
     }
+}
+
+fn parse_origin(origin: &str) -> Result<reqwest::Url, ConfigurationSyncError> {
+    use ConfigurationSyncError as Error;
+    if origin
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(Error::InvalidPin);
+    }
+    let url = reqwest::Url::parse(origin).map_err(|_| Error::InvalidPin)?;
+    if url.scheme() != "https"
+        || url.host().is_none()
+        || url.port_or_known_default() == Some(0)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(Error::InvalidPin);
+    }
+    Ok(url)
+}
+
+fn parse_origin_for_server_name(
+    origin: &str,
+    server_name: &str,
+) -> Result<reqwest::Url, ConfigurationSyncError> {
+    let url = parse_origin(origin)?;
+    if !valid_server_name(server_name) || !url_host_matches(&url, server_name) {
+        return Err(ConfigurationSyncError::InvalidPin);
+    }
+    Ok(url)
 }
 
 // Canonical ULID grammar, matching core IDs without importing domain types into

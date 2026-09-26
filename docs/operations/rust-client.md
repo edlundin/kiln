@@ -209,10 +209,10 @@ authenticate a remote peer or enroll a follower. See the
 
 `ConfigurationSyncClient` is a separate HTTPS-only component for enrolled
 followers. It is not the local `Client` and has no general request method. The
-daemon also uses its pinned transport for explicit enrollment exchange through a
-narrow core port; infrastructure does not depend on the client or protocol
-crates. This does not connect snapshot fetching to ongoing daemon synchronization
-or configure the master's separate opt-in listener.
+daemon also uses its pinned transport for explicit enrollment exchange and
+one-shot or scheduled refresh through narrow core ports; infrastructure does not
+depend on the client or protocol crates. It does not configure the master's
+separate opt-in listener.
 
 Supply `ConfigurationMasterPin` with the HTTPS origin, a dedicated master CA in
 DER format, canonical master/group/follower IDs, the follower-specific `kcfg1_`
@@ -340,8 +340,8 @@ never recreate a credential removed by explicit retirement. Retry explicit
 retirement after a vault-cleanup error. The response includes only
 credential-free exchange status and the last-observed receipt; a later master
 revocation may change the grant state. The client does not retry the command
-automatically. Enrollment exchange does not fetch or apply snapshots, establish
-currentness, or start automatic reconnect.
+automatically. Enrollment exchange does not fetch or apply snapshots or
+establish currentness. Daemon-owned periodic refresh is configured separately.
 
 Protocol `0.38.0` adds the authenticated local
 `fetch_configuration_follower_snapshot(attempt_id, request)` command. Its strict
@@ -352,7 +352,8 @@ fetches one bounded candidate, records its authenticated revision, validates the
 complete bundle, and atomically applies it. The response contains only the
 resulting follower instance/state version, revision, and `applied` or
 `already_applied` disposition. It does not return snapshot bytes, credentials,
-vault references, or private enrollment state.
+vault references, or private enrollment state. This one-shot command does not
+retry automatically; see the separate daemon refresh configuration below.
 
 Migration 47 adds a private monotonic credential marker. Only a credential from
 an approved enrollment with an active marker can fetch. Explicit retirement
@@ -365,3 +366,17 @@ command performs one explicit fetch with no automatic retry. If bundle
 validation or application fails, the previous snapshot remains intact while a
 newer authenticated observation may be retained. See the
 [snapshot fetch contract](../spec/configuration-sync.md#explicit-follower-snapshot-fetch-and-application).
+
+Protocol `0.39.0` adds opt-in daemon-owned follower refresh. Set every
+`KILN_CONFIGURATION_FOLLOWER_REFRESH_*` environment variable in the
+[follower refresh operations guide](configuration-follower-refresh.md) to enable
+one initial authenticated check and serialized periodic refreshes for an exact
+follower instance and enrollment attempt. Each fetch still reloads the
+enrollment's immutable CA, server name, authority and active credential marker.
+The per-check HTTPS origin may change if its host still matches that server name;
+the polling interval, freshness threshold, connect deadline and request deadline
+are caller-supplied. The authenticated `GET /v1/configuration-sync` response now
+reports refresh configuration and operation state, the last outcome, successful
+revision/check time, and process-local age/recency. After restart, recency remains
+unknown until a new successful check; matching revisions or historical enrollment
+receipts do not count as a live check. Refresh does not activate consumers.

@@ -9,8 +9,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use kiln_client::ConfigurationSyncClient;
 use kiln_core::{
-    ConfigurationAuthority, ConfigurationFollowerServingIdentity, ConfigurationIdentityStatusStore,
+    ConfigurationAuthority, ConfigurationFollowerEnrollmentAdministration,
+    ConfigurationFollowerServingIdentity, ConfigurationIdentityStatusStore,
     ConfigurationMasterIdentityId, ConfigurationMasterIdentityPhase,
     ConfigurationMasterIdentityStatus, ConfigurationRole, ConfigurationStateStore, ContentHash,
     KilnInstanceId, ModelId, ModelInvocationCompletionKind, ModelInvocationOutcome,
@@ -40,10 +42,14 @@ use kiln_server::{
 use crate::configuration_enrollment::{
     PinnedConfigurationFollowerEnrollmentTransport, PinnedConfigurationFollowerSnapshotTransport,
 };
+use crate::configuration_refresh::{
+    ConfigurationFollowerRefreshConfig, ConfigurationFollowerRefreshStatus,
+};
 use crate::run_service::RunService;
 
 mod account_import;
 mod configuration_enrollment;
+mod configuration_refresh;
 mod native_model;
 mod provider_login;
 mod run_service;
@@ -155,6 +161,15 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let follower_refresh_config = match ConfigurationFollowerRefreshConfig::from_environment() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("kilnd: invalid configuration follower refresh settings: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let follower_refresh_status =
+        ConfigurationFollowerRefreshStatus::new(follower_refresh_config.as_ref());
 
     let listener = match tokio::net::TcpListener::bind(address).await {
         Ok(listener) => listener,
@@ -321,6 +336,28 @@ async fn main() -> ExitCode {
     )
     .with_exchange_transport(Arc::new(PinnedConfigurationFollowerEnrollmentTransport))
     .with_snapshot_transport(Arc::new(PinnedConfigurationFollowerSnapshotTransport));
+    if let Some(config) = follower_refresh_config.as_ref()
+        && let Ok(Some(enrollment)) = follower_enrollment
+            .get_configuration_follower_enrollment(&config.attempt_id)
+            .await
+        && enrollment.follower_instance_id == config.instance_id
+    {
+        follower_refresh_status.set_enrollment_authority(
+            enrollment.authority.group_id().as_str(),
+            enrollment.authority.master_id().as_str(),
+        );
+        if ConfigurationSyncClient::validate_origin_for_server_name(
+            &config.exchange.origin,
+            &enrollment.server_name,
+        )
+        .is_err()
+        {
+            eprintln!(
+                "kilnd: KILN_CONFIGURATION_FOLLOWER_REFRESH_ORIGIN host must match the configured enrollment's pinned TLS server name"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
     let state = AppState::with_provider_account_operations(
         StoreMetadata::default(),
         bound_address,
@@ -333,11 +370,15 @@ async fn main() -> ExitCode {
         AuthToken::from_bytes(credential.token()),
     )
     .with_configuration_status_store(store.clone())
+    .with_configuration_follower_refresh_status({
+        let status = follower_refresh_status.clone();
+        move || status.response()
+    })
     .with_configuration_identity_status_store(store.clone())
     .with_configuration_identity_administration(identity_commands)
     .with_configuration_administration_store(store.clone(), UlidIdGenerator)
     .with_configuration_access_store(store.clone())
-    .with_configuration_follower_enrollment_administration(follower_enrollment)
+    .with_configuration_follower_enrollment_administration(follower_enrollment.clone())
     .with_configuration_publication_store(store.clone());
     let lifecycle = state.lifecycle();
 
@@ -399,6 +440,21 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    let (refresh_task, refresh_done_rx) = if let Some(config) = follower_refresh_config {
+        let (refresh_done_tx, refresh_done_rx) = tokio::sync::oneshot::channel();
+        let manager = follower_enrollment.clone();
+        let status = follower_refresh_status.clone();
+        let lifecycle = lifecycle.clone();
+        let changes = store.subscribe_configuration_serving_changes();
+        let task = tokio::spawn(async move {
+            configuration_refresh::run(manager, config, status, lifecycle, changes).await;
+            let _ = refresh_done_tx.send(());
+        });
+        (Some(task), Some(refresh_done_rx))
+    } else {
+        (None, None)
+    };
+
     let follower_task = prepared_follower.map(|prepared| {
         let store = store.clone();
         let lifecycle = lifecycle.clone();
@@ -445,6 +501,11 @@ async fn main() -> ExitCode {
     let graceful_shutdown = async move {
         shutdown_lifecycle.wait_for_shutdown_request().await;
         shutdown_lifecycle.wait_for_commands().await;
+        if let Some(refresh_done_rx) = refresh_done_rx {
+            if refresh_done_rx.await.is_err() {
+                eprintln!("kilnd: configuration follower refresh task stopped unexpectedly");
+            }
+        }
         if provider_logins.shutdown().await.is_err() {
             eprintln!("kilnd: provider account login cleanup failed");
             std::future::pending::<()>().await;
@@ -458,6 +519,11 @@ async fn main() -> ExitCode {
     let server_result = serve_with_shutdown(listener, state, graceful_shutdown).await;
     lifecycle.request_shutdown();
     lifecycle.wait_for_commands().await;
+    if let Some(refresh_task) = refresh_task
+        && refresh_task.await.is_err()
+    {
+        eprintln!("kilnd: configuration follower refresh task failed");
+    }
     if let Some(follower_task) = follower_task
         && follower_task.await.is_err()
     {

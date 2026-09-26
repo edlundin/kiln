@@ -70,7 +70,9 @@ use crate::{
     CONFIGURATION_SYNC_STATUS_PATH, CREATE_PROVIDER_ACCOUNT_OPERATION_ID,
     CREATE_SESSION_OPERATION_ID, CREATE_TASK_OPERATION_ID, CREATE_WORKSPACE_OPERATION_ID,
     ChangedFileResponse, ChildActivityReference, ClientIdentity,
-    ConfigurationMasterDesignationResponse, ConfigurationRevisionResponse, ConfigurationSyncRole,
+    ConfigurationMasterDesignationResponse, ConfigurationRevisionResponse,
+    ConfigurationSyncRefreshOutcome, ConfigurationSyncRefreshRecency,
+    ConfigurationSyncRefreshState, ConfigurationSyncRefreshStatusResponse, ConfigurationSyncRole,
     ConfigurationSyncStatusResponse, ConfigurationSyncTransportState,
     ContextManifestCreatedResponse, CreateProviderAccountRequest, CreateTaskRequest,
     CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID,
@@ -323,6 +325,22 @@ fn schema() -> String {
         (
             "ConfigurationRevisionResponse",
             schema_for!(ConfigurationRevisionResponse),
+        ),
+        (
+            "ConfigurationSyncRefreshOutcome",
+            schema_for!(ConfigurationSyncRefreshOutcome),
+        ),
+        (
+            "ConfigurationSyncRefreshRecency",
+            schema_for!(ConfigurationSyncRefreshRecency),
+        ),
+        (
+            "ConfigurationSyncRefreshState",
+            schema_for!(ConfigurationSyncRefreshState),
+        ),
+        (
+            "ConfigurationSyncRefreshStatusResponse",
+            schema_for!(ConfigurationSyncRefreshStatusResponse),
         ),
         (
             "ConfigurationSyncStatusResponse",
@@ -585,6 +603,10 @@ fn typescript() -> String {
         ConfigurationMasterDesignationResponse::decl(&config),
         ConfigurationSyncRole::decl(&config),
         ConfigurationSyncTransportState::decl(&config),
+        ConfigurationSyncRefreshOutcome::decl(&config),
+        ConfigurationSyncRefreshRecency::decl(&config),
+        ConfigurationSyncRefreshState::decl(&config),
+        ConfigurationSyncRefreshStatusResponse::decl(&config),
         ConfigurationRevisionResponse::decl(&config),
         ConfigurationSyncStatusResponse::decl(&config),
         ConfigurationIdentityStatusResponse::decl(&config),
@@ -2072,7 +2094,7 @@ paths:
       operationId: {GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID}
       responses:
         '200':
-          description: Durable configuration authority and revision metadata; transport currentness is not implied.
+          description: Durable configuration authority and revision metadata plus opt-in refresh configuration, operation outcome and process-local recency; configured transport and fresh recency do not imply a live connection or consumer activation.
           content:
             application/json:
               schema:
@@ -3003,6 +3025,22 @@ components:
         (
             "ConfigurationRevisionResponse",
             openapi_schema::<ConfigurationRevisionResponse>(),
+        ),
+        (
+            "ConfigurationSyncRefreshOutcome",
+            openapi_schema::<ConfigurationSyncRefreshOutcome>(),
+        ),
+        (
+            "ConfigurationSyncRefreshRecency",
+            openapi_schema::<ConfigurationSyncRefreshRecency>(),
+        ),
+        (
+            "ConfigurationSyncRefreshState",
+            openapi_schema::<ConfigurationSyncRefreshState>(),
+        ),
+        (
+            "ConfigurationSyncRefreshStatusResponse",
+            openapi_schema::<ConfigurationSyncRefreshStatusResponse>(),
         ),
         (
             "ConfigurationSyncStatusResponse",

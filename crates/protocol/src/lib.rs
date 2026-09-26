@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.38.0";
+pub const PROTOCOL_VERSION: &str = "0.39.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -475,7 +475,110 @@ pub enum ConfigurationSyncRole {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigurationSyncTransportState {
+    /// Daemon-owned refresh is disabled.
     Unconfigured,
+    /// Daemon-owned refresh is configured; this does not imply a live connection.
+    Configured,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSyncRefreshState {
+    /// Refresh is disabled.
+    Disabled,
+    /// Refresh is enabled but has not completed an attempt in this process.
+    Waiting,
+    /// An authenticated snapshot fetch/application is in progress.
+    Checking,
+    /// The last attempt succeeded; the next scheduled check has not started.
+    Idle,
+    /// The last attempt failed and can be retried on the configured schedule.
+    Failed,
+    /// The exact follower enrollment cannot be used; no replacement is selected.
+    EnrollmentInactive,
+    /// The refresh settings cannot be used with the pinned enrollment.
+    InvalidConfiguration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSyncRefreshOutcome {
+    Applied,
+    AlreadyApplied,
+    Failed,
+    EnrollmentInactive,
+    InvalidConfiguration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSyncRefreshRecency {
+    /// No successful check has completed in this process.
+    Unknown,
+    /// The last successful check is within the configured freshness threshold.
+    Fresh,
+    /// The last successful check is older than the configured threshold.
+    Stale,
+}
+
+/// In-memory scheduling and last-check metadata for the opt-in follower refresh.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct ConfigurationSyncRefreshStatusResponse {
+    pub enabled: bool,
+    pub state: ConfigurationSyncRefreshState,
+    #[schemars(with = "RequiredNullableString")]
+    pub follower_instance_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub attempt_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub origin: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub enrolled_group_id: Option<String>,
+    #[schemars(with = "RequiredNullableString")]
+    pub enrolled_master_instance_id: Option<String>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub connect_timeout_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub request_timeout_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub polling_interval_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub freshness_threshold_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableConfigurationSyncRefreshOutcome")]
+    pub last_outcome: Option<ConfigurationSyncRefreshOutcome>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub last_check_at_unix_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub last_success_at_unix_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableU64")]
+    pub last_success_age_ms: Option<u64>,
+    #[schemars(with = "RequiredNullableConfigurationRevision")]
+    pub last_success_revision: Option<ConfigurationRevisionResponse>,
+    pub recency: ConfigurationSyncRefreshRecency,
+}
+
+impl ConfigurationSyncRefreshStatusResponse {
+    pub fn unconfigured() -> Self {
+        Self {
+            enabled: false,
+            state: ConfigurationSyncRefreshState::Disabled,
+            follower_instance_id: None,
+            attempt_id: None,
+            origin: None,
+            enrolled_group_id: None,
+            enrolled_master_instance_id: None,
+            connect_timeout_ms: None,
+            request_timeout_ms: None,
+            polling_interval_ms: None,
+            freshness_threshold_ms: None,
+            last_outcome: None,
+            last_check_at_unix_ms: None,
+            last_success_at_unix_ms: None,
+            last_success_age_ms: None,
+            last_success_revision: None,
+            recency: ConfigurationSyncRefreshRecency::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -572,6 +675,7 @@ pub struct ConfigurationSyncStatusResponse {
     #[schemars(with = "RequiredNullableConfigurationRevision")]
     pub observed_revision: Option<ConfigurationRevisionResponse>,
     pub transport: ConfigurationSyncTransportState,
+    pub refresh: ConfigurationSyncRefreshStatusResponse,
 }
 
 /// Public setup metadata only. identity_id is independent of the private vault
@@ -894,6 +998,20 @@ impl JsonSchema for RequiredNullableConfigurationRevision {
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let revision = generator.subschema_for::<ConfigurationRevisionResponse>();
         json_schema!({"anyOf": [revision, {"type": "null"}]})
+    }
+}
+
+struct RequiredNullableConfigurationSyncRefreshOutcome;
+impl JsonSchema for RequiredNullableConfigurationSyncRefreshOutcome {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableConfigurationSyncRefreshOutcome".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let outcome = generator.subschema_for::<ConfigurationSyncRefreshOutcome>();
+        json_schema!({"anyOf": [outcome, {"type": "null"}]})
     }
 }
 

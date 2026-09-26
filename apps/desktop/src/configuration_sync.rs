@@ -1009,6 +1009,9 @@ impl Render for ConfigurationSyncSettings {
                 ConfigurationSyncTransportState::Unconfigured => {
                     "Remote synchronization is not configured. Configuration is not yet distributed between instances."
                 }
+                ConfigurationSyncTransportState::Configured => {
+                    "Automatic follower refresh is configured. Freshness comes from the last successful authenticated check, not stored revision equality."
+                }
             };
             content = content
                 .child(div().text_sm().child(format!("Role: {role}")))

@@ -240,7 +240,7 @@ impl<T: kiln_core::ConfigurationFollowerEnrollmentAdministration>
             expected_instance_id,
             attempt_id,
             settings,
-            Box::new(super::configuration_publication::decode_follower_snapshot_candidate),
+            Box::new(super::configuration_publication::validate_follower_snapshot_candidate),
         ))
     }
 }

@@ -15,8 +15,8 @@ restricted follower router. An explicit local follower-exchange command now
 submits prepared requests over pinned HTTPS and transitions the follower role
 after exact master approval. The successful follower-read credential remains in
 the OS vault. A separate one-shot local command now fetches, observes, validates,
-and atomically applies a follower snapshot. Polling, automatic reconnect, and
-runtime settings/MCP/skill activation remain incomplete.
+and atomically applies a follower snapshot. Opt-in daemon-owned periodic refresh
+is also available. Runtime settings/MCP/skill activation remains incomplete.
 
 ## Authority and enrollment
 
@@ -422,17 +422,15 @@ journal does not establish device identity: pinned TLS authenticates the master
 to the follower, not the follower to the master. A locally authenticated
 administrator must review and confirm the exact request before a read grant is
 issued. The local review API, exchange, and one-shot snapshot fetch/application
-are implemented; a review UI, polling, automatic reconnect, and runtime consumers
-remain unimplemented.
+are implemented; a review UI and runtime consumers remain unimplemented.
 
 ## Pinned HTTPS follower client
 
 The Rust `ConfigurationSyncClient` is the restricted outgoing transport
 component. The daemon uses it through narrow core transport ports for explicit
-follower enrollment exchange and one-shot snapshot fetch; infrastructure stays
-independent of client, protocol and server crates. Snapshot fetching is not wired
-into ongoing daemon synchronization, and the client does not configure the
-master's separate opt-in listener.
+follower enrollment exchange, one-shot snapshot fetch and opt-in daemon-owned
+refresh; infrastructure stays independent of client, protocol and server crates.
+The client does not configure the master's separate opt-in listener.
 The isolated follower router described below serves
 `GET /v1/configuration-sync/snapshot` with the existing snapshot response
 and checks `kiln-configuration-master`, `kiln-configuration-group` and
@@ -448,7 +446,10 @@ snapshot or discovery response can replace it. The
 trust anchor must be dedicated to that master's TLS identity; a public/shared CA
 would broaden trust. This pins a certificate authority plus hostname, rather than
 the exact leaf certificate: leaf renewal under that same authority/name remains
-possible. Changing the authority, origin or master/group requires explicit
+possible. The HTTPS origin is supplied for each check and may change independently
+of enrollment, provided it remains a root HTTPS origin whose host matches the
+enrolled server name. The port may change. Changing the authority, server name,
+CA trust anchor, or master/group/follower identity requires explicit
 reenrollment. Certificate provisioning, enrollment preparation, master-side
 approval, and listener setup are separate administration steps; this client does
 not perform them.
@@ -1115,16 +1116,51 @@ client as `get_configuration_sync_status`. It uses the daemon's existing local
 bearer, Host and Origin checks. The response contains instance ID, CAS state
 version, role, nullable group/master IDs, and nullable applied/observed revision
 metadata (revision number, schema and content hash). These fields are read in one
-transaction. No snapshot payload, skill file, endpoint, host binding, or credential
-is returned.
+transaction. The response contains no snapshot payload, skill file, host binding,
+or credential. When refresh is enabled, `refresh.origin` returns only the
+configured HTTPS origin; it contains no credentials, path, query or fragment.
 
-`transport` remains `unconfigured` until ongoing authenticated snapshot fetching
-and application are connected. The explicit one-shot fetch does not enable
-ongoing synchronization or establish a freshness lease. Enrollment exchange
-alone does not establish currentness. Equal applied/observed revisions alone do
-not establish currentness.
+`transport` is `unconfigured` unless opt-in daemon-owned refresh has been
+configured; `configured` reports configuration only, not a live connection. The
+`refresh` object reports whether scheduling is enabled, its exact follower
+instance and enrollment attempt, the enrolled group/master when available,
+the HTTPS origin and connect/request timeouts, polling and freshness settings,
+current
+operation state, last outcome, last check time, last successful check time and
+revision, and the age/recency of that success. Recency is process-local and is
+`unknown` after restart until an authenticated check succeeds. A fresh recency
+means only that a successful authenticated fetch/apply completed within the
+caller-supplied threshold; it is not a connection lease or consumer activation.
+Enrollment receipts and equal applied/observed revisions do not establish
+currentness.
 The endpoint reports committed metadata, not a fresh validation of every stored
 payload byte. Store/integrity failures produce content-free HTTP 503
 `configuration_sync_unavailable`. This endpoint cannot designate a master,
 enroll a follower or publish/apply configuration. Settings presents this status;
 master designation and publication use the separate commands above.
+
+## Opt-in daemon-owned follower refresh
+
+The daemon can periodically invoke the same pinned fetch, observe, validate and
+atomic apply path as the explicit one-shot command. Refresh is disabled unless
+all `KILN_CONFIGURATION_FOLLOWER_REFRESH_*` settings are present. It binds one
+configured follower instance and one enrollment attempt. Each operation reloads
+that exact durable enrollment, uses its immutable authority, server name, CA and
+active credential marker, then applies the existing lifecycle fences. It never
+discovers or switches enrollments, and it does not approve or recreate
+credentials.
+
+The first check starts after daemon readiness. One operation runs at a time;
+later checks follow the configured interval, with committed role/enrollment
+lifecycle notifications prompting an immediate recheck. Transient failures are
+reported in status and retried on the configured schedule. Missing, retired,
+recovery-required or role-mismatched attempts stop the coordinator. Shutdown
+stops new checks, lets an in-flight owned operation finish, and joins the task
+before store teardown. Refresh failures do not fail local daemon operations.
+
+Changing the caller-supplied HTTPS origin alone does not require reenrollment if
+its host still matches the immutable enrolled server name. The origin remains a
+transport option; it cannot change or replace the enrollment pin.
+
+The operator settings, validation rules and status meanings are documented in
+the [follower refresh operations guide](../operations/configuration-follower-refresh.md).

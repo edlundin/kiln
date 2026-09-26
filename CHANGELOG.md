@@ -2,6 +2,18 @@
 
 ## 2026-09-26 — `feat`
 
+- EDL-322: Add opt-in daemon-owned follower refresh using the exact approved
+  enrollment pin, with serialized scheduling and authenticated operation/recency
+  status. Protocol `0.39.0` reports the configured attempt, last outcome, last
+  successful revision/check time, and process-local freshness.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+
+## 2026-09-26 — `feat`
+
 - EDL-322: Add a one-shot authenticated follower snapshot fetch and atomic
   application over the approved pinned HTTPS enrollment. A monotonic private
   credential-state fence retires credentials on explicit retirement or follower

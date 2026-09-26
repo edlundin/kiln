@@ -37,6 +37,7 @@ const MAX_RECEIPT_BYTES: usize = 4 * 1024;
 enum ConfigurationFollowerEnrollmentManagerError {
     InvalidRequest,
     NotFound,
+    EnrollmentInactive,
     Conflict,
     IdempotencyConflict,
     Retired,
@@ -202,7 +203,7 @@ impl ConfigurationFollowerEnrollmentManager {
             .await?
             .ok_or(Error::NotFound)?;
         if &request.follower_instance_id != expected_instance_id {
-            return Err(Error::Conflict);
+            return Err(Error::EnrollmentInactive);
         }
         let credential_state: Option<String> = sqlx::query_scalar(
             "SELECT state FROM configuration_follower_enrollment_credentials WHERE attempt_id = ?",
@@ -225,11 +226,11 @@ impl ConfigurationFollowerEnrollmentManager {
         let state = configuration_sync::load(&mut transaction)
             .await
             .map_err(state_error)?
-            .ok_or(Error::Conflict)?;
+            .ok_or(Error::EnrollmentInactive)?;
         if state.instance_id() != expected_instance_id
             || !matches!(state.role(), ConfigurationRole::Follower(authority) if authority == &request.authority)
         {
-            return Err(Error::Conflict);
+            return Err(Error::EnrollmentInactive);
         }
         verify_active_snapshot_credential(&mut transaction, attempt_id, &state)
             .await
@@ -1211,6 +1212,7 @@ fn map_manager_error(error: Error) -> CoreError {
     match error {
         Error::InvalidRequest => CoreError::InvalidRequest,
         Error::NotFound => CoreError::NotFound,
+        Error::EnrollmentInactive => CoreError::EnrollmentInactive,
         Error::Conflict => CoreError::Conflict,
         Error::IdempotencyConflict => CoreError::IdempotencyConflict,
         Error::Retired => CoreError::Retired,

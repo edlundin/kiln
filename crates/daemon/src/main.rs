@@ -37,7 +37,9 @@ use kiln_server::{
     serve_configuration_followers, serve_with_shutdown,
 };
 
-use crate::configuration_enrollment::PinnedConfigurationFollowerEnrollmentTransport;
+use crate::configuration_enrollment::{
+    PinnedConfigurationFollowerEnrollmentTransport, PinnedConfigurationFollowerSnapshotTransport,
+};
 use crate::run_service::RunService;
 
 mod account_import;
@@ -317,7 +319,8 @@ async fn main() -> ExitCode {
         store.clone(),
         configuration_vault,
     )
-    .with_exchange_transport(Arc::new(PinnedConfigurationFollowerEnrollmentTransport));
+    .with_exchange_transport(Arc::new(PinnedConfigurationFollowerEnrollmentTransport))
+    .with_snapshot_transport(Arc::new(PinnedConfigurationFollowerSnapshotTransport));
     let state = AppState::with_provider_account_operations(
         StoreMetadata::default(),
         bound_address,

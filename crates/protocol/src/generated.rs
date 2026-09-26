@@ -8,19 +8,21 @@ use crate::{
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH,
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH, CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH,
     CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES,
-    CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH, CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH,
-    CONFIGURATION_IDENTITY_RETIRE_PATH, CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH,
-    CONFIGURATION_READ_GRANT_PATH, CONFIGURATION_READ_GRANT_REVOKE_PATH,
-    CONFIGURATION_READ_GRANTS_PATH, CONFIGURE_MASTER_IDENTITY_OPERATION_ID,
-    ConfigurationFollowerEnrollmentDecisionRequest, ConfigurationFollowerEnrollmentExchangeResult,
-    ConfigurationFollowerEnrollmentListResponse, ConfigurationFollowerEnrollmentPhase,
-    ConfigurationFollowerEnrollmentRequestListResponse,
+    CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH, CONFIGURATION_FOLLOWER_SNAPSHOT_FETCH_PATH,
+    CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH, CONFIGURATION_IDENTITY_RETIRE_PATH,
+    CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH, CONFIGURATION_READ_GRANT_PATH,
+    CONFIGURATION_READ_GRANT_REVOKE_PATH, CONFIGURATION_READ_GRANTS_PATH,
+    CONFIGURE_MASTER_IDENTITY_OPERATION_ID, ConfigurationFollowerEnrollmentDecisionRequest,
+    ConfigurationFollowerEnrollmentExchangeResult, ConfigurationFollowerEnrollmentListResponse,
+    ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentRequestListResponse,
     ConfigurationFollowerEnrollmentRequestPhase, ConfigurationFollowerEnrollmentRequestResponse,
     ConfigurationFollowerEnrollmentResponse, ConfigurationIdentitySetupResponse,
     ConfigurationReadGrantListResponse, ConfigurationReadGrantResponse,
-    ConfigureMasterIdentityRequest, EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    ConfigurationSnapshotApplyDisposition, ConfigureMasterIdentityRequest,
+    EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     ExchangeConfigurationFollowerEnrollmentRequest,
-    GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    FETCH_CONFIGURATION_FOLLOWER_SNAPSHOT_OPERATION_ID, FetchConfigurationFollowerSnapshotRequest,
+    FetchConfigurationFollowerSnapshotResponse, GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_OPERATION_ID,
@@ -379,6 +381,18 @@ fn schema() -> String {
             schema_for!(ExchangeConfigurationFollowerEnrollmentRequest),
         ),
         (
+            "FetchConfigurationFollowerSnapshotRequest",
+            schema_for!(FetchConfigurationFollowerSnapshotRequest),
+        ),
+        (
+            "FetchConfigurationFollowerSnapshotResponse",
+            schema_for!(FetchConfigurationFollowerSnapshotResponse),
+        ),
+        (
+            "ConfigurationSnapshotApplyDisposition",
+            schema_for!(ConfigurationSnapshotApplyDisposition),
+        ),
+        (
             "RetireMasterIdentityRequest",
             schema_for!(RetireMasterIdentityRequest),
         ),
@@ -591,6 +605,9 @@ fn typescript() -> String {
         PrepareConfigurationFollowerEnrollmentRequest::decl(&config),
         RetireConfigurationFollowerEnrollmentRequest::decl(&config),
         ExchangeConfigurationFollowerEnrollmentRequest::decl(&config),
+        FetchConfigurationFollowerSnapshotRequest::decl(&config),
+        FetchConfigurationFollowerSnapshotResponse::decl(&config),
+        ConfigurationSnapshotApplyDisposition::decl(&config),
         RetireMasterIdentityRequest::decl(&config),
         RetireMasterIdentityByIdRequest::decl(&config),
         ClientIdentity::decl(&config),
@@ -1766,6 +1783,41 @@ paths:
         '404':
           $ref: '#/components/responses/Problem'
         '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_FOLLOWER_SNAPSHOT_FETCH_PATH}:
+    post:
+      operationId: {FETCH_CONFIGURATION_FOLLOWER_SNAPSHOT_OPERATION_ID}
+      description: Explicitly fetch one bounded snapshot through the approved enrollment's pinned HTTPS binding. Transport settings are supplied again on every call. The authenticated revision is durably observed against the pre-fetch follower state before the complete bundle is validated; validation or application failure preserves the current snapshot and retains the newer observation. The retained credential remains private to the daemon and no automatic retry is performed.
+      parameters:
+        - name: attempt_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cra_[0-9a-f]{{32}}$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FetchConfigurationFollowerSnapshotRequest'
+      responses:
+        '200':
+          description: Credential-free fetch and application receipt.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FetchConfigurationFollowerSnapshotResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '413':
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
@@ -3015,6 +3067,18 @@ components:
         (
             "RetireConfigurationFollowerEnrollmentRequest",
             openapi_schema::<RetireConfigurationFollowerEnrollmentRequest>(),
+        ),
+        (
+            "FetchConfigurationFollowerSnapshotRequest",
+            openapi_schema::<FetchConfigurationFollowerSnapshotRequest>(),
+        ),
+        (
+            "FetchConfigurationFollowerSnapshotResponse",
+            openapi_schema::<FetchConfigurationFollowerSnapshotResponse>(),
+        ),
+        (
+            "ConfigurationSnapshotApplyDisposition",
+            openapi_schema::<ConfigurationSnapshotApplyDisposition>(),
         ),
         (
             "RetireMasterIdentityRequest",

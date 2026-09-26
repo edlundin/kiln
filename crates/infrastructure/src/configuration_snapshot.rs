@@ -2,10 +2,10 @@ use super::{SqliteStore, configuration_sync};
 use kiln_core::{
     ConfigurationAuthority, ConfigurationCandidateDisposition, ConfigurationFollowerCursor,
     ConfigurationGroupId, ConfigurationInstanceState, ConfigurationPublicationStore,
-    ConfigurationRevision, ConfigurationRole, ConfigurationSnapshotDisposition,
-    ConfigurationSnapshotError as Error, ConfigurationSnapshotMutation,
-    ConfigurationSnapshotReadLimits, ConfigurationSnapshotStore, ConfigurationStateError,
-    ConfigurationSyncStatus, ContentHash, GlobalSkillId, KilnInstanceId,
+    ConfigurationReadGrantAttemptId, ConfigurationRevision, ConfigurationRole,
+    ConfigurationSnapshotDisposition, ConfigurationSnapshotError as Error,
+    ConfigurationSnapshotMutation, ConfigurationSnapshotReadLimits, ConfigurationSnapshotStore,
+    ConfigurationStateError, ConfigurationSyncStatus, ContentHash, GlobalSkillId, KilnInstanceId,
     SHARED_CONFIGURATION_SCHEMA_VERSION, SharedConfigurationSnapshot, SharedSkillFileInput,
     SharedSkillPackage, SharedSkillPackageInput, StoredConfigurationSnapshot,
 };
@@ -166,48 +166,7 @@ impl ConfigurationSnapshotStore for SqliteStore {
         revision: ConfigurationRevision,
         snapshot: &SharedConfigurationSnapshot,
     ) -> Result<ConfigurationSnapshotMutation, Error> {
-        snapshot
-            .verify_revision(&revision)
-            .map_err(|_| Error::InvalidSnapshot)?;
-        let mut connection = self.connection.lock().await;
-        let mut transaction = connection
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(|_| Error::Unavailable)?;
-        let current = current(&mut transaction, expected).await?;
-        let ConfigurationRole::Follower(authority) = current.role() else {
-            return Err(Error::State(ConfigurationStateError::InvalidRole));
-        };
-        let applied = load_revision(&mut transaction, authority).await?;
-        let cursor = ConfigurationFollowerCursor::from_persisted(
-            current.instance_id().clone(),
-            authority.clone(),
-            applied,
-            current.observed().cloned(),
-        )
-        .map_err(|error| Error::State(ConfigurationStateError::Revision(error)))?;
-        let disposition = cursor
-            .assess_candidate(&revision, SHARED_CONFIGURATION_SCHEMA_VERSION)
-            .map_err(|error| Error::State(ConfigurationStateError::Revision(error)))?;
-        if disposition == ConfigurationCandidateDisposition::AlreadyApplied {
-            transaction.commit().await.map_err(|_| Error::Unavailable)?;
-            return Ok(ConfigurationSnapshotMutation {
-                state: current,
-                revision,
-                disposition: ConfigurationSnapshotDisposition::Duplicate,
-            });
-        }
-        let next = advanced_state(&current, Some(revision.clone()))?;
-        write_snapshot(&mut transaction, &revision, snapshot).await?;
-        configuration_sync::save(&mut transaction, &current, &next)
-            .await
-            .map_err(Error::State)?;
-        transaction.commit().await.map_err(|_| Error::Unavailable)?;
-        Ok(ConfigurationSnapshotMutation {
-            state: next,
-            revision,
-            disposition: ConfigurationSnapshotDisposition::Applied,
-        })
+        apply_configuration_snapshot_inner(self, expected, None, revision, snapshot).await
     }
 
     async fn get_configuration_snapshot(
@@ -224,6 +183,75 @@ impl ConfigurationSnapshotStore for SqliteStore {
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
         Ok(snapshot)
     }
+}
+
+pub(super) async fn apply_follower_enrollment_snapshot(
+    store: &SqliteStore,
+    expected: &ConfigurationInstanceState,
+    attempt_id: &ConfigurationReadGrantAttemptId,
+    revision: ConfigurationRevision,
+    snapshot: &SharedConfigurationSnapshot,
+) -> Result<ConfigurationSnapshotMutation, Error> {
+    apply_configuration_snapshot_inner(store, expected, Some(attempt_id), revision, snapshot).await
+}
+
+async fn apply_configuration_snapshot_inner(
+    store: &SqliteStore,
+    expected: &ConfigurationInstanceState,
+    enrollment_attempt_id: Option<&ConfigurationReadGrantAttemptId>,
+    revision: ConfigurationRevision,
+    snapshot: &SharedConfigurationSnapshot,
+) -> Result<ConfigurationSnapshotMutation, Error> {
+    snapshot
+        .verify_revision(&revision)
+        .map_err(|_| Error::InvalidSnapshot)?;
+    let mut connection = store.connection.lock().await;
+    let mut transaction = connection
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    let current = current(&mut transaction, expected).await?;
+    let ConfigurationRole::Follower(authority) = current.role() else {
+        return Err(Error::State(ConfigurationStateError::InvalidRole));
+    };
+    if let Some(attempt_id) = enrollment_attempt_id {
+        super::configuration_enrollment::verify_active_snapshot_credential(
+            &mut *transaction,
+            attempt_id,
+            &current,
+        )
+        .await?;
+    }
+    let applied = load_revision(&mut transaction, authority).await?;
+    let cursor = ConfigurationFollowerCursor::from_persisted(
+        current.instance_id().clone(),
+        authority.clone(),
+        applied,
+        current.observed().cloned(),
+    )
+    .map_err(|error| Error::State(ConfigurationStateError::Revision(error)))?;
+    let disposition = cursor
+        .assess_candidate(&revision, SHARED_CONFIGURATION_SCHEMA_VERSION)
+        .map_err(|error| Error::State(ConfigurationStateError::Revision(error)))?;
+    if disposition == ConfigurationCandidateDisposition::AlreadyApplied {
+        transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        return Ok(ConfigurationSnapshotMutation {
+            state: current,
+            revision,
+            disposition: ConfigurationSnapshotDisposition::Duplicate,
+        });
+    }
+    let next = advanced_state(&current, Some(revision.clone()))?;
+    write_snapshot(&mut transaction, &revision, snapshot).await?;
+    configuration_sync::save(&mut transaction, &current, &next)
+        .await
+        .map_err(Error::State)?;
+    transaction.commit().await.map_err(|_| Error::Unavailable)?;
+    Ok(ConfigurationSnapshotMutation {
+        state: next,
+        revision,
+        disposition: ConfigurationSnapshotDisposition::Applied,
+    })
 }
 
 /// Caller holds one transaction across authorization, state and content reads.

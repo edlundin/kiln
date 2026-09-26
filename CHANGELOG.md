@@ -2,6 +2,17 @@
 
 ## 2026-09-26 — `feat`
 
+- EDL-322: Add a one-shot authenticated follower snapshot fetch and atomic
+  application over the approved pinned HTTPS enrollment. A monotonic private
+  credential-state fence retires credentials on explicit retirement or follower
+  role departure; ambiguous historical approvals require fresh approval.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-26 — `feat`
+
 - EDL-322: Add explicit authenticated follower enrollment exchange over
   caller-selected pinned HTTPS, with durable receipts and retries, atomic
   approved-grant role transition, retained read credential, and recoverable

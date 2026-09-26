@@ -14,8 +14,9 @@ managed identity and served by an opt-in daemon TLS listener around the
 restricted follower router. An explicit local follower-exchange command now
 submits prepared requests over pinned HTTPS and transitions the follower role
 after exact master approval. The successful follower-read credential remains in
-the OS vault. Snapshot fetching, application, and ongoing settings synchronization
-remain incomplete.
+the OS vault. A separate one-shot local command now fetches, observes, validates,
+and atomically applies a follower snapshot. Polling, automatic reconnect, and
+runtime settings/MCP/skill activation remain incomplete.
 
 ## Authority and enrollment
 
@@ -32,12 +33,14 @@ loopback alone does not prove the identity of a forwarded peer. Enrollment must
 pin the master identity and provision a follower-specific, revocable credential
 with read-only shared-configuration access. The existing unrestricted local API
 bearer is not a synchronization credential and must not be copied to followers.
-The follower's local API can reserve and recover its request inputs, but it does
-not contact or authenticate a master, change the local role, or deliver a
-credential. A master's local API can review an already journaled request and
-approve or reject its exact binding; that operation does not authenticate the
-follower. The isolated follower intake route described below is not mounted, so
-end-to-end remote enrollment and daemon network serving remain disabled.
+Local preparation reserves and recovers follower request inputs without
+contacting a master or changing the local role. A separate authenticated local
+exchange command contacts the selected master over pinned HTTPS and changes the
+follower role only after observing an approved active grant; the read credential
+remains in the OS vault. A master's local API can review and approve or reject an
+exact journaled request; that operation does not authenticate the follower. The
+isolated intake and snapshot routes are available only through the separately
+configured opt-in TLS listener.
 
 The first release has no automatic failover or master election. A master cannot
 be replaced by accepting a newer snapshot or a numerically larger revision.
@@ -123,9 +126,10 @@ No runtime delivery is complete until those paths exist and are verified.
 ## Current persistence boundary
 
 Migration 34 stores one durable instance ID, an initially unassigned role, and a
-compare-and-swap version. Initial master designation is available through the local
-administrative API; other role changes remain internal operations. Daemon startup
-never chooses a role. Authority history binds every
+compare-and-swap version. Initial master designation is available through the
+local administrative API; a follower role is entered only through the approved
+enrollment exchange, with no general role-mutation route. Daemon startup never
+chooses a role. Authority history binds every
 seen group to its original master and retains follower observation metadata.
 Role changes and observations commit atomically with the instance state version.
 Stale expected state fails instead of changing a newer enrollment. An identical
@@ -137,15 +141,15 @@ Migration 35 adds coherent snapshot payloads and active revisions as described
 below. Migration 38 adds master-side credential digests and permanent revocation
 records; migration 42 adds stable grant and request-attempt IDs; migration 43 adds
 the immutable follower request journal and permanent lifecycle tombstones.
-Migration 44 stores the master-side digest-only request journal, and migration 45
-indexes it by authority for bounded retained-record admission. The local API
-exposes status, initial master designation, credential-free grant
-metadata/list/revoke, and local follower-request preparation/recovery/retirement.
-Remote intake is available only through the isolated router. The daemon serves it
-only when `KILN_CONFIGURATION_FOLLOWER_LISTEN_ADDR` is set and the current master
-has a usable active managed identity. An explicit follower exchange can record an
-approved active grant and follower role in one transaction; snapshot consumers
-remain subsequent work.
+Migration 44 stores the master-side digest-only request journal, migration 45
+indexes it by authority for bounded retained-record admission, and migration 46
+stores durable exchange receipts. Migration 47 adds a private monotonic local
+credential state. The local API exposes status, master designation, credential-
+free grant metadata/list/revoke, follower request preparation/recovery/retirement,
+explicit exchange, and one-shot snapshot fetch/application. The remote intake and
+snapshot routes are available only through the isolated router; the daemon serves
+them only when `KILN_CONFIGURATION_FOLLOWER_LISTEN_ADDR` is set and the current
+master has a usable active managed identity.
 
 ## Internal follower read credentials
 
@@ -274,6 +278,52 @@ Retry explicit retirement after a vault-cleanup error. The returned receipt is
 last-observed metadata, not a live grant check; master-side revocation still
 blocks subsequent snapshot reads.
 
+## Explicit follower snapshot fetch and application
+
+Protocol `0.38.0` adds the authenticated local
+`fetch_configuration_follower_snapshot(attempt_id, request)` command at
+`POST /v1/configuration-sync/follower-enrollments/{attempt_id}/fetch`. The strict
+4 KiB request supplies the expected follower instance and per-call HTTPS origin,
+connect timeout, and request timeout. These transport settings are not saved with
+the enrollment. Only a durably approved attempt whose private credential marker
+is active can fetch. Infrastructure reloads the exact request pin and retained
+OS-vault credential, verifies the credential digest, and uses the bounded pinned
+HTTPS client. It does not return or log bearer material, the vault reference, or
+the private active marker.
+
+The response is a bounded candidate, never active configuration. The pinned
+client rejects non-success bodies, oversized responses, invalid authority IDs,
+and malformed revision metadata. Infrastructure checks the response against the
+exact approved master/group and commits its authenticated revision against the
+full follower state captured before the network request. This observation commits
+before bundle validation. The existing server-owned bundle validator then checks
+canonical configuration, skill identifiers, package/file hashes, limits and
+dependencies. Application uses the newly observed state and, in the same
+transaction as replacement, rechecks the exact enrollment marker and follower
+authority. The existing store enforces supported schema, content/revision hash,
+monotonic watermark and atomic full replacement. Invalid content or a failed
+application leaves the prior snapshot intact while retaining a newer valid
+observation. An already-applied identical revision is returned as a no-op.
+
+The enrollment manager holds its per-store operation lock across credential
+acquisition, fetch, observation, validation and application. SQLite transactions
+independently fence the active marker and exact follower state at acquisition,
+observation and apply. Explicit enrollment retirement makes the marker
+permanently inactive and commits before retryable vault deletion. Leaving a
+follower role also retires the active marker in the role-change transaction, so
+rejoining the same group requires a new approved attempt.
+
+Migration 47 retains a private monotonic credential state separate from the
+historical exchange receipt. It preserves only clearly pre-approval reserved or
+prepared attempts without a terminal receipt as pending. All previously retired,
+approved, terminal, or uncertain rows start retired; an old `Approved` receipt or
+a credential that happens to remain in the vault is not evidence of current
+activation. Existing followers with ambiguous historical approvals must leave
+the follower role, retire the old attempt (retrying cleanup if needed), then
+prepare and approve a new enrollment before fetching. The private marker is never
+included in local metadata responses. The command performs one explicit fetch;
+it does not poll, retry automatically, reconnect, or activate consumers.
+
 The master now has an internal durable request journal for digest-only follower
 claims. Exact retries are keyed by the follower attempt ID; the stable master
 request ID binds that attempt, claimed follower and follower state version,
@@ -371,17 +421,18 @@ changes the follower role after observing an approved active grant. The master
 journal does not establish device identity: pinned TLS authenticates the master
 to the follower, not the follower to the master. A locally authenticated
 administrator must review and confirm the exact request before a read grant is
-issued. The local review API and exchange are implemented; a review UI, snapshot
-fetch/application, and automatic reconnect remain unimplemented.
+issued. The local review API, exchange, and one-shot snapshot fetch/application
+are implemented; a review UI, polling, automatic reconnect, and runtime consumers
+remain unimplemented.
 
 ## Pinned HTTPS follower client
 
 The Rust `ConfigurationSyncClient` is the restricted outgoing transport
-component. The daemon uses it through a narrow core transport port for explicit
-follower enrollment exchange; infrastructure stays independent of client and
-protocol crates. Snapshot fetching is not yet wired into ongoing daemon
-synchronization, and the client does not configure the master's separate opt-in
-listener.
+component. The daemon uses it through narrow core transport ports for explicit
+follower enrollment exchange and one-shot snapshot fetch; infrastructure stays
+independent of client, protocol and server crates. Snapshot fetching is not wired
+into ongoing daemon synchronization, and the client does not configure the
+master's separate opt-in listener.
 The isolated follower router described below serves
 `GET /v1/configuration-sync/snapshot` with the existing snapshot response
 and checks `kiln-configuration-master`, `kiln-configuration-group` and
@@ -398,7 +449,9 @@ trust anchor must be dedicated to that master's TLS identity; a public/shared CA
 would broaden trust. This pins a certificate authority plus hostname, rather than
 the exact leaf certificate: leaf renewal under that same authority/name remains
 possible. Changing the authority, origin or master/group requires explicit
-reenrollment. Certificate provisioning and that approval flow remain pending.
+reenrollment. Certificate provisioning, enrollment preparation, master-side
+approval, and listener setup are separate administration steps; this client does
+not perform them.
 
 The client uses only the supplied root, with normal hostname and certificate-chain
 verification and TLS 1.2 or later. System roots, plaintext HTTP, proxies, redirects,
@@ -902,7 +955,8 @@ version, and revision number/schema/content hash. Reload status to see the curre
 stored revision. Publication does not establish remote currentness or activate
 configuration consumers. Desktop Settings supports explicit bundle import with a
 replacement preview/confirmation and exact retries within the connection view.
-Authenticated remote distribution and runtime activation remain incomplete.
+One-shot remote follower fetch/application is implemented; ongoing distribution,
+reconnect, and runtime activation remain incomplete.
 
 ## Verified local snapshot export
 
@@ -1065,8 +1119,10 @@ transaction. No snapshot payload, skill file, endpoint, host binding, or credent
 is returned.
 
 `transport` remains `unconfigured` until ongoing authenticated snapshot fetching
-and application are connected. Enrollment exchange alone does not establish
-currentness. Equal applied/observed revisions alone do not establish currentness.
+and application are connected. The explicit one-shot fetch does not enable
+ongoing synchronization or establish a freshness lease. Enrollment exchange
+alone does not establish currentness. Equal applied/observed revisions alone do
+not establish currentness.
 The endpoint reports committed metadata, not a fresh validation of every stored
 payload byte. Store/integrity failures produce content-free HTTP 503
 `configuration_sync_unavailable`. This endpoint cannot designate a master,

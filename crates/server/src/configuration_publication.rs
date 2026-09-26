@@ -3,11 +3,11 @@ use super::{
 };
 use axum::{Json, extract::State, http::HeaderMap, response::IntoResponse};
 use kiln_core::{
-    ConfigurationGroupId, ConfigurationPublicationStore, ConfigurationSnapshotError as Error,
-    ConfigurationSnapshotMutation, ConfigurationSnapshotReadLimits, ConfigurationSnapshotStore,
-    ContentHash, GlobalSkillId, KilnInstanceId, SharedConfigurationLimits,
-    SharedConfigurationSnapshot, SharedSkillFileInput, SharedSkillLimits, SharedSkillPackage,
-    SharedSkillPackageInput, StoredConfigurationSnapshot,
+    ConfigurationFollowerSnapshotCandidate, ConfigurationGroupId, ConfigurationPublicationStore,
+    ConfigurationSnapshotError as Error, ConfigurationSnapshotMutation,
+    ConfigurationSnapshotReadLimits, ConfigurationSnapshotStore, ContentHash, GlobalSkillId,
+    KilnInstanceId, SharedConfigurationLimits, SharedConfigurationSnapshot, SharedSkillFileInput,
+    SharedSkillLimits, SharedSkillPackage, SharedSkillPackageInput, StoredConfigurationSnapshot,
 };
 use kiln_protocol::{
     CONFIGURATION_PUBLICATION_MAX_BYTES, ConfigurationPublicationResponse,
@@ -291,4 +291,32 @@ fn decode_bundle(bundle: SharedConfigurationBundle) -> Result<SharedConfiguratio
         limits.configuration,
     )
     .map_err(|_| Error::InvalidSnapshot)
+}
+
+pub(super) fn decode_follower_snapshot_candidate(
+    candidate: ConfigurationFollowerSnapshotCandidate,
+) -> Result<SharedConfigurationSnapshot, Error> {
+    decode_bundle(SharedConfigurationBundle {
+        metadata_json: candidate.snapshot.metadata_json,
+        skills: candidate
+            .snapshot
+            .skills
+            .into_iter()
+            .map(|skill| SharedSkillPackageBundle {
+                id: skill.id,
+                version: skill.version,
+                enabled: skill.enabled,
+                dependencies: skill.dependencies,
+                files: skill
+                    .files
+                    .into_iter()
+                    .map(|file| SharedSkillFileBundle {
+                        path: file.path,
+                        content: file.content,
+                        content_hash: file.content_hash,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
 }

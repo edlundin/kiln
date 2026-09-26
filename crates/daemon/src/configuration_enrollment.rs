@@ -8,7 +8,10 @@ use kiln_core::{
     ConfigurationFollowerEnrollmentExchangeSettings, ConfigurationFollowerEnrollmentRemoteGrant,
     ConfigurationFollowerEnrollmentRemotePhase, ConfigurationFollowerEnrollmentRemoteReceipt,
     ConfigurationFollowerEnrollmentSubmission, ConfigurationFollowerEnrollmentTransport,
-    ConfigurationFollowerEnrollmentTransportError,
+    ConfigurationFollowerEnrollmentTransportError, ConfigurationFollowerSnapshotBundle,
+    ConfigurationFollowerSnapshotCandidate, ConfigurationFollowerSnapshotPeer,
+    ConfigurationFollowerSnapshotSkillFile, ConfigurationFollowerSnapshotSkillPackage,
+    ConfigurationFollowerSnapshotTransport, ConfigurationFollowerSnapshotTransportError,
 };
 use kiln_protocol::ConfigurationFollowerEnrollmentRequestPhase;
 use std::{future::Future, pin::Pin, time::Duration};
@@ -59,6 +62,95 @@ impl ConfigurationFollowerEnrollmentTransport for PinnedConfigurationFollowerEnr
                 .map_err(|_| ConfigurationFollowerEnrollmentTransportError::Failed)?;
             Ok(remote_receipt(response))
         })
+    }
+}
+
+pub(crate) struct PinnedConfigurationFollowerSnapshotTransport;
+
+impl ConfigurationFollowerSnapshotTransport for PinnedConfigurationFollowerSnapshotTransport {
+    fn fetch(
+        &self,
+        peer: ConfigurationFollowerSnapshotPeer,
+        credential: kiln_core::SecretValue,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ConfigurationFollowerSnapshotCandidate,
+                        ConfigurationFollowerSnapshotTransportError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let pin = ConfigurationMasterPin {
+                origin: settings.origin,
+                server_name: peer.server_name,
+                certificate_authority_der: peer.certificate_authority_der,
+                master_instance_id: peer.authority.master_id().as_str().to_owned(),
+                group_id: peer.authority.group_id().as_str().to_owned(),
+                follower_instance_id: peer.follower_instance_id.as_str().to_owned(),
+            };
+            let client = ConfigurationSyncClient::new(
+                pin,
+                credential.as_bytes(),
+                ConfigurationSyncTimeouts {
+                    connect: Duration::from_millis(settings.connect_timeout_ms),
+                    request: Duration::from_millis(settings.request_timeout_ms),
+                },
+            )
+            .map_err(map_snapshot_client_error)?;
+            let response = client
+                .get_snapshot()
+                .await
+                .map_err(map_snapshot_client_error)?;
+            Ok(ConfigurationFollowerSnapshotCandidate {
+                instance_id: response.instance_id,
+                group_id: response.group_id,
+                master_instance_id: response.master_instance_id,
+                state_version: response.state_version,
+                revision_number: response.revision.revision,
+                schema_version: response.revision.schema_version,
+                content_hash: response.revision.content_hash,
+                snapshot: ConfigurationFollowerSnapshotBundle {
+                    metadata_json: response.snapshot.metadata_json,
+                    skills: response
+                        .snapshot
+                        .skills
+                        .into_iter()
+                        .map(|skill| ConfigurationFollowerSnapshotSkillPackage {
+                            id: skill.id,
+                            version: skill.version,
+                            enabled: skill.enabled,
+                            dependencies: skill.dependencies,
+                            files: skill
+                                .files
+                                .into_iter()
+                                .map(|file| ConfigurationFollowerSnapshotSkillFile {
+                                    path: file.path,
+                                    content: file.content,
+                                    content_hash: file.content_hash,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                },
+            })
+        })
+    }
+}
+
+fn map_snapshot_client_error(
+    error: ConfigurationSyncError,
+) -> ConfigurationFollowerSnapshotTransportError {
+    match error {
+        ConfigurationSyncError::InvalidPin | ConfigurationSyncError::InvalidTimeouts => {
+            ConfigurationFollowerSnapshotTransportError::InvalidSettings
+        }
+        ConfigurationSyncError::TooLarge => ConfigurationFollowerSnapshotTransportError::TooLarge,
+        _ => ConfigurationFollowerSnapshotTransportError::Failed,
     }
 }
 

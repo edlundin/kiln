@@ -962,6 +962,14 @@ where
             )),
         )
         .route(
+            kiln_protocol::CONFIGURATION_FOLLOWER_SNAPSHOT_FETCH_PATH,
+            post(configuration_enrollment::fetch_snapshot).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    kiln_protocol::CONFIGURATION_FOLLOWER_SNAPSHOT_FETCH_MAX_BYTES,
+                ),
+            ),
+        )
+        .route(
             kiln_protocol::CONFIGURATION_SYNC_STATUS_PATH,
             get(configuration_sync::get_status),
         )
@@ -3434,6 +3442,16 @@ impl PublicError {
                     StatusCode::CONFLICT,
                     error_code::CONFIGURATION_FOLLOWER_ENROLLMENT_RECOVERY_REQUIRED,
                     "Follower enrollment recovery is required; use a fresh attempt ID",
+                ),
+                kiln_core::ConfigurationFollowerEnrollmentError::InvalidSnapshot => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::CONFIGURATION_SYNC_INVALID_REQUEST,
+                    "Fetched configuration snapshot is invalid",
+                ),
+                kiln_core::ConfigurationFollowerEnrollmentError::SnapshotTooLarge => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    error_code::CONFIGURATION_SNAPSHOT_TOO_LARGE,
+                    "Fetched configuration snapshot exceeds transfer budget",
                 ),
                 kiln_core::ConfigurationFollowerEnrollmentError::Unavailable => (
                     StatusCode::SERVICE_UNAVAILABLE,

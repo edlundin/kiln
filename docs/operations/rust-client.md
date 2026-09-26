@@ -183,8 +183,9 @@ after later publication or role changes. It contains a revision/schema/hash and
 the resulting state version, not current content or an activation result. Reload
 `get_configuration_sync_status` before preparing another publication. Changed key
 reuse is `idempotency_conflict`; stale state/wrong master is
-`configuration_sync_conflict`. Publication stores the complete snapshot locally;
-remote distribution and runtime consumers are not yet wired.
+`configuration_sync_conflict`. Publication stores the complete snapshot locally.
+An approved follower can fetch and apply it explicitly through the separate
+one-shot method below; ongoing distribution and runtime consumers are not wired.
 
 ## Configuration snapshot export
 
@@ -341,3 +342,26 @@ credential-free exchange status and the last-observed receipt; a later master
 revocation may change the grant state. The client does not retry the command
 automatically. Enrollment exchange does not fetch or apply snapshots, establish
 currentness, or start automatic reconnect.
+
+Protocol `0.38.0` adds the authenticated local
+`fetch_configuration_follower_snapshot(attempt_id, request)` command. Its strict
+4 KiB request supplies the expected follower instance, HTTPS origin, and positive
+connect/request timeouts; the origin and budgets are per-call transport options.
+The daemon reloads the exact approved enrollment pin and OS-vault credential,
+fetches one bounded candidate, records its authenticated revision, validates the
+complete bundle, and atomically applies it. The response contains only the
+resulting follower instance/state version, revision, and `applied` or
+`already_applied` disposition. It does not return snapshot bytes, credentials,
+vault references, or private enrollment state.
+
+Migration 47 adds a private monotonic credential marker. Only a credential from
+an approved enrollment with an active marker can fetch. Explicit retirement
+commits marker retirement before retryable vault cleanup; leaving the follower
+role also retires the marker in the role-change transaction, making any leftover
+vault value unusable. Rejoining requires a new approval. Historical approved or
+uncertain attempts are not treated as active during migration and require
+leaving the follower role, retiring the old attempt, and reenrolling. The
+command performs one explicit fetch with no automatic retry. If bundle
+validation or application fails, the previous snapshot remains intact while a
+newer authenticated observation may be retained. See the
+[snapshot fetch contract](../spec/configuration-sync.md#explicit-follower-snapshot-fetch-and-application).

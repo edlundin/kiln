@@ -11,7 +11,8 @@ use kiln_core::{
     ConfigurationFollowerEnrollmentExchangeSettings, ConfigurationFollowerEnrollmentMetadata,
     ConfigurationFollowerEnrollmentPhase, ConfigurationFollowerEnrollmentRemoteGrant,
     ConfigurationFollowerEnrollmentRemotePhase, ConfigurationFollowerEnrollmentRemoteReceipt,
-    ConfigurationGroupId, ConfigurationReadGrantAttemptId, KilnInstanceId,
+    ConfigurationGroupId, ConfigurationReadGrantAttemptId, ConfigurationSnapshotMutation,
+    KilnInstanceId,
 };
 use kiln_protocol::{
     ConfigurationFollowerEnrollmentExchangeResult as ProtocolExchangeResult,
@@ -19,7 +20,8 @@ use kiln_protocol::{
     ConfigurationFollowerEnrollmentPhase as ProtocolPhase,
     ConfigurationFollowerEnrollmentRequestPhase, ConfigurationFollowerEnrollmentRequestResponse,
     ConfigurationFollowerEnrollmentResponse, ConfigurationReadGrantResponse,
-    ExchangeConfigurationFollowerEnrollmentRequest, PrepareConfigurationFollowerEnrollmentRequest,
+    ExchangeConfigurationFollowerEnrollmentRequest, FetchConfigurationFollowerSnapshotRequest,
+    FetchConfigurationFollowerSnapshotResponse, PrepareConfigurationFollowerEnrollmentRequest,
     RetireConfigurationFollowerEnrollmentRequest,
 };
 use serde::Deserialize;
@@ -89,6 +91,23 @@ pub(super) trait ConfigurationFollowerEnrollmentOperations: Send + Sync {
             dyn Future<
                     Output = Result<
                         ConfigurationFollowerEnrollmentMetadata,
+                        ConfigurationFollowerEnrollmentError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >;
+
+    fn fetch_snapshot(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ConfigurationSnapshotMutation,
                         ConfigurationFollowerEnrollmentError,
                     >,
                 > + Send
@@ -198,6 +217,30 @@ impl<T: kiln_core::ConfigurationFollowerEnrollmentAdministration>
             expected_instance_id,
             attempt_id,
             settings,
+        ))
+    }
+
+    fn fetch_snapshot(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ConfigurationSnapshotMutation,
+                        ConfigurationFollowerEnrollmentError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(self.0.fetch_and_apply_configuration_follower_snapshot(
+            expected_instance_id,
+            attempt_id,
+            settings,
+            Box::new(super::configuration_publication::decode_follower_snapshot_candidate),
         ))
     }
 }
@@ -396,6 +439,61 @@ where
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(enrollment_response(&metadata)),
+    ))
+}
+
+pub(super) async fn fetch_snapshot<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(attempt_id): Path<String>,
+    super::StrictJson(request): super::StrictJson<FetchConfigurationFollowerSnapshotRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let permit = state.lifecycle.begin_command()?;
+    let attempt_id =
+        ConfigurationReadGrantAttemptId::parse(attempt_id).map_err(|_| enrollment_invalid())?;
+    let expected_instance_id =
+        KilnInstanceId::parse(request.expected_instance_id).map_err(|_| enrollment_invalid())?;
+    let settings = ConfigurationFollowerEnrollmentExchangeSettings {
+        origin: request.origin,
+        connect_timeout_ms: request.connect_timeout_ms,
+        request_timeout_ms: request.request_timeout_ms,
+    };
+    let operations = state
+        .configuration_follower_enrollment_operations
+        .clone()
+        .ok_or(PublicError::ConfigurationSyncUnavailable)?;
+    let mutation = tokio::spawn(async move {
+        let _permit = permit;
+        operations
+            .fetch_snapshot(expected_instance_id, attempt_id, settings)
+            .await
+    })
+    .await
+    .map_err(|_| PublicError::ConfigurationSyncUnavailable)?
+    .map_err(PublicError::ConfigurationFollowerEnrollment)?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(FetchConfigurationFollowerSnapshotResponse {
+            instance_id: mutation.state.instance_id().as_str().to_owned(),
+            state_version: mutation.state.version(),
+            revision: kiln_protocol::ConfigurationRevisionResponse {
+                revision: mutation.revision.number(),
+                schema_version: mutation.revision.schema_version(),
+                content_hash: mutation.revision.content_hash().as_str().to_owned(),
+            },
+            disposition: match mutation.disposition {
+                kiln_core::ConfigurationSnapshotDisposition::Applied => {
+                    kiln_protocol::ConfigurationSnapshotApplyDisposition::Applied
+                }
+                kiln_core::ConfigurationSnapshotDisposition::Duplicate => {
+                    kiln_protocol::ConfigurationSnapshotApplyDisposition::AlreadyApplied
+                }
+            },
+        }),
     ))
 }
 

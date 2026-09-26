@@ -162,6 +162,85 @@ impl ConfigurationFollowerEnrollmentSubmission {
     }
 }
 
+/// Immutable inputs for one authenticated follower snapshot read. The secret
+/// is supplied separately and the reference/digest remain private to storage.
+pub struct ConfigurationFollowerSnapshotPeer {
+    pub follower_instance_id: KilnInstanceId,
+    pub authority: ConfigurationAuthority,
+    pub server_name: String,
+    pub certificate_authority_der: Vec<u8>,
+}
+
+/// Bounded but not yet validated bytes and metadata returned by the pinned
+/// transport. This internal candidate is never a local HTTP response.
+pub struct ConfigurationFollowerSnapshotCandidate {
+    pub instance_id: String,
+    pub group_id: String,
+    pub master_instance_id: String,
+    pub state_version: u64,
+    pub revision_number: u64,
+    pub schema_version: u32,
+    pub content_hash: String,
+    pub snapshot: ConfigurationFollowerSnapshotBundle,
+}
+
+pub struct ConfigurationFollowerSnapshotBundle {
+    pub metadata_json: String,
+    pub skills: Vec<ConfigurationFollowerSnapshotSkillPackage>,
+}
+
+pub struct ConfigurationFollowerSnapshotSkillPackage {
+    pub id: String,
+    pub version: String,
+    pub enabled: bool,
+    pub dependencies: Vec<String>,
+    pub files: Vec<ConfigurationFollowerSnapshotSkillFile>,
+}
+
+pub struct ConfigurationFollowerSnapshotSkillFile {
+    pub path: String,
+    pub content: Vec<u8>,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationFollowerSnapshotTransportError {
+    InvalidSettings,
+    TooLarge,
+    Failed,
+}
+
+/// Restricted daemon-to-infrastructure transport for a single pinned snapshot
+/// fetch. Implementations must not log the credential or remote diagnostics.
+pub trait ConfigurationFollowerSnapshotTransport: Send + Sync {
+    fn fetch(
+        &self,
+        peer: ConfigurationFollowerSnapshotPeer,
+        credential: SecretValue,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ConfigurationFollowerSnapshotCandidate,
+                        ConfigurationFollowerSnapshotTransportError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    >;
+}
+
+/// The server supplies the existing complete bundle validator after the
+/// authenticated revision has been durably observed.
+pub type ConfigurationFollowerSnapshotValidator = Box<
+    dyn FnOnce(
+            ConfigurationFollowerSnapshotCandidate,
+        )
+            -> Result<crate::SharedConfigurationSnapshot, crate::ConfigurationSnapshotError>
+        + Send,
+>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigurationFollowerEnrollmentTransportError {
     InvalidSettings,
@@ -197,6 +276,8 @@ pub enum ConfigurationFollowerEnrollmentError {
     IdempotencyConflict,
     Retired,
     RecoveryRequired,
+    InvalidSnapshot,
+    SnapshotTooLarge,
     Unavailable,
 }
 
@@ -262,5 +343,18 @@ pub trait ConfigurationFollowerEnrollmentAdministration: Send + Sync {
             ConfigurationFollowerEnrollmentMetadata,
             ConfigurationFollowerEnrollmentError,
         >,
+    > + Send;
+
+    /// Fetch one candidate over the exact enrollment pin, durably observe its
+    /// revision against the state captured before transport, validate its
+    /// bundle, then atomically apply it under the same active-enrollment fence.
+    fn fetch_and_apply_configuration_follower_snapshot(
+        &self,
+        expected_instance_id: KilnInstanceId,
+        attempt_id: ConfigurationReadGrantAttemptId,
+        settings: ConfigurationFollowerEnrollmentExchangeSettings,
+        validate: ConfigurationFollowerSnapshotValidator,
+    ) -> impl Future<
+        Output = Result<crate::ConfigurationSnapshotMutation, ConfigurationFollowerEnrollmentError>,
     > + Send;
 }

@@ -100,6 +100,8 @@ pub enum Error {
     InvalidConfigurationFollowerEnrollmentPageLimit,
     #[error("configuration follower enrollment exchange settings are invalid")]
     InvalidConfigurationFollowerEnrollmentExchangeRequest,
+    #[error("configuration follower snapshot fetch settings are invalid")]
+    InvalidConfigurationFollowerSnapshotFetchRequest,
     #[error("configuration follower enrollment request page limit must be between 1 and 100")]
     InvalidConfigurationFollowerEnrollmentRequestPageLimit,
     #[error("configuration follower enrollment request has an empty or oversized CA DER value")]
@@ -493,6 +495,43 @@ impl Client {
         )?;
         self.send_json(
             kiln_protocol::EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+            self.http.post(self.http_url(&path)).json(request),
+        )
+        .await
+    }
+
+    /// Explicitly fetch, validate and atomically apply one snapshot from the
+    /// approved enrollment's pinned master. The daemon does not retry this
+    /// command automatically; call again with the same pin and current budgets.
+    pub async fn fetch_configuration_follower_snapshot(
+        &self,
+        attempt_id: &str,
+        request: &kiln_protocol::FetchConfigurationFollowerSnapshotRequest,
+    ) -> Result<kiln_protocol::FetchConfigurationFollowerSnapshotResponse, Error> {
+        if !valid_public_configuration_id(attempt_id, "cra_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration follower enrollment attempt ID",
+            });
+        }
+        if request.origin.is_empty()
+            || request
+                .origin
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+            || request.connect_timeout_ms == 0
+            || request.request_timeout_ms == 0
+            || request.connect_timeout_ms > request.request_timeout_ms
+        {
+            return Err(Error::InvalidConfigurationFollowerSnapshotFetchRequest);
+        }
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_FOLLOWER_SNAPSHOT_FETCH_PATH,
+            "{attempt_id}",
+            "configuration follower enrollment attempt ID",
+            attempt_id,
+        )?;
+        self.send_json(
+            kiln_protocol::FETCH_CONFIGURATION_FOLLOWER_SNAPSHOT_OPERATION_ID,
             self.http.post(self.http_url(&path)).json(request),
         )
         .await

@@ -267,6 +267,20 @@ pub(super) async fn save(
         return Ok(());
     }
     if current.role() != next.role() {
+        if let ConfigurationRole::Follower(authority) = current.role() {
+            // A local role departure permanently disables credentials approved
+            // for this exact follower binding. Rejoining the same authority
+            // requires a fresh approved enrollment.
+            sqlx::query(
+                "UPDATE configuration_follower_enrollment_credentials SET state = 'retired' WHERE state = 'active' AND attempt_id IN (SELECT attempt_id FROM configuration_follower_enrollment_requests WHERE follower_instance_id = ? AND group_id = ? AND master_instance_id = ?)",
+            )
+            .bind(current.instance_id().as_str())
+            .bind(authority.group_id().as_str())
+            .bind(authority.master_id().as_str())
+            .execute(&mut *connection)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        }
         // Leaving a master authority permanently invalidates its credentials.
         // Rejoining the historical group must never revive remote access.
         if let ConfigurationRole::Master(authority) = current.role() {

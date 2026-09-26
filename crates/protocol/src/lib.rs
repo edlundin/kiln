@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.37.0";
+pub const PROTOCOL_VERSION: &str = "0.38.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -40,6 +40,8 @@ pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH: &str =
     "/v1/configuration-sync/follower-enrollments/{attempt_id}/retire";
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_PATH: &str =
     "/v1/configuration-sync/follower-enrollments/{attempt_id}/exchange";
+pub const CONFIGURATION_FOLLOWER_SNAPSHOT_FETCH_PATH: &str =
+    "/v1/configuration-sync/follower-enrollments/{attempt_id}/fetch";
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH: &str =
     "/v1/configuration-sync/follower-enrollment-requests";
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH: &str =
@@ -68,6 +70,8 @@ pub const RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
     "retire_configuration_follower_enrollment";
 pub const EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID: &str =
     "exchange_configuration_follower_enrollment";
+pub const FETCH_CONFIGURATION_FOLLOWER_SNAPSHOT_OPERATION_ID: &str =
+    "fetch_configuration_follower_snapshot";
 pub const LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID: &str =
     "list_configuration_follower_enrollment_requests";
 pub const GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
@@ -94,6 +98,8 @@ pub const CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES: usize = 4 * 10
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RECEIPT_MAX_BYTES: usize = 4 * 1024;
 /// Cap for the explicit local follower-exchange command body.
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_EXCHANGE_MAX_BYTES: usize = 4 * 1024;
+/// Cap for the explicit local follower snapshot-fetch command body.
+pub const CONFIGURATION_FOLLOWER_SNAPSHOT_FETCH_MAX_BYTES: usize = 4 * 1024;
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_DEFAULT_PAGE_SIZE: usize = 50;
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE: usize = 100;
 pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configuration_master";
@@ -811,6 +817,33 @@ pub struct ExchangeConfigurationFollowerEnrollmentRequest {
     pub origin: String,
     pub connect_timeout_ms: u64,
     pub request_timeout_ms: u64,
+}
+
+/// One explicit fetch uses the exact enrollment pin; transport settings are
+/// supplied again on retry and are not persisted with the attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FetchConfigurationFollowerSnapshotRequest {
+    pub expected_instance_id: String,
+    pub origin: String,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationSnapshotApplyDisposition {
+    Applied,
+    AlreadyApplied,
+}
+
+/// Credential-free result of one explicit fetch/validate/apply command.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct FetchConfigurationFollowerSnapshotResponse {
+    pub instance_id: String,
+    pub state_version: u64,
+    pub revision: ConfigurationRevisionResponse,
+    pub disposition: ConfigurationSnapshotApplyDisposition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

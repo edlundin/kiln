@@ -174,6 +174,29 @@ The Rust client also supports [publication](rust-client.md#configuration-snapsho
 [follower snapshot fetch](../spec/configuration-sync.md#explicit-follower-snapshot-fetch-and-application).
 Provider credentials remain local to each instance.
 
+## Model account bindings
+
+Settings → Model account bindings maps a portable shared
+`model_defaults.account_binding` key to a provider account on the connected
+daemon’s host. Enter the exact key from shared settings and choose **Load
+binding**, or choose **Browse bindings** and select a key. **Next page** replaces
+the current page; **Browse bindings** returns to the first page.
+
+The editor shows the loaded key, version, current account, provider and account
+state. Choose a connected account of the provider type required by the shared
+model defaults, then confirm the displayed key and account ID. The server checks
+the exact binding version and selected account’s provider type. **Remove mapping**
+also requires confirmation. Missing or incompatible mappings prevent new managed
+Runs from starting; existing Runs retain their saved selection. Account credentials
+and Workspace access remain local, and connection state does not establish access
+to a particular Workspace or model.
+
+Every write consumes the loaded version. After success, failure, conflict, or
+reconnect, load the key again before editing; the client never blindly retries a
+write. A disconnected request may still finish in the daemon. Stale responses
+cannot restore editing state after reconnect. Sign in to an account below and
+reload the binding if no connected account is available.
+
 ## Provider accounts
 
 After connecting to the daemon, open **Settings** in the global toolbar. Provider

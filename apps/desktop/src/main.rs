@@ -5,6 +5,7 @@ mod configuration_bundle;
 mod configuration_sync;
 mod connection;
 mod conversation;
+mod model_bindings;
 mod theme;
 
 use std::sync::Arc;

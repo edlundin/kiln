@@ -14,7 +14,10 @@ use kiln_protocol::{
 };
 use tokio::{runtime::Runtime, sync::mpsc};
 
-use crate::{configuration_sync::ConfigurationSyncSettings, connection, theme};
+use crate::{
+    configuration_sync::ConfigurationSyncSettings, connection,
+    model_bindings::ModelBindingSettings, theme,
+};
 
 const CODEX_PROVIDER: &str = "openai_codex_subscription";
 // Browser and device destinations are validated before opening.
@@ -112,6 +115,7 @@ enum Update {
 
 pub struct AccountSettings {
     configuration_sync: Entity<ConfigurationSyncSettings>,
+    model_bindings: Entity<ModelBindingSettings>,
     client: Client,
     runtime: Arc<Runtime>,
     updates: mpsc::UnboundedSender<Update>,
@@ -141,6 +145,8 @@ impl AccountSettings {
         })
         .detach();
         let mut settings = Self {
+            model_bindings: cx
+                .new(|cx| ModelBindingSettings::new(client.clone(), runtime.clone(), cx)),
             configuration_sync: cx
                 .new(|cx| ConfigurationSyncSettings::new(client.clone(), runtime.clone(), cx)),
             client,
@@ -164,6 +170,8 @@ impl AccountSettings {
 
     pub fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
         self.online = online;
+        self.model_bindings
+            .update(cx, |settings, cx| settings.set_online(online, cx));
         self.configuration_sync
             .update(cx, |settings, cx| settings.set_online(online, cx));
         if !online {
@@ -469,6 +477,7 @@ impl Render for AccountSettings {
         let disabled = self.busy || !self.online;
         let mut content = div().flex().flex_col().gap_4().w_full().min_w_0().max_w(theme::TRANSCRIPT_WIDTH)
             .child(self.configuration_sync.clone())
+            .child(self.model_bindings.clone())
             .child(div().text_lg().child("Provider accounts"))
             .child(div().text_sm().text_color(theme::MUTED)
                 .child("Connect your Codex subscription in a browser on this daemon’s host. Use device sign-in for a remote host or if the callback is unavailable. OpenAI account terms and data controls apply."))

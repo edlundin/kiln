@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-27 — `feat`
+
+- EDL-322: Add a desktop Settings editor to browse shared model account-binding
+  keys and map them to connected host-local provider accounts with confirmed,
+  version-checked changes. Existing Runs keep their saved model selection.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
 ## 2026-09-26 — `feat`
 
 - EDL-322: Resolve shared model defaults and the host-local account binding in

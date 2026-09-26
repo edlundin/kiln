@@ -216,9 +216,11 @@ retains the next version as a tombstone. A stale version returns
 
 If a mutation response is uncertain, call `get_model_account_binding(key)` and
 compare the current account ID and version before sending another command. The
-client does not retry these commands automatically. This API prepares the local
-binding boundary only: model defaults are not yet consumed when a Run starts, and
-the future Run resolver must recheck current account and workspace availability.
+client does not retry these commands automatically. New managed Runs resolve
+shared model defaults through these local bindings and recheck current account,
+provider and Workspace availability in the creation transaction. Existing Runs
+retain their saved selection. The desktop Settings editor exposes version-checked
+assignment/removal and requires a fresh read after each write or reconnect.
 
 ## Configuration snapshot export
 

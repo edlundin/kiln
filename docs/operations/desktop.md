@@ -174,6 +174,30 @@ The Rust client also supports [publication](rust-client.md#configuration-snapsho
 [follower snapshot fetch](../spec/configuration-sync.md#explicit-follower-snapshot-fetch-and-application).
 Provider credentials remain local to each instance.
 
+## Master enrollment decisions
+
+Settings → Follower enrollment requests provides **Refresh requests** and
+**Next page** for pending and historical master-side requests. Select a row to
+reload its immutable metadata and the current local authority. A pending request
+can be approved or rejected only when it belongs to the current master and group.
+The daemon independently checks the exact authority version, all confirmation
+fields, and (for approval) the current managed identity.
+
+Before choosing **Approve follower…**, compare the complete **Request fingerprint**
+with the intended follower over a trusted channel. **Copy request fingerprint**
+copies that public fingerprint; no bearer or credential digest reaches the UI.
+The follower ID is only a claim. The confirmation displays the request and attempt
+IDs, follower and master identities/versions, authority group, server name, CA
+fingerprint, and request fingerprint. **Fingerprint verified — approve** grants
+read access to that authority’s shared configuration. **Reject request…** requires
+separate confirmation and permanently rejects the exact request.
+
+After a decision or uncertain response, select the request again to load its
+current state. An approved record with a revoked grant is labeled as revoked;
+approval cannot revive it. Disconnect invalidates selection and confirmation,
+although already accepted daemon work may still finish. The next decision requires
+a fresh read. This section does not start the TLS listener or prepare a follower.
+
 ## Model account bindings
 
 Settings → Model account bindings maps a portable shared

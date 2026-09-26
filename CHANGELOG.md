@@ -2,6 +2,16 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-322: Add master-side enrollment request review with fresh authority and
+  request reads, full fingerprint display and copy, and confirmed exact-field
+  approval or permanent rejection. Revoked grants remain visibly revoked.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-322: Add a desktop Settings editor to browse shared model account-binding
   keys and map them to connected host-local provider accounts with confirmed,
   version-checked changes. Existing Runs keep their saved model selection.

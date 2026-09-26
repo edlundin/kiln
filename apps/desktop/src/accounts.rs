@@ -16,6 +16,7 @@ use tokio::{runtime::Runtime, sync::mpsc};
 
 use crate::{
     configuration_sync::ConfigurationSyncSettings, connection,
+    enrollment_requests::EnrollmentRequests,
     model_bindings::ModelBindingSettings, theme,
 };
 
@@ -116,6 +117,7 @@ enum Update {
 pub struct AccountSettings {
     configuration_sync: Entity<ConfigurationSyncSettings>,
     model_bindings: Entity<ModelBindingSettings>,
+    enrollment_requests: Entity<EnrollmentRequests>,
     client: Client,
     runtime: Arc<Runtime>,
     updates: mpsc::UnboundedSender<Update>,
@@ -145,6 +147,8 @@ impl AccountSettings {
         })
         .detach();
         let mut settings = Self {
+            enrollment_requests: cx
+                .new(|cx| EnrollmentRequests::new(client.clone(), runtime.clone(), cx)),
             model_bindings: cx
                 .new(|cx| ModelBindingSettings::new(client.clone(), runtime.clone(), cx)),
             configuration_sync: cx
@@ -170,6 +174,8 @@ impl AccountSettings {
 
     pub fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
         self.online = online;
+        self.enrollment_requests
+            .update(cx, |settings, cx| settings.set_online(online, cx));
         self.model_bindings
             .update(cx, |settings, cx| settings.set_online(online, cx));
         self.configuration_sync
@@ -477,6 +483,7 @@ impl Render for AccountSettings {
         let disabled = self.busy || !self.online;
         let mut content = div().flex().flex_col().gap_4().w_full().min_w_0().max_w(theme::TRANSCRIPT_WIDTH)
             .child(self.configuration_sync.clone())
+            .child(self.enrollment_requests.clone())
             .child(self.model_bindings.clone())
             .child(div().text_lg().child("Provider accounts"))
             .child(div().text_sm().text_color(theme::MUTED)

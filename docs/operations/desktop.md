@@ -83,11 +83,14 @@ Open **Settings** to see the connected daemon's configuration role, instance ID,
 group and master IDs, stored snapshot revision, and highest observed revision.
 **Refresh status** reloads that metadata; a failed request offers **Retry status**.
 Loading this section does not block provider-account actions. Disconnecting
-clears the displayed metadata and cancels the request; reconnecting loads it again.
+clears the displayed metadata and invalidates this view's pending operation;
+reconnecting loads it again. Work already accepted by the daemon may still complete.
 
-Remote synchronization currently reports **unconfigured**. The displayed revisions
-describe durable metadata, not remote connectivity or activation in running
-Sessions. For an unassigned instance, **Designate as master** shows the instance
+Without opt-in daemon refresh settings, automatic follower refresh reports
+**unconfigured**; a follower can still fetch manually when it has an approved
+attempt record. Stored and observed revisions describe durable metadata, not
+remote connectivity or activation in running Sessions. For an unassigned instance,
+**Designate as master** shows the instance
 ID and asks for confirmation before creating its configuration group. **Keep
 unassigned** cancels without changing anything. A stale choice is rejected;
 refresh status before choosing again. If the result is unconfirmed, **Retry
@@ -147,10 +150,29 @@ finishes its contents, and persists it without replacing an existing destination
 A save already started may finish after the view disconnects or closes. On Unix,
 the temporary/exported file is private to the user.
 
-The Rust client also supports [publication](rust-client.md#configuration-snapshot-publication)
-and [export](rust-client.md#configuration-snapshot-export). **Refresh status** shows
-the stored revision. Follower enrollment, remote distribution and runtime
-activation remain unavailable. Provider credentials remain local to each instance.
+For a follower, Settings also shows the protocol `0.39.0` automatic-refresh state,
+last outcome, freshness recency, time since the last successful check, and last
+successful revision. These values are separate from the stored and highest
+observed revisions. Disabled automatic refresh does not disable manual fetch.
+
+**Follower snapshot fetch** lists local approval records for this follower in
+bounded pages; **Load more attempts** fetches the next page. Selecting a record
+does not contact the master, and an approved exchange result is not proof that
+the credential or master grant is still active. The master validates the exact
+selected attempt during fetch. Enter an HTTPS origin whose host matches that
+record's pinned server name, plus positive connection and request timeouts in
+milliseconds. The origin and deadlines have no defaults, and the request timeout
+must be at least the connection timeout. **Review snapshot fetch…** shows the
+target and requires a second action before the daemon fetches and atomically
+applies the complete snapshot. Settings warns that absent settings, model
+defaults, global MCP servers, skills, and files will be removed.
+Disconnecting clears the UI task and its confirmation; work already accepted
+by the daemon may still complete.
+
+The Rust client also supports [publication](rust-client.md#configuration-snapshot-publication),
+[export](rust-client.md#configuration-snapshot-export), and
+[follower snapshot fetch](../spec/configuration-sync.md#explicit-follower-snapshot-fetch-and-application).
+Provider credentials remain local to each instance.
 
 ## Provider accounts
 

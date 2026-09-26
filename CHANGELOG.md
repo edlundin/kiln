@@ -2,6 +2,17 @@
 
 ## 2026-09-26 — `feat`
 
+- EDL-322: Extend Settings with protocol `0.39.0` automatic-refresh status and
+  an explicit protocol `0.38.0` follower snapshot fetch. Attempts are listed in
+  bounded pages, transport origin and deadlines are caller-supplied, and a
+  review step explains complete snapshot replacement and removal behavior.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-26 — `feat`
+
 - EDL-322: Add opt-in daemon-owned follower refresh using the exact approved
   enrollment pin, with serialized scheduling and authenticated operation/recency
   status. Protocol `0.39.0` reports the configured attempt, last outcome, last

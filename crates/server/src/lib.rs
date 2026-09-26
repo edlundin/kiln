@@ -2,7 +2,8 @@
 
 mod configuration_follower;
 pub use configuration_follower::{
-    ConfigurationFollowerRouter, InvalidConfigurationFollowerHost, configuration_follower_router,
+    ConfigurationFollowerRouter, InvalidConfigurationFollowerHost,
+    configuration_follower_host_authority, configuration_follower_router,
 };
 mod configuration_tls;
 pub use configuration_tls::{

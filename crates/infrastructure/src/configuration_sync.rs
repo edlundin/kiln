@@ -91,6 +91,7 @@ impl ConfigurationAdministrationStore for SqliteStore {
             .bind(idempotency_key).bind(expected_instance.as_str()).bind(expected_version as i64)
             .bind(proposed_group.as_str()).execute(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        self.notify_configuration_serving_change();
         Ok(next)
     }
 }
@@ -136,6 +137,7 @@ impl ConfigurationStateStore for SqliteStore {
             return Err(Error::Conflict);
         }
         let next = current.change_role(role)?;
+        let role_changed = current.role() != next.role();
         if let Some(authority) = next.role().authority() {
             sqlx::query("INSERT INTO configuration_authorities (group_id, master_instance_id) VALUES (?, ?) ON CONFLICT(group_id) DO NOTHING")
                 .bind(authority.group_id().as_str()).bind(authority.master_id().as_str())
@@ -158,6 +160,9 @@ impl ConfigurationStateStore for SqliteStore {
             .await?
             .ok_or(Error::IntegrityViolation)?;
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        if role_changed {
+            self.notify_configuration_serving_change();
+        }
         Ok(next)
     }
 

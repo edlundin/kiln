@@ -657,6 +657,9 @@ impl ConfigurationIdentityProvisioner {
             retire(&mut connection, &ca_ref).await?;
             stored
         };
+        // The SQL update is committed before releasing the connection lock.
+        // Notify only afterward so supervisors always observe committed state.
+        self.store.notify_configuration_serving_change();
         // Try both slots even if the first delete fails. Tombstone retries
         // are deliberate: never forget an uncertain OS deletion.
         let ca = self.vault.delete(stored.record.request.ca_binding()).await;
@@ -763,6 +766,7 @@ impl ConfigurationIdentityProvisioner {
         sqlx::query("UPDATE configuration_master_identities SET status = 'active' WHERE ca_ref = ? AND status = 'pending'")
             .bind(ca_ref.as_str()).execute(&mut *transaction).await.map_err(|_| Error::Unavailable)?;
         transaction.commit().await.map_err(|_| Error::Unavailable)?;
+        self.store.notify_configuration_serving_change();
         let mut record = stored.record;
         record.status = ConfigurationIdentityStatus::Active;
         Ok(record)
@@ -777,7 +781,9 @@ impl ConfigurationIdentityProvisioner {
 
     async fn retire_incomplete(&self, ca_ref: &SecretRef) -> Result<(), Error> {
         let mut connection = self.store.connection.lock().await;
-        retire(&mut connection, ca_ref).await
+        retire(&mut connection, ca_ref).await?;
+        self.store.notify_configuration_serving_change();
+        Ok(())
     }
 
     async fn reserve(

@@ -110,15 +110,17 @@ impl ConfigurationFollowerTls {
 /// this function until explicit enrollment/certificate composition is available.
 /// One HTTP/1 request per connection avoids unbounded keep-alive or HTTP/2 streams.
 /// Dropping the serving future aborts its owned connection tasks.
-pub async fn serve_configuration_followers<F>(
+pub async fn serve_configuration_followers<F, I>(
     listener: TcpListener,
     router: ConfigurationFollowerRouter,
     tls: ConfigurationFollowerTls,
     limits: ConfigurationTlsLimits,
-    shutdown: F,
+    graceful_shutdown: F,
+    immediate_shutdown: I,
 ) -> Result<(), ConfigurationTlsError>
 where
     F: Future<Output = ()> + Send,
+    I: Future<Output = ()> + Send,
 {
     if limits.max_http_buffer_bytes < 8192
         || [
@@ -134,20 +136,22 @@ where
         return Err(ConfigurationTlsError::InvalidLimits);
     }
     let mut connections = JoinSet::new();
-    let mut shutdown = std::pin::pin!(shutdown);
-    let outcome = loop {
+    let mut graceful_shutdown = std::pin::pin!(graceful_shutdown);
+    let mut immediate_shutdown = std::pin::pin!(immediate_shutdown);
+    let (outcome, immediate) = loop {
         tokio::select! {
             biased;
-            _ = &mut shutdown => break Ok(()),
+            _ = &mut immediate_shutdown => break (Ok(()), true),
+            _ = &mut graceful_shutdown => break (Ok(()), false),
             completed = connections.join_next(), if !connections.is_empty() => {
                 if completed.is_some_and(|result| result.is_err()) {
-                    break Err(ConfigurationTlsError::ConnectionTask);
+                    break (Err(ConfigurationTlsError::ConnectionTask), false);
                 }
             }
             accepted = listener.accept(), if connections.len() < limits.max_connections.get() => {
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
-                    Err(_) => break Err(ConfigurationTlsError::Listener),
+                    Err(_) => break (Err(ConfigurationTlsError::Listener), false),
                 };
                 let acceptor = tls.0.clone();
                 let service = TowerToHyperService::new(router.0.clone());
@@ -172,17 +176,26 @@ where
     // Stop admission before draining any existing TLS/HTTP work.
     drop(listener);
     let mut task_failed = false;
-    if timeout(limits.shutdown_timeout, async {
-        while let Some(result) = connections.join_next().await {
-            task_failed |= result.is_err();
-        }
-    })
-    .await
-    .is_err()
-    {
+    if immediate {
         connections.abort_all();
         while let Some(result) = connections.join_next().await {
             task_failed |= result.is_err_and(|error| !error.is_cancelled());
+        }
+    } else {
+        let drain_completed = tokio::select! {
+            biased;
+            _ = &mut immediate_shutdown => false,
+            result = timeout(limits.shutdown_timeout, async {
+                while let Some(result) = connections.join_next().await {
+                    task_failed |= result.is_err();
+                }
+            }) => result.is_ok(),
+        };
+        if !drain_completed {
+            connections.abort_all();
+            while let Some(result) = connections.join_next().await {
+                task_failed |= result.is_err_and(|error| !error.is_cancelled());
+            }
         }
     }
     if task_failed {

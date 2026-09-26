@@ -10,9 +10,9 @@ follower-credential reservation and authenticated request preparation/recovery.
 The master also exposes local request review, exact approval and permanent
 rejection for its internal follower-request journal.
 Active master TLS material can now be acquired from an explicitly selected
-managed identity and composed into the restricted TLS server configuration.
-Remote enrollment, daemon listener composition, and runtime synchronization
-remain incomplete.
+managed identity and served by an opt-in daemon TLS listener around the
+restricted follower router. Automatic enrollment, follower role transition,
+credential delivery, and runtime settings synchronization remain incomplete.
 
 ## Authority and enrollment
 
@@ -138,8 +138,10 @@ Migration 44 stores the master-side digest-only request journal, and migration 4
 indexes it by authority for bounded retained-record admission. The local API
 exposes status, initial master designation, credential-free grant
 metadata/list/revoke, and local follower-request preparation/recovery/retirement.
-Remote intake is available only through the isolated router; daemon listener
-composition, follower role changes and consumers remain subsequent work.
+Remote intake is available only through the isolated router. The daemon serves it
+only when `KILN_CONFIGURATION_FOLLOWER_LISTEN_ADDR` is set and the current master
+has a usable active managed identity. Follower role changes and consumers remain
+subsequent work.
 
 ## Internal follower read credentials
 
@@ -154,7 +156,8 @@ private enrollment delivery/storage and sensitive transport headers.
 
 `ConfigurationAccessStore` is an internal master-side grant issuance/read
 boundary. The isolated router accepts digest-only remote request claims, but no
-operation delivers bearer material and the daemon does not mount the router.
+operation delivers bearer material. The daemon exposes this router only through
+the separately configured HTTPS listener.
 Registration binds one digest permanently to a stable grant ID, the master/group, claimed
 follower instance and original master state version. A stable request-attempt ID
 deduplicates issuance and permits metadata-only recovery after a lost response.
@@ -198,10 +201,10 @@ transport must hash a presented bearer, never accept a client-supplied digest as
 proof, and no reusable authorization decision is returned.
 
 The digest-only intake route, local exact approval/rejection, pinned client and
-receipt validation are implemented, but the daemon does not mount the router.
-End-to-end enrollment still needs daemon listener composition, identity-lifecycle
-supervision and a connected administration workflow before remote access is
-enabled. No live remote interaction has been verified.
+receipt validation are implemented. The daemon mounts the isolated router only
+with explicit listener configuration and supervises the acquired identity.
+End-to-end enrollment still needs a connected administration workflow before
+remote access can issue a grant. No live remote interaction has been verified.
 
 ## Selected automatic enrollment direction
 
@@ -329,20 +332,21 @@ remain retained and do not free capacity. At capacity, new attempt IDs return
 HTTP 429 `configuration_follower_enrollment_request_capacity_reached`, while an
 exact retry can still recover its receipt. Operators raise the configured cap
 deliberately after exhaustion. The remote POST is available only on the isolated
-router; the daemon does not mount it or enable a listener.
+router; the daemon enables it only with the opt-in listener configuration.
 
 The local preparer does not change the local role or make a network request.
 The master journal does not establish device identity: pinned TLS authenticates
 the master to the follower, not the follower to the master. A locally
 authenticated administrator must review and confirm the exact request before a
 read grant is issued. The local review API and isolated remote intake/receipt
-component exist; UI, follower role transition, active credential retrieval,
-automatic reconnect and daemon listener composition remain unimplemented.
+component exist; UI, follower role transition, active credential retrieval and
+automatic reconnect remain unimplemented.
 
 ## Pinned HTTPS follower client
 
 The Rust `ConfigurationSyncClient` is the restricted outgoing transport component.
-It is not wired into daemon synchronization and does not enable a remote listener.
+It is not wired into daemon synchronization and does not configure the master's
+separate opt-in listener.
 The isolated follower router described below serves
 `GET /v1/configuration-sync/snapshot` with the existing snapshot response
 and checks `kiln-configuration-master`, `kiln-configuration-group` and
@@ -390,11 +394,11 @@ runtime activation follows merely from constructing the client or fetching data.
 ## Isolated follower read service
 
 `kiln-server::configuration_follower_router` builds a separate opaque router with
-the snapshot GET and enrollment-request POST only. The daemon does not mount or
-serve it yet. It must never be
-merged into the local administrative router. Its owner must supply authenticated
-HTTPS for the enrolled master certificate, connection/request resource limits
-and shutdown handling before exposing it. The router itself binds no socket and
+the snapshot GET and enrollment-request POST only. The daemon serves it only
+through the opt-in TLS listener. It must never be merged into the local
+administrative router. Its owner supplies authenticated HTTPS for the enrolled
+master certificate, connection/request resource limits and shutdown handling.
+The router itself binds no socket and
 does not provision certificates, create grants, approve requests or change roles.
 
 Construction takes the access store, an explicit expected HTTP Host authority,
@@ -436,11 +440,10 @@ Other paths have no registered operations, and no general API, publication, vaul
 or execution access is available.
 
 Router compilation and managed TLS acquisition are not remote-delivery
-acceptance. Active master TLS material can be checked and converted to TLS
-configuration, but that composition is not wired into daemon startup. The
-snapshot bearer adapter, daemon listener composition and end-to-end delivery,
-retry and audit/recovery flow remain unwired; no remote HTTP interaction has
-been verified.
+acceptance. The daemon composes the active identity, bounded TLS server, and
+isolated router at startup only when explicitly configured. End-to-end delivery,
+retry and audit/recovery flow still need runtime acceptance; no remote HTTP
+interaction has been verified.
 
 ## Bounded TLS serving component
 
@@ -464,10 +467,14 @@ current master authority, certificate lifetime or certificate-chain trust;
 those remain the composition owner's responsibilities.
 
 `serve_configuration_followers` accepts an already-bound listener, the opaque
-`ConfigurationFollowerRouter`, TLS configuration, explicit resource budgets and
-a shutdown future. An arbitrary administrative Axum router cannot be supplied.
-The server function is available as a library component but the daemon does not
-bind a remote listener or call it. Local startup behavior is unchanged.
+`ConfigurationFollowerRouter`, TLS configuration, explicit resource budgets,
+a graceful-shutdown future and an independent immediate-stop future. An
+arbitrary administrative Axum router cannot be supplied. The daemon binds a
+separate remote listener only when `KILN_CONFIGURATION_FOLLOWER_LISTEN_ADDR` is
+set; its existing local API remains loopback-only. Readiness reports the remote
+bind address and canonical HTTPS Host authority when enabled. See the
+[configuration follower listener operations guide](../operations/configuration-follower-listener.md)
+for required daemon settings and startup order.
 
 `ConfigurationTlsLimits` requires a positive accepted-connection cap, HTTP/1
 buffer bytes, and nonzero handshake/request/shutdown durations representable by
@@ -486,14 +493,24 @@ and expired deadlines close only that socket and expose no remote diagnostics.
 A listener error or unexpected task failure stops admission and is reported as a
 content-free service error.
 
-Shutdown stops accepting, drops the listener, and permits existing sockets to
-finish for the supplied drain duration. Remaining tasks are then aborted and
-joined. Dropping the serving future also aborts its owned tasks. Deadlines and
-cancellation are cooperative at async polling boundaries: these are network and
-admission budgets, not hard CPU/wall-clock or total process-memory guarantees.
-The existing snapshot/encoded-content limits remain in force. Certificate-file
-ownership, live composition, enrollment, audit/recovery and TLS runtime acceptance
-are still required before enabling remote synchronization.
+Graceful daemon shutdown stops accepting and permits existing sockets to finish
+for the configured drain duration. Remaining connection tasks are then aborted
+and joined. Role loss, current identity replacement, expiry, or a supervisor
+storage error stops admission and aborts/joins connection tasks immediately. The
+supervisor re-reads current authority and exact identity metadata after committed
+role/identity notifications, so unrelated historical-identity cleanup and
+ordinary revision/version updates do not stop a valid generation. Once stopped,
+that generation stays disabled until daemon restart.
+
+The remote enrollment POST moves an accepted SQLite mutation into an owned task
+with the same command permit used by the local daemon. Aborting a network handler
+does not cancel that accepted mutation; graceful daemon shutdown waits for the
+permit before store teardown. This is operation ownership, not a claim that
+SQLite mutation cancellation is safe. Dropping the serving future also aborts
+its owned connection tasks. Deadlines and cancellation are cooperative at async
+polling boundaries: these are network and admission budgets, not hard CPU or
+total process-memory guarantees. The existing snapshot/encoded-content limits
+remain in force. No live TLS or remote HTTP acceptance has been performed.
 
 ## Host-local configuration vault
 
@@ -646,14 +663,13 @@ remain after success, so uncertain deletions can always be retried and reference
 can never be reused. Role changes and incomplete recovery retain discoverable
 cleanup work; they do not perform OS effects inside SQLite transactions.
 
-Validation includes `rtk cargo check --locked -p kiln-infrastructure -p
-kiln-server -p kiln-daemon`, focused Rust formatting checks, and `rtk git diff
---check`. Independent reviews of the borrowed-DER TLS constructor and active
-identity acquisition found no actionable defects. No tests, actual certificate
-generation, vault operations, cancellation/recovery scenarios or TLS handshakes
-have run. Remote follower enrollment/exchange and
-credential delivery, daemon listener composition, follower fetch/apply and
-consumers remain open; remote synchronization is not enabled.
+Validation for the TLS constructor and active identity acquisition included
+`rtk cargo check --locked -p kiln-infrastructure -p kiln-server -p kiln-daemon`,
+focused Rust formatting checks, and `rtk git diff --check`. No tests, actual
+certificate generation, vault operations, cancellation/recovery scenarios or
+TLS handshakes have run. Remote credential delivery, follower fetch/apply and
+consumers remain open; enabling the optional listener does not complete those
+flows.
 
 ## Local managed identity status
 
@@ -755,11 +771,11 @@ The Rust client exposes `configure_master_identity(key, request)`,
 `retire_master_identity_by_id(request)` for a known stable target; it does not
 automatically retry them. Both retirement clients require HTTP 204. Retain the
 exact setup key/request after an uncertain setup and the exact target request
-after uncertain retirement. No remote listener,
-follower credential, trust installation or snapshot publication is created by
-these commands. Replacement root trust still needs explicit follower approval;
-listener teardown/reenrollment integration must precede remote runtime activation.
-Desktop offers explicit setup and retirement confirmation, preserves exact
+after uncertain retirement. No follower credential, trust installation or
+snapshot publication is created by these commands. Replacement root trust still
+needs explicit follower approval. Retiring or replacing a serving identity stops
+the current listener generation; restart the daemon after provisioning a valid
+replacement. Desktop offers explicit setup and retirement confirmation, preserves exact
 uncertain requests within the live Settings connection, and reloads both status
 views after confirmed changes. App restart reloads the current stable identity ID
 from status, allowing retirement without the original setup key. Live vault,

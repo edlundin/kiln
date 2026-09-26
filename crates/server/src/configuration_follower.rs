@@ -21,8 +21,10 @@ use kiln_protocol::{
     CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES,
     SubmitConfigurationFollowerEnrollmentRequest,
 };
-use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::{net::IpAddr, num::NonZeroU32};
+
+use super::LifecycleCoordinator;
 
 #[derive(Debug, thiserror::Error)]
 #[error("configuration follower service requires an explicit valid Host authority")]
@@ -33,11 +35,12 @@ pub struct InvalidConfigurationFollowerHost;
 pub struct ConfigurationFollowerRouter(pub(super) Router);
 
 struct FollowerState<T, F> {
-    store: T,
+    store: Arc<T>,
     credential_digest: F,
     expected_host: HeaderValue,
     serving_identity: ConfigurationFollowerServingIdentity,
     max_retained_requests_per_authority: NonZeroU32,
+    lifecycle: LifecycleCoordinator,
 }
 
 /// Build a separate read-only service, never merge it into the local admin router.
@@ -56,35 +59,23 @@ pub fn configuration_follower_router<T, F>(
     expected_host: &str,
     serving_identity: ConfigurationFollowerServingIdentity,
     max_retained_requests_per_authority: NonZeroU32,
+    lifecycle: LifecycleCoordinator,
 ) -> Result<ConfigurationFollowerRouter, InvalidConfigurationFollowerHost>
 where
     T: ConfigurationAccessStore + 'static,
     F: Fn(&[u8]) -> Option<ConfigurationCredentialDigest> + Send + Sync + 'static,
 {
-    let authority: Authority = expected_host
-        .parse()
-        .map_err(|_| InvalidConfigurationFollowerHost)?;
-    let expected_host_name = authority
-        .host()
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or_else(|| authority.host());
-    if authority.host().is_empty()
-        || expected_host.contains('@')
-        || !expected_host_name.eq_ignore_ascii_case(&serving_identity.server_name)
-        || (authority.as_str() != authority.host()
-            && authority.port_u16().is_none_or(|port| port == 0))
-    {
-        return Err(InvalidConfigurationFollowerHost);
-    }
     let expected_host =
-        HeaderValue::from_str(expected_host).map_err(|_| InvalidConfigurationFollowerHost)?;
+        configuration_follower_host_authority(expected_host, &serving_identity.server_name)?;
+    let expected_host =
+        HeaderValue::from_str(&expected_host).map_err(|_| InvalidConfigurationFollowerHost)?;
     let state = Arc::new(FollowerState {
-        store,
+        store: Arc::new(store),
         credential_digest,
         expected_host,
         serving_identity,
         max_retained_requests_per_authority,
+        lifecycle,
     });
     Ok(ConfigurationFollowerRouter(
         Router::new()
@@ -116,7 +107,7 @@ where
         return PublicError::MethodNotAllowed.into_response();
     }
     let headers = request.headers();
-    if single_header(headers, header::HOST.as_str()) != Some(&state.expected_host)
+    if !matches_expected_host(headers, &state)
         || headers.contains_key(header::ORIGIN)
         || headers.contains_key(header::SEC_WEBSOCKET_PROTOCOL)
         || headers.contains_key(header::AUTHORIZATION)
@@ -168,26 +159,85 @@ where
     };
     let attempt_id = submission.attempt_id.clone();
     let request_id = ConfigurationFollowerEnrollmentRequestId::from_ulid(ulid::Ulid::generate());
-    match state
-        .store
-        .submit_configuration_follower_enrollment_request(
-            &state.serving_identity,
-            state.max_retained_requests_per_authority,
-            &submission,
-            &request_id,
-        )
-        .await
+    let command = match state.lifecycle.begin_command() {
+        Ok(command) => command,
+        Err(error) => return error.into_response(),
+    };
+    let store = Arc::clone(&state.store);
+    let serving_identity = state.serving_identity.clone();
+    let max_retained_requests_per_authority = state.max_retained_requests_per_authority;
+    let receipt = match tokio::spawn(async move {
+        // Own the shared daemon command permit until the accepted SQLite
+        // transaction finishes, even if this HTTP connection is aborted.
+        let _command = command;
+        store
+            .submit_configuration_follower_enrollment_request(
+                &serving_identity,
+                max_retained_requests_per_authority,
+                &submission,
+                &request_id,
+            )
+            .await
+    })
+    .await
     {
-        Ok(receipt) if receipt.attempt_id == attempt_id => axum::Json(
-            super::configuration_access::enrollment_request_response(&receipt),
-        )
-        .into_response(),
-        Ok(_) => PublicError::ConfigurationFollowerEnrollmentRequest(
+        Ok(Ok(receipt)) => receipt,
+        Ok(Err(error)) => {
+            return PublicError::ConfigurationFollowerEnrollmentRequest(error).into_response();
+        }
+        Err(_) => return PublicError::ConfigurationSyncUnavailable.into_response(),
+    };
+    if receipt.attempt_id == attempt_id {
+        axum::Json(super::configuration_access::enrollment_request_response(
+            &receipt,
+        ))
+        .into_response()
+    } else {
+        PublicError::ConfigurationFollowerEnrollmentRequest(
             ConfigurationAccessError::IntegrityViolation,
         )
-        .into_response(),
-        Err(error) => PublicError::ConfigurationFollowerEnrollmentRequest(error).into_response(),
+        .into_response()
     }
+}
+
+/// Validate and canonicalize an externally configured HTTPS authority against
+/// the active certificate name. An omitted port means HTTPS port 443.
+pub fn configuration_follower_host_authority(
+    expected_host: &str,
+    server_name: &str,
+) -> Result<String, InvalidConfigurationFollowerHost> {
+    let authority: Authority = expected_host
+        .parse()
+        .map_err(|_| InvalidConfigurationFollowerHost)?;
+    let raw_host = authority
+        .host()
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or_else(|| authority.host());
+    if raw_host.is_empty()
+        || expected_host.contains('@')
+        || (authority.as_str() != authority.host()
+            && authority.port_u16().is_none_or(|port| port == 0))
+    {
+        return Err(InvalidConfigurationFollowerHost);
+    }
+    let host = match raw_host.parse::<IpAddr>() {
+        Ok(address) => address.to_string(),
+        Err(_) => raw_host.to_ascii_lowercase(),
+    };
+    if host != server_name {
+        return Err(InvalidConfigurationFollowerHost);
+    }
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let port = authority.port_u16().unwrap_or(443);
+    if port == 0 {
+        return Err(InvalidConfigurationFollowerHost);
+    }
+    Ok(format!("{host}:{port}"))
 }
 
 fn parse_submission(
@@ -235,7 +285,7 @@ where
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
     let headers = request.headers();
-    if single_header(headers, header::HOST.as_str()) != Some(&state.expected_host)
+    if !matches_expected_host(headers, &state)
         || headers.contains_key(header::ORIGIN)
         || headers.contains_key(header::SEC_WEBSOCKET_PROTOCOL)
     {
@@ -301,6 +351,17 @@ fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a HeaderVal
         return None;
     }
     Some(value)
+}
+
+fn matches_expected_host<T, F>(headers: &HeaderMap, state: &FollowerState<T, F>) -> bool {
+    let Some(value) =
+        single_header(headers, header::HOST.as_str()).and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    configuration_follower_host_authority(value, &state.serving_identity.server_name)
+        .ok()
+        .is_some_and(|canonical| canonical.as_bytes() == state.expected_host.as_bytes())
 }
 
 fn identity_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, StatusCode> {

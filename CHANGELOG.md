@@ -8,6 +8,9 @@
 - EDL-322: Fence follower snapshot reads to the exact active serving identity
   and approved enrollment lifecycle; grants without a trustworthy issuance
   attempt fail closed.
+- EDL-322: Add opt-in daemon TLS serving for the isolated follower router with
+  explicit network budgets, committed-identity supervision, expiry shutdown,
+  and owned admission of remote enrollment mutations.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322
 

@@ -88,7 +88,7 @@ use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use tokio::{
     io::AsyncReadExt,
     process::Command,
-    sync::Mutex,
+    sync::{Mutex, watch},
     time::{Duration, timeout},
 };
 use ulid::Ulid;
@@ -517,6 +517,7 @@ pub struct SqliteStore {
     connection: Arc<Mutex<SqliteConnection>>,
     configuration_identity_operations: Arc<Mutex<()>>,
     configuration_enrollment_operations: Arc<Mutex<()>>,
+    configuration_serving_changes: watch::Sender<u64>,
 }
 
 pub const DETERMINISTIC_SUBPROCESS_ARGUMENT: &str = "--kiln-deterministic-subprocess";
@@ -846,11 +847,25 @@ impl SqliteStore {
         backfill_workspace_root_filesystem_identities(&mut connection)
             .await
             .map_err(InfrastructureError::Database)?;
+        let (configuration_serving_changes, _) = watch::channel(0);
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             configuration_identity_operations: Arc::new(Mutex::new(())),
             configuration_enrollment_operations: Arc::new(Mutex::new(())),
+            configuration_serving_changes,
         })
+    }
+
+    /// Subscribe to committed changes that may invalidate a managed TLS
+    /// serving identity. Watchers must re-read current state after each signal;
+    /// events about historical identities can be unrelated to the active one.
+    pub fn subscribe_configuration_serving_changes(&self) -> watch::Receiver<u64> {
+        self.configuration_serving_changes.subscribe()
+    }
+
+    pub(crate) fn notify_configuration_serving_change(&self) {
+        self.configuration_serving_changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     pub async fn get_artifact_metadata(

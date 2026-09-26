@@ -1439,19 +1439,28 @@ The internal `ConfigurationAccessStore` now registers and permanently revokes
 follower-specific read credentials under current-master state preconditions.
 Migration 38 persists only domain-separated credential digests and immutable
 bindings/tombstones. Leaving a master role revokes its grants atomically.
-Authorized follower snapshot acquisition checks the current authority and grant
-in the same transaction as bounded content validation, without issuing a reusable
-authorization proof. No protocol change or remote listener is enabled by this
-storage boundary; authenticated encrypted enrollment, master identity pinning and
-private credential delivery remain required.
+Authorized follower snapshot acquisition receives an explicit serving identity.
+In the same transaction, it checks the current master authority and exact active
+managed identity ID, server name, CA fingerprint and leaf/CA validity before grant
+lookup. It then resolves the grant's issuance attempt to its immutable request
+and approved lifecycle, requires the lifecycle grant ID to equal the exact grant,
+and matches the request authority, follower, server name and CA fingerprint to
+the active serving identity before bounded content validation. Legacy grants
+without a trustworthy issuance attempt fail closed; no reusable authorization
+proof escapes. No protocol change or remote listener is enabled by this boundary.
 
 `configuration_follower_router` is a separate, currently unmounted server router
 for restricted snapshot GETs and digest-only enrollment POSTs. Snapshot reads
 require exact Host and singular bearer/identity headers; intake rejects bearer
 headers and uses the transactional request store. Both reject browser/WebSocket/
 query inputs and expose no administrative operations. Responses are no-store.
-The owning daemon must still supply authenticated HTTPS, explicit enrollment,
-credential-adapter composition, resource limits and shutdown handling before serving it.
+Unknown, revoked, mismatched and stale-identity reads return the same content-free
+401. This identity check is per request, not a serving lease or proof that an
+already-authorized handler is cancelled. Identity retirement may race with an
+in-flight response; a future listener supervisor must cancel or drain affected
+handlers when the serving identity changes. The owning daemon must still compose
+authenticated HTTPS, the credential adapter, resource limits and shutdown
+handling before serving the router.
 
 The router is now opaque and can enter only the dedicated
 `serve_configuration_followers` TLS serving boundary. Explicit DER identity and

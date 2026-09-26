@@ -266,10 +266,13 @@ where
         return Err(StatusCode::UNAUTHORIZED);
     }
     let authority = ConfigurationAuthority::new(group, master);
+    if authority != state.serving_identity.authority {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let stored = state
         .store
         .read_configuration_for_follower(
-            &authority,
+            &state.serving_identity,
             &follower,
             &digest,
             super::configuration_publication::bundle_limits(),

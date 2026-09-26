@@ -395,7 +395,7 @@ impl ConfigurationAccessStore for SqliteStore {
 
     async fn read_configuration_for_follower(
         &self,
-        authority: &ConfigurationAuthority,
+        serving_identity: &ConfigurationFollowerServingIdentity,
         follower: &KilnInstanceId,
         digest: &ConfigurationCredentialDigest,
         limits: ConfigurationSnapshotReadLimits,
@@ -406,17 +406,55 @@ impl ConfigurationAccessStore for SqliteStore {
             .await
             .map_err(Error::State)?
             .ok_or(Error::Denied)?;
-        if !matches!(state.role(), ConfigurationRole::Master(current) if current == authority)
+        if !matches!(state.role(), ConfigurationRole::Master(current) if current == &serving_identity.authority)
             || state.instance_id() == follower
         {
             return Err(Error::Denied);
         }
+
+        match require_active_serving_identity_binding(&mut transaction, serving_identity).await {
+            Ok(()) => {}
+            Err(Error::Conflict) => return Err(Error::Denied),
+            Err(error) => return Err(error),
+        }
+
         let grant = load_by_digest(&mut transaction, digest)
             .await?
             .ok_or(Error::Denied)?;
-        if grant.revoked || grant.authority != *authority || grant.follower_id != *follower {
+        if grant.revoked
+            || grant.authority != serving_identity.authority
+            || grant.follower_id != *follower
+        {
             return Err(Error::Denied);
         }
+
+        let Some(attempt_id) = grant.issuance_attempt_id.as_ref() else {
+            return Err(Error::Denied);
+        };
+        let Some(origin) = load_enrollment_request_by_attempt(&mut transaction, attempt_id).await?
+        else {
+            return Err(Error::Denied);
+        };
+        let Some(issued_grant) = origin.metadata.grant.as_ref() else {
+            return Err(Error::Denied);
+        };
+        if origin.metadata.phase != ConfigurationFollowerEnrollmentRequestPhase::Approved
+            || origin.metadata.attempt_id != *attempt_id
+            || issued_grant.grant_id != grant.grant_id
+            || issued_grant.issuance_attempt_id.as_ref() != Some(attempt_id)
+            || issued_grant.authority != grant.authority
+            || issued_grant.follower_id != grant.follower_id
+            || issued_grant.issued_state_version != grant.issued_state_version
+            || issued_grant.revoked != grant.revoked
+            || origin.credential_digest != grant.credential_digest
+            || origin.metadata.authority != serving_identity.authority
+            || origin.metadata.follower_id != *follower
+            || origin.metadata.server_name != serving_identity.server_name
+            || origin.metadata.master_ca_fingerprint != serving_identity.master_ca_fingerprint
+        {
+            return Err(Error::Denied);
+        }
+
         // Authorization and snapshot acquisition share the transaction and store
         // lock. No reusable authorization proof escapes this boundary.
         let snapshot =

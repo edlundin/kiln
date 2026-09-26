@@ -133,8 +133,9 @@ pub struct ConfigurationFollowerEnrollmentRequestSubmission {
 }
 
 /// Exact managed identity context under which the restricted follower service
-/// was composed. The store rechecks every field and certificate validity inside
-/// the admission transaction; this value alone does not prove a live TLS peer.
+/// was composed. The store rechecks its exact persisted identity and certificate
+/// validity inside admission and snapshot-read transactions; this value alone
+/// does not prove a live TLS peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigurationFollowerServingIdentity {
     pub authority: ConfigurationAuthority,
@@ -309,14 +310,15 @@ pub trait ConfigurationAccessStore: Send + Sync {
         grant_id: &ConfigurationReadGrantId,
     ) -> impl Future<Output = Result<(), ConfigurationAccessError>> + Send;
 
-    /// Check the credential binding/current master and read bounded, validated
-    /// content in one transaction. Never grants local API or publication access.
-    /// The transport must hash a presented bearer, not accept a client digest.
-    /// Revocation prevents subsequent reads; already-returned bytes cannot be
-    /// recalled. A success does not authenticate the master to the follower.
+    /// Check the exact current serving identity and approved enrollment binding,
+    /// then read bounded, validated content in one transaction. Never grants
+    /// local API or publication access. The transport must hash a presented
+    /// bearer, not accept a client digest. Revocation prevents subsequent reads;
+    /// already-authorized or returned bytes cannot be recalled. A success does
+    /// not authenticate the master to the follower.
     fn read_configuration_for_follower(
         &self,
-        authority: &ConfigurationAuthority,
+        serving_identity: &ConfigurationFollowerServingIdentity,
         follower: &KilnInstanceId,
         digest: &ConfigurationCredentialDigest,
         limits: ConfigurationSnapshotReadLimits,

@@ -5,6 +5,9 @@
 - EDL-322: Add bounded digest-only remote follower enrollment intake, exact
   serving-identity admission and durable current-state receipts through the
   isolated pinned HTTPS client.
+- EDL-322: Fence follower snapshot reads to the exact active serving identity
+  and approved enrollment lifecycle; grants without a trustworthy issuance
+  attempt fail closed.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322
 

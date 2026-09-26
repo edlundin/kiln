@@ -152,8 +152,9 @@ Its SHA-256 digest covers the complete prefixed credential and is the only
 credential representation stored in SQLite. Raw material must remain confined to
 private enrollment delivery/storage and sensitive transport headers.
 
-`ConfigurationAccessStore` is an internal master-side issuance/read boundary,
-with no remote enrollment or bearer-delivery route and no network listener.
+`ConfigurationAccessStore` is an internal master-side grant issuance/read
+boundary. The isolated router accepts digest-only remote request claims, but no
+operation delivers bearer material and the daemon does not mount the router.
 Registration binds one digest permanently to a stable grant ID, the master/group, claimed
 follower instance and original master state version. A stable request-attempt ID
 deduplicates issuance and permits metadata-only recovery after a lost response.
@@ -172,21 +173,35 @@ API lists and reads grant metadata, looks up an issuance attempt after an
 uncertain response, and revokes by grant ID. It never returns a bearer or digest.
 Existing legacy active duplicates are preserved during migration; new issuance
 for that follower remains blocked until an administrator explicitly revokes the
-old active grants.
+old active grants. Identity retirement or historical-identity cleanup does not
+revoke grants. Before re-enrollment, an administrator must revoke the previous
+grant by its exact stable ID; any active legacy duplicates must also be revoked
+before approval of a replacement grant.
 
-`read_configuration_for_follower` verifies the current master/group, follower and
-unrevoked digest, then acquires the bounded, fully validated snapshot in the same
-read transaction. Unknown, revoked and mismatched bindings receive the same denied
-category, including when no snapshot exists. Revocation prevents later reads;
-already-acquired content cannot be recalled. The result grants no general local
-API, publication, credential-vault or execution access. The eventual transport
-must parse and hash a presented bearer itself, never accept a client-supplied
-digest as proof. No reusable authorization decision is returned.
+`read_configuration_for_follower` receives the router's exact serving identity.
+Before grant lookup, one transaction verifies current master authority and the
+exact active managed identity ID, server name, CA fingerprint and leaf/CA
+validity. A grant must have an issuance attempt that resolves to its immutable
+request and approved lifecycle; the lifecycle's grant ID must equal the exact
+grant, and the request authority, follower, server name and CA fingerprint must
+match the current serving identity. Legacy grants without a trustworthy issuance
+attempt fail closed. Only then does the transaction acquire the bounded, fully
+validated snapshot. Unknown, revoked, mismatched and stale-identity bindings
+receive the same denied category, including when no snapshot exists. Revocation
+prevents subsequent reads; a read authorized before revocation or identity
+retirement may still be in flight and its acquired bytes cannot be recalled.
+This per-request check is not a serving lease and does not cancel an authorized
+handler; listener supervision must cancel or drain affected handlers across
+identity retirement before exposing a changed serving identity. The result grants
+no general local API, publication, credential-vault or execution access. The
+transport must hash a presented bearer, never accept a client-supplied digest as
+proof, and no reusable authorization decision is returned.
 
-This does not complete remote enrollment. Master identity pinning over a live
-connection, encrypted authenticated transport, master-side request approval and
-acknowledgement, administration UI, reconnect and listener composition remain
-to be wired before remote access is enabled.
+The digest-only intake route, local exact approval/rejection, pinned client and
+receipt validation are implemented, but the daemon does not mount the router.
+End-to-end enrollment still needs daemon listener composition, identity-lifecycle
+supervision and a connected administration workflow before remote access is
+enabled. No live remote interaction has been verified.
 
 ## Selected automatic enrollment direction
 
@@ -205,11 +220,11 @@ request ID, claimed follower ID and displayed digest fingerprint bound together.
 That approval is the trust decision for this initial design; the pinned TLS
 connection authenticates the master to the follower, not the follower to the
 master. A different request or digest requires separate review. Exact retries
-reuse the follower's vaulted bearer and request ID. Once remote acknowledgement
-is implemented, a retry will recover the original request/grant state and will
-never reactivate a revoked attempt. A follower that needs a new credential first
-receives explicit revocation of its old grant, then creates a new secret and
-request for approval.
+reuse the follower's vaulted bearer and request ID. The pinned client validates
+the receipt's complete request binding and fingerprint; retries recover current
+request/grant state and never reactivate a revoked attempt. A follower that needs
+a new credential first receives explicit revocation of its old grant, then
+creates a new secret and request for approval.
 
 The stable grant and request-attempt IDs, digest-only registration, exact retry
 deduplication, metadata recovery, and local list/revoke API are implemented. An
@@ -403,12 +418,22 @@ digest-only claim and returns the current journal receipt. Pending and terminal
 records all count toward the caller's per-authority cap; exact retries remain
 recoverable at capacity.
 
-Unknown, revoked and mismatched grants yield content-free HTTP 401 with a Bearer
-challenge. Missing content yields 404 only after authorization. Transfer budget
-failures yield 413; storage/integrity failures yield 503. The router shares local
-export's full bounded JSON encoder and validator limits. Every response, including
-fallbacks/errors, has `Cache-Control: no-store`. Other paths have no registered
-operations, and no general API, publication, vault or execution access is available.
+Snapshot GET rechecks the router's exact active serving identity and validity
+inside the same transaction, then requires a grant linked by its issuance attempt
+to an approved immutable request. Its lifecycle grant ID must equal that exact
+grant, and request authority, follower, server name and CA fingerprint must match
+the active serving identity. Legacy grants without issuance attempts fail closed.
+Unknown, revoked, mismatched and stale-identity grants yield the same content-free
+HTTP 401 with a Bearer challenge. Missing content yields 404 only after
+authorization. Transfer budget failures yield 413; storage/integrity failures
+yield 503. These checks run per request; they are not a serving lease or proof
+that an already-authorized handler is cancelled. A request authorized before
+identity retirement may remain in flight and return its acquired bytes, so
+listener supervision must cancel or drain old handlers when the serving identity
+changes. The router shares local export's full bounded JSON encoder and validator
+limits. Every response, including fallbacks/errors, has `Cache-Control: no-store`.
+Other paths have no registered operations, and no general API, publication, vault
+or execution access is available.
 
 Router compilation and managed TLS acquisition are not remote-delivery
 acceptance. Active master TLS material can be checked and converted to TLS

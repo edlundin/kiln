@@ -174,6 +174,33 @@ The Rust client also supports [publication](rust-client.md#configuration-snapsho
 [follower snapshot fetch](../spec/configuration-sync.md#explicit-follower-snapshot-fetch-and-application).
 Provider credentials remain local to each instance.
 
+## Follower exchange and retirement
+
+Settings → Follower enrollment lists attempts on the connected daemon in bounded
+pages, including when the instance is still unassigned. Select an attempt to
+reload its durable state, pinned server name/CA fingerprint, authority and latest
+receipt. Preparation currently uses the local API; the desktop can submit and
+manage an already prepared attempt.
+
+For a prepared attempt, enter the master HTTPS origin and explicit positive
+connect and whole-request deadlines in milliseconds. Connect must not exceed the
+whole-request deadline. **Review submission / approval check…** freezes those
+settings and the attempt. Confirmation contacts only the saved pinned master
+through the daemon. A pending receipt leaves the instance unassigned; an approved
+active receipt may atomically join it as a follower. Exchange does not fetch a
+snapshot. Reload the attempt to see its receipt and **Copy request fingerprint**;
+compare that fingerprint on the master before approving, then exchange again to
+observe approval. Refresh the configuration status section after a role change.
+
+**Retire enrollment…** permanently retires the attempt and deletes its local vault
+credential after confirmation. This does not leave an existing follower role,
+remove a stored snapshot, or revoke the master’s grant. **Retry credential
+cleanup…** remains available on retired attempts for uncertain or failed vault
+deletion. After any uncertain operation, reload the same attempt before retrying.
+Disconnect discards unsubmitted confirmation and ignores stale replies, but an
+accepted daemon operation may still finish. Receipt status is historical; it does
+not prove current connectivity or that a grant has not subsequently been revoked.
+
 ## Master enrollment decisions
 
 Settings → Follower enrollment requests provides **Refresh requests** and

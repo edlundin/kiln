@@ -4,13 +4,14 @@ use kiln_core::{
     ConfigurationCredentialDigest, ConfigurationFollowerEnrollmentRequest,
     ConfigurationFollowerEnrollmentRequestConfirmation, ConfigurationFollowerEnrollmentRequestId,
     ConfigurationFollowerEnrollmentRequestPhase, ConfigurationFollowerEnrollmentRequestSubmission,
-    ConfigurationGroupId, ConfigurationInstanceState, ConfigurationReadGrant,
-    ConfigurationReadGrantAttemptId, ConfigurationReadGrantId, ConfigurationReadGrantSummary,
-    ConfigurationRole, ConfigurationSnapshotReadLimits, ConfigurationStateError, ContentHash,
-    KilnInstanceId, StoredConfigurationSnapshot,
+    ConfigurationFollowerServingIdentity, ConfigurationGroupId, ConfigurationInstanceState,
+    ConfigurationReadGrant, ConfigurationReadGrantAttemptId, ConfigurationReadGrantId,
+    ConfigurationReadGrantSummary, ConfigurationRole, ConfigurationSnapshotReadLimits,
+    ConfigurationStateError, ContentHash, KilnInstanceId, StoredConfigurationSnapshot,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteRow};
+use std::num::NonZeroU32;
 
 const MAX_ENROLLMENT_REQUEST_PAGE_SIZE: usize = 101;
 
@@ -26,7 +27,8 @@ macro_rules! enrollment_request_select {
 impl ConfigurationAccessStore for SqliteStore {
     async fn submit_configuration_follower_enrollment_request(
         &self,
-        expected: &ConfigurationInstanceState,
+        serving_identity: &ConfigurationFollowerServingIdentity,
+        max_retained_requests_per_authority: NonZeroU32,
         submission: &ConfigurationFollowerEnrollmentRequestSubmission,
         proposed_request_id: &ConfigurationFollowerEnrollmentRequestId,
     ) -> Result<ConfigurationFollowerEnrollmentRequest, Error> {
@@ -37,9 +39,16 @@ impl ConfigurationAccessStore for SqliteStore {
         if !super::configuration_identity::valid_server_name(&submission.server_name) {
             return Err(Error::InvalidRequest);
         }
-        let authority = registration_authority(expected, &submission.follower_id)?;
-        if authority != &submission.authority {
+        let retention_limit = i64::from(max_retained_requests_per_authority.get());
+        if !super::configuration_identity::valid_server_name(&serving_identity.server_name) {
             return Err(Error::InvalidRequest);
+        }
+        if submission.follower_id == *serving_identity.authority.master_id()
+            || submission.authority != serving_identity.authority
+            || submission.server_name != serving_identity.server_name
+            || submission.master_ca_fingerprint != serving_identity.master_ca_fingerprint
+        {
+            return Err(Error::Conflict);
         }
 
         let mut connection = self.connection.lock().await;
@@ -47,7 +56,17 @@ impl ConfigurationAccessStore for SqliteStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|_| Error::Unavailable)?;
-        require_current(&mut transaction, expected).await?;
+
+        let current = configuration_sync::load(&mut transaction)
+            .await
+            .map_err(Error::State)?
+            .ok_or(Error::Conflict)?;
+        if current.instance_id() != serving_identity.authority.master_id()
+            || !matches!(current.role(), ConfigurationRole::Master(authority) if authority == &serving_identity.authority)
+        {
+            return Err(Error::Conflict);
+        }
+        require_active_serving_identity_binding(&mut transaction, serving_identity).await?;
 
         if let Some(existing) =
             load_enrollment_request_by_attempt(&mut transaction, &submission.attempt_id).await?
@@ -59,13 +78,17 @@ impl ConfigurationAccessStore for SqliteStore {
             return Ok(existing.metadata);
         }
 
-        require_active_identity_binding(
-            &mut transaction,
-            &submission.authority,
-            &submission.server_name,
-            &submission.master_ca_fingerprint,
+        let retained_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM configuration_follower_enrollment_requests WHERE group_id = ? AND master_instance_id = ?",
         )
-        .await?;
+        .bind(serving_identity.authority.group_id().as_str())
+        .bind(serving_identity.authority.master_id().as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+        if retained_count >= retention_limit {
+            return Err(Error::RetentionLimitReached);
+        }
 
         sqlx::query(
             "INSERT INTO configuration_follower_enrollment_requests (request_id, attempt_id, follower_instance_id, follower_state_version, group_id, master_instance_id, server_name, master_ca_fingerprint, credential_digest, received_master_state_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -79,7 +102,7 @@ impl ConfigurationAccessStore for SqliteStore {
         .bind(&submission.server_name)
         .bind(submission.master_ca_fingerprint.as_str())
         .bind(submission.credential_digest.as_str())
-        .bind(expected.version() as i64)
+        .bind(i64::try_from(current.version()).map_err(|_| Error::IntegrityViolation)?)
         .execute(&mut *transaction)
         .await
         .map_err(|error| {
@@ -724,6 +747,52 @@ async fn require_active_identity_binding(
         return Err(Error::IntegrityViolation);
     }
     if current_server_name != server_name || hash_bytes(&ca_der) != *ca_fingerprint {
+        return Err(Error::Conflict);
+    }
+    Ok(())
+}
+
+async fn require_active_serving_identity_binding(
+    connection: &mut SqliteConnection,
+    serving_identity: &ConfigurationFollowerServingIdentity,
+) -> Result<(), Error> {
+    let row = sqlx::query(
+        "SELECT server_name, ca_der, not_before, leaf_not_after, ca_not_after, unixepoch() AS current_time FROM configuration_master_identities WHERE identity_id = ? AND group_id = ? AND master_instance_id = ? AND status = 'active'",
+    )
+    .bind(serving_identity.identity_id.as_str())
+    .bind(serving_identity.authority.group_id().as_str())
+    .bind(serving_identity.authority.master_id().as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| Error::Unavailable)?
+    .ok_or(Error::Conflict)?;
+    let current_server_name: String = row
+        .try_get("server_name")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let ca_der: Vec<u8> = row
+        .try_get("ca_der")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let not_before: i64 = row
+        .try_get("not_before")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let leaf_not_after: i64 = row
+        .try_get("leaf_not_after")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let ca_not_after: i64 = row
+        .try_get("ca_not_after")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let current_time: i64 = row
+        .try_get("current_time")
+        .map_err(|_| Error::IntegrityViolation)?;
+    if ca_der.is_empty() {
+        return Err(Error::IntegrityViolation);
+    }
+    if current_server_name != serving_identity.server_name
+        || hash_bytes(&ca_der) != serving_identity.master_ca_fingerprint
+        || not_before > current_time
+        || leaf_not_after <= current_time
+        || ca_not_after <= current_time
+    {
         return Err(Error::Conflict);
     }
     Ok(())

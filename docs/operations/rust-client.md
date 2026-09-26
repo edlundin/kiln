@@ -300,3 +300,18 @@ grant, including revocation, and pending requests can still be rejected after
 identity retirement. Metadata reads do not assert current certificate validity
 or live TLS readiness. These calls do not authenticate the claimed follower or
 enable remote intake.
+
+Protocol `0.36.0` adds the digest-only
+`ConfigurationSyncClient::submit_enrollment_request(attempt_id,
+follower_state_version)` method. The pinned client now takes the approved master
+server name in addition to the HTTPS origin and CA, and sends its bearer only on
+snapshot GET. The enrollment POST contains the stable attempt, follower/version,
+authority, server name, CA fingerprint and SHA-256 credential digest; it sends no
+Authorization header. Its strict body is capped at 4 KiB. Receipts must echo the
+binding, use a canonical request ID, and return a confirmation fingerprint that
+matches the submitted digest and complete binding; approved receipts
+include the grant's current revoked state. Exact retries recover current pending
+or terminal state. The isolated router's caller configures a positive
+per-authority cap over all retained rows; at exhaustion, new attempts return HTTP
+429 and exact retries remain available. No daemon listener, follower role
+transition or local-admin POST route is enabled.

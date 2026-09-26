@@ -1,10 +1,15 @@
-//! Restricted HTTPS transport for an explicitly enrolled configuration follower.
-//! No daemon listener or enrollment operation is enabled by this client.
+//! Restricted HTTPS transport for an explicitly pinned configuration follower.
+//! No daemon listener or automatic enrollment orchestration is enabled here.
 
 use kiln_protocol::{
-    CONFIGURATION_PUBLICATION_MAX_BYTES, CONFIGURATION_SNAPSHOT_PATH, ConfigurationSnapshotResponse,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_RECEIPT_MAX_BYTES,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH, CONFIGURATION_PUBLICATION_MAX_BYTES,
+    CONFIGURATION_SNAPSHOT_PATH, ConfigurationFollowerEnrollmentRequestPhase,
+    ConfigurationFollowerEnrollmentRequestResponse, ConfigurationSnapshotResponse,
+    SubmitConfigurationFollowerEnrollmentRequest,
 };
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
+use sha2::{Digest as _, Sha256};
 use std::time::Duration;
 
 /// Administrative enrollment must bind all these values together before any
@@ -12,6 +17,8 @@ use std::time::Duration;
 pub struct ConfigurationMasterPin {
     /// HTTPS origin only: no credentials, path prefix, query or fragment.
     pub origin: String,
+    /// Canonical DNS/IP name in the approved master identity and TLS SAN.
+    pub server_name: String,
     /// One DER-encoded trust anchor dedicated to this master's TLS identity.
     /// The hostname and chain are still verified; system roots are excluded.
     pub certificate_authority_der: Vec<u8>,
@@ -34,11 +41,13 @@ pub enum ConfigurationSyncError {
     InvalidPin,
     #[error("configuration synchronization credential is invalid")]
     InvalidCredential,
+    #[error("configuration follower enrollment request is invalid")]
+    InvalidEnrollmentRequest,
     #[error("configuration synchronization deadlines are invalid")]
     InvalidTimeouts,
     #[error("configuration synchronization transport failed")]
     Transport,
-    #[error("configuration snapshot exceeds the transfer budget")]
+    #[error("configuration synchronization response exceeds the transfer budget")]
     TooLarge,
     #[error("configuration master returned HTTP {status}")]
     HttpStatus { status: u16 },
@@ -48,14 +57,22 @@ pub enum ConfigurationSyncError {
     AuthorityMismatch,
 }
 
-/// Can only fetch configuration snapshots. It cannot call the general local API,
-/// change authority, publish, or discover credentials. Deliberately not Debug or
-/// Clone; each instance keeps one immutable peer/credential binding.
+/// Can only fetch snapshots and submit the exact credential digest for the
+/// pinned follower enrollment attempt. The bearer is sent only on snapshot GET,
+/// never on intake POST. It cannot call the general local API, change authority,
+/// publish, or discover credentials. Deliberately not Debug or Clone; each
+/// instance keeps one immutable peer/credential binding.
 pub struct ConfigurationSyncClient {
     http: reqwest::Client,
     snapshot_url: reqwest::Url,
+    enrollment_request_url: reqwest::Url,
+    authorization: HeaderValue,
     master_instance_id: String,
     group_id: String,
+    follower_instance_id: String,
+    server_name: String,
+    master_ca_fingerprint: String,
+    credential_digest: String,
 }
 
 impl ConfigurationSyncClient {
@@ -73,6 +90,7 @@ impl ConfigurationSyncClient {
             || !valid_id(&pin.follower_instance_id, "ins_")
             || !valid_id(&pin.group_id, "cfg_")
             || pin.master_instance_id == pin.follower_instance_id
+            || !valid_server_name(&pin.server_name)
             || pin
                 .origin
                 .bytes()
@@ -80,19 +98,23 @@ impl ConfigurationSyncClient {
         {
             return Err(Error::InvalidPin);
         }
-        let mut snapshot_url = reqwest::Url::parse(&pin.origin).map_err(|_| Error::InvalidPin)?;
-        if snapshot_url.scheme() != "https"
-            || snapshot_url.host().is_none()
-            || snapshot_url.port_or_known_default() == Some(0)
-            || !snapshot_url.username().is_empty()
-            || snapshot_url.password().is_some()
-            || snapshot_url.path() != "/"
-            || snapshot_url.query().is_some()
-            || snapshot_url.fragment().is_some()
+        let base_url = reqwest::Url::parse(&pin.origin).map_err(|_| Error::InvalidPin)?;
+        if base_url.scheme() != "https"
+            || base_url.host().is_none()
+            || !url_host_matches(&base_url, &pin.server_name)
+            || base_url.port_or_known_default() == Some(0)
+            || !base_url.username().is_empty()
+            || base_url.password().is_some()
+            || base_url.path() != "/"
+            || base_url.query().is_some()
+            || base_url.fragment().is_some()
         {
             return Err(Error::InvalidPin);
         }
+        let mut snapshot_url = base_url.clone();
         snapshot_url.set_path(CONFIGURATION_SNAPSHOT_PATH);
+        let mut enrollment_request_url = base_url;
+        enrollment_request_url.set_path(CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH);
         // Independent of the unrestricted local bearer format. Keep this wire
         // grammar aligned with infrastructure::ConfigurationReadCredential.
         if credential.len() != 86
@@ -119,19 +141,8 @@ impl ConfigurationSyncClient {
         let mut authorization =
             HeaderValue::from_bytes(&bearer).map_err(|_| Error::InvalidCredential)?;
         authorization.set_sensitive(true);
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, authorization);
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        for (name, value) in [
-            ("kiln-configuration-master", &pin.master_instance_id),
-            ("kiln-configuration-group", &pin.group_id),
-            ("kiln-configuration-follower", &pin.follower_instance_id),
-        ] {
-            headers.insert(
-                name,
-                HeaderValue::from_str(value).map_err(|_| Error::InvalidPin)?,
-            );
-        }
+        let credential_digest = lower_hex(&Sha256::digest(credential));
+        let master_ca_fingerprint = lower_hex(&Sha256::digest(&pin.certificate_authority_der));
         let http = reqwest::Client::builder()
             .tls_backend_rustls()
             .tls_certs_only([certificate])
@@ -147,14 +158,19 @@ impl ConfigurationSyncClient {
             .no_zstd()
             .connect_timeout(timeouts.connect)
             .timeout(timeouts.request)
-            .default_headers(headers)
             .build()
             .map_err(|_| Error::InvalidPin)?;
         Ok(Self {
             http,
             snapshot_url,
+            enrollment_request_url,
+            authorization,
             master_instance_id: pin.master_instance_id,
             group_id: pin.group_id,
+            follower_instance_id: pin.follower_instance_id,
+            server_name: pin.server_name,
+            master_ca_fingerprint,
+            credential_digest,
         })
     }
 
@@ -169,6 +185,11 @@ impl ConfigurationSyncClient {
         let mut response = self
             .http
             .get(self.snapshot_url.clone())
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, self.authorization.clone())
+            .header("kiln-configuration-master", &self.master_instance_id)
+            .header("kiln-configuration-group", &self.group_id)
+            .header("kiln-configuration-follower", &self.follower_instance_id)
             .send()
             .await
             .map_err(|_| Error::Transport)?;
@@ -217,6 +238,68 @@ impl ConfigurationSyncClient {
         }
         Ok(snapshot)
     }
+
+    /// Submit the immutable digest-only enrollment claim through the pinned
+    /// HTTPS channel. The bearer is never attached to this POST. Repeating the
+    /// same attempt ID and local state version recovers the current master
+    /// receipt; the server validates the exact pin before returning it.
+    pub async fn submit_enrollment_request(
+        &self,
+        attempt_id: &str,
+        follower_state_version: u64,
+    ) -> Result<ConfigurationFollowerEnrollmentRequestResponse, ConfigurationSyncError> {
+        use ConfigurationSyncError as Error;
+        if !valid_attempt_id(attempt_id)
+            || follower_state_version == 0
+            || follower_state_version > i64::MAX as u64
+        {
+            return Err(Error::InvalidEnrollmentRequest);
+        }
+        let request = SubmitConfigurationFollowerEnrollmentRequest {
+            attempt_id: attempt_id.to_owned(),
+            follower_id: self.follower_instance_id.clone(),
+            follower_state_version,
+            group_id: self.group_id.clone(),
+            master_instance_id: self.master_instance_id.clone(),
+            server_name: self.server_name.clone(),
+            master_ca_fingerprint: self.master_ca_fingerprint.clone(),
+            credential_digest: self.credential_digest.clone(),
+        };
+        let mut response = self
+            .http
+            .post(self.enrollment_request_url.clone())
+            .header(ACCEPT, "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|_| Error::Transport)?;
+        let status = response.status();
+        let cap = CONFIGURATION_FOLLOWER_ENROLLMENT_RECEIPT_MAX_BYTES;
+        if response
+            .content_length()
+            .is_some_and(|length| length > cap as u64)
+        {
+            return Err(Error::TooLarge);
+        }
+        if status != reqwest::StatusCode::OK {
+            return Err(Error::HttpStatus {
+                status: status.as_u16(),
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| Error::Transport)? {
+            if chunk.len() > cap.saturating_sub(bytes.len()) {
+                return Err(Error::TooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let receipt: ConfigurationFollowerEnrollmentRequestResponse =
+            serde_json::from_slice(&bytes).map_err(|_| Error::InvalidResponse)?;
+        if !valid_enrollment_receipt(&receipt, &request, &self.master_ca_fingerprint) {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(receipt)
+    }
 }
 
 // Canonical ULID grammar, matching core IDs without importing domain types into
@@ -229,4 +312,132 @@ fn valid_id(value: &str, prefix: &str) -> bool {
                 .bytes()
                 .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
     })
+}
+
+fn valid_attempt_id(value: &str) -> bool {
+    value.strip_prefix("cra_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn valid_server_name(value: &str) -> bool {
+    use std::net::IpAddr;
+    if let Ok(address) = value.parse::<IpAddr>() {
+        return address.to_string() == value;
+    }
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
+fn url_host_matches(url: &reqwest::Url, server_name: &str) -> bool {
+    url.host_str().is_some_and(|host| {
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        host.eq_ignore_ascii_case(server_name)
+    })
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        value.push(HEX[(byte >> 4) as usize] as char);
+        value.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    value
+}
+
+fn valid_enrollment_receipt(
+    receipt: &ConfigurationFollowerEnrollmentRequestResponse,
+    request: &SubmitConfigurationFollowerEnrollmentRequest,
+    master_ca_fingerprint: &str,
+) -> bool {
+    let valid_confirmation_fingerprint = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !valid_attempt_id(&receipt.attempt_id)
+        || !receipt.request_id.starts_with("cfr_")
+        || receipt.request_id.len() != 36
+        || !receipt.request_id[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || receipt.attempt_id != request.attempt_id
+        || receipt.follower_id != request.follower_id
+        || receipt.follower_state_version != request.follower_state_version
+        || receipt.group_id != request.group_id
+        || receipt.master_instance_id != request.master_instance_id
+        || receipt.server_name != request.server_name
+        || receipt.master_ca_fingerprint != master_ca_fingerprint
+        || !valid_confirmation_fingerprint(&receipt.credential_fingerprint)
+        || receipt.received_master_state_version == 0
+        || receipt.received_master_state_version > i64::MAX as u64
+    {
+        return false;
+    }
+    if receipt.credential_fingerprint != enrollment_confirmation_fingerprint(receipt, request) {
+        return false;
+    }
+    match (receipt.phase, receipt.grant.as_ref()) {
+        (ConfigurationFollowerEnrollmentRequestPhase::Approved, Some(grant)) => {
+            grant.grant_id.starts_with("crg_")
+                && grant.grant_id.len() == 36
+                && grant.grant_id[4..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                && grant.issuance_attempt_id.as_deref() == Some(request.attempt_id.as_str())
+                && grant.group_id == request.group_id
+                && grant.master_instance_id == request.master_instance_id
+                && grant.follower_instance_id == request.follower_id
+                && grant.issued_state_version > 0
+                && grant.issued_state_version <= i64::MAX as u64
+        }
+        (
+            ConfigurationFollowerEnrollmentRequestPhase::Pending
+            | ConfigurationFollowerEnrollmentRequestPhase::Rejected,
+            None,
+        ) => true,
+        _ => false,
+    }
+}
+
+fn enrollment_confirmation_fingerprint(
+    receipt: &ConfigurationFollowerEnrollmentRequestResponse,
+    request: &SubmitConfigurationFollowerEnrollmentRequest,
+) -> String {
+    // Keep the framing aligned with infrastructure's durable confirmation hash.
+    let mut hash = Sha256::new();
+    hash.update(b"kiln configuration follower enrollment confirmation v1\0");
+    for value in [
+        receipt.request_id.as_str(),
+        request.attempt_id.as_str(),
+        request.follower_id.as_str(),
+        request.group_id.as_str(),
+        request.master_instance_id.as_str(),
+        request.server_name.as_str(),
+        request.master_ca_fingerprint.as_str(),
+        request.credential_digest.as_str(),
+    ] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.update(request.follower_state_version.to_be_bytes());
+    hash.update(receipt.received_master_state_version.to_be_bytes());
+    lower_hex(&hash.finalize())
 }

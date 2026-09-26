@@ -679,7 +679,7 @@ fn parse_confirmation(
     })
 }
 
-fn enrollment_request_response(
+pub(crate) fn enrollment_request_response(
     request: &ConfigurationFollowerEnrollmentRequest,
 ) -> ConfigurationFollowerEnrollmentRequestResponse {
     ConfigurationFollowerEnrollmentRequestResponse {

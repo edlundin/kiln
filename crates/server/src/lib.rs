@@ -3332,6 +3332,11 @@ impl PublicError {
                     error_code::IDEMPOTENCY_CONFLICT,
                     "Grant attempt ID was reused with different request data",
                 ),
+                kiln_core::ConfigurationAccessError::RetentionLimitReached => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    error_code::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_CAPACITY_REACHED,
+                    "Configuration follower enrollment request capacity reached",
+                ),
                 kiln_core::ConfigurationAccessError::Denied => (
                     StatusCode::NOT_FOUND,
                     error_code::CONFIGURATION_READ_GRANT_NOT_FOUND,
@@ -3367,6 +3372,11 @@ impl PublicError {
                     StatusCode::CONFLICT,
                     error_code::IDEMPOTENCY_CONFLICT,
                     "Confirmation did not match the immutable follower request",
+                ),
+                kiln_core::ConfigurationAccessError::RetentionLimitReached => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    error_code::CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_CAPACITY_REACHED,
+                    "Configuration follower enrollment request capacity reached",
                 ),
                 kiln_core::ConfigurationAccessError::Denied => (
                     StatusCode::NOT_FOUND,

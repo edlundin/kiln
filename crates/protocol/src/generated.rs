@@ -7,6 +7,7 @@ use crate::{
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_PATH,
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH,
     CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH, CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRE_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES,
     CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH, CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH,
     CONFIGURATION_IDENTITY_RETIRE_PATH, CONFIGURATION_READ_GRANT_BY_ATTEMPT_PATH,
     CONFIGURATION_READ_GRANT_PATH, CONFIGURATION_READ_GRANT_REVOKE_PATH,
@@ -31,6 +32,8 @@ use crate::{
     REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID, RetireConfigurationFollowerEnrollmentRequest,
     RetireMasterIdentityByIdRequest, RetireMasterIdentityRequest,
     RevokeConfigurationReadGrantRequest,
+    SUBMIT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
+    SubmitConfigurationFollowerEnrollmentRequest,
 };
 use crate::{
     CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
@@ -353,6 +356,10 @@ fn schema() -> String {
             schema_for!(ConfigurationFollowerEnrollmentListResponse),
         ),
         (
+            "SubmitConfigurationFollowerEnrollmentRequest",
+            schema_for!(SubmitConfigurationFollowerEnrollmentRequest),
+        ),
+        (
             "PrepareConfigurationFollowerEnrollmentRequest",
             schema_for!(PrepareConfigurationFollowerEnrollmentRequest),
         ),
@@ -567,6 +574,7 @@ fn typescript() -> String {
         ConfigurationFollowerEnrollmentRequestResponse::decl(&config),
         ConfigurationFollowerEnrollmentRequestListResponse::decl(&config),
         ConfigurationFollowerEnrollmentDecisionRequest::decl(&config),
+        SubmitConfigurationFollowerEnrollmentRequest::decl(&config),
         ConfigurationReadGrantResponse::decl(&config),
         PrepareConfigurationFollowerEnrollmentRequest::decl(&config),
         RetireConfigurationFollowerEnrollmentRequest::decl(&config),
@@ -866,6 +874,11 @@ fn catalogue() -> String {
                 "method": "GET",
                 "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
                 "operation": LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID
+            }),
+            json!({
+                "method": "POST",
+                "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
+                "operation": SUBMIT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID
             }),
             json!({
                 "method": "GET",
@@ -1730,6 +1743,34 @@ paths:
               schema:
                 $ref: '#/components/schemas/ConfigurationFollowerEnrollmentRequestListResponse'
         '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: {SUBMIT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID}
+      description: Submit a digest-only follower claim to the isolated HTTPS follower router. The strict JSON body is capped at {CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES} bytes. TLS authenticates the master to the follower; the follower ID remains a claim and local master approval is still required. The active serving identity ID, authority, server name, CA fingerprint and current certificate validity are checked transactionally before both new admission and exact retry acknowledgement. A caller-configured cap retains pending and terminal records; exact retries still return the current request state at capacity.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitConfigurationFollowerEnrollmentRequest'
+      responses:
+        '200':
+          description: Current credential-free request receipt, including pending, approved or rejected state and current grant revocation state when approved.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigurationFollowerEnrollmentRequestResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '429':
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
@@ -2908,6 +2949,10 @@ components:
         (
             "ConfigurationFollowerEnrollmentRequestListResponse",
             openapi_schema::<ConfigurationFollowerEnrollmentRequestListResponse>(),
+        ),
+        (
+            "SubmitConfigurationFollowerEnrollmentRequest",
+            openapi_schema::<SubmitConfigurationFollowerEnrollmentRequest>(),
         ),
         (
             "ConfigurationFollowerEnrollmentDecisionRequest",

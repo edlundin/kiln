@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.35.0";
+pub const PROTOCOL_VERSION: &str = "0.36.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -72,6 +72,8 @@ pub const APPROVE_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
     "approve_configuration_follower_enrollment_request";
 pub const REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
     "reject_configuration_follower_enrollment_request";
+pub const SUBMIT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID: &str =
+    "submit_configuration_follower_enrollment_request";
 pub const CONFIGURATION_PUBLICATIONS_PATH: &str = "/v1/configuration-sync/publications";
 pub const CONFIGURATION_SNAPSHOT_PATH: &str = "/v1/configuration-sync/snapshot";
 pub const GET_CONFIGURATION_SNAPSHOT_OPERATION_ID: &str = "get_configuration_snapshot";
@@ -81,6 +83,11 @@ pub const PUBLISH_CONFIGURATION_OPERATION_ID: &str = "publish_configuration_snap
 pub const CONFIGURATION_PUBLICATION_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// Bounds follower-enrollment JSON bodies and their submitted CA DER field.
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES: usize = CONFIGURATION_PUBLICATION_MAX_BYTES;
+/// Strict remote follower-claim body cap. This request contains only bounded
+/// identifiers, names, fingerprints and a credential digest.
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES: usize = 4 * 1024;
+/// Client-side cap for a credential-free remote request receipt.
+pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RECEIPT_MAX_BYTES: usize = 4 * 1024;
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_DEFAULT_PAGE_SIZE: usize = 50;
 pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_MAX_PAGE_SIZE: usize = 100;
 pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configuration_master";
@@ -232,6 +239,8 @@ pub mod error_code {
     pub const CONFIGURATION_READ_GRANT_NOT_FOUND: &str = "configuration_read_grant_not_found";
     pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_NOT_FOUND: &str =
         "configuration_follower_enrollment_request_not_found";
+    pub const CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_CAPACITY_REACHED: &str =
+        "configuration_follower_enrollment_request_capacity_reached";
     pub const CONFIGURATION_IDENTITY_RECOVERY_REQUIRED: &str =
         "configuration_identity_recovery_required";
     pub const CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND: &str =
@@ -327,6 +336,7 @@ pub mod error_code {
         CONFIGURATION_SYNC_CONFLICT,
         CONFIGURATION_READ_GRANT_NOT_FOUND,
         CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_NOT_FOUND,
+        CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_CAPACITY_REACHED,
         CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
         CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND,
         CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRED,
@@ -651,11 +661,11 @@ pub struct ConfigurationFollowerEnrollmentRequestResponse {
     pub follower_state_version: u64,
     pub group_id: String,
     pub master_instance_id: String,
-    /// Follower-asserted server name, checked against active managed identity
-    /// metadata on new admission and first approval, not on metadata reads.
+    /// Follower-asserted server name, matched to the exact current managed
+    /// serving identity on admission and checked again on first approval.
     pub server_name: String,
-    /// Follower-asserted CA fingerprint, checked against active managed identity
-    /// metadata on new admission and first approval, not on metadata reads.
+    /// Follower-asserted CA fingerprint, matched to the exact current managed
+    /// serving identity on admission and checked again on first approval.
     pub master_ca_fingerprint: String,
     /// Full confirmation fingerprint over the immutable request and the
     /// credential digest. The digest and bearer remain private.
@@ -673,6 +683,23 @@ pub struct ConfigurationFollowerEnrollmentRequestListResponse {
     #[serde(deserialize_with = "deserialize_required_nullable_string")]
     #[schemars(with = "RequiredNullableString")]
     pub next_cursor: Option<String>,
+}
+
+/// Strict digest-only request submitted over HTTPS to the isolated follower
+/// intake route. TLS authenticates the master to the follower; these follower
+/// IDs and the supplied digest remain unverified claims until local approval.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitConfigurationFollowerEnrollmentRequest {
+    pub attempt_id: String,
+    pub follower_id: String,
+    pub follower_state_version: u64,
+    pub group_id: String,
+    pub master_instance_id: String,
+    pub server_name: String,
+    pub master_ca_fingerprint: String,
+    /// SHA-256 of the complete `kcfg1_` bearer; never the bearer itself.
+    pub credential_digest: String,
 }
 
 /// Exact confirmation values displayed by the master before a local decision.

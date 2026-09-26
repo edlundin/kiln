@@ -2,17 +2,26 @@
 
 use axum::{
     Router,
+    body::to_bytes,
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header, uri::Authority},
     middleware,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use kiln_core::{
     ConfigurationAccessError, ConfigurationAccessStore, ConfigurationAuthority,
-    ConfigurationCredentialDigest, ConfigurationGroupId, ConfigurationSnapshotError,
+    ConfigurationCredentialDigest, ConfigurationFollowerEnrollmentRequestId,
+    ConfigurationFollowerEnrollmentRequestSubmission, ConfigurationFollowerServingIdentity,
+    ConfigurationGroupId, ConfigurationReadGrantAttemptId, ConfigurationSnapshotError, ContentHash,
     KilnInstanceId,
 };
+use kiln_protocol::{
+    CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
+    CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES,
+    SubmitConfigurationFollowerEnrollmentRequest,
+};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +36,8 @@ struct FollowerState<T, F> {
     store: T,
     credential_digest: F,
     expected_host: HeaderValue,
+    serving_identity: ConfigurationFollowerServingIdentity,
+    max_retained_requests_per_authority: NonZeroU32,
 }
 
 /// Build a separate read-only service, never merge it into the local admin router.
@@ -37,10 +48,14 @@ struct FollowerState<T, F> {
 /// `credential_digest` is the trusted adapter's strict parser and one-way hasher
 /// for ConfigurationReadCredential. It must never accept a digest as a bearer or
 /// derive from the unrestricted local API token. No credential is stored here.
+/// The caller also supplies the exact active serving identity and a nonzero cap
+/// for all retained request rows under its authority.
 pub fn configuration_follower_router<T, F>(
     store: T,
     credential_digest: F,
     expected_host: &str,
+    serving_identity: ConfigurationFollowerServingIdentity,
+    max_retained_requests_per_authority: NonZeroU32,
 ) -> Result<ConfigurationFollowerRouter, InvalidConfigurationFollowerHost>
 where
     T: ConfigurationAccessStore + 'static,
@@ -49,8 +64,14 @@ where
     let authority: Authority = expected_host
         .parse()
         .map_err(|_| InvalidConfigurationFollowerHost)?;
+    let expected_host_name = authority
+        .host()
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or_else(|| authority.host());
     if authority.host().is_empty()
         || expected_host.contains('@')
+        || !expected_host_name.eq_ignore_ascii_case(&serving_identity.server_name)
         || (authority.as_str() != authority.host()
             && authority.port_u16().is_none_or(|port| port == 0))
     {
@@ -62,6 +83,8 @@ where
         store,
         credential_digest,
         expected_host,
+        serving_identity,
+        max_retained_requests_per_authority,
     });
     Ok(ConfigurationFollowerRouter(
         Router::new()
@@ -69,10 +92,133 @@ where
                 kiln_protocol::CONFIGURATION_SNAPSHOT_PATH,
                 get(snapshot::<T, F>),
             )
+            .route(
+                CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
+                post(submit_enrollment_request::<T, F>),
+            )
             .fallback(|| async { StatusCode::NOT_FOUND })
-            .layer(middleware::map_response(no_store))
+            .layer(middleware::from_fn(no_store))
             .with_state(state),
     ))
+}
+
+async fn submit_enrollment_request<T, F>(
+    State(state): State<Arc<FollowerState<T, F>>>,
+    request: Request,
+) -> Response
+where
+    T: ConfigurationAccessStore + 'static,
+    F: Fn(&[u8]) -> Option<ConfigurationCredentialDigest> + Send + Sync + 'static,
+{
+    use super::PublicError;
+
+    if request.method() != Method::POST {
+        return PublicError::MethodNotAllowed.into_response();
+    }
+    let headers = request.headers();
+    if single_header(headers, header::HOST.as_str()) != Some(&state.expected_host)
+        || headers.contains_key(header::ORIGIN)
+        || headers.contains_key(header::SEC_WEBSOCKET_PROTOCOL)
+        || headers.contains_key(header::AUTHORIZATION)
+        || request.uri().query().is_some()
+    {
+        return PublicError::InvalidRequest.into_response();
+    }
+    if !matches!(
+        single_header(headers, header::CONTENT_TYPE.as_str()).and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    ) {
+        return PublicError::InvalidJson.into_response();
+    }
+    if headers.get_all(header::CONTENT_LENGTH).iter().count() > 1 {
+        return PublicError::InvalidJson.into_response();
+    }
+    if let Some(length) = single_header(headers, header::CONTENT_LENGTH.as_str()) {
+        if length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_none_or(|length| length > CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES)
+        {
+            return PublicError::InvalidJson.into_response();
+        }
+    }
+
+    let bytes = match to_bytes(
+        request.into_body(),
+        CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(_) => return PublicError::InvalidJson.into_response(),
+    };
+    let submission: SubmitConfigurationFollowerEnrollmentRequest =
+        match serde_json::from_slice(&bytes) {
+            Ok(submission) => submission,
+            Err(error) if error.is_syntax() || error.is_eof() => {
+                return PublicError::InvalidJson.into_response();
+            }
+            Err(_) => return PublicError::InvalidRequest.into_response(),
+        };
+
+    let submission = match parse_submission(submission) {
+        Ok(submission) => submission,
+        Err(response) => return response,
+    };
+    let attempt_id = submission.attempt_id.clone();
+    let request_id = ConfigurationFollowerEnrollmentRequestId::from_ulid(ulid::Ulid::generate());
+    match state
+        .store
+        .submit_configuration_follower_enrollment_request(
+            &state.serving_identity,
+            state.max_retained_requests_per_authority,
+            &submission,
+            &request_id,
+        )
+        .await
+    {
+        Ok(receipt) if receipt.attempt_id == attempt_id => axum::Json(
+            super::configuration_access::enrollment_request_response(&receipt),
+        )
+        .into_response(),
+        Ok(_) => PublicError::ConfigurationFollowerEnrollmentRequest(
+            ConfigurationAccessError::IntegrityViolation,
+        )
+        .into_response(),
+        Err(error) => PublicError::ConfigurationFollowerEnrollmentRequest(error).into_response(),
+    }
+}
+
+fn parse_submission(
+    request: SubmitConfigurationFollowerEnrollmentRequest,
+) -> Result<ConfigurationFollowerEnrollmentRequestSubmission, Response> {
+    use super::PublicError;
+
+    let attempt_id = ConfigurationReadGrantAttemptId::parse(request.attempt_id)
+        .map_err(|_| PublicError::InvalidRequest.into_response())?;
+    let follower_id = KilnInstanceId::parse(request.follower_id)
+        .map_err(|_| PublicError::InvalidRequest.into_response())?;
+    let group_id = ConfigurationGroupId::parse(request.group_id)
+        .map_err(|_| PublicError::InvalidRequest.into_response())?;
+    let master_id = KilnInstanceId::parse(request.master_instance_id)
+        .map_err(|_| PublicError::InvalidRequest.into_response())?;
+    let master_ca_fingerprint = ContentHash::parse(request.master_ca_fingerprint)
+        .map_err(|_| PublicError::InvalidRequest.into_response())?;
+    let credential_digest = ContentHash::parse(request.credential_digest)
+        .map_err(|_| PublicError::InvalidRequest.into_response())?;
+    if request.follower_state_version == 0 || request.follower_state_version > i64::MAX as u64 {
+        return Err(PublicError::InvalidRequest.into_response());
+    }
+    Ok(ConfigurationFollowerEnrollmentRequestSubmission {
+        attempt_id,
+        follower_id,
+        follower_state_version: request.follower_state_version,
+        authority: ConfigurationAuthority::new(group_id, master_id),
+        server_name: request.server_name,
+        master_ca_fingerprint,
+        credential_digest: ConfigurationCredentialDigest::from_sha256(credential_digest),
+    })
 }
 
 async fn snapshot<T, F>(
@@ -161,7 +307,9 @@ fn identity_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, St
         .ok_or(StatusCode::UNAUTHORIZED)
 }
 
-async fn no_store(mut response: Response) -> Response {
+async fn no_store(request: Request, next: middleware::Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
     if response.status() == StatusCode::UNAUTHORIZED {
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
@@ -169,9 +317,18 @@ async fn no_store(mut response: Response) -> Response {
         );
     }
     if response.status() == StatusCode::METHOD_NOT_ALLOWED {
-        response
-            .headers_mut()
-            .insert(header::ALLOW, HeaderValue::from_static("GET"));
+        let allowed = if path == kiln_protocol::CONFIGURATION_SNAPSHOT_PATH {
+            Some("GET")
+        } else if path == CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH {
+            Some("POST")
+        } else {
+            None
+        };
+        if let Some(allowed) = allowed {
+            response
+                .headers_mut()
+                .insert(header::ALLOW, HeaderValue::from_static(allowed));
+        }
     }
     response
         .headers_mut()

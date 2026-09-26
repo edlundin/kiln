@@ -2,11 +2,11 @@
 //! neither a digest nor an instance ID proves the identity of a remote peer.
 
 use crate::{
-    ConfigurationAuthority, ConfigurationInstanceState, ConfigurationSnapshotError,
-    ConfigurationSnapshotReadLimits, ConfigurationStateError, ContentHash, InvalidKilnId,
-    KilnInstanceId, StoredConfigurationSnapshot,
+    ConfigurationAuthority, ConfigurationInstanceState, ConfigurationMasterIdentityId,
+    ConfigurationSnapshotError, ConfigurationSnapshotReadLimits, ConfigurationStateError,
+    ContentHash, InvalidKilnId, KilnInstanceId, StoredConfigurationSnapshot,
 };
-use std::future::Future;
+use std::{future::Future, num::NonZeroU32};
 use ulid::Ulid;
 
 /// Stable public identifier for one follower read grant. It is independent of
@@ -132,6 +132,17 @@ pub struct ConfigurationFollowerEnrollmentRequestSubmission {
     pub credential_digest: ConfigurationCredentialDigest,
 }
 
+/// Exact managed identity context under which the restricted follower service
+/// was composed. The store rechecks every field and certificate validity inside
+/// the admission transaction; this value alone does not prove a live TLS peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationFollowerServingIdentity {
+    pub authority: ConfigurationAuthority,
+    pub identity_id: ConfigurationMasterIdentityId,
+    pub server_name: String,
+    pub master_ca_fingerprint: ContentHash,
+}
+
 /// Exact values an administrator must confirm before the master issues a
 /// follower read grant. The fingerprint covers every immutable request field
 /// plus the full credential digest.
@@ -191,6 +202,7 @@ pub enum ConfigurationAccessError {
     Conflict,
     IdempotencyConflict,
     CredentialConflict,
+    RetentionLimitReached,
     Denied,
     State(ConfigurationStateError),
     Snapshot(ConfigurationSnapshotError),
@@ -202,14 +214,16 @@ pub enum ConfigurationAccessError {
 /// pending-request approval transaction. No API in this trait delivers the
 /// bearer credential or treats claimed remote IDs as authentication proof.
 pub trait ConfigurationAccessStore: Send + Sync {
-    /// Durably accept an exact follower claim while this instance is the
-    /// matching master and the claimed server name/CA fingerprint match its
-    /// active managed identity. Exact retries recover their original journal
-    /// entry. Caller IDs remain claims until local approval; this method does
-    /// not authenticate a remote instance or issue a grant.
+    /// Durably accept an exact follower claim under the exact current managed
+    /// serving identity, while that identity's CA and leaf remain valid. The
+    /// caller-supplied retention cap counts every request for this authority;
+    /// exact retries recover their original journal entry even at capacity.
+    /// Caller IDs remain claims until local approval; this method does not
+    /// authenticate a remote instance or issue a grant.
     fn submit_configuration_follower_enrollment_request(
         &self,
-        expected: &ConfigurationInstanceState,
+        serving_identity: &ConfigurationFollowerServingIdentity,
+        max_retained_requests_per_authority: NonZeroU32,
         submission: &ConfigurationFollowerEnrollmentRequestSubmission,
         proposed_request_id: &ConfigurationFollowerEnrollmentRequestId,
     ) -> impl Future<

@@ -33,8 +33,8 @@ The follower's local API can reserve and recover its request inputs, but it does
 not contact or authenticate a master, change the local role, or deliver a
 credential. A master's local API can review an already journaled request and
 approve or reject its exact binding; that operation does not authenticate the
-follower. Remote request submission and network listeners remain disabled until
-their separate authentication boundaries exist.
+follower. The isolated follower intake route described below is not mounted, so
+end-to-end remote enrollment and daemon network serving remain disabled.
 
 The first release has no automatic failover or master election. A master cannot
 be replaced by accepting a newer snapshot or a numerically larger revision.
@@ -133,10 +133,13 @@ signed 64-bit positive range and rejects exhaustion/overflow.
 Migration 35 adds coherent snapshot payloads and active revisions as described
 below. Migration 38 adds master-side credential digests and permanent revocation
 records; migration 42 adds stable grant and request-attempt IDs; migration 43 adds
-the immutable follower request journal and permanent lifecycle tombstones. The
-local API exposes status, initial master designation, credential-free grant
+the immutable follower request journal and permanent lifecycle tombstones.
+Migration 44 stores the master-side digest-only request journal, and migration 45
+indexes it by authority for bounded retained-record admission. The local API
+exposes status, initial master designation, credential-free grant
 metadata/list/revoke, and local follower-request preparation/recovery/retirement.
-Remote enrollment, exchange and consumers remain subsequent work.
+Remote intake is available only through the isolated router; daemon listener
+composition, follower role changes and consumers remain subsequent work.
 
 ## Internal follower read credentials
 
@@ -228,14 +231,16 @@ request ID binds that attempt, claimed follower and follower state version,
 master/group authority, the follower-asserted server name and master CA
 fingerprint, the credential digest, and the master state version at receipt.
 Metadata exposes a full SHA-256 confirmation fingerprint over this immutable
-binding without returning the raw digest or bearer. New admission requires the
-server name and CA fingerprint to match the current authority's active managed
-identity metadata in the same transaction as the journal write. The fingerprint
-is computed from the stored CA DER. Missing, pending, retired or changed identity
-fails closed. Exact admission retries recover the existing immutable request
-without this check, after the current master state and full submission binding
-are checked. There is no uniqueness rule per claimed follower, so an unverified
-ID cannot reserve that identity.
+binding without returning the raw digest or bearer. Admission is performed only
+by the isolated follower router. Its composition binds an explicit serving
+context containing the master authority, managed identity ID, server name and CA
+fingerprint. Every new submission and exact retry checks that exact active
+identity, the current master authority, and both certificate validity windows in
+the same transaction before reading the attempt journal. A stale, expired,
+retired or replaced identity fails closed, including for retries. The follower's
+server-name and CA-fingerprint claims must match this context. There is no
+uniqueness rule per claimed follower, so an unverified ID cannot reserve that
+identity.
 
 The internal master port lists and recovers requests, then atomically approves
 or permanently rejects one only after exact request, attempt, follower, authority,
@@ -247,18 +252,15 @@ approval of an old pending request. Exact approval retries recover that grant's
 current state, including revocation, without rechecking identity metadata; they
 never reactivate it. Rejection remains possible after identity retirement.
 Master role/authority drift fails closed.
-The local authenticated API now exposes bounded list/get and exact approve/reject
+The local authenticated API exposes bounded list/get and exact approve/reject
 operations for the master journal. Decisions include every confirmation field
 and the expected current master instance/version; approval creates the read
-grant atomically and returns its current revoked state on retries. The routes do
-not accept a new request, expose the digest/bearer/vault reference, or establish
-remote caller identity. Remote request submission and acknowledgement remain
-pending. These checks compare durable identity metadata only: they do not check
-certificate lifetime, resolve vault material, authenticate a follower, or prove
-which certificate served a live connection. Before remote exchange is composed,
-it must bind incoming requests to the actual connection and current managed TLS
-identity, including certificate rotation and validity. The stored claims alone
-do not establish that connection binding.
+grant atomically and returns its current revoked state on retries. These local
+routes do not accept new requests or expose the digest/bearer/vault reference.
+Admission checks durable managed-identity metadata and its validity window, but
+the router cannot introspect which certificate the TLS acceptor actually used;
+its composition must bind the serving context to the active TLS identity. Neither
+admission nor approval authenticates the claimed follower.
 
 An authenticated local API exposes `POST
 /v1/configuration-sync/follower-enrollments` with a stable `cra_` attempt ID,
@@ -291,13 +293,36 @@ or serving-readiness assertion. First approval reports HTTP 409
 `configuration_sync_conflict` when the active managed identity is missing or no
 longer matches.
 
+The isolated follower router also accepts `POST
+/v1/configuration-sync/follower-enrollment-requests` with a strict JSON body
+capped at 4 KiB. It carries the stable attempt ID, claimed follower ID and state
+version, authority, approved master server name and CA fingerprint, and the
+SHA-256 digest of the complete `kcfg1_` bearer. The bearer itself is never sent.
+The restricted route does not accept an `Authorization` header; HTTPS authenticates
+the master to the follower, while the submitted follower ID remains an unverified
+claim. The receipt echoes the exact binding and full confirmation fingerprint,
+and reports the current pending, approved or rejected state. The client
+recomputes the confirmation fingerprint over the submitted digest and echoed
+binding before returning the receipt. If approved, it includes the grant's
+current revoked flag. Exact retries return this current receipt only after the
+serving identity and certificate validity have been checked in the admission
+transaction.
+
+Each router caller sets a positive retained-record cap for its authority.
+Admission counts pending, approved and rejected rows together; terminal records
+remain retained and do not free capacity. At capacity, new attempt IDs return
+HTTP 429 `configuration_follower_enrollment_request_capacity_reached`, while an
+exact retry can still recover its receipt. Operators raise the configured cap
+deliberately after exhaustion. The remote POST is available only on the isolated
+router; the daemon does not mount it or enable a listener.
+
 The local preparer does not change the local role or make a network request.
 The master journal does not establish device identity: pinned TLS authenticates
 the master to the follower, not the follower to the master. A locally
 authenticated administrator must review and confirm the exact request before a
-read grant is issued. The local review API exists; UI, remote request
-submission/acknowledgement, follower role transition, active credential
-retrieval, automatic reconnect and listener composition remain unimplemented.
+read grant is issued. The local review API and isolated remote intake/receipt
+component exist; UI, follower role transition, active credential retrieval,
+automatic reconnect and daemon listener composition remain unimplemented.
 
 ## Pinned HTTPS follower client
 
@@ -310,10 +335,11 @@ and checks `kiln-configuration-master`, `kiln-configuration-group` and
 headers carry claimed IDs, never authentication proof. The existing local API
 does not recognize them as authorization and rejects the distinct sync bearer.
 
-Construction takes an HTTPS origin, one explicit DER trust anchor, the bound
-master/group/follower IDs, a `kcfg1_` read bearer and caller-supplied nonzero connect
-and total request deadlines. Enrollment must approve this entire binding before
-sending the credential. No snapshot or discovery response can replace it. The
+Construction takes an HTTPS origin, the approved canonical server name, one
+explicit DER trust anchor, the bound master/group/follower IDs, a `kcfg1_` read
+bearer and caller-supplied nonzero connect and total request deadlines.
+Enrollment must approve this entire binding before sending the credential. No
+snapshot or discovery response can replace it. The
 trust anchor must be dedicated to that master's TLS identity; a public/shared CA
 would broaden trust. This pins a certificate authority plus hostname, rather than
 the exact leaf certificate: leaf renewal under that same authority/name remains
@@ -322,16 +348,23 @@ reenrollment. Certificate provisioning and that approval flow remain pending.
 
 The client uses only the supplied root, with normal hostname and certificate-chain
 verification and TLS 1.2 or later. System roots, plaintext HTTP, proxies, redirects,
-automatic retries, decompression and TLS key logging are disabled. Only one fixed
-snapshot URL is callable. Connect timeout cannot exceed the total network deadline,
-which covers response-body transfer as well as connection/headers. The caller
-chooses deployment-appropriate durations; the client embeds no network-speed
-assumption. Creating the client sends no network request and reads no credential
-or certificate file.
+automatic retries, decompression and TLS key logging are disabled. Only the fixed
+snapshot GET and enrollment-request POST are callable. The bearer and identity
+headers are attached only to snapshot GET. Enrollment POST sends the typed request
+binding and SHA-256 credential digest, without an Authorization header. Connect
+timeout cannot exceed the total network deadline, which covers response-body
+transfer as well as connection/headers. The caller chooses deployment-appropriate
+durations; the client embeds no network-speed assumption. Creating the client
+sends no network request and reads no credential or certificate file.
 
 Only HTTP 200 is accepted. Non-success bodies are discarded without parsing or
-exposing remote diagnostics. Declared and collected response bytes are capped at
-the existing 2 MiB transfer budget; incomplete/oversized JSON is never returned.
+exposing remote diagnostics. Enrollment receipts must echo the attempt,
+follower/version, authority, server name and CA fingerprint exactly; the request
+ID must have canonical syntax and the confirmation fingerprint must match the
+submitted digest and complete echoed binding. An approved receipt must include
+the matching grant and its current revoked flag. Snapshot response
+bytes are capped at the existing 2 MiB transfer budget and enrollment receipts at
+4 KiB; incomplete/oversized JSON is never returned.
 The decoded instance and master IDs must both match the enrolled master and the
 group must match the pin. Basic revision/state/hash syntax is checked. Successful
 output is still a candidate: the receiving service must fully validate canonical
@@ -341,27 +374,34 @@ runtime activation follows merely from constructing the client or fetching data.
 
 ## Isolated follower read service
 
-`kiln-server::configuration_follower_router` builds a separate opaque router with only
-the snapshot GET. The daemon does not mount or serve it yet. It must never be
+`kiln-server::configuration_follower_router` builds a separate opaque router with
+the snapshot GET and enrollment-request POST only. The daemon does not mount or
+serve it yet. It must never be
 merged into the local administrative router. Its owner must supply authenticated
 HTTPS for the enrolled master certificate, connection/request resource limits
 and shutdown handling before exposing it. The router itself binds no socket and
-does not provision certificates, create grants or perform enrollment.
+does not provision certificates, create grants, approve requests or change roles.
 
 Construction takes the access store, an explicit expected HTTP Host authority,
-and the trusted adapter's strict credential parser/one-way digest function.
+the exact serving identity context, a positive retained-request cap, and the
+trusted adapter's strict credential parser/one-way digest function.
 Composition must use `ConfigurationReadCredential` parsing and hashing; raw
 credential storage, digest-as-bearer acceptance and derivation from local API
 authentication are forbidden. The server excludes the local bearer and digest
 formats before invoking the adapter.
 
-Only GET is accepted, including explicit rejection of Axum's automatic HEAD
-fallback. Host must occur exactly once and match the configured authority.
-Requests containing Origin or WebSocket protocol headers are rejected. Query
-strings are rejected. Authorization and each claimed identity header must occur
-exactly once. IDs use the canonical domain parsers, and self-enrollment is rejected.
-The claimed IDs and credential digest go to `read_configuration_for_follower`,
-which checks current authority and the grant in the snapshot read transaction.
+Snapshot reads accept only GET, including explicit rejection of Axum's automatic
+HEAD fallback. Intake accepts only POST. Host must occur exactly once and match
+the configured authority and serving name. Requests containing Origin or
+WebSocket protocol headers are rejected; query strings are rejected. Snapshot
+GET requires the sensitive bearer and each claimed identity header exactly once.
+Enrollment POST rejects Authorization, bounds the strict JSON body to 4 KiB, and
+parses IDs, fingerprints and digest with canonical domain parsers. Its transaction
+checks current master role, exact active identity ID/authority/name/CA fingerprint
+and leaf/CA validity before retry lookup or retained-count admission. It stores the
+digest-only claim and returns the current journal receipt. Pending and terminal
+records all count toward the caller's per-authority cap; exact retries remain
+recoverable at capacity.
 
 Unknown, revoked and mismatched grants yield content-free HTTP 401 with a Bearer
 challenge. Missing content yields 404 only after authorization. Transfer budget
@@ -373,8 +413,9 @@ operations, and no general API, publication, vault or execution access is availa
 Router compilation and managed TLS acquisition are not remote-delivery
 acceptance. Active master TLS material can be checked and converted to TLS
 configuration, but that composition is not wired into daemon startup. The
-follower reader credential adapter, explicit enrollment and audit/recovery
-remain unwired, and no remote HTTP interaction has been verified.
+snapshot bearer adapter, daemon listener composition and end-to-end delivery,
+retry and audit/recovery flow remain unwired; no remote HTTP interaction has
+been verified.
 
 ## Bounded TLS serving component
 

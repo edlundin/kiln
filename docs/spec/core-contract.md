@@ -1446,10 +1446,10 @@ storage boundary; authenticated encrypted enrollment, master identity pinning an
 private credential delivery remain required.
 
 `configuration_follower_router` is a separate, currently unmounted server router
-for restricted snapshot GETs. It requires exact Host and singular bearer/identity
-headers, excludes browser/WebSocket/query inputs and uses the transactional
-follower access store. It shares the bounded local snapshot encoder but exposes
-no administrative operations. Responses are no-store and failures are content-free.
+for restricted snapshot GETs and digest-only enrollment POSTs. Snapshot reads
+require exact Host and singular bearer/identity headers; intake rejects bearer
+headers and uses the transactional request store. Both reject browser/WebSocket/
+query inputs and expose no administrative operations. Responses are no-store.
 The owning daemon must still supply authenticated HTTPS, explicit enrollment,
 credential-adapter composition, resource limits and shutdown handling before serving it.
 
@@ -1482,3 +1482,16 @@ retryable deletion. The HTTP composition retains its shutdown command permit
 through owned vault work even when the request disconnects. These commands enable
 no remote listener or follower trust. See the
 [setup contract](configuration-sync.md#explicit-managed-identity-setup-and-retirement).
+
+Protocol `0.36.0` adds a POST to the isolated follower router for digest-only
+enrollment submission and durable receipt recovery. It binds each admission to
+the current master authority and exact active identity ID, server name, CA
+fingerprint and certificate lifetime inside the SQLite transaction, before
+looking up an attempt retry. A caller-configured positive cap counts pending and
+terminal request rows for the authority; exact retries remain recoverable at
+capacity. The strict 4 KiB body contains no bearer and is rejected if an
+Authorization header is present. The pinned Rust client submits its credential
+digest without an Authorization header and validates the exact receipt binding,
+phase and approved grant's current revoked state. The route is not mounted by the
+daemon and does not authenticate the claimed follower, approve a grant, or change
+role; local administrator review remains required.

@@ -22,12 +22,33 @@ $env.KILN_OPENAI_API_CONFIG = "/absolute/path/to/native-model.json"
 rtk cargo run -p kiln-daemon --bin kilnd
 ```
 
-This selects the account/model for new Runs in this daemon, including child Runs.
-The JSON is read once at startup. Every generation in a Run retains the selected
-account, settings, and capability version; changing the file has no effect on
-an existing daemon or Run. Capabilities describe model support, not permission
-to execute tools. File reads still require the explicit file-read limits and
-normal policy/approval checks.
+On an unassigned instance, this selects the account/model for new Runs. On a
+Master or Follower, the shared model default and its locally resolved account
+binding select the model and account for each new root or child Run; the
+environment account/model fields do not override or constrain that shared
+choice. In managed mode, this file still enables the local OpenAI executor and
+sets its provider type, output/reasoning ceilings, capability ceilings, context
+limits, and transport/resource budgets. Shared settings cannot enable another
+provider adapter or raise those local ceilings.
+
+The effective selection and configuration/binding provenance are committed
+atomically with the Run. `GET /v1/runs/{run_id}/model-selection` returns the
+provider, model, and non-secret source metadata. The local account ID and
+credentials are omitted. Changing shared defaults or a local binding affects
+new Runs only. Legacy Runs are never rebound from current configuration, and
+the daemon does not restart external OpenAI work after a process restart.
+Capabilities describe model support, not permission to execute tools. File
+reads still require the explicit file-read limits and normal policy/approval
+checks.
+
+Migration 50 also stores each new Run's execution kind in the same creation
+transaction: `native_model` accompanies a pinned model selection, while
+`subprocess` records a legitimate local subprocess Run. A saved kind must match
+the currently enabled executor. Pre-migration rows are not guessed from current
+environment settings or missing model selections. Only an older no-selection
+Run whose durable ToolCall history consists entirely of deterministic
+subprocess capability calls, with no model invocation history, can be proven to
+use the subprocess path; other unknown or inconsistent Runs fail closed.
 
 ## Configuration fields
 

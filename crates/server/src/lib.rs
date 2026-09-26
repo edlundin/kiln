@@ -66,19 +66,21 @@ use kiln_protocol::{
     PROTOCOL_VERSION, PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH,
     PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse,
     ProviderAccountLoginState, ProviderAccountResponse, RUN_CANCEL_PATH, RUN_CHILDREN_PATH,
-    RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode,
-    RunResponse, RunState, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH,
-    SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH,
-    SendRunInputRequest, SessionChangeDiffContent, SessionChangeDiffResponse,
-    SessionChangeDiffUnavailableReason, SessionChangesResponse, SessionEventDataResponse,
-    SessionEventResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
-    StartChildRunRequest, StartProviderAccountLoginResponse, StartRunRequest, StoreIdentity,
-    TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TaskResponse,
-    TaskState, ToolCallResponse, ToolCallState, ToolOutputStream, TransitionTaskRequest,
-    USAGE_PATH, UpdateTaskRequest, UsageAccounting, UsageCompleteness, UsageFinality,
-    UsageLedgerEntryResponse, UsageLedgerResponse, UsageQuantityRelation, UsageQuantityResponse,
-    UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
-    WebSocketFrame, WorkspaceResponse, WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
+    RUN_INPUT_PATH, RUN_MODEL_SELECTION_PATH, RUN_PATH, RUN_REACTIONS_PATH,
+    ReactToRunActivityRequest, RunInputMode, RunModelSelectionResponse,
+    RunModelSelectionSourceResponse, RunResponse, RunState, SESSION_CHANGE_DIFF_PATH,
+    SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
+    SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest, SessionChangeDiffContent,
+    SessionChangeDiffResponse, SessionChangeDiffUnavailableReason, SessionChangesResponse,
+    SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
+    SessionRunsResponse, StartChildRunRequest, StartProviderAccountLoginResponse, StartRunRequest,
+    StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
+    TaskResponse, TaskState, ToolCallResponse, ToolCallState, ToolOutputStream,
+    TransitionTaskRequest, USAGE_PATH, UpdateTaskRequest, UsageAccounting, UsageCompleteness,
+    UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse, UsageQuantityRelation,
+    UsageQuantityResponse, UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH,
+    WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    WorkspaceRootResponse, WorkspaceScopeResponse, error_code,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -1144,6 +1146,7 @@ where
         .route(SESSION_RUNS_PATH, post(start_run).get(list_session_runs))
         .route(RUN_CHILDREN_PATH, post(start_child_run))
         .route(RUN_PATH, get(get_run))
+        .route(RUN_MODEL_SELECTION_PATH, get(get_run_model_selection))
         .route(RUN_INPUT_PATH, post(send_run_input))
         .route(RUN_REACTIONS_PATH, post(react_to_run_activity))
         .route(RUN_CANCEL_PATH, post(cancel_run))
@@ -2026,6 +2029,27 @@ where
     Ok(Json(run_response(&run)))
 }
 
+async fn get_run_model_selection<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(run_id): Path<String>,
+) -> Result<Json<RunModelSelectionResponse>, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let run_id = RunId::parse(run_id).map_err(|_| PublicError::InvalidRequest)?;
+    let run = state
+        .run_operations
+        .get_run(run_id)
+        .await
+        .map_err(PublicError::from)?;
+    let selection = run
+        .model_selection()
+        .ok_or(PublicError::Run(RunError::ModelSelectionNotFound))?;
+    Ok(Json(run_model_selection_response(selection)))
+}
+
 async fn get_artifact<W, S, R>(
     State(state): State<AppState<W, S, R>>,
     Path(content_hash): Path<String>,
@@ -2414,6 +2438,34 @@ fn run_response(snapshot: &RunSnapshot) -> RunResponse {
             .map(tool_call_response)
             .collect(),
         approvals: snapshot.approvals().iter().map(approval_response).collect(),
+    }
+}
+
+fn run_model_selection_response(
+    selection: &kiln_core::RunModelSelection,
+) -> RunModelSelectionResponse {
+    let source = match selection.source() {
+        kiln_core::RunModelSelectionSource::HostDefault => {
+            RunModelSelectionSourceResponse::HostDefault
+        }
+        kiln_core::RunModelSelectionSource::InvocationHistory => {
+            RunModelSelectionSourceResponse::InvocationHistory
+        }
+        kiln_core::RunModelSelectionSource::SharedDefault(provenance) => {
+            RunModelSelectionSourceResponse::SharedDefault {
+                configuration_group_id: provenance.group_id().as_str().to_owned(),
+                configuration_revision: provenance.revision(),
+                configuration_schema_version: provenance.schema_version(),
+                configuration_content_hash: provenance.content_hash().as_str().to_owned(),
+                account_binding: provenance.account_binding().as_str().to_owned(),
+                account_binding_version: provenance.account_binding_version(),
+            }
+        }
+    };
+    RunModelSelectionResponse {
+        provider: selection.settings().provider().as_str().to_owned(),
+        model: selection.settings().model().as_str().to_owned(),
+        source,
     }
 }
 
@@ -3865,6 +3917,16 @@ impl PublicError {
                     StatusCode::NOT_FOUND,
                     error_code::RUN_NOT_FOUND,
                     "Run not found",
+                ),
+                RunError::ModelSelectionNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::MODEL_SELECTION_NOT_FOUND,
+                    "Run model selection not found",
+                ),
+                RunError::ModelUnavailable(_) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::MODEL_UNAVAILABLE,
+                    "Model unavailable",
                 ),
                 RunError::ParentRunNotFound => (
                     StatusCode::NOT_FOUND,

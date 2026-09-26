@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.40.0";
+pub const PROTOCOL_VERSION: &str = "0.41.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -138,6 +138,7 @@ pub const USAGE_PATH: &str = "/v1/usage";
 pub const SESSION_RUNS_PATH: &str = "/v1/sessions/{session_id}/runs";
 pub const RUN_CHILDREN_PATH: &str = "/v1/runs/{parent_run_id}/children";
 pub const RUN_PATH: &str = "/v1/runs/{run_id}";
+pub const RUN_MODEL_SELECTION_PATH: &str = "/v1/runs/{run_id}/model-selection";
 pub const RUN_INPUT_PATH: &str = "/v1/runs/{run_id}/input";
 pub const RUN_REACTIONS_PATH: &str = "/v1/runs/{run_id}/reactions";
 pub const TASK_PATH: &str = "/v1/tasks/{task_id}";
@@ -182,6 +183,7 @@ pub const START_RUN_OPERATION_ID: &str = "start_run";
 pub const START_CHILD_RUN_OPERATION_ID: &str = "start_child_run";
 pub const LIST_SESSION_RUNS_OPERATION_ID: &str = "list_session_runs";
 pub const GET_RUN_OPERATION_ID: &str = "get_run";
+pub const GET_RUN_MODEL_SELECTION_OPERATION_ID: &str = "get_run_model_selection";
 pub const SEND_RUN_INPUT_OPERATION_ID: &str = "send_run_input";
 pub const REACT_TO_RUN_ACTIVITY_OPERATION_ID: &str = "react_to_run_activity";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
@@ -245,6 +247,8 @@ pub mod error_code {
     pub const INVALID_MESSAGE_DELIVERY: &str = "invalid_message_delivery";
     pub const MESSAGE_DELIVERY_OUT_OF_ORDER: &str = "message_delivery_out_of_order";
     pub const RUN_STORE_UNAVAILABLE: &str = "run_store_unavailable";
+    pub const MODEL_SELECTION_NOT_FOUND: &str = "model_selection_not_found";
+    pub const MODEL_UNAVAILABLE: &str = "model_unavailable";
     pub const RUN_CANCELLATION_FAILED: &str = "run_cancellation_failed";
     pub const DAEMON_SHUTTING_DOWN: &str = "daemon_shutting_down";
     pub const WORKSPACE_ROOT_NOT_FOUND: &str = "workspace_root_not_found";
@@ -350,6 +354,8 @@ pub mod error_code {
         INVALID_MESSAGE_DELIVERY,
         MESSAGE_DELIVERY_OUT_OF_ORDER,
         RUN_STORE_UNAVAILABLE,
+        MODEL_SELECTION_NOT_FOUND,
+        MODEL_UNAVAILABLE,
         RUN_CANCELLATION_FAILED,
         DAEMON_SHUTTING_DOWN,
         WORKSPACE_ROOT_NOT_FOUND,
@@ -1479,6 +1485,29 @@ pub struct RunResponse {
     pub requested_scope: Option<WorkspaceScopeResponse>,
     pub tool_calls: Vec<ToolCallResponse>,
     pub approvals: Vec<ApprovalResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct RunModelSelectionResponse {
+    pub provider: String,
+    pub model: String,
+    pub source: RunModelSelectionSourceResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunModelSelectionSourceResponse {
+    HostDefault,
+    InvocationHistory,
+    SharedDefault {
+        configuration_group_id: String,
+        configuration_revision: u64,
+        configuration_schema_version: u32,
+        configuration_content_hash: String,
+        account_binding: String,
+        account_binding_version: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

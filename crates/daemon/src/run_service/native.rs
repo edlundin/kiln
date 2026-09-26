@@ -8,7 +8,8 @@ use kiln_core::{
     ModelInvocationId, ModelInvocationPurpose, ModelProviderOperation, ModelToolCatalogStore,
     NativeRunApplication, ProviderApplication, ProviderClaim, ProviderError, ProviderType,
     ProviderUpdate, ProviderUpdateMutation, ProviderUsageMetadata, ProviderUsageUpdate,
-    RecordRunInputDelivery, UsageAccounting, UsageCompleteness, UsageFinality, UsageSource,
+    RecordRunInputDelivery, RunModelSelection, UsageAccounting, UsageCompleteness, UsageFinality,
+    UsageSource,
 };
 use kiln_providers::{
     DETERMINISTIC_MODEL_ID, DETERMINISTIC_PROVIDER_ACCOUNT_ID, DETERMINISTIC_PROVIDER_TYPE,
@@ -173,6 +174,7 @@ impl RunService {
         run_id: RunId,
         mut cancellation: oneshot::Receiver<()>,
         selection: &crate::native_model::NativeModelSelection,
+        run_selection: &RunModelSelection,
     ) -> Result<RunSnapshot, RunError> {
         let mut entries = vec![ContextManifestEntryInput::Instruction {
             provenance: ContextInstructionProvenance::Runtime,
@@ -274,22 +276,25 @@ impl RunService {
                 ProviderClaim::Duplicate { .. } => return Err(RunError::InvalidTransition),
             };
             let invocation = request.invocation().clone();
-            let (outcome, steered, has_continuation) =
-                match self.provider_registry.start(request).await {
-                    Ok(mut operation) => {
-                        self.drive_native_operation(&invocation, &mut operation, &mut cancellation)
-                            .await?
-                    }
-                    Err(error) => {
-                        let outcome = failure_outcome(error);
-                        self.persist_native_update(
-                            invocation.invocation_id(),
-                            unknown_terminal(&invocation, outcome)?,
-                        )
-                        .await?;
-                        (outcome, false, false)
-                    }
-                };
+            let (outcome, steered, has_continuation) = match self
+                .provider_registry
+                .start_for_run_selection(request, run_selection)
+                .await
+            {
+                Ok(mut operation) => {
+                    self.drive_native_operation(&invocation, &mut operation, &mut cancellation)
+                        .await?
+                }
+                Err(error) => {
+                    let outcome = failure_outcome(error);
+                    self.persist_native_update(
+                        invocation.invocation_id(),
+                        unknown_terminal(&invocation, outcome)?,
+                    )
+                    .await?;
+                    (outcome, false, false)
+                }
+            };
             self.active.changed.notify_waiters();
             let snapshot = self.runs.get_run(run_id.clone()).await?;
             if matches!(

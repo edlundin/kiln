@@ -29,8 +29,9 @@ use std::{collections::VecDeque, future::Future, pin::Pin};
 use kiln_core::{
     ModelId, ModelInvocation, ModelInvocationOutcome, ModelOutputStream, ModelProvider,
     ModelProviderOperation, ProviderAccountId, ProviderError, ProviderRequest, ProviderType,
-    ProviderUpdate, ProviderUsageMetadata, ProviderUsageUpdate, RecordModelOutput, UsageAccounting,
-    UsageCompleteness, UsageFinality, UsageQuantity, UsageSource,
+    ProviderUpdate, ProviderUsageMetadata, ProviderUsageUpdate, RecordModelOutput,
+    RunModelSelection, UsageAccounting, UsageCompleteness, UsageFinality, UsageQuantity,
+    UsageSource,
 };
 
 pub const DETERMINISTIC_PROVIDER_TYPE: &str = "kiln_deterministic";
@@ -95,6 +96,7 @@ trait ProviderFactory: Send + Sync {
     fn provider_type(&self) -> &ProviderType;
     fn model_id(&self) -> &ModelId;
     fn account_id(&self) -> &ProviderAccountId;
+    fn supports_run_scoped_selection(&self) -> bool;
     fn start(&self, request: ProviderRequest) -> ProviderStartFuture<'_>;
 }
 
@@ -102,6 +104,7 @@ struct RegisteredProvider<P> {
     provider_type: ProviderType,
     model_id: ModelId,
     account_id: ProviderAccountId,
+    run_scoped_selection: bool,
     provider: P,
 }
 
@@ -119,6 +122,10 @@ where
 
     fn account_id(&self) -> &ProviderAccountId {
         &self.account_id
+    }
+
+    fn supports_run_scoped_selection(&self) -> bool {
+        self.run_scoped_selection
     }
 
     fn start(&self, request: ProviderRequest) -> ProviderStartFuture<'_> {
@@ -161,6 +168,36 @@ impl ProviderRegistry {
     where
         P: ModelProvider + 'static,
     {
+        self.register_with_scope(provider_type, model_id, account_id, provider, false)
+    }
+
+    /// Registers a provider with an exact base identity plus the explicit
+    /// ability to create a one-call exact route for a validated Run selection.
+    /// Direct `start` lookup remains tuple-exact; no wildcard route is stored.
+    pub fn register_run_scoped_adapter<P>(
+        &mut self,
+        provider_type: ProviderType,
+        model_id: ModelId,
+        account_id: ProviderAccountId,
+        provider: P,
+    ) -> Result<(), ProviderRegistryError>
+    where
+        P: ModelProvider + 'static,
+    {
+        self.register_with_scope(provider_type, model_id, account_id, provider, true)
+    }
+
+    fn register_with_scope<P>(
+        &mut self,
+        provider_type: ProviderType,
+        model_id: ModelId,
+        account_id: ProviderAccountId,
+        provider: P,
+        run_scoped_selection: bool,
+    ) -> Result<(), ProviderRegistryError>
+    where
+        P: ModelProvider + 'static,
+    {
         if self.providers.iter().any(|registered| {
             registered.provider_type() == &provider_type
                 && registered.model_id() == &model_id
@@ -172,9 +209,61 @@ impl ProviderRegistry {
             provider_type,
             model_id,
             account_id,
+            run_scoped_selection,
             provider,
         }));
         Ok(())
+    }
+
+    /// Whether this host has an enabled adapter for a provider type. This says
+    /// nothing about any shared account, model, credential, or endpoint.
+    pub fn supports_provider_type(&self, provider_type: &ProviderType) -> bool {
+        self.providers
+            .iter()
+            .any(|registered| registered.provider_type() == provider_type)
+    }
+
+    pub fn supports_shared_model_selection(&self, provider_type: &ProviderType) -> bool {
+        self.providers.iter().any(|registered| {
+            registered.provider_type() == provider_type
+                && registered.supports_run_scoped_selection()
+        })
+    }
+
+    /// Dispatches one already-resolved Run selection through a host-registered
+    /// adapter. The route is exact to this selection and is never retained in
+    /// the registry. Callers must obtain the selection from the durable Run
+    /// start transaction, which validates managed bindings and local limits.
+    pub async fn start_for_run_selection(
+        &self,
+        request: ProviderRequest,
+        selection: &RunModelSelection,
+    ) -> Result<ProviderOperation, ProviderError> {
+        let invocation = request.invocation();
+        if invocation.settings() != selection.settings()
+            || invocation.provider_account_id() != selection.provider_account_id()
+        {
+            return Err(ProviderError::ProviderAccountMismatch);
+        }
+        let provider = invocation.settings().provider();
+        let model = invocation.settings().model();
+        let account = invocation.provider_account_id();
+        if let Some(registered) = self.providers.iter().find(|registered| {
+            registered.provider_type() == provider
+                && registered.model_id() == model
+                && registered.account_id() == account
+        }) {
+            return registered.start(request).await;
+        }
+
+        // The local adapter is generic over request model/account values, but
+        // only this call receives the exact route after durable Run validation.
+        let Some(registered) = self.providers.iter().find(|registered| {
+            registered.provider_type() == provider && registered.supports_run_scoped_selection()
+        }) else {
+            return Err(ProviderError::ModelUnavailable);
+        };
+        registered.start(request).await
     }
 
     pub async fn start(

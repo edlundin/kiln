@@ -2,12 +2,40 @@
 
 ## 2026-09-26 — `feat`
 
+- EDL-322: Resolve shared model defaults and the host-local account binding in
+  the root/child Run creation transaction, after idempotency replay lookup.
+  Persist each effective selection and its configuration/binding provenance so
+  later turns and exact retries retain the original choice. Masters use their
+  published snapshot; Followers use their applied snapshot. Managed Runs fail
+  visibly with `model_unavailable` when defaults, an eligible account, or a
+  compatible local executor are unavailable; environment model/account values
+  do not replace shared selections. Local capability and resource ceilings
+  remain authoritative, and exact provider routing exists only for one
+  validated Run selection. Protocol `0.41.0` adds a read-only selection
+  provenance endpoint without returning local account IDs or credentials.
+  Migration 50 records the executor kind atomically for new Runs. Older rows
+  without a saved selection stay unknown instead of being guessed from current
+  settings; only durable deterministic-subprocess ToolCall history with no
+  model invocation history can prove the legacy subprocess path.
+
+  Validation: the seven-crate `rtk cargo check` and protocol contract generation
+  passed before the executor-kind repair; after repair, focused rustfmt,
+  `rtk cargo check -p kiln-core -p kiln-infrastructure -p kiln-daemon -p kiln-server`,
+  and `rtk git diff --check` passed. No tests or runtime migration/account/provider
+  behavior checks ran.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-26 — `feat`
+
 - EDL-322: Add durable host-local mappings from portable model account-binding
   keys to local provider accounts, with authenticated version-checked list/get/
   set/remove operations, safe current account state, migration 48, and typed Rust
   client methods. Protocol `0.40.0` keeps local IDs and credentials out of shared
-  snapshots. The new-Run defaults policy is documented; Run consumption and
-  binding UI remain out of scope.
+  snapshots. The Run consumer is delivered in the entry above; binding UI
+  remains out of scope.
 
 EDL-322: https://linear.app/edlundin/issue/EDL-322
 

@@ -217,14 +217,16 @@ async fn main() -> ExitCode {
     };
     // Identity creation is idempotent. Startup never designates a master or enrolls
     // a follower implicitly, including after configuration/network failures.
-    if store
+    let configuration_state = match store
         .initialize_configuration_instance(KilnInstanceId::from_ulid(ulid::Ulid::generate()))
         .await
-        .is_err()
     {
-        eprintln!("kilnd: cannot initialize configuration instance identity");
-        return ExitCode::FAILURE;
-    }
+        Ok(state) => state,
+        Err(_) => {
+            eprintln!("kilnd: cannot initialize configuration instance identity");
+            return ExitCode::FAILURE;
+        }
+    };
     let artifacts = match FileArtifactStore::open_default() {
         Ok(artifacts) => artifacts,
         Err(_) => {
@@ -242,18 +244,20 @@ async fn main() -> ExitCode {
     ));
     let vault = kiln_infrastructure::OsSecretStore::open_default();
     let provider_registry = if let Some(config) = public_api_config {
-        match provider_accounts
-            .get_provider_account(config.selection.account_id.clone())
-            .await
-        {
-            Ok(account) if account.provider_type() == config.selection.settings.provider() => {}
-            _ => {
-                eprintln!(
-                    "kilnd: configured public API account is missing or belongs to another provider"
-                );
-                return ExitCode::FAILURE;
+        if matches!(configuration_state.role(), ConfigurationRole::Unassigned) {
+            match provider_accounts
+                .get_provider_account(config.selection.account_id.clone())
+                .await
+            {
+                Ok(account) if account.provider_type() == config.selection.settings.provider() => {}
+                _ => {
+                    eprintln!(
+                        "kilnd: configured public API account is missing or belongs to another provider"
+                    );
+                    return ExitCode::FAILURE;
+                }
             }
-        };
+        }
         // Cloning OsSecretStore shares its entry locks. The application Arc also
         // shares the lifecycle lock with all account-management operations.
         let provider = match kiln_providers::OpenAiApiModelProvider::new(
@@ -271,7 +275,7 @@ async fn main() -> ExitCode {
         };
         let mut registry = ProviderRegistry::new();
         if registry
-            .register(
+            .register_run_scoped_adapter(
                 config.selection.settings.provider().clone(),
                 config.selection.settings.model().clone(),
                 config.selection.account_id.clone(),

@@ -1,9 +1,11 @@
 use std::{collections::HashMap, future::Future, sync::Arc};
 
 use kiln_core::{
-    ApprovalPolicy, Artifact, ContentHash, INLINE_TOOL_OUTPUT_LIMIT, ModelInvocationApplication,
-    ModelInvocationOutcome, ModelInvocationState, ReactToRunActivity, RunApplication, RunError,
-    RunId, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore, SendRunInput, SessionId,
+    ApprovalPolicy, Artifact, ContentHash, DETERMINISTIC_SUBPROCESS_CAPABILITY,
+    INLINE_TOOL_OUTPUT_LIMIT, ModelInvocationApplication, ModelInvocationOutcome,
+    ModelInvocationState, ReactToRunActivity, RunApplication, RunError, RunExecutionKind, RunId,
+    RunInputMode, RunModelExecutorPolicy, RunModelSelection, RunModelSelectionSource,
+    RunModelStartPolicy, RunMutation, RunSnapshot, RunState, RunStore, SendRunInput, SessionId,
     SessionStore, StartRunDisposition, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
     SubprocessRequest, TOOL_OUTPUT_MEDIA_TYPE, TaskId, ToolCallId, WorkspacePathScope,
     WorkspaceStore,
@@ -22,6 +24,19 @@ use tokio::sync::{Mutex, Notify, oneshot, watch};
 mod native;
 mod native_tools;
 pub(crate) use native_tools::configured_file_read;
+
+fn legacy_subprocess_is_proven(snapshot: &RunSnapshot) -> bool {
+    // Before execution_kind was persisted, the durable deterministic tool
+    // capability was the only source that proved subprocess ownership.
+    snapshot.execution_kind().is_none()
+        && snapshot.model_selection().is_none()
+        && snapshot.model_invocations().is_empty()
+        && !snapshot.tool_calls().is_empty()
+        && snapshot
+            .tool_calls()
+            .iter()
+            .all(|call| call.capability() == DETERMINISTIC_SUBPROCESS_CAPABILITY)
+}
 
 struct ActiveRun {
     cancellation: Option<oneshot::Sender<()>>,
@@ -122,6 +137,37 @@ impl RunService {
         Ok(())
     }
 
+    fn model_start_policy(&self) -> RunModelStartPolicy {
+        let Some(selection) = self.native_model.as_ref() else {
+            return RunModelStartPolicy::new(None, None);
+        };
+        let mut local_capabilities = selection.capabilities.clone();
+        if self.native_file_read.is_none() {
+            local_capabilities = kiln_core::ModelCapabilitySnapshot::new(
+                selection.capabilities.version(),
+                kiln_core::CapabilitySupport::Unsupported,
+                selection.capabilities.vision(),
+                selection.capabilities.structured_output(),
+            )
+            .expect("existing native capability metadata remains valid");
+        }
+        let local_default = RunModelSelection::new(
+            selection.account_id.clone(),
+            selection.settings.clone(),
+            local_capabilities.clone(),
+            RunModelSelectionSource::HostDefault,
+        );
+        let executor = RunModelExecutorPolicy::new(
+            selection.settings.provider().clone(),
+            self.provider_registry
+                .supports_shared_model_selection(selection.settings.provider()),
+            selection.settings.generation().max_output_tokens(),
+            selection.settings.reasoning().effort().map(str::to_owned),
+            local_capabilities,
+        );
+        RunModelStartPolicy::new(Some(local_default), Some(executor))
+    }
+
     async fn start(
         &self,
         session_id: SessionId,
@@ -132,13 +178,15 @@ impl RunService {
         self.validate_start(&session_id, &requested_scope).await?;
         let (value, disposition) = {
             let _sequence = self.commit_sequence.lock().await;
+            let model_policy = self.model_start_policy();
             let mutation = self
                 .runs
-                .start_root_run(
+                .start_root_run_with_model_policy(
                     session_id,
                     idempotency_key,
                     approval_policy,
                     requested_scope,
+                    model_policy,
                 )
                 .await?;
             let value = mutation.value.clone();
@@ -179,15 +227,17 @@ impl RunService {
             .await?;
         let (value, disposition) = {
             let _sequence = self.commit_sequence.lock().await;
+            let model_policy = self.model_start_policy();
             let mutation = self
                 .runs
-                .start_child_run(
+                .start_child_run_with_model_policy(
                     parent_run_id,
                     task_id,
                     user_input_mode,
                     idempotency_key,
                     approval_policy,
                     requested_scope,
+                    model_policy,
                 )
                 .await?;
             let value = mutation.value.clone();
@@ -271,9 +321,76 @@ impl RunService {
         mut approval_revision: watch::Receiver<u64>,
         initialize: bool,
     ) -> Result<RunSnapshot, RunError> {
-        if initialize {
-            if let Some(selection) = &self.native_model {
-                return self.execute_native(run_id, cancellation, selection).await;
+        let snapshot = self.runs.get_run(run_id.clone()).await?;
+        let saved_selection = snapshot.model_selection().cloned();
+        match saved_selection {
+            Some(run_selection) => {
+                if matches!(
+                    run_selection.source(),
+                    RunModelSelectionSource::InvocationHistory
+                ) || snapshot.execution_kind() == Some(RunExecutionKind::Subprocess)
+                {
+                    // History and conflicting durable metadata can describe a
+                    // prior choice, but cannot authorize a new provider call or
+                    // a switch to subprocess execution.
+                    return Err(RunError::ModelUnavailable(
+                        kiln_core::RunModelUnavailableReason::CapabilityUnavailable,
+                    ));
+                }
+                let Some(runtime) = self.native_model.as_ref() else {
+                    return Err(RunError::ModelUnavailable(
+                        kiln_core::RunModelUnavailableReason::ExecutorUnavailable,
+                    ));
+                };
+                if runtime.settings.provider() != run_selection.settings().provider() {
+                    return Err(RunError::ModelUnavailable(
+                        kiln_core::RunModelUnavailableReason::ExecutorUnavailable,
+                    ));
+                }
+                if snapshot.model_invocations().iter().any(|invocation| {
+                    invocation.settings() != run_selection.settings()
+                        || invocation.provider_account_id() != run_selection.provider_account_id()
+                        || invocation.capabilities() != run_selection.capabilities()
+                }) {
+                    return Err(RunError::ModelUnavailable(
+                        kiln_core::RunModelUnavailableReason::CapabilityUnavailable,
+                    ));
+                }
+                if !initialize {
+                    return Err(RunError::ModelUnavailable(
+                        kiln_core::RunModelUnavailableReason::ExecutorUnavailable,
+                    ));
+                }
+                let selection = crate::native_model::NativeModelSelection {
+                    account_id: run_selection.provider_account_id().clone(),
+                    settings: run_selection.settings().clone(),
+                    capabilities: run_selection.capabilities().clone(),
+                    instruction: runtime.instruction,
+                };
+                return self
+                    .execute_native(run_id, cancellation, &selection, &run_selection)
+                    .await;
+            }
+            None => {
+                let reason = if snapshot.model_invocations().is_empty() {
+                    kiln_core::RunModelUnavailableReason::DefaultsMissing
+                } else {
+                    kiln_core::RunModelUnavailableReason::CapabilityUnavailable
+                };
+                let execution_kind = snapshot.execution_kind();
+                let durable_subprocess_proof = execution_kind == Some(RunExecutionKind::Subprocess)
+                    || (execution_kind.is_none() && legacy_subprocess_is_proven(&snapshot));
+                if !snapshot.model_invocations().is_empty()
+                    || execution_kind == Some(RunExecutionKind::NativeModel)
+                    || !durable_subprocess_proof
+                {
+                    return Err(RunError::ModelUnavailable(reason));
+                }
+                if self.native_model.is_some() {
+                    return Err(RunError::ModelUnavailable(
+                        kiln_core::RunModelUnavailableReason::ExecutorUnavailable,
+                    ));
+                }
             }
         }
         if cancellation.try_recv().is_ok() {

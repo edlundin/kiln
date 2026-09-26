@@ -56,33 +56,37 @@ use std::{
 use directories::ProjectDirs;
 use kiln_core::{
     Approval, ApprovalId, ApprovalPolicy, ApprovalState, Artifact, AssignTask, CapabilitySupport,
-    ContentHash, ContextInstructionProvenance, ContextManifest, ContextManifestAttachment,
-    ContextManifestEntry, ContextManifestEntryInput, ContextManifestId, ContextManifestIdGenerator,
-    ContextManifestStore, ContextManifestStoreError, CreateContextManifest,
-    CreateContextManifestDisposition, CreateContextManifestMutation, CreateModelInvocation,
-    CreateModelInvocationDisposition, CreateModelInvocationMutation, CreateTaskDisposition,
-    CreateTaskMutation, DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor,
-    EventId, FilesystemIdentity, GenerationSettings, Message, MessageDelivery, MessageDeliveryMode,
+    ConfigurationGroupId, ConfigurationRole, ConfigurationSnapshotReadLimits, ContentHash,
+    ContextInstructionProvenance, ContextManifest, ContextManifestAttachment, ContextManifestEntry,
+    ContextManifestEntryInput, ContextManifestId, ContextManifestIdGenerator, ContextManifestStore,
+    ContextManifestStoreError, CreateContextManifest, CreateContextManifestDisposition,
+    CreateContextManifestMutation, CreateModelInvocation, CreateModelInvocationDisposition,
+    CreateModelInvocationMutation, CreateTaskDisposition, CreateTaskMutation,
+    DETERMINISTIC_SUBPROCESS_CAPABILITY, DiscoveredWorkspaceRoot, EventCursor, EventId,
+    FilesystemIdentity, GenerationSettings, Message, MessageDelivery, MessageDeliveryMode,
     MessageDeliveryState, MessageId, MessageRole, ModelCapabilitySnapshot, ModelId,
     ModelInvocation, ModelInvocationId, ModelInvocationIdGenerator, ModelInvocationMutation,
     ModelInvocationMutationDisposition, ModelInvocationOutcome, ModelInvocationPurpose,
     ModelInvocationRequest, ModelInvocationSettings, ModelInvocationState, ModelInvocationStore,
     ModelInvocationStoreError, ModelWorkId, PersistedModelInvocation, PersistedToolCall,
-    ProviderAccountId, ProviderAccountIdGenerator, ProviderType, ReasoningSettings,
-    RecordRunInputDelivery, RecordRunInputDisposition, RecordRunInputMutation, RootDiscoveryError,
-    Run, RunId, RunIdGenerator, RunInputMode, RunMutation, RunSnapshot, RunState, RunStore,
-    RunStoreError, SendRunInputDisposition, SendRunInputMutation, Session, SessionEvent,
-    SessionEventPage, SessionEventPayload, SessionId, SessionIdGenerator, SessionStore,
-    StartRunDisposition, StartRunMutation, StoreError, StoredSessionEvent, SubprocessExecution,
-    SubprocessExecutor, SubprocessOutput, SubprocessRequest, Task, TaskError, TaskId,
-    TaskIdGenerator, TaskMutation, TaskMutationDisposition, TaskState, TaskStore, TaskStoreError,
-    ToolCall, ToolCallId, ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace,
-    WorkspaceChangeDiff, WorkspaceChangeDiffContent, WorkspaceChangeDiffUnavailableReason,
-    WorkspaceChangeKind, WorkspaceChangePath, WorkspaceChangeSummary, WorkspaceChangedFile,
-    WorkspaceCheckout, WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot,
-    WorkspaceRootDiscovery, WorkspaceRootId, WorkspaceRootState, WorkspaceStore,
-    canonical_context_manifest_bytes, canonical_context_manifest_request_bytes,
-    canonical_context_manifest_with_attachments_bytes, canonical_model_invocation_request_bytes,
+    ProviderAccountId, ProviderAccountIdGenerator, ProviderAccountState, ProviderType,
+    ReasoningSettings, RecordRunInputDelivery, RecordRunInputDisposition, RecordRunInputMutation,
+    RootDiscoveryError, Run, RunExecutionKind, RunId, RunIdGenerator, RunInputMode,
+    RunModelSelection, RunModelSelectionSource, RunModelStartPolicy, RunModelUnavailableReason,
+    RunMutation, RunSnapshot, RunState, RunStore, RunStoreError, SendRunInputDisposition,
+    SendRunInputMutation, Session, SessionEvent, SessionEventPage, SessionEventPayload, SessionId,
+    SessionIdGenerator, SessionStore, SharedConfigurationKey, SharedConfigurationLimits,
+    SharedModelDefaultProvenance, SharedSkillLimits, StartRunDisposition, StartRunMutation,
+    StoreError, StoredSessionEvent, SubprocessExecution, SubprocessExecutor, SubprocessOutput,
+    SubprocessRequest, Task, TaskError, TaskId, TaskIdGenerator, TaskMutation,
+    TaskMutationDisposition, TaskState, TaskStore, TaskStoreError, ToolCall, ToolCallId,
+    ToolCallState, ToolOutputStream, TransitionTask, UpdateTask, Workspace, WorkspaceChangeDiff,
+    WorkspaceChangeDiffContent, WorkspaceChangeDiffUnavailableReason, WorkspaceChangeKind,
+    WorkspaceChangePath, WorkspaceChangeSummary, WorkspaceChangedFile, WorkspaceCheckout,
+    WorkspaceId, WorkspaceIdGenerator, WorkspacePathScope, WorkspaceRoot, WorkspaceRootDiscovery,
+    WorkspaceRootId, WorkspaceRootState, WorkspaceStore, canonical_context_manifest_bytes,
+    canonical_context_manifest_request_bytes, canonical_context_manifest_with_attachments_bytes,
+    canonical_model_invocation_request_bytes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
@@ -4883,6 +4887,22 @@ impl RunStore for SqliteStore {
         events: &[SessionEvent],
         idempotency_key: &str,
     ) -> Result<StartRunMutation, RunStoreError> {
+        self.start_root_run_with_model_policy(
+            run,
+            events,
+            idempotency_key,
+            &RunModelStartPolicy::disabled(),
+        )
+        .await
+    }
+
+    async fn start_root_run_with_model_policy(
+        &self,
+        run: &Run,
+        events: &[SessionEvent],
+        idempotency_key: &str,
+        model_policy: &RunModelStartPolicy,
+    ) -> Result<StartRunMutation, RunStoreError> {
         if idempotency_key.is_empty() {
             return Err(RunStoreError::IdempotencyKeyRequired);
         }
@@ -4963,15 +4983,28 @@ impl RunStore for SqliteStore {
         let policy = run
             .approval_policy()
             .ok_or(RunStoreError::InvalidTransition)?;
-        let result = sqlx::query("INSERT INTO runs (run_id, session_id, state, approval_policy, workspace_root_id, relative_directory, parent_run_id, user_input_mode) VALUES (?, ?, ?, ?, ?, ?, NULL, 'interactive')")
-            .bind(run.run_id().as_str())
-            .bind(run.session_id().as_str())
-            .bind(run.state().as_str())
-            .bind(policy.as_str())
-            .bind(scope.workspace_root_id().as_str())
-            .bind(scope.relative_directory())
-            .execute(&mut *transaction)
-            .await;
+        let model_selection =
+            resolve_run_model_selection(&mut *transaction, run, model_policy).await?;
+        let execution_kind = if model_selection.is_some() {
+            RunExecutionKind::NativeModel
+        } else {
+            RunExecutionKind::Subprocess
+        };
+        let result = sqlx::query(
+            "INSERT INTO runs
+                (run_id, session_id, state, approval_policy, workspace_root_id,
+                 relative_directory, parent_run_id, user_input_mode, execution_kind)
+             VALUES (?, ?, ?, ?, ?, ?, NULL, 'interactive', ?)",
+        )
+        .bind(run.run_id().as_str())
+        .bind(run.session_id().as_str())
+        .bind(run.state().as_str())
+        .bind(policy.as_str())
+        .bind(scope.workspace_root_id().as_str())
+        .bind(scope.relative_directory())
+        .bind(execution_kind.as_str())
+        .execute(&mut *transaction)
+        .await;
         if let Err(error) = result {
             if is_unique_constraint(&error) {
                 let active: Option<String> = sqlx::query_scalar(
@@ -4986,6 +5019,9 @@ impl RunStore for SqliteStore {
                 }
             }
             return Err(RunStoreError::Unavailable);
+        }
+        if let Some(selection) = model_selection.as_ref() {
+            persist_run_model_selection(&mut *transaction, run.run_id(), selection).await?;
         }
         let stored_events = insert_events(&mut transaction, events).await?;
         sqlx::query(
@@ -5005,7 +5041,9 @@ impl RunStore for SqliteStore {
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
         Ok(StartRunMutation::new(
-            RunSnapshot::new(run.clone(), Vec::new()),
+            RunSnapshot::new(run.clone(), Vec::new())
+                .with_model_selection(model_selection)
+                .with_execution_kind(Some(execution_kind)),
             stored_events,
             StartRunDisposition::Created,
         ))
@@ -5017,6 +5055,24 @@ impl RunStore for SqliteStore {
         events: &[SessionEvent],
         task_assignment_event_id: Option<&EventId>,
         idempotency_key: &str,
+    ) -> Result<StartRunMutation, RunStoreError> {
+        self.start_child_run_with_model_policy(
+            run,
+            events,
+            task_assignment_event_id,
+            idempotency_key,
+            &RunModelStartPolicy::disabled(),
+        )
+        .await
+    }
+
+    async fn start_child_run_with_model_policy(
+        &self,
+        run: &Run,
+        events: &[SessionEvent],
+        task_assignment_event_id: Option<&EventId>,
+        idempotency_key: &str,
+        model_policy: &RunModelStartPolicy,
     ) -> Result<StartRunMutation, RunStoreError> {
         if idempotency_key.is_empty() {
             return Err(RunStoreError::IdempotencyKeyRequired);
@@ -5165,11 +5221,18 @@ impl RunStore for SqliteStore {
         let policy = run
             .approval_policy()
             .ok_or(RunStoreError::InvalidTransition)?;
+        let model_selection =
+            resolve_run_model_selection(&mut *transaction, run, model_policy).await?;
+        let execution_kind = if model_selection.is_some() {
+            RunExecutionKind::NativeModel
+        } else {
+            RunExecutionKind::Subprocess
+        };
         sqlx::query(
             "INSERT INTO runs
                 (run_id, session_id, state, approval_policy, workspace_root_id,
-                 relative_directory, parent_run_id, user_input_mode)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 relative_directory, parent_run_id, user_input_mode, execution_kind)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(run.run_id().as_str())
         .bind(run.session_id().as_str())
@@ -5179,9 +5242,13 @@ impl RunStore for SqliteStore {
         .bind(scope.relative_directory())
         .bind(parent_run_id.as_str())
         .bind(run.user_input_mode().as_str())
+        .bind(execution_kind.as_str())
         .execute(&mut *transaction)
         .await
         .map_err(|_| RunStoreError::Unavailable)?;
+        if let Some(selection) = model_selection.as_ref() {
+            persist_run_model_selection(&mut *transaction, run.run_id(), selection).await?;
+        }
         if let Some(task) = assigned_task.as_ref() {
             sqlx::query("UPDATE tasks SET assigned_run_id = ? WHERE task_id = ?")
                 .bind(run.run_id().as_str())
@@ -5221,7 +5288,9 @@ impl RunStore for SqliteStore {
             .await
             .map_err(|_| RunStoreError::Unavailable)?;
         Ok(StartRunMutation::new(
-            RunSnapshot::new(run.clone(), Vec::new()),
+            RunSnapshot::new(run.clone(), Vec::new())
+                .with_model_selection(model_selection)
+                .with_execution_kind(Some(execution_kind)),
             stored_events,
             StartRunDisposition::Created,
         ))
@@ -7821,6 +7890,405 @@ fn parse_run_and_tool_call(
     ))
 }
 
+const RUN_MODEL_SNAPSHOT_METADATA_BYTES: usize = 2 * 1024 * 1024;
+
+fn run_model_snapshot_read_limits() -> ConfigurationSnapshotReadLimits {
+    // Match the existing bounded configuration transfer contract. These are
+    // aggregate transfer/validation ceilings, not recommended catalog sizes.
+    let cap = RUN_MODEL_SNAPSHOT_METADATA_BYTES;
+    ConfigurationSnapshotReadLimits {
+        configuration: SharedConfigurationLimits {
+            max_key_bytes: cap,
+            max_metadata_bytes: cap,
+            max_mcp_servers: cap,
+            max_mcp_arguments: cap,
+            max_mcp_argument_bytes: cap,
+            max_mcp_environment: cap,
+            max_endpoint_bytes: cap,
+            max_skills: cap,
+            max_total_skill_files: cap,
+            max_total_skill_bytes: cap,
+        },
+        skill: SharedSkillLimits {
+            max_identifier_bytes: cap,
+            max_version_bytes: cap,
+            max_dependencies: cap,
+            max_files: cap,
+            max_path_bytes: cap,
+            max_file_bytes: cap,
+            max_total_file_bytes: cap,
+        },
+        max_total_metadata_bytes: cap,
+    }
+}
+
+async fn resolve_run_model_selection(
+    connection: &mut SqliteConnection,
+    run: &Run,
+    policy: &RunModelStartPolicy,
+) -> Result<Option<RunModelSelection>, RunStoreError> {
+    if !policy.resolves_shared_defaults() {
+        return Ok(policy.host_default().cloned());
+    }
+    let state = configuration_sync::load(connection)
+        .await
+        .map_err(|_| RunStoreError::Unavailable)?
+        .ok_or(RunStoreError::Unavailable)?;
+    if matches!(state.role(), ConfigurationRole::Unassigned) {
+        return Ok(policy.host_default().cloned());
+    }
+
+    let stored = configuration_snapshot::read_current_snapshot(
+        connection,
+        state,
+        run_model_snapshot_read_limits(),
+    )
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?
+    .ok_or(RunStoreError::ModelUnavailable(
+        RunModelUnavailableReason::DefaultsMissing,
+    ))?;
+    let defaults = stored.snapshot.settings().model_defaults.as_ref().ok_or(
+        RunStoreError::ModelUnavailable(RunModelUnavailableReason::DefaultsMissing),
+    )?;
+    let (account_id, binding_version) = resolve_bound_account(
+        connection,
+        run,
+        defaults.account_binding.as_str(),
+        defaults.settings.provider(),
+    )
+    .await?;
+    let revision = &stored.revision;
+    let provenance = SharedModelDefaultProvenance::new(
+        revision.authority().group_id().clone(),
+        revision.number(),
+        revision.schema_version(),
+        revision.content_hash().clone(),
+        defaults.account_binding.clone(),
+        binding_version,
+    )
+    .ok_or(RunStoreError::Unavailable)?;
+    let selection = policy
+        .resolve_shared_default(
+            account_id,
+            &defaults.settings,
+            &defaults.capabilities,
+            provenance,
+        )
+        .map_err(RunStoreError::ModelUnavailable)?;
+    Ok(Some(selection))
+}
+
+async fn resolve_bound_account(
+    connection: &mut SqliteConnection,
+    run: &Run,
+    binding_key: &str,
+    expected_provider: &ProviderType,
+) -> Result<(ProviderAccountId, u64), RunStoreError> {
+    let binding = sqlx::query(
+        "SELECT provider_account_id, version FROM host_model_account_bindings
+         WHERE binding_key = ?",
+    )
+    .bind(binding_key)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?
+    .ok_or(RunStoreError::ModelUnavailable(
+        RunModelUnavailableReason::BindingUnavailable,
+    ))?;
+    let account_id = ProviderAccountId::parse(
+        binding
+            .try_get::<Option<String>, _>("provider_account_id")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .ok_or(RunStoreError::ModelUnavailable(
+                RunModelUnavailableReason::BindingUnavailable,
+            ))?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let binding_version = u64::try_from(
+        binding
+            .try_get::<i64, _>("version")
+            .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .ok()
+    .filter(|version| *version > 0)
+    .ok_or(RunStoreError::Unavailable)?;
+
+    let workspace_id: String =
+        sqlx::query_scalar("SELECT workspace_id FROM sessions WHERE session_id = ?")
+            .bind(run.session_id().as_str())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?
+            .ok_or(RunStoreError::Unavailable)?;
+    let account = sqlx::query(
+        "SELECT a.provider_type, a.state,
+                EXISTS(SELECT 1 FROM provider_account_workspaces w
+                       WHERE w.provider_account_id = a.provider_account_id
+                         AND w.workspace_id = ?) AS workspace_associated
+         FROM provider_accounts a WHERE a.provider_account_id = ?",
+    )
+    .bind(workspace_id)
+    .bind(account_id.as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?
+    .ok_or(RunStoreError::ModelUnavailable(
+        RunModelUnavailableReason::AccountUnavailable,
+    ))?;
+    let provider_type = ProviderType::parse(
+        account
+            .try_get::<String, _>("provider_type")
+            .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let account_state = ProviderAccountState::parse(
+        account
+            .try_get::<String, _>("state")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .as_str(),
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let workspace_associated = account
+        .try_get::<bool, _>("workspace_associated")
+        .map_err(|_| RunStoreError::Unavailable)?;
+    if &provider_type != expected_provider
+        || account_state != ProviderAccountState::Connected
+        || !workspace_associated
+    {
+        return Err(RunStoreError::ModelUnavailable(
+            RunModelUnavailableReason::AccountUnavailable,
+        ));
+    }
+    Ok((account_id, binding_version))
+}
+
+async fn persist_run_model_selection(
+    connection: &mut SqliteConnection,
+    run_id: &RunId,
+    selection: &RunModelSelection,
+) -> Result<(), RunStoreError> {
+    let (source, group_id, revision, schema_version, content_hash, binding_key, binding_version) =
+        match selection.source() {
+            RunModelSelectionSource::HostDefault => {
+                ("host_default", None, None, None, None, None, None)
+            }
+            RunModelSelectionSource::SharedDefault(provenance) => (
+                "shared_default",
+                Some(provenance.group_id().as_str()),
+                Some(i64::try_from(provenance.revision()).map_err(|_| RunStoreError::Unavailable)?),
+                Some(i64::from(provenance.schema_version())),
+                Some(provenance.content_hash().as_str()),
+                Some(provenance.account_binding().as_str()),
+                Some(
+                    i64::try_from(provenance.account_binding_version())
+                        .map_err(|_| RunStoreError::Unavailable)?,
+                ),
+            ),
+            RunModelSelectionSource::InvocationHistory => {
+                return Err(RunStoreError::InvalidTransition);
+            }
+        };
+    sqlx::query(
+        "INSERT INTO run_model_selections
+            (run_id, provider_account_id, provider_type, model_id, max_output_tokens,
+             reasoning_effort, capabilities_version, tool_calls, vision,
+             structured_output, source, configuration_group_id, configuration_revision,
+             configuration_schema_version, configuration_content_hash, account_binding_key,
+             account_binding_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(run_id.as_str())
+    .bind(selection.provider_account_id().as_str())
+    .bind(selection.settings().provider().as_str())
+    .bind(selection.settings().model().as_str())
+    .bind(
+        selection
+            .settings()
+            .generation()
+            .max_output_tokens()
+            .map(i64::from),
+    )
+    .bind(selection.settings().reasoning().effort())
+    .bind(selection.capabilities().version())
+    .bind(selection.capabilities().tool_calls().as_str())
+    .bind(selection.capabilities().vision().as_str())
+    .bind(selection.capabilities().structured_output().as_str())
+    .bind(source)
+    .bind(group_id)
+    .bind(revision)
+    .bind(schema_version)
+    .bind(content_hash)
+    .bind(binding_key)
+    .bind(binding_version)
+    .execute(&mut *connection)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?;
+    Ok(())
+}
+
+async fn load_run_model_selection(
+    connection: &mut SqliteConnection,
+    run_id: &RunId,
+) -> Result<Option<RunModelSelection>, RunStoreError> {
+    let Some(row) = sqlx::query(
+        "SELECT provider_account_id, provider_type, model_id, max_output_tokens,
+                reasoning_effort, capabilities_version, tool_calls, vision,
+                structured_output, source, configuration_group_id, configuration_revision,
+                configuration_schema_version, configuration_content_hash, account_binding_key,
+                account_binding_version
+         FROM run_model_selections WHERE run_id = ?",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| RunStoreError::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    let account_id = ProviderAccountId::parse(
+        row.try_get::<String, _>("provider_account_id")
+            .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let provider_type = ProviderType::parse(
+        row.try_get::<String, _>("provider_type")
+            .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let model_id = ModelId::parse(
+        row.try_get::<String, _>("model_id")
+            .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let max_output_tokens = row
+        .try_get::<Option<i64>, _>("max_output_tokens")
+        .map_err(|_| RunStoreError::Unavailable)?
+        .map(|value| u32::try_from(value).map_err(|_| RunStoreError::Unavailable))
+        .transpose()?;
+    let reasoning_effort = row
+        .try_get::<Option<String>, _>("reasoning_effort")
+        .map_err(|_| RunStoreError::Unavailable)?;
+    let settings = ModelInvocationSettings::new(
+        provider_type,
+        model_id,
+        GenerationSettings::new(max_output_tokens).map_err(|_| RunStoreError::Unavailable)?,
+        ReasoningSettings::new(reasoning_effort).map_err(|_| RunStoreError::Unavailable)?,
+    );
+    let capabilities = ModelCapabilitySnapshot::new(
+        row.try_get::<String, _>("capabilities_version")
+            .map_err(|_| RunStoreError::Unavailable)?,
+        CapabilitySupport::parse(
+            row.try_get::<String, _>("tool_calls")
+                .map_err(|_| RunStoreError::Unavailable)?
+                .as_str(),
+        )
+        .map_err(|_| RunStoreError::Unavailable)?,
+        CapabilitySupport::parse(
+            row.try_get::<String, _>("vision")
+                .map_err(|_| RunStoreError::Unavailable)?
+                .as_str(),
+        )
+        .map_err(|_| RunStoreError::Unavailable)?,
+        CapabilitySupport::parse(
+            row.try_get::<String, _>("structured_output")
+                .map_err(|_| RunStoreError::Unavailable)?
+                .as_str(),
+        )
+        .map_err(|_| RunStoreError::Unavailable)?,
+    )
+    .map_err(|_| RunStoreError::Unavailable)?;
+    let source = match row
+        .try_get::<String, _>("source")
+        .map_err(|_| RunStoreError::Unavailable)?
+        .as_str()
+    {
+        "host_default" => {
+            if has_shared_provenance(&row)? {
+                return Err(RunStoreError::Unavailable);
+            }
+            RunModelSelectionSource::HostDefault
+        }
+        "shared_default" => {
+            let group_id = ConfigurationGroupId::parse(
+                row.try_get::<String, _>("configuration_group_id")
+                    .map_err(|_| RunStoreError::Unavailable)?,
+            )
+            .map_err(|_| RunStoreError::Unavailable)?;
+            let revision = positive_u64(&row, "configuration_revision")?;
+            let schema_version = u32::try_from(positive_u64(&row, "configuration_schema_version")?)
+                .map_err(|_| RunStoreError::Unavailable)?;
+            let content_hash = ContentHash::parse(
+                row.try_get::<String, _>("configuration_content_hash")
+                    .map_err(|_| RunStoreError::Unavailable)?,
+            )
+            .map_err(|_| RunStoreError::Unavailable)?;
+            let account_binding = SharedConfigurationKey::parse(
+                row.try_get::<String, _>("account_binding_key")
+                    .map_err(|_| RunStoreError::Unavailable)?,
+                RUN_MODEL_SNAPSHOT_METADATA_BYTES,
+            )
+            .map_err(|_| RunStoreError::Unavailable)?;
+            let account_binding_version = positive_u64(&row, "account_binding_version")?;
+            let provenance = SharedModelDefaultProvenance::new(
+                group_id,
+                revision,
+                schema_version,
+                content_hash,
+                account_binding,
+                account_binding_version,
+            )
+            .ok_or(RunStoreError::Unavailable)?;
+            RunModelSelectionSource::SharedDefault(provenance)
+        }
+        _ => return Err(RunStoreError::Unavailable),
+    };
+    Ok(Some(RunModelSelection::new(
+        account_id,
+        settings,
+        capabilities,
+        source,
+    )))
+}
+
+fn has_shared_provenance(row: &sqlx::sqlite::SqliteRow) -> Result<bool, RunStoreError> {
+    Ok(row
+        .try_get::<Option<String>, _>("configuration_group_id")
+        .map_err(|_| RunStoreError::Unavailable)?
+        .is_some()
+        || row
+            .try_get::<Option<i64>, _>("configuration_revision")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .is_some()
+        || row
+            .try_get::<Option<i64>, _>("configuration_schema_version")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .is_some()
+        || row
+            .try_get::<Option<String>, _>("configuration_content_hash")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .is_some()
+        || row
+            .try_get::<Option<String>, _>("account_binding_key")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .is_some()
+        || row
+            .try_get::<Option<i64>, _>("account_binding_version")
+            .map_err(|_| RunStoreError::Unavailable)?
+            .is_some())
+}
+
+fn positive_u64(row: &sqlx::sqlite::SqliteRow, column: &'static str) -> Result<u64, RunStoreError> {
+    u64::try_from(
+        row.try_get::<Option<i64>, _>(column)
+            .map_err(|_| RunStoreError::Unavailable)?
+            .ok_or(RunStoreError::Unavailable)?,
+    )
+    .ok()
+    .filter(|value| *value > 0)
+    .ok_or(RunStoreError::Unavailable)
+}
+
 async fn load_snapshot(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &RunId,
@@ -7828,6 +8296,15 @@ async fn load_snapshot(
     let Some(run) = load_run(transaction, id).await? else {
         return Ok(None);
     };
+    let execution_kind =
+        sqlx::query_scalar::<_, Option<String>>("SELECT execution_kind FROM runs WHERE run_id = ?")
+            .bind(id.as_str())
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?
+            .ok_or(RunStoreError::Unavailable)?
+            .map(|kind| RunExecutionKind::parse(&kind).map_err(|_| RunStoreError::Unavailable))
+            .transpose()?;
     let rows = sqlx::query(
         "SELECT t.tool_call_id, t.run_id, t.capability, t.state,
                 t.requested_workspace_root_id, t.requested_relative_directory,
@@ -7918,12 +8395,33 @@ async fn load_snapshot(
                 .ok_or(RunStoreError::Unavailable)?,
         );
     }
-    Ok(Some(RunSnapshot::with_model_invocations(
-        run,
-        tool_calls,
-        approvals,
-        model_invocations,
-    )))
+    let model_selection = load_run_model_selection(&mut **transaction, id)
+        .await?
+        .or_else(|| model_selection_from_invocation_history(&model_invocations));
+    Ok(Some(
+        RunSnapshot::with_model_invocations(run, tool_calls, approvals, model_invocations)
+            .with_model_selection(model_selection)
+            .with_execution_kind(execution_kind),
+    ))
+}
+
+fn model_selection_from_invocation_history(
+    invocations: &[ModelInvocation],
+) -> Option<RunModelSelection> {
+    let first = invocations.first()?;
+    if invocations.iter().any(|invocation| {
+        invocation.settings() != first.settings()
+            || invocation.provider_account_id() != first.provider_account_id()
+            || invocation.capabilities() != first.capabilities()
+    }) {
+        return None;
+    }
+    Some(RunModelSelection::new(
+        first.provider_account_id().clone(),
+        first.settings().clone(),
+        first.capabilities().clone(),
+        RunModelSelectionSource::InvocationHistory,
+    ))
 }
 
 fn is_unique_constraint(error: &sqlx::Error) -> bool {

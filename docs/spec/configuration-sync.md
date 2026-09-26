@@ -1066,18 +1066,41 @@ the caller's expected provider type. It accepts records in any durable account
 state and returns the current state (`connecting`, `connected`, `reauth_required`,
 or `disconnected`). A mapping does not guarantee a current credential, provider
 access, workspace association, or future model compatibility. Disconnection does
-not delete an account or silently remap its binding. A Run resolver must recheck
-account state, workspace availability, provider/model compatibility, and the
-credential when it is implemented.
+not delete an account or silently remap its binding. At new root and child Run
+creation, the local daemon reads the Master publication or Follower applied
+snapshot in the same transaction as the idempotency check and Run insert. It
+resolves the named binding, verifies its version, and requires a connected
+provider account of the expected type associated with the Run's Workspace. The
+later credential claim still checks current execution eligibility, so a
+disconnect or credential change after Run creation fails closed.
 
-The model-default policy for that future Run resolver is shared across masters
-and followers: the shared defaults govern newly created Runs. If defaults or the
-named local account mapping are missing, model execution is unavailable; an
-assigned instance does not fall back to an environment-selected model or account.
-Existing Runs retain their selected revision, account, and settings. Instances
-that remain unassigned keep their existing local environment behavior. This
-mapping API does not add a Run consumer; model defaults are not yet used to start
-Runs.
+Assigned instances use shared model defaults for new Runs. A missing snapshot,
+default, local binding, compatible local OpenAI executor, capability ceiling, or
+eligible account returns the stable `model_unavailable` error. Managed mode
+never falls back to the environment model or account. Environment output and
+reasoning limits, capability ceilings, and the host's context and transport
+budgets remain local; the daemon caps shared generation settings to those local
+limits and creates only a per-Run exact provider route after selection
+validation. An unassigned instance keeps the local environment selection.
+
+The effective provider, model, settings, capabilities, local account ID and
+source metadata are stored atomically with the Run. The model-selection endpoint
+returns the provider/model and bounded source provenance without exposing the
+local account ID, credentials, or a snapshot copy. Idempotent retries return the
+stored selection without resolving newer defaults. Existing Runs keep their
+choice when defaults or bindings change. Legacy Runs are never rebound from
+current defaults; consistent prior invocation history is reported as
+`invocation_history`, but does not authorize restarting an external provider
+operation. Migration 50 stores `native_model` or `subprocess` in the Run row in
+the same transaction that creates each new root or child Run. Pre-migration
+rows remain unknown; there is no backfill from the current environment or from
+an absent model selection. An older no-selection Run is recognized as a
+subprocess Run only when its durable ToolCall history contains at least one call
+and every call declares the deterministic subprocess capability, with no model
+invocation history. Other unknown or inconsistent no-selection Runs fail closed.
+Persisted subprocess Runs remain eligible only while the daemon is configured
+for its subprocess executor; a saved native selection never falls through to
+that executor.
 
 The binding API accepts the same 2 MiB key byte budget used by snapshot
 publication and the `SharedConfigurationKey` character set. Keys and page cursors

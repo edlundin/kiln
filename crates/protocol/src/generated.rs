@@ -81,12 +81,13 @@ use crate::{
     EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
     GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID, GET_MODEL_ACCOUNT_BINDING_OPERATION_ID,
     GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, GET_PROVIDER_ACCOUNT_OPERATION_ID,
-    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
-    GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, GetModelAccountBindingRequest,
-    IDEMPOTENCY_KEY_HEADER, LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID,
-    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
-    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
-    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListModelAccountBindingsRequest,
+    GET_RUN_MODEL_SELECTION_OPERATION_ID, GET_RUN_OPERATION_ID,
+    GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID,
+    GET_WORKSPACE_OPERATION_ID, GetModelAccountBindingRequest, IDEMPOTENCY_KEY_HEADER,
+    LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID, LIST_PROVIDER_ACCOUNTS_OPERATION_ID,
+    LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
+    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_USAGE_OPERATION_ID,
+    LIST_WORKSPACES_OPERATION_ID, ListModelAccountBindingsRequest,
     ListModelAccountBindingsResponse, ListProviderAccountsResponse, ListSessionsResponse,
     ListWorkspacesResponse, MODEL_ACCOUNT_BINDING_DEFAULT_PAGE_SIZE,
     MODEL_ACCOUNT_BINDING_GET_PATH, MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES,
@@ -102,8 +103,9 @@ use crate::{
     PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails,
     ProviderAccountLoginResponse, ProviderAccountLoginState, ProviderAccountResponse,
     REACT_TO_RUN_ACTIVITY_OPERATION_ID, REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID, RUN_CANCEL_PATH,
-    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest,
-    RemoveModelAccountBindingRequest, RunInputMode, RunResponse, RunState,
+    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_MODEL_SELECTION_PATH, RUN_PATH, RUN_REACTIONS_PATH,
+    ReactToRunActivityRequest, RemoveModelAccountBindingRequest, RunInputMode,
+    RunModelSelectionResponse, RunModelSelectionSourceResponse, RunResponse, RunState,
     SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
     SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
     SESSION_TASKS_PATH, SET_MODEL_ACCOUNT_BINDING_OPERATION_ID, START_CHILD_RUN_OPERATION_ID,
@@ -569,6 +571,14 @@ fn schema() -> String {
         ("ApprovalResponse", schema_for!(ApprovalResponse)),
         ("ToolCallResponse", schema_for!(ToolCallResponse)),
         ("RunResponse", schema_for!(RunResponse)),
+        (
+            "RunModelSelectionResponse",
+            schema_for!(RunModelSelectionResponse),
+        ),
+        (
+            "RunModelSelectionSourceResponse",
+            schema_for!(RunModelSelectionSourceResponse),
+        ),
         ("SessionRunsResponse", schema_for!(SessionRunsResponse)),
         ("ChangedFileResponse", schema_for!(ChangedFileResponse)),
         (
@@ -942,6 +952,10 @@ fn catalogue() -> String {
             "method": "GET",
             "path": RUN_PATH,
             "operation": GET_RUN_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": RUN_MODEL_SELECTION_PATH,
+            "operation": GET_RUN_MODEL_SELECTION_OPERATION_ID
         }, {
             "method": "POST",
             "path": RUN_INPUT_PATH,
@@ -3021,6 +3035,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RunResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+  {RUN_MODEL_SELECTION_PATH}:
+    get:
+      operationId: {GET_RUN_MODEL_SELECTION_OPERATION_ID}
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema: {{type: string}}
+      responses:
+        '200':
+          description: Durable effective model choice and non-secret selection provenance.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunModelSelectionResponse'
         '400':
           $ref: '#/components/responses/Problem'
         '404':

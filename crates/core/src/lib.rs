@@ -27,6 +27,7 @@ mod native_run;
 mod provider;
 mod provider_account;
 mod provider_context;
+mod run_model_selection;
 mod shared_configuration;
 mod shared_configuration_decode;
 mod shared_skill;
@@ -56,6 +57,7 @@ pub use native_run::*;
 pub use provider::*;
 pub use provider_account::*;
 pub use provider_context::*;
+pub use run_model_selection::*;
 pub use shared_configuration::*;
 pub use shared_skill::*;
 pub use usage::*;
@@ -3495,6 +3497,8 @@ pub struct RunSnapshot {
     tool_calls: Vec<ToolCall>,
     approvals: Vec<Approval>,
     model_invocations: Vec<ModelInvocation>,
+    model_selection: Option<RunModelSelection>,
+    execution_kind: Option<RunExecutionKind>,
 }
 
 impl RunSnapshot {
@@ -3504,6 +3508,8 @@ impl RunSnapshot {
             tool_calls,
             approvals: Vec::new(),
             model_invocations: Vec::new(),
+            model_selection: None,
+            execution_kind: None,
         }
     }
 
@@ -3513,6 +3519,8 @@ impl RunSnapshot {
             tool_calls,
             approvals,
             model_invocations: Vec::new(),
+            model_selection: None,
+            execution_kind: None,
         }
     }
 
@@ -3527,7 +3535,17 @@ impl RunSnapshot {
             tool_calls,
             approvals,
             model_invocations,
+            model_selection: None,
+            execution_kind: None,
         }
+    }
+    pub fn with_model_selection(mut self, model_selection: Option<RunModelSelection>) -> Self {
+        self.model_selection = model_selection;
+        self
+    }
+    pub fn with_execution_kind(mut self, execution_kind: Option<RunExecutionKind>) -> Self {
+        self.execution_kind = execution_kind;
+        self
     }
     pub fn run(&self) -> &Run {
         &self.run
@@ -3556,6 +3574,14 @@ impl RunSnapshot {
 
     pub fn model_invocations(&self) -> &[ModelInvocation] {
         &self.model_invocations
+    }
+
+    pub fn model_selection(&self) -> Option<&RunModelSelection> {
+        self.model_selection.as_ref()
+    }
+
+    pub fn execution_kind(&self) -> Option<RunExecutionKind> {
+        self.execution_kind
     }
 
     pub fn model_invocation(&self, id: &ModelInvocationId) -> Option<&ModelInvocation> {
@@ -4637,6 +4663,8 @@ pub enum RunError {
     ApprovalNotFound,
     ApprovalAlreadyDecided,
     IdempotencyConflict,
+    ModelSelectionNotFound,
+    ModelUnavailable(RunModelUnavailableReason),
     RunStoreUnavailable,
 }
 
@@ -4662,6 +4690,7 @@ pub enum RunStoreError {
     ApprovalNotFound,
     ApprovalAlreadyDecided,
     IdempotencyConflict,
+    ModelUnavailable(RunModelUnavailableReason),
     Unavailable,
 }
 
@@ -5021,6 +5050,15 @@ pub trait RunStore: SessionStore + WorkspaceStore {
         events: &[SessionEvent],
         idempotency_key: &str,
     ) -> impl Future<Output = Result<StartRunMutation, RunStoreError>> + Send;
+    fn start_root_run_with_model_policy<'a>(
+        &'a self,
+        run: &'a Run,
+        events: &'a [SessionEvent],
+        idempotency_key: &'a str,
+        _model_policy: &'a RunModelStartPolicy,
+    ) -> impl Future<Output = Result<StartRunMutation, RunStoreError>> + Send + 'a {
+        async move { self.start_root_run(run, events, idempotency_key).await }
+    }
     fn start_child_run(
         &self,
         run: &Run,
@@ -5028,6 +5066,19 @@ pub trait RunStore: SessionStore + WorkspaceStore {
         task_assignment_event_id: Option<&EventId>,
         idempotency_key: &str,
     ) -> impl Future<Output = Result<StartRunMutation, RunStoreError>> + Send;
+    fn start_child_run_with_model_policy<'a>(
+        &'a self,
+        run: &'a Run,
+        events: &'a [SessionEvent],
+        task_assignment_event_id: Option<&'a EventId>,
+        idempotency_key: &'a str,
+        _model_policy: &'a RunModelStartPolicy,
+    ) -> impl Future<Output = Result<StartRunMutation, RunStoreError>> + Send + 'a {
+        async move {
+            self.start_child_run(run, events, task_assignment_event_id, idempotency_key)
+                .await
+        }
+    }
     fn get_run(
         &self,
         id: &RunId,
@@ -5344,6 +5395,24 @@ where
         approval_policy: ApprovalPolicy,
         requested_scope: WorkspacePathScope,
     ) -> Result<StartRunMutation, RunError> {
+        self.start_root_run_with_model_policy(
+            session_id,
+            idempotency_key,
+            approval_policy,
+            requested_scope,
+            RunModelStartPolicy::disabled(),
+        )
+        .await
+    }
+
+    pub async fn start_root_run_with_model_policy(
+        &self,
+        session_id: SessionId,
+        idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+        model_policy: RunModelStartPolicy,
+    ) -> Result<StartRunMutation, RunError> {
         if idempotency_key.is_empty() {
             return Err(RunError::IdempotencyKeyRequired);
         }
@@ -5354,6 +5423,7 @@ where
             approval_policy,
             requested_scope,
             run_id,
+            &model_policy,
         )
         .await
     }
@@ -5365,6 +5435,7 @@ where
         approval_policy: ApprovalPolicy,
         requested_scope: WorkspacePathScope,
         run_id: RunId,
+        model_policy: &RunModelStartPolicy,
     ) -> Result<StartRunMutation, RunError> {
         let session = self
             .store
@@ -5396,7 +5467,7 @@ where
             SessionEvent::run_queued(self.ids.event_id(), &run),
         ];
         self.store
-            .start_root_run(&run, &events, &idempotency_key)
+            .start_root_run_with_model_policy(&run, &events, &idempotency_key, model_policy)
             .await
             .map_err(map_run_store_error)
     }
@@ -5409,6 +5480,28 @@ where
         idempotency_key: String,
         approval_policy: ApprovalPolicy,
         requested_scope: WorkspacePathScope,
+    ) -> Result<StartRunMutation, RunError> {
+        self.start_child_run_with_model_policy(
+            parent_run_id,
+            task_id,
+            user_input_mode,
+            idempotency_key,
+            approval_policy,
+            requested_scope,
+            RunModelStartPolicy::disabled(),
+        )
+        .await
+    }
+
+    pub async fn start_child_run_with_model_policy(
+        &self,
+        parent_run_id: RunId,
+        task_id: Option<TaskId>,
+        user_input_mode: RunInputMode,
+        idempotency_key: String,
+        approval_policy: ApprovalPolicy,
+        requested_scope: WorkspacePathScope,
+        model_policy: RunModelStartPolicy,
     ) -> Result<StartRunMutation, RunError> {
         if idempotency_key.is_empty() {
             return Err(RunError::IdempotencyKeyRequired);
@@ -5457,7 +5550,13 @@ where
         ];
         let task_event_id = task_id.as_ref().map(|_| self.ids.event_id());
         self.store
-            .start_child_run(&run, &events, task_event_id.as_ref(), &idempotency_key)
+            .start_child_run_with_model_policy(
+                &run,
+                &events,
+                task_event_id.as_ref(),
+                &idempotency_key,
+                &model_policy,
+            )
             .await
             .map_err(map_run_store_error)
     }
@@ -6178,6 +6277,7 @@ fn map_run_store_error(error: RunStoreError) -> RunError {
         RunStoreError::ApprovalNotFound => RunError::ApprovalNotFound,
         RunStoreError::ApprovalAlreadyDecided => RunError::ApprovalAlreadyDecided,
         RunStoreError::IdempotencyConflict => RunError::IdempotencyConflict,
+        RunStoreError::ModelUnavailable(reason) => RunError::ModelUnavailable(reason),
         RunStoreError::Unavailable => RunError::RunStoreUnavailable,
     }
 }

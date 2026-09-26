@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.39.0";
+pub const PROTOCOL_VERSION: &str = "0.40.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -106,6 +106,20 @@ pub const DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID: &str = "designate_configu
 pub const GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID: &str = "get_configuration_sync_status";
 pub const PROVIDER_ACCOUNTS_PATH: &str = "/v1/provider-accounts";
 pub const PROVIDER_ACCOUNT_PATH: &str = "/v1/provider-accounts/{provider_account_id}";
+pub const MODEL_ACCOUNT_BINDINGS_PATH: &str = "/v1/model-account-bindings";
+pub const MODEL_ACCOUNT_BINDING_GET_PATH: &str = "/v1/model-account-bindings/get";
+pub const MODEL_ACCOUNT_BINDING_LIST_PATH: &str = "/v1/model-account-bindings/list";
+pub const MODEL_ACCOUNT_BINDING_REMOVE_PATH: &str = "/v1/model-account-bindings/remove";
+/// Uses the existing snapshot-publication key byte budget.
+pub const MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES: usize = CONFIGURATION_PUBLICATION_MAX_BYTES;
+/// Allows a maximum-size key and provider type, including JSON string escaping.
+pub const MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES: usize =
+    4 * CONFIGURATION_PUBLICATION_MAX_BYTES + 64 * 1024;
+/// Fits one maximum-size key and escaped provider type, account metadata and cursor.
+pub const MODEL_ACCOUNT_BINDING_RESPONSE_MAX_BYTES: usize =
+    4 * CONFIGURATION_PUBLICATION_MAX_BYTES + 64 * 1024;
+pub const MODEL_ACCOUNT_BINDING_DEFAULT_PAGE_SIZE: usize = 50;
+pub const MODEL_ACCOUNT_BINDING_MAX_PAGE_SIZE: usize = 100;
 pub const PROVIDER_ACCOUNT_LOGIN_PATH: &str = "/v1/provider-accounts/{provider_account_id}/login";
 pub const PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH: &str =
     "/v1/provider-accounts/{provider_account_id}/login/browser";
@@ -141,6 +155,10 @@ pub const GET_WORKSPACE_OPERATION_ID: &str = "get_workspace";
 pub const CREATE_PROVIDER_ACCOUNT_OPERATION_ID: &str = "create_provider_account";
 pub const LIST_PROVIDER_ACCOUNTS_OPERATION_ID: &str = "list_provider_accounts";
 pub const GET_PROVIDER_ACCOUNT_OPERATION_ID: &str = "get_provider_account";
+pub const LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID: &str = "list_model_account_bindings";
+pub const GET_MODEL_ACCOUNT_BINDING_OPERATION_ID: &str = "get_model_account_binding";
+pub const SET_MODEL_ACCOUNT_BINDING_OPERATION_ID: &str = "set_model_account_binding";
+pub const REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID: &str = "remove_model_account_binding";
 pub const DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID: &str = "disconnect_provider_account";
 pub const PROVIDER_ACCOUNT_DISCONNECT_PATH: &str =
     "/v1/provider-accounts/{provider_account_id}/disconnect";
@@ -245,6 +263,12 @@ pub mod error_code {
     pub const PROVIDER_ACCOUNT_LIMIT_REACHED: &str = "provider_account_limit_reached";
     pub const PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID: &str =
         "provider_account_workspace_association_invalid";
+    pub const MODEL_ACCOUNT_BINDING_INVALID_REQUEST: &str = "model_account_binding_invalid_request";
+    pub const MODEL_ACCOUNT_BINDING_CONFLICT: &str = "model_account_binding_conflict";
+    pub const MODEL_ACCOUNT_BINDING_PROVIDER_TYPE_MISMATCH: &str =
+        "model_account_binding_provider_type_mismatch";
+    pub const MODEL_ACCOUNT_BINDING_STORE_UNAVAILABLE: &str =
+        "model_account_binding_store_unavailable";
     pub const CONFIGURATION_SYNC_UNAVAILABLE: &str = "configuration_sync_unavailable";
     pub const CONFIGURATION_SYNC_INVALID_REQUEST: &str = "configuration_sync_invalid_request";
     pub const CONFIGURATION_SYNC_CONFLICT: &str = "configuration_sync_conflict";
@@ -343,6 +367,10 @@ pub mod error_code {
         PROVIDER_ACCOUNT_INVALID,
         PROVIDER_ACCOUNT_LIMIT_REACHED,
         PROVIDER_ACCOUNT_WORKSPACE_ASSOCIATION_INVALID,
+        MODEL_ACCOUNT_BINDING_INVALID_REQUEST,
+        MODEL_ACCOUNT_BINDING_CONFLICT,
+        MODEL_ACCOUNT_BINDING_PROVIDER_TYPE_MISMATCH,
+        MODEL_ACCOUNT_BINDING_STORE_UNAVAILABLE,
         CONFIGURATION_SYNC_UNAVAILABLE,
         CONFIGURATION_SYNC_INVALID_REQUEST,
         CONFIGURATION_SYNC_CONFLICT,
@@ -1034,6 +1062,76 @@ pub struct ProviderAccountResponse {
 #[serde(rename_all = "snake_case")]
 pub struct ListProviderAccountsResponse {
     pub provider_accounts: Vec<ProviderAccountResponse>,
+}
+
+/// Current host-local mapping for one portable model account key. The account
+/// fields are null after removal or before any mapping exists. Provider state
+/// is current metadata, not a guarantee of connection or execution eligibility.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelAccountBindingResponse {
+    #[schemars(length(max = 2_097_152))]
+    pub binding_key: String,
+    pub version: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub provider_account_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub provider_type: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub provider_account_label: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub provider_account_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ListModelAccountBindingsResponse {
+    pub bindings: Vec<ModelAccountBindingResponse>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableString")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ListModelAccountBindingsRequest {
+    pub limit: Option<usize>,
+    #[serde(deserialize_with = "deserialize_required_nullable_string")]
+    #[schemars(with = "RequiredNullableModelAccountBindingKey")]
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetModelAccountBindingRequest {
+    #[schemars(length(max = 2_097_152))]
+    pub binding_key: String,
+}
+
+/// Exact-version assignment of one host-local provider account to a portable
+/// model binding key. `expected_provider_type` is checked against the durable
+/// account record before the mapping is stored.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SetModelAccountBindingRequest {
+    #[schemars(length(max = 2_097_152))]
+    pub binding_key: String,
+    pub expected_version: u64,
+    #[schemars(length(max = 2_097_152))]
+    pub expected_provider_type: String,
+    pub provider_account_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RemoveModelAccountBindingRequest {
+    #[schemars(length(max = 2_097_152))]
+    pub binding_key: String,
+    pub expected_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
@@ -1795,6 +1893,25 @@ impl JsonSchema for RequiredNullableString {
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         json_schema!({"type": ["string", "null"]})
+    }
+}
+
+struct RequiredNullableModelAccountBindingKey;
+
+impl JsonSchema for RequiredNullableModelAccountBindingKey {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableModelAccountBindingKey".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": ["string", "null"],
+            "maxLength": MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES
+        })
     }
 }
 

@@ -1044,6 +1044,53 @@ model capabilities. There are no local provider-account IDs, credentials, host
 resource budgets or paths in this setting. Additional UI or runtime preferences
 must declare their shared scope and extend the schema explicitly.
 
+#### Host-local model account mappings
+
+Each host resolves `model_defaults.account_binding` through its own durable local
+mapping from the portable key to a stable `ProviderAccountId`. This table is not
+part of a shared snapshot and is never replicated. It stores no account label,
+provider subject, credential, vault reference, or secret. Labels are mutable
+presentation metadata and are not mapping keys.
+
+The authenticated local API lists active mappings in key order and gets one key's
+current state. Set and remove mutations require that key's exact current version.
+An unseen key has version `0`; removing a mapping retains a version tombstone so a
+stale update cannot succeed after remove/recreate. Lists omit tombstones; get
+returns them with null account fields. After an uncertain mutation response, read
+the key's current metadata before deciding whether to send another mutation.
+Mappings are local to each master or follower. They are not transported in
+snapshots.
+
+Set validates that the durable account exists and that its provider type matches
+the caller's expected provider type. It accepts records in any durable account
+state and returns the current state (`connecting`, `connected`, `reauth_required`,
+or `disconnected`). A mapping does not guarantee a current credential, provider
+access, workspace association, or future model compatibility. Disconnection does
+not delete an account or silently remap its binding. A Run resolver must recheck
+account state, workspace availability, provider/model compatibility, and the
+credential when it is implemented.
+
+The model-default policy for that future Run resolver is shared across masters
+and followers: the shared defaults govern newly created Runs. If defaults or the
+named local account mapping are missing, model execution is unavailable; an
+assigned instance does not fall back to an environment-selected model or account.
+Existing Runs retain their selected revision, account, and settings. Instances
+that remain unassigned keep their existing local environment behavior. This
+mapping API does not add a Run consumer; model defaults are not yet used to start
+Runs.
+
+The binding API accepts the same 2 MiB key byte budget used by snapshot
+publication and the `SharedConfigurationKey` character set. Keys and page cursors
+travel in bounded JSON bodies because their supported size exceeds practical URL
+limits. Command bodies and encoded responses are capped at 8 MiB plus 64 KiB.
+That budget covers a 2 MiB key, a 2 MiB provider type with up to 2× JSON string
+escaping, one duplicate key cursor, fixed account metadata, and 64 KiB of envelope
+headroom. Lists default to 50 active rows and allow at most 100; the server
+measures exact encoded JSON size as it builds the page and oversized pages
+continue from the last returned key. All responses are `no-store`. Protocol
+`0.40.0` adds these local operations, and migration 48 stores the mappings and
+per-key versions.
+
 MCP entries have stable portable IDs, enabled state, and one transport:
 
 - `stdio`: a logical runtime binding, ordered literal/host-binding arguments, and

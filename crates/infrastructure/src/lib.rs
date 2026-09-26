@@ -22,6 +22,7 @@ mod configuration_snapshot;
 mod configuration_sync;
 mod daemon_lock;
 pub use daemon_lock::DaemonStoreLock;
+mod host_model_account_binding;
 mod model_continuation;
 mod model_credential;
 mod model_output;

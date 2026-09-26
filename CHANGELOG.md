@@ -2,6 +2,19 @@
 
 ## 2026-09-26 — `feat`
 
+- EDL-322: Add durable host-local mappings from portable model account-binding
+  keys to local provider accounts, with authenticated version-checked list/get/
+  set/remove operations, safe current account state, migration 48, and typed Rust
+  client methods. Protocol `0.40.0` keeps local IDs and credentials out of shared
+  snapshots. The new-Run defaults policy is documented; Run consumption and
+  binding UI remain out of scope.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-26 — `feat`
+
 - EDL-322: Extend Settings with protocol `0.39.0` automatic-refresh status and
   an explicit protocol `0.38.0` follower snapshot fetch. Attempts are listed in
   bounded pages, transport origin and deadlines are caller-supplied, and a

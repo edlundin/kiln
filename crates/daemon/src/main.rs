@@ -378,6 +378,7 @@ async fn main() -> ExitCode {
     .with_configuration_identity_administration(identity_commands)
     .with_configuration_administration_store(store.clone(), UlidIdGenerator)
     .with_configuration_access_store(store.clone())
+    .with_host_model_account_binding_store(store.clone())
     .with_configuration_follower_enrollment_administration(follower_enrollment.clone())
     .with_configuration_publication_store(store.clone());
     let lifecycle = state.lifecycle();

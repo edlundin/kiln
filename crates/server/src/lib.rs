@@ -15,6 +15,7 @@ mod configuration_access;
 mod configuration_enrollment;
 mod configuration_identity;
 mod configuration_publication;
+mod host_model_account_binding;
 pub use configuration_publication::validate_follower_snapshot_candidate;
 mod configuration_sync;
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
@@ -696,6 +697,8 @@ pub struct AppState<W, S, R> {
         Option<Arc<dyn configuration_access::ConfigurationAccessOperations>>,
     configuration_follower_enrollment_operations:
         Option<Arc<dyn configuration_enrollment::ConfigurationFollowerEnrollmentOperations>>,
+    host_model_account_binding_operations:
+        Option<Arc<dyn host_model_account_binding::HostModelAccountBindingOperations>>,
     event_broadcaster: EventBroadcaster,
     lifecycle: LifecycleCoordinator,
 }
@@ -743,6 +746,10 @@ impl<W, S, R> Clone for AppState<W, S, R> {
                 .map(Arc::clone),
             configuration_follower_enrollment_operations: self
                 .configuration_follower_enrollment_operations
+                .as_ref()
+                .map(Arc::clone),
+            host_model_account_binding_operations: self
+                .host_model_account_binding_operations
                 .as_ref()
                 .map(Arc::clone),
             event_broadcaster: self.event_broadcaster.clone(),
@@ -806,6 +813,7 @@ impl<W, S, R> AppState<W, S, R> {
             configuration_publication_operations: None,
             configuration_access_operations: None,
             configuration_follower_enrollment_operations: None,
+            host_model_account_binding_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -845,6 +853,7 @@ impl<W, S, R> AppState<W, S, R> {
             configuration_publication_operations: None,
             configuration_access_operations: None,
             configuration_follower_enrollment_operations: None,
+            host_model_account_binding_operations: None,
             event_broadcaster,
             lifecycle: LifecycleCoordinator::new(),
         }
@@ -876,6 +885,20 @@ impl<W, S, R> AppState<W, S, R> {
     ) -> Self {
         self.configuration_access_operations = Some(Arc::new(
             configuration_access::ConfigurationAccessAdapter(store),
+        ));
+        self
+    }
+
+    pub fn with_host_model_account_binding_store<
+        T: kiln_core::HostModelAccountBindingStore + kiln_core::ProviderAccountStore + 'static,
+    >(
+        mut self,
+        store: T,
+    ) -> Self {
+        self.host_model_account_binding_operations = Some(Arc::new(
+            host_model_account_binding::HostModelAccountBindingAdapter(
+                kiln_core::HostModelAccountBindingApplication::new(store),
+            ),
         ));
         self
     }
@@ -1061,6 +1084,32 @@ where
             PROVIDER_ACCOUNTS_PATH,
             get(list_provider_accounts).post(create_provider_account),
         )
+        .route(
+            kiln_protocol::MODEL_ACCOUNT_BINDING_LIST_PATH,
+            post(host_model_account_binding::list).layer(axum::extract::DefaultBodyLimit::max(
+                kiln_protocol::MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES,
+            )),
+        )
+        .route(
+            kiln_protocol::MODEL_ACCOUNT_BINDING_GET_PATH,
+            post(host_model_account_binding::get).layer(axum::extract::DefaultBodyLimit::max(
+                kiln_protocol::MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES,
+            )),
+        )
+        .route(
+            kiln_protocol::MODEL_ACCOUNT_BINDINGS_PATH,
+            axum::routing::put(host_model_account_binding::set).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    kiln_protocol::MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES,
+                ),
+            ),
+        )
+        .route(
+            kiln_protocol::MODEL_ACCOUNT_BINDING_REMOVE_PATH,
+            post(host_model_account_binding::remove).layer(axum::extract::DefaultBodyLimit::max(
+                kiln_protocol::MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES,
+            )),
+        )
         .route(PROVIDER_ACCOUNT_PATH, get(get_provider_account))
         .route(
             kiln_protocol::PROVIDER_ACCOUNT_DISCONNECT_PATH,
@@ -1118,13 +1167,28 @@ where
     S: SessionOperations + TaskOperations + 'static,
     R: RunOperations + ArtifactOperations + 'static,
 {
-    if let Err(error) = validate_authority(&request, &state.bound_authority, &state.http_origin) {
-        return error.into_response();
+    let is_model_account_binding = is_model_account_binding_path(request.uri().path());
+    let mut response =
+        match validate_authority(&request, &state.bound_authority, &state.http_origin) {
+            Ok(()) => match authenticate_request(&request, &state.auth_token) {
+                Ok(()) => next.run(request).await,
+                Err(error) => error.into_response(),
+            },
+            Err(error) => error.into_response(),
+        };
+    if is_model_account_binding {
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
-    if let Err(error) = authenticate_request(&request, &state.auth_token) {
-        return error.into_response();
-    }
-    next.run(request).await
+    response
+}
+
+fn is_model_account_binding_path(path: &str) -> bool {
+    path == kiln_protocol::MODEL_ACCOUNT_BINDING_LIST_PATH
+        || path == kiln_protocol::MODEL_ACCOUNT_BINDING_GET_PATH
+        || path == kiln_protocol::MODEL_ACCOUNT_BINDINGS_PATH
+        || path == kiln_protocol::MODEL_ACCOUNT_BINDING_REMOVE_PATH
 }
 
 fn validate_authority(
@@ -3177,6 +3241,8 @@ enum PublicError {
     Usage(UsageQueryError),
     #[error("provider account operation failed")]
     ProviderAccount(ProviderAccountOperationError),
+    #[error("host model account binding operation failed")]
+    HostModelAccountBinding(kiln_core::HostModelAccountBindingError),
     #[error("configuration synchronization status is unavailable")]
     ConfigurationSyncUnavailable,
     #[error("configuration read grant was not found")]
@@ -4012,6 +4078,34 @@ impl PublicError {
                     StatusCode::CONFLICT,
                     error_code::PROVIDER_ACCOUNT_INVALID_STATE,
                     "Provider account login cancelled",
+                ),
+            },
+            Self::HostModelAccountBinding(error) => match error {
+                kiln_core::HostModelAccountBindingError::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::MODEL_ACCOUNT_BINDING_INVALID_REQUEST,
+                    "Invalid model account binding request",
+                ),
+                kiln_core::HostModelAccountBindingError::Conflict => (
+                    StatusCode::CONFLICT,
+                    error_code::MODEL_ACCOUNT_BINDING_CONFLICT,
+                    "Model account binding version changed",
+                ),
+                kiln_core::HostModelAccountBindingError::ProviderAccountNotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::PROVIDER_ACCOUNT_NOT_FOUND,
+                    "Provider account not found",
+                ),
+                kiln_core::HostModelAccountBindingError::ProviderTypeMismatch => (
+                    StatusCode::CONFLICT,
+                    error_code::MODEL_ACCOUNT_BINDING_PROVIDER_TYPE_MISMATCH,
+                    "Provider account type does not match the expected model provider",
+                ),
+                kiln_core::HostModelAccountBindingError::IntegrityViolation
+                | kiln_core::HostModelAccountBindingError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::MODEL_ACCOUNT_BINDING_STORE_UNAVAILABLE,
+                    "Model account binding store unavailable",
                 ),
             },
         };

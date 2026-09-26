@@ -79,37 +79,47 @@ use crate::{
     DESIGNATE_CONFIGURATION_MASTER_OPERATION_ID, DETERMINISTIC_SUBPROCESS_CAPABILITY,
     DISCONNECT_PROVIDER_ACCOUNT_OPERATION_ID, DesignateConfigurationMasterRequest,
     EVENT_STREAM_OPERATION_ID, EVENTS_WEBSOCKET_PATH, GET_ARTIFACT_OPERATION_ID,
-    GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
-    GET_PROVIDER_ACCOUNT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID,
-    IDEMPOTENCY_KEY_HEADER, LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
+    GET_CONFIGURATION_SYNC_STATUS_OPERATION_ID, GET_MODEL_ACCOUNT_BINDING_OPERATION_ID,
+    GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, GET_PROVIDER_ACCOUNT_OPERATION_ID,
+    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
+    GET_TASK_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, GetModelAccountBindingRequest,
+    IDEMPOTENCY_KEY_HEADER, LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID,
+    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
     LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
-    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse,
-    ListSessionsResponse, ListWorkspacesResponse, MessageDeliveryMode, MessageDeliveryResponse,
-    MessageDeliveryState, MessageResponse, MessageRole, MessageStatus,
-    ModelInvocationCompletionKind, ModelInvocationEventResponse, ModelInvocationFailureReason,
-    ModelInvocationPurpose, ModelInvocationStatus, ModelOutputRecordedResponse, ModelOutputStream,
-    NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH, PROVIDER_ACCOUNT_DISCONNECT_PATH,
-    PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH,
-    PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse,
-    ProviderAccountLoginState, ProviderAccountResponse, REACT_TO_RUN_ACTIVITY_OPERATION_ID,
-    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH,
-    ReactToRunActivityRequest, RunInputMode, RunResponse, RunState, SEND_RUN_INPUT_OPERATION_ID,
-    SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH,
-    SESSION_PATH, SESSION_RUNS_PATH, SESSION_TASKS_PATH, START_CHILD_RUN_OPERATION_ID,
+    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListModelAccountBindingsRequest,
+    ListModelAccountBindingsResponse, ListProviderAccountsResponse, ListSessionsResponse,
+    ListWorkspacesResponse, MODEL_ACCOUNT_BINDING_DEFAULT_PAGE_SIZE,
+    MODEL_ACCOUNT_BINDING_GET_PATH, MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES,
+    MODEL_ACCOUNT_BINDING_LIST_PATH, MODEL_ACCOUNT_BINDING_MAX_PAGE_SIZE,
+    MODEL_ACCOUNT_BINDING_REMOVE_PATH, MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES,
+    MODEL_ACCOUNT_BINDING_RESPONSE_MAX_BYTES, MODEL_ACCOUNT_BINDINGS_PATH, MessageDeliveryMode,
+    MessageDeliveryResponse, MessageDeliveryState, MessageResponse, MessageRole, MessageStatus,
+    ModelAccountBindingResponse, ModelInvocationCompletionKind, ModelInvocationEventResponse,
+    ModelInvocationFailureReason, ModelInvocationPurpose, ModelInvocationStatus,
+    ModelOutputRecordedResponse, ModelOutputStream, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH,
+    PROVIDER_ACCOUNT_DISCONNECT_PATH, PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+    PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails,
+    ProviderAccountLoginResponse, ProviderAccountLoginState, ProviderAccountResponse,
+    REACT_TO_RUN_ACTIVITY_OPERATION_ID, REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID, RUN_CANCEL_PATH,
+    RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH, ReactToRunActivityRequest,
+    RemoveModelAccountBindingRequest, RunInputMode, RunResponse, RunState,
+    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SESSION_TASKS_PATH, SET_MODEL_ACCOUNT_BINDING_OPERATION_ID, START_CHILD_RUN_OPERATION_ID,
     START_PROVIDER_ACCOUNT_BROWSER_LOGIN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
     START_RUN_OPERATION_ID, SendRunInputRequest, SessionChangeDiffContent,
     SessionChangeDiffResponse, SessionChangeDiffUnavailableReason, SessionChangesResponse,
     SessionEventDataResponse, SessionEventResponse, SessionEventsResponse, SessionResponse,
-    SessionRunsResponse, StartChildRunRequest, StartProviderAccountBrowserLoginResponse,
-    StartProviderAccountLoginResponse, StartRunRequest, StoreIdentity, TASK_ASSIGNMENT_PATH,
-    TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH, TRANSITION_TASK_OPERATION_ID,
-    TaskResponse, TaskState, ToolCallResponse, ToolCallState, ToolOutputStream,
-    TransitionTaskRequest, UPDATE_TASK_OPERATION_ID, UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH,
-    UpdateTaskRequest, UsageAccounting, UsageCompleteness, UsageFinality, UsageLedgerEntryResponse,
-    UsageLedgerResponse, UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse,
-    UsageSource, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
+    SessionRunsResponse, SetModelAccountBindingRequest, StartChildRunRequest,
+    StartProviderAccountBrowserLoginResponse, StartProviderAccountLoginResponse, StartRunRequest,
+    StoreIdentity, TASK_ASSIGNMENT_PATH, TASK_PATH, TASK_TRANSITION_PATH, TOOL_CALL_APPROVAL_PATH,
+    TRANSITION_TASK_OPERATION_ID, TaskResponse, TaskState, ToolCallResponse, ToolCallState,
+    ToolOutputStream, TransitionTaskRequest, UPDATE_TASK_OPERATION_ID,
+    UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UpdateTaskRequest, UsageAccounting,
+    UsageCompleteness, UsageFinality, UsageLedgerEntryResponse, UsageLedgerResponse,
+    UsageObservedResponse, UsageQuantityRelation, UsageQuantityResponse, UsageSource,
+    WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH,
     WorkspaceResponse, WorkspaceRootRequest, WorkspaceRootResponse, WorkspaceScopeResponse,
     error_code,
 };
@@ -177,6 +187,30 @@ pub fn artifact_files() -> BTreeMap<&'static str, String> {
     files.insert(
         "fixtures/list-provider-accounts-response.json",
         fixture_list_provider_accounts_response(),
+    );
+    files.insert(
+        "fixtures/model-account-binding-response.json",
+        fixture_model_account_binding_response(),
+    );
+    files.insert(
+        "fixtures/list-model-account-bindings-response.json",
+        fixture_list_model_account_bindings_response(),
+    );
+    files.insert(
+        "fixtures/list-model-account-bindings-request.json",
+        fixture_list_model_account_bindings_request(),
+    );
+    files.insert(
+        "fixtures/get-model-account-binding-request.json",
+        fixture_get_model_account_binding_request(),
+    );
+    files.insert(
+        "fixtures/set-model-account-binding-request.json",
+        fixture_set_model_account_binding_request(),
+    );
+    files.insert(
+        "fixtures/remove-model-account-binding-request.json",
+        fixture_remove_model_account_binding_request(),
     );
     files.insert(
         "fixtures/start-provider-account-login-response.json",
@@ -448,6 +482,30 @@ fn schema() -> String {
             schema_for!(ListProviderAccountsResponse),
         ),
         (
+            "ModelAccountBindingResponse",
+            schema_for!(ModelAccountBindingResponse),
+        ),
+        (
+            "ListModelAccountBindingsResponse",
+            schema_for!(ListModelAccountBindingsResponse),
+        ),
+        (
+            "ListModelAccountBindingsRequest",
+            schema_for!(ListModelAccountBindingsRequest),
+        ),
+        (
+            "GetModelAccountBindingRequest",
+            schema_for!(GetModelAccountBindingRequest),
+        ),
+        (
+            "SetModelAccountBindingRequest",
+            schema_for!(SetModelAccountBindingRequest),
+        ),
+        (
+            "RemoveModelAccountBindingRequest",
+            schema_for!(RemoveModelAccountBindingRequest),
+        ),
+        (
             "StartProviderAccountLoginResponse",
             schema_for!(StartProviderAccountLoginResponse),
         ),
@@ -646,6 +704,12 @@ fn typescript() -> String {
         CreateProviderAccountRequest::decl(&config),
         ProviderAccountResponse::decl(&config),
         ListProviderAccountsResponse::decl(&config),
+        ModelAccountBindingResponse::decl(&config),
+        ListModelAccountBindingsResponse::decl(&config),
+        ListModelAccountBindingsRequest::decl(&config),
+        GetModelAccountBindingRequest::decl(&config),
+        SetModelAccountBindingRequest::decl(&config),
+        RemoveModelAccountBindingRequest::decl(&config),
         StartProviderAccountLoginResponse::decl(&config),
         StartProviderAccountBrowserLoginResponse::decl(&config),
         ProviderAccountLoginState::decl(&config),
@@ -951,6 +1015,26 @@ fn catalogue() -> String {
                 "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_REJECT_PATH,
                 "operation": REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID
             }),
+            json!({
+                "method": "POST",
+                "path": MODEL_ACCOUNT_BINDING_LIST_PATH,
+                "operation": LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID
+            }),
+            json!({
+                "method": "POST",
+                "path": MODEL_ACCOUNT_BINDING_GET_PATH,
+                "operation": GET_MODEL_ACCOUNT_BINDING_OPERATION_ID
+            }),
+            json!({
+                "method": "PUT",
+                "path": MODEL_ACCOUNT_BINDINGS_PATH,
+                "operation": SET_MODEL_ACCOUNT_BINDING_OPERATION_ID
+            }),
+            json!({
+                "method": "POST",
+                "path": MODEL_ACCOUNT_BINDING_REMOVE_PATH,
+                "operation": REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID
+            }),
         ]);
     serde_json::to_string_pretty(&catalogue).expect("catalogue is serializable") + "\n"
 }
@@ -1108,6 +1192,60 @@ fn fixture_list_provider_accounts_response() -> String {
             last_used_at_unix_ms: None,
             capabilities_refreshed_at_unix_ms: None,
         }],
+    })
+}
+
+fn fixture_model_account_binding_response() -> String {
+    serialize_fixture(&ModelAccountBindingResponse {
+        binding_key: "openai-primary".to_owned(),
+        version: 2,
+        provider_account_id: Some("pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned()),
+        provider_type: Some("openai_codex_subscription".to_owned()),
+        provider_account_label: Some("ChatGPT subscription".to_owned()),
+        provider_account_state: Some("disconnected".to_owned()),
+    })
+}
+
+fn fixture_list_model_account_bindings_response() -> String {
+    serialize_fixture(&ListModelAccountBindingsResponse {
+        bindings: vec![ModelAccountBindingResponse {
+            binding_key: "openai-primary".to_owned(),
+            version: 2,
+            provider_account_id: Some("pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned()),
+            provider_type: Some("openai_codex_subscription".to_owned()),
+            provider_account_label: Some("ChatGPT subscription".to_owned()),
+            provider_account_state: Some("disconnected".to_owned()),
+        }],
+        next_cursor: None,
+    })
+}
+
+fn fixture_list_model_account_bindings_request() -> String {
+    serialize_fixture(&ListModelAccountBindingsRequest {
+        limit: Some(MODEL_ACCOUNT_BINDING_DEFAULT_PAGE_SIZE),
+        after: None,
+    })
+}
+
+fn fixture_get_model_account_binding_request() -> String {
+    serialize_fixture(&GetModelAccountBindingRequest {
+        binding_key: "openai-primary".to_owned(),
+    })
+}
+
+fn fixture_set_model_account_binding_request() -> String {
+    serialize_fixture(&SetModelAccountBindingRequest {
+        binding_key: "openai-primary".to_owned(),
+        expected_version: 1,
+        expected_provider_type: "openai_codex_subscription".to_owned(),
+        provider_account_id: "pac_01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned(),
+    })
+}
+
+fn fixture_remove_model_account_binding_request() -> String {
+    serialize_fixture(&RemoveModelAccountBindingRequest {
+        binding_key: "openai-primary".to_owned(),
+        expected_version: 2,
     })
 }
 
@@ -2099,6 +2237,96 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConfigurationSyncStatusResponse'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {MODEL_ACCOUNT_BINDING_LIST_PATH}:
+    post:
+      operationId: {LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID}
+      description: Authenticated local page of active host-local bindings. Keys use the {MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES}-byte snapshot-publication budget; the default page size is {MODEL_ACCOUNT_BINDING_DEFAULT_PAGE_SIZE}, the maximum is {MODEL_ACCOUNT_BINDING_MAX_PAGE_SIZE}, and request and encoded response bodies are bounded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ListModelAccountBindingsRequest'
+      responses:
+        '200':
+          description: Current local account metadata; provider state does not guarantee future execution availability.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListModelAccountBindingsResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {MODEL_ACCOUNT_BINDING_GET_PATH}:
+    post:
+      operationId: {GET_MODEL_ACCOUNT_BINDING_OPERATION_ID}
+      description: Looks up current state for one key, including version zero for never-seen keys and retained tombstone versions after removal. The key is limited to {MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES} bytes and is sent in the bounded JSON body to avoid URL-length limits.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GetModelAccountBindingRequest'
+      responses:
+        '200':
+          description: Current local account metadata, or null account fields when unbound.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelAccountBindingResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {MODEL_ACCOUNT_BINDINGS_PATH}:
+    put:
+      operationId: {SET_MODEL_ACCOUNT_BINDING_OPERATION_ID}
+      description: Sets a host-local mapping with an exact per-key version precondition. The supplied provider type must match the existing account metadata. Disconnected and reauthentication-required accounts may be mapped and are reported as such. Request and encoded response bodies are bounded at {MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES} and {MODEL_ACCOUNT_BINDING_RESPONSE_MAX_BYTES} bytes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetModelAccountBindingRequest'
+      responses:
+        '200':
+          description: Current mapping and account metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelAccountBindingResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {MODEL_ACCOUNT_BINDING_REMOVE_PATH}:
+    post:
+      operationId: {REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID}
+      description: Removes a mapping under an exact per-key version precondition and retains a version tombstone. Look up current metadata after an uncertain response before retrying.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveModelAccountBindingRequest'
+      responses:
+        '200':
+          description: Unbound key and retained current version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelAccountBindingResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
   {PROVIDER_ACCOUNTS_PATH}:
@@ -3150,6 +3378,30 @@ components:
         (
             "ListProviderAccountsResponse",
             openapi_schema::<ListProviderAccountsResponse>(),
+        ),
+        (
+            "ModelAccountBindingResponse",
+            openapi_schema::<ModelAccountBindingResponse>(),
+        ),
+        (
+            "ListModelAccountBindingsResponse",
+            openapi_schema::<ListModelAccountBindingsResponse>(),
+        ),
+        (
+            "ListModelAccountBindingsRequest",
+            openapi_schema::<ListModelAccountBindingsRequest>(),
+        ),
+        (
+            "GetModelAccountBindingRequest",
+            openapi_schema::<GetModelAccountBindingRequest>(),
+        ),
+        (
+            "SetModelAccountBindingRequest",
+            openapi_schema::<SetModelAccountBindingRequest>(),
+        ),
+        (
+            "RemoveModelAccountBindingRequest",
+            openapi_schema::<RemoveModelAccountBindingRequest>(),
         ),
         (
             "StartProviderAccountLoginResponse",

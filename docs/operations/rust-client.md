@@ -187,6 +187,39 @@ reuse is `idempotency_conflict`; stale state/wrong master is
 An approved follower can fetch and apply it explicitly through the separate
 one-shot method below; ongoing distribution and runtime consumers are not wired.
 
+## Host-local model account bindings
+
+Protocol `0.40.0` adds `list_model_account_bindings`,
+`get_model_account_binding`, `set_model_account_binding`, and
+`remove_model_account_binding`. These authenticated operations map a portable
+`model_defaults.account_binding` key to a local provider-account ID. The mapping
+stays in that daemon's database and never enters a shared snapshot.
+
+Use `get_model_account_binding(key)` to read the key's current version and safe
+account metadata. An unseen key has version `0`; a removed key returns null account
+fields with its retained tombstone version. `list_model_account_bindings(limit,
+after)` returns active mappings only, in key order, with a default page size of 50
+and maximum of 100. The key and cursor may be up to the snapshot publication
+limit (2 MiB), so the methods send them in JSON request bodies instead of URL
+segments. Requests and exact encoded responses are capped at 8 MiB plus 64 KiB;
+the client streams and stops reading a response once that cap is exceeded.
+
+`set_model_account_binding` takes a `SetModelAccountBindingRequest` containing
+the key, `expected_version`, `expected_provider_type` from shared model defaults,
+and `provider_account_id`. The daemon checks account existence and provider type
+before storing it, then returns current safe account metadata, including state.
+Disconnected and reauthentication-required records may be mapped; state does not
+promise future provider access, workspace availability, or compatibility.
+`remove_model_account_binding` takes the key and exact `expected_version`, then
+retains the next version as a tombstone. A stale version returns
+`model_account_binding_conflict`.
+
+If a mutation response is uncertain, call `get_model_account_binding(key)` and
+compare the current account ID and version before sending another command. The
+client does not retry these commands automatically. This API prepares the local
+binding boundary only: model defaults are not yet consumed when a Run starts, and
+the future Run resolver must recheck current account and workspace availability.
+
 ## Configuration snapshot export
 
 Protocol `0.29.0` adds `get_configuration_snapshot()`. It returns a

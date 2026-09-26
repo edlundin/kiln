@@ -18,30 +18,39 @@ use kiln_protocol::{
     CREATE_WORKSPACE_OPERATION_ID, ClientIdentity, CreateProviderAccountRequest,
     CreateWorkspaceRequest, DECIDE_APPROVAL_OPERATION_ID, EVENTS_WEBSOCKET_PATH,
     GET_ARTIFACT_OPERATION_ID, GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
-    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
-    GET_PROVIDER_ACCOUNT_OPERATION_ID, GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID,
-    GET_SESSION_OPERATION_ID, GET_WORKSPACE_OPERATION_ID, IDEMPOTENCY_KEY_HEADER,
-    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID, LIST_PROVIDER_ACCOUNTS_OPERATION_ID,
-    LIST_SESSION_CHANGES_OPERATION_ID, LIST_SESSION_EVENTS_OPERATION_ID,
-    LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID, LIST_USAGE_OPERATION_ID,
-    LIST_WORKSPACES_OPERATION_ID, ListProviderAccountsResponse, ListSessionsResponse,
-    ListWorkspacesResponse, MessageDeliveryResponse, MessageResponse, NEGOTIATE_OPERATION_ID,
-    NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION,
-    PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH,
-    PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse, ProviderAccountResponse,
-    REACT_TO_RUN_ACTIVITY_OPERATION_ID, REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID,
+    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, GET_MODEL_ACCOUNT_BINDING_OPERATION_ID,
+    GET_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, GET_PROVIDER_ACCOUNT_OPERATION_ID,
+    GET_RUN_OPERATION_ID, GET_SESSION_CHANGE_DIFF_OPERATION_ID, GET_SESSION_OPERATION_ID,
+    GET_WORKSPACE_OPERATION_ID, GetModelAccountBindingRequest, IDEMPOTENCY_KEY_HEADER,
+    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID, LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID,
+    LIST_PROVIDER_ACCOUNTS_OPERATION_ID, LIST_SESSION_CHANGES_OPERATION_ID,
+    LIST_SESSION_EVENTS_OPERATION_ID, LIST_SESSION_RUNS_OPERATION_ID, LIST_SESSIONS_OPERATION_ID,
+    LIST_USAGE_OPERATION_ID, LIST_WORKSPACES_OPERATION_ID, ListModelAccountBindingsRequest,
+    ListModelAccountBindingsResponse, ListProviderAccountsResponse, ListSessionsResponse,
+    ListWorkspacesResponse, MODEL_ACCOUNT_BINDING_DEFAULT_PAGE_SIZE,
+    MODEL_ACCOUNT_BINDING_GET_PATH, MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES,
+    MODEL_ACCOUNT_BINDING_LIST_PATH, MODEL_ACCOUNT_BINDING_MAX_PAGE_SIZE,
+    MODEL_ACCOUNT_BINDING_REMOVE_PATH, MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES,
+    MODEL_ACCOUNT_BINDING_RESPONSE_MAX_BYTES, MODEL_ACCOUNT_BINDINGS_PATH, MessageDeliveryResponse,
+    MessageResponse, ModelAccountBindingResponse, NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH,
+    NegotiateRequest, NegotiateResponse, PROTOCOL_VERSION, PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH,
+    PROVIDER_ACCOUNT_LOGIN_PATH, PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails,
+    ProviderAccountLoginResponse, ProviderAccountResponse, REACT_TO_RUN_ACTIVITY_OPERATION_ID,
+    REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID, REVOKE_CONFIGURATION_READ_GRANT_OPERATION_ID,
     RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_PATH, RUN_REACTIONS_PATH,
-    ReactToRunActivityRequest, RunResponse, SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH,
-    SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
-    SESSION_RUNS_PATH, START_CHILD_RUN_OPERATION_ID, START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID,
-    START_RUN_OPERATION_ID, SessionChangeDiffResponse, SessionChangesResponse,
-    SessionEventsResponse, SessionResponse, SessionRunsResponse, StartChildRunRequest,
-    StartProviderAccountLoginResponse, StartRunRequest, TOOL_CALL_APPROVAL_PATH,
-    UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH, UsageLedgerResponse, WEBSOCKET_CAPABILITY,
-    WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH, WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
+    ReactToRunActivityRequest, RemoveModelAccountBindingRequest, RunResponse,
+    SEND_RUN_INPUT_OPERATION_ID, SESSION_CHANGE_DIFF_PATH, SESSION_CHANGES_PATH,
+    SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH, SESSION_RUNS_PATH,
+    SET_MODEL_ACCOUNT_BINDING_OPERATION_ID, START_CHILD_RUN_OPERATION_ID,
+    START_PROVIDER_ACCOUNT_LOGIN_OPERATION_ID, START_RUN_OPERATION_ID, SessionChangeDiffResponse,
+    SessionChangesResponse, SessionEventsResponse, SessionResponse, SessionRunsResponse,
+    SetModelAccountBindingRequest, StartChildRunRequest, StartProviderAccountLoginResponse,
+    StartRunRequest, TOOL_CALL_APPROVAL_PATH, UPLOAD_ARTIFACT_OPERATION_ID, USAGE_PATH,
+    UsageLedgerResponse, WEBSOCKET_CAPABILITY, WORKSPACE_PATH, WORKSPACE_SESSIONS_PATH,
+    WORKSPACES_PATH, WebSocketFrame, WorkspaceResponse,
 };
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
-use serde::de::DeserializeOwned;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio_tungstenite::tungstenite::{
     Message, client::IntoClientRequest, error::Error as WebSocketError,
@@ -110,6 +119,14 @@ pub enum Error {
     InvalidConfigurationFollowerEnrollmentDecision,
     #[error("configuration snapshot response exceeds the transfer budget")]
     ConfigurationSnapshotTooLarge,
+    #[error("model account binding key is invalid or exceeds the protocol byte limit")]
+    InvalidModelAccountBindingKey,
+    #[error("model account binding page limit must be between 1 and 100")]
+    InvalidModelAccountBindingPageLimit,
+    #[error("model account binding response exceeds the protocol transfer budget")]
+    ModelAccountBindingResponseTooLarge,
+    #[error("model account binding request is invalid or exceeds the protocol transfer budget")]
+    InvalidModelAccountBindingRequest,
 }
 
 /// A downloaded immutable artifact and its public response metadata.
@@ -852,6 +869,110 @@ impl Client {
         .await
     }
 
+    /// Lists bounded host-local mappings. Pass the returned key cursor as `after`
+    /// to continue. Removed keys remain available through `get_model_account_binding`
+    /// with their retained version, but do not appear in this active-only list.
+    pub async fn list_model_account_bindings(
+        &self,
+        limit: Option<usize>,
+        after: Option<&str>,
+    ) -> Result<ListModelAccountBindingsResponse, Error> {
+        let limit = limit.unwrap_or(MODEL_ACCOUNT_BINDING_DEFAULT_PAGE_SIZE);
+        if !(1..=MODEL_ACCOUNT_BINDING_MAX_PAGE_SIZE).contains(&limit) {
+            return Err(Error::InvalidModelAccountBindingPageLimit);
+        }
+        if after.is_some_and(|key| !valid_model_account_binding_key(key)) {
+            return Err(Error::InvalidModelAccountBindingKey);
+        }
+        let request = ListModelAccountBindingsRequest {
+            limit: Some(limit),
+            after: after.map(str::to_owned),
+        };
+        let body = bounded_model_account_binding_body(&request)?;
+        self.send_model_account_binding_json(
+            LIST_MODEL_ACCOUNT_BINDINGS_OPERATION_ID,
+            self.http
+                .post(self.http_url(MODEL_ACCOUNT_BINDING_LIST_PATH))
+                .header(CONTENT_TYPE, "application/json")
+                .body(body),
+        )
+        .await
+    }
+
+    /// Reads one key's current version and safe account metadata. A version of
+    /// zero means the key has never been stored; a removed key retains a
+    /// nonzero tombstone version. Use this metadata to recover an uncertain
+    /// mutation before constructing another exact-version request.
+    pub async fn get_model_account_binding(
+        &self,
+        binding_key: &str,
+    ) -> Result<ModelAccountBindingResponse, Error> {
+        if !valid_model_account_binding_key(binding_key) {
+            return Err(Error::InvalidModelAccountBindingKey);
+        }
+        let request = GetModelAccountBindingRequest {
+            binding_key: binding_key.to_owned(),
+        };
+        let body = bounded_model_account_binding_body(&request)?;
+        self.send_model_account_binding_json(
+            GET_MODEL_ACCOUNT_BINDING_OPERATION_ID,
+            self.http
+                .post(self.http_url(MODEL_ACCOUNT_BINDING_GET_PATH))
+                .header(CONTENT_TYPE, "application/json")
+                .body(body),
+        )
+        .await
+    }
+
+    /// Assigns a local provider account under the exact current key version.
+    /// `expected_provider_type` must match the shared model default's provider.
+    /// If the response is uncertain, read the key before retrying.
+    pub async fn set_model_account_binding(
+        &self,
+        request: &SetModelAccountBindingRequest,
+    ) -> Result<ModelAccountBindingResponse, Error> {
+        if !valid_model_account_binding_key(&request.binding_key)
+            || !valid_public_ulid(&request.provider_account_id, "pac_")
+            || request.expected_provider_type.is_empty()
+            || request.expected_provider_type.len() > MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES
+            || !request
+                .expected_provider_type
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(Error::InvalidModelAccountBindingRequest);
+        }
+        let body = bounded_model_account_binding_body(request)?;
+        self.send_model_account_binding_json(
+            SET_MODEL_ACCOUNT_BINDING_OPERATION_ID,
+            self.http
+                .put(self.http_url(MODEL_ACCOUNT_BINDINGS_PATH))
+                .header(CONTENT_TYPE, "application/json")
+                .body(body),
+        )
+        .await
+    }
+
+    /// Removes a local mapping while retaining its next version as a tombstone.
+    /// After an uncertain response, read the key before retrying.
+    pub async fn remove_model_account_binding(
+        &self,
+        request: &RemoveModelAccountBindingRequest,
+    ) -> Result<ModelAccountBindingResponse, Error> {
+        if !valid_model_account_binding_key(&request.binding_key) {
+            return Err(Error::InvalidModelAccountBindingKey);
+        }
+        let body = bounded_model_account_binding_body(request)?;
+        self.send_model_account_binding_json(
+            REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID,
+            self.http
+                .post(self.http_url(MODEL_ACCOUNT_BINDING_REMOVE_PATH))
+                .header(CONTENT_TYPE, "application/json")
+                .body(body),
+        )
+        .await
+    }
+
     pub async fn list_provider_accounts(&self) -> Result<ListProviderAccountsResponse, Error> {
         self.send_json(
             LIST_PROVIDER_ACCOUNTS_OPERATION_ID,
@@ -1414,6 +1535,52 @@ impl Client {
         serde_json::from_slice(&bytes).map_err(|source| Error::Decode { operation, source })
     }
 
+    async fn send_model_account_binding_json<T>(
+        &self,
+        operation: &'static str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, Error>
+    where
+        T: DeserializeOwned,
+    {
+        let response = request
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport { operation, source })?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MODEL_ACCOUNT_BINDING_RESPONSE_MAX_BYTES as u64)
+        {
+            return Err(Error::ModelAccountBindingResponseTooLarge);
+        }
+        let status = response.status();
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|source| Error::HttpTransport { operation, source })?;
+            if bytes
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|length| length > MODEL_ACCOUNT_BINDING_RESPONSE_MAX_BYTES)
+            {
+                return Err(Error::ModelAccountBindingResponseTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return match serde_json::from_slice(&bytes) {
+                Ok(problem) => Err(Error::Api {
+                    status: status.as_u16(),
+                    problem,
+                }),
+                Err(_) => Err(Error::UnexpectedResponse {
+                    status: status.as_u16(),
+                }),
+            };
+        }
+        serde_json::from_slice(&bytes).map_err(|source| Error::Decode { operation, source })
+    }
+
     fn http_url(&self, path: &str) -> reqwest::Url {
         let mut url = reqwest::Url::parse(&format!("http://{}/", self.address))
             .expect("a loopback socket address is a valid URL authority");
@@ -1561,6 +1728,32 @@ fn path_with_segments(
     }
     drop(segments);
     Ok(url.path().to_owned())
+}
+
+fn bounded_model_account_binding_body<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
+    let body = serde_json::to_vec(value).map_err(|_| Error::InvalidModelAccountBindingRequest)?;
+    if body.len() > MODEL_ACCOUNT_BINDING_REQUEST_MAX_BYTES {
+        return Err(Error::InvalidModelAccountBindingRequest);
+    }
+    Ok(body)
+}
+
+fn valid_model_account_binding_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MODEL_ACCOUNT_BINDING_KEY_MAX_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+fn valid_public_ulid(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.len() == 26
+            && matches!(suffix.as_bytes()[0], b'0'..=b'7')
+            && suffix
+                .bytes()
+                .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
+    })
 }
 
 fn valid_public_configuration_id(value: &str, prefix: &str) -> bool {

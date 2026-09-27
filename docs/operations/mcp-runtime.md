@@ -93,3 +93,19 @@ resolved credentials are never included. Errors omit supplied metadata.
 
 Online registration, common-format import, shared-source ingestion, public audit
 replay, and host-binding/credential administration remain open.
+
+The internal MCP secret reservation journal (migration 54) records vault identity
+and write ownership without secret values. A fresh reservation is the only result
+that permits one vault write; an existing receipt never permits another write,
+even after restart or deletion. Reservations validate the current enabled stdio
+definition, owner, binding role and caller-supplied metadata limits. Cleanup is
+scoped and batched, with retained deletion tombstones that prevent reference
+reuse across identities. Retired reservations can be reconciled after a definition
+is disabled or replaced.
+
+This is an unpublished-reservation primitive, not credential administration or
+launch authorization. It does not call the OS vault, publish host snapshots or
+run during startup. Its caller must serialize writes and cleanup, wait for any
+cancelled OS write to settle, and acknowledge deletion only after vault deletion
+succeeds. Snapshot publication and generation/revision coordination remain open;
+no published credential can be represented by this journal yet.

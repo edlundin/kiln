@@ -83,3 +83,68 @@ pub trait McpSecretStore: Send + Sync {
         binding: &McpSecretBinding,
     ) -> impl Future<Output = Result<(), SecretStoreError>> + Send;
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSecretReservationState {
+    Reserved,
+    Retired,
+    Deleted,
+}
+
+/// Only Fresh permits the caller to write a vault value. An existing receipt,
+/// including Reserved after an ambiguous commit, must never repeat that write.
+pub enum McpSecretReservation {
+    Fresh,
+    Existing(McpSecretReservationState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSecretJournalError {
+    InvalidRequest,
+    LimitExceeded,
+    DefinitionChanged,
+    InvalidBinding,
+    Conflict,
+    NotFound,
+    IntegrityViolation,
+    Unavailable,
+}
+
+/// Host-local write ownership and cleanup receipts; never stores secret bytes.
+/// This preparatory journal does not publish references into launch snapshots.
+/// Callers must serialize vault writes, retirement and deletion for a binding;
+/// restart reconciliation requires exclusive daemon ownership. A cancelled OS
+/// write must settle before its retirement is acknowledged as deleted.
+pub trait McpSecretJournal: Send + Sync {
+    fn reserve_mcp_secret(
+        &self,
+        binding: &McpSecretBinding,
+        expected_definition_version: u64,
+        limits: crate::McpDefinitionLimits,
+    ) -> impl Future<Output = Result<McpSecretReservation, McpSecretJournalError>> + Send;
+
+    /// Retires an unpublished reservation. Exact retries preserve Deleted.
+    fn retire_mcp_secret_reservation(
+        &self,
+        binding: &McpSecretBinding,
+    ) -> impl Future<Output = Result<McpSecretReservationState, McpSecretJournalError>> + Send;
+
+    /// Call only after an idempotent vault delete has completed successfully.
+    /// Retains a tombstone so this reference can never acquire a new writer.
+    fn finish_mcp_secret_deletion(
+        &self,
+        binding: &McpSecretBinding,
+    ) -> impl Future<Output = Result<(), McpSecretJournalError>> + Send;
+
+    /// Bounded reconciliation for one already-authorized scope. Deleted
+    /// tombstones are omitted. Retire/finish each returned item before taking
+    /// another batch; this is not a cursor over concurrently changing writers.
+    fn pending_mcp_secret_reservations(
+        &self,
+        instance_id: &KilnInstanceId,
+        key: &McpInstanceKey,
+        batch_size: std::num::NonZeroUsize,
+    ) -> impl Future<
+        Output = Result<Vec<(McpSecretBinding, McpSecretReservationState)>, McpSecretJournalError>,
+    > + Send;
+}

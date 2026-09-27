@@ -26,6 +26,7 @@ mod host_model_account_binding;
 mod mcp_definition;
 mod mcp_instance;
 mod mcp_invocation;
+mod mcp_secret;
 mod model_continuation;
 mod model_credential;
 mod model_output;

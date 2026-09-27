@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Reserve MCP vault references durably with scoped validation,
+  bounded cleanup reconciliation and permanent deletion tombstones.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Resolve authorized MCP argument and environment secret references
   through a separate host vault namespace.
 

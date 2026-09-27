@@ -2,8 +2,9 @@
 
 This crate begins EDL-314 with a guarded stdio negotiation adapter over the
 official `rmcp` SDK, pinned to 3.4.1. It is not yet connected to daemon tool
-execution or synchronized MCP definitions. It does not launch processes or grant
-permission to invoke tools, read resources, or request prompts.
+execution or synchronized MCP definitions. Its Unix process adapter accepts
+explicit locally authorized launch inputs; it does not grant permission to
+launch synchronized definitions, invoke tools, read resources, or request prompts.
 
 `start_stdio_client` accepts a caller-owned transport and either `Auto` or a pin
 to one of the five final versions in EDL-247. Auto prefers `2026-07-28` discovery.
@@ -41,7 +42,30 @@ frames. This deliberately stricter transport avoids the SDK's unbounded
 `read_until` buffer and malformed-input recovery behavior. It supplies no default
 frame limit; the host must choose one from its resource budget.
 
-Remaining broker work includes scoped process ownership and explicit environment,
+On Unix, `StdioProcess` starts one process generation with an absolute executable
+and working directory, explicit arguments and environment, piped protocol I/O,
+and discarded stderr. It clears the daemon environment and uses a separate process
+group. It is an execution adapter: the caller must authorize and resolve all launch
+inputs first. It does not yet bind them to a durable scoped instance or protect a
+validated directory against replacement between resolution and launch.
+
+Explicit close shuts stdin, allows the caller's shutdown grace, signals remaining
+group members, and reaps the direct child. The leader stays unreaped for the full
+grace interval to prevent numeric PID reuse before group cleanup. Drop forces
+group cleanup and delegates direct-child reaping to Tokio; orderly daemon shutdown
+must therefore close instances while its runtime is alive. On macOS, XNU excludes
+zombies when signaling groups and can report `EPERM` after graceful exit. The
+adapter accepts that case only after `waitid(WNOWAIT)` confirms its leader exited.
+The process-group boundary covers descendants retaining the caller's credentials
+and group; processes escaping those constraints require an OS sandbox. Windows
+process ownership is not implemented. There is no default grace or startup deadline.
+
+Real-process fixtures cover environment/cwd isolation, legacy negotiation,
+idempotent close/reaping, EOF shutdown, descendant cleanup, malformed output,
+and cancellation during startup. These are local macOS observations; Linux
+execution and full MCP conformance remain unverified.
+
+Remaining broker work includes scoped instance ownership,
 registration and host binding resolution, durable lifecycle and invocation
 events, Kiln grants/approvals, catalogue/result paging, interruption/recovery,
 HTTP/OAuth, mediated server requests, and full conformance. No MCP operation is

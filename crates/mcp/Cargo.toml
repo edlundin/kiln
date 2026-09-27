@@ -9,5 +9,8 @@ rmcp = { version = "=3.4.1", default-features = false, features = ["client"] }
 tokio = { workspace = true, features = ["io-util"] }
 serde_json.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

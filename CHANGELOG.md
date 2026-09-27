@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `feat`
+
+- EDL-314: Add Unix MCP stdio process ownership with explicit launch inputs,
+  isolated environment, and process-group cleanup.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
 ## 2026-09-27 — `test`
 
 - EDL-322: Repair infrastructure library test fixtures so targeted storage and

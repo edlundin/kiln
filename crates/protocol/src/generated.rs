@@ -25,10 +25,10 @@ use crate::{
     FetchConfigurationFollowerSnapshotResponse, GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
-    GET_CONFIGURATION_READ_GRANT_OPERATION_ID,
+    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, INSPECT_TOOL_CALL_OPERATION_ID,
     LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID,
     LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID,
-    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID,
+    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID, NativeToolSourceResponse,
     PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     PrepareConfigurationFollowerEnrollmentRequest,
     REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
@@ -38,12 +38,13 @@ use crate::{
     RetireMasterIdentityByIdRequest, RetireMasterIdentityRequest,
     RevokeConfigurationReadGrantRequest,
     SUBMIT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
-    SubmitConfigurationFollowerEnrollmentRequest,
+    SubmitConfigurationFollowerEnrollmentRequest, TOOL_CALL_INSPECTION_PATH,
+    ToolCallInspectionResponse,
 };
 use crate::{
-    CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
-    CONFIGURATION_IDENTITY_CERTIFICATE_PATH, GET_CONFIGURATION_IDENTITY_CERTIFICATE_OPERATION_ID,
-    ConfigurationIdentityStatusResponse, ConfigurationIdentitySummaryResponse,
+    CONFIGURATION_IDENTITY_CERTIFICATE_PATH, CONFIGURATION_IDENTITY_STATUS_PATH,
+    ConfigurationIdentityPhase, ConfigurationIdentityStatusResponse,
+    ConfigurationIdentitySummaryResponse, GET_CONFIGURATION_IDENTITY_CERTIFICATE_OPERATION_ID,
     GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID,
 };
 use crate::{
@@ -559,6 +560,14 @@ fn schema() -> String {
             schema_for!(ApprovalDecisionRequest),
         ),
         ("ApprovalDecision", schema_for!(ApprovalDecision)),
+        (
+            "NativeToolSourceResponse",
+            schema_for!(NativeToolSourceResponse),
+        ),
+        (
+            "ToolCallInspectionResponse",
+            schema_for!(ToolCallInspectionResponse),
+        ),
         ("RunState", schema_for!(RunState)),
         ("RunInputMode", schema_for!(RunInputMode)),
         ("ToolCallState", schema_for!(ToolCallState)),
@@ -748,6 +757,8 @@ fn typescript() -> String {
         ApprovalPolicy::decl(&config),
         ApprovalDecisionRequest::decl(&config),
         ApprovalDecision::decl(&config),
+        NativeToolSourceResponse::decl(&config),
+        ToolCallInspectionResponse::decl(&config),
         RunState::decl(&config),
         RunInputMode::decl(&config),
         ToolCallState::decl(&config),
@@ -1009,6 +1020,7 @@ fn catalogue() -> String {
         .and_then(Value::as_array_mut)
         .expect("catalogue HTTP operations are an array")
         .extend([
+            json!({"method":"GET", "path":TOOL_CALL_INSPECTION_PATH, "operation":INSPECT_TOOL_CALL_OPERATION_ID}),
             json!({
                 "method": "GET",
                 "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
@@ -3010,6 +3022,39 @@ paths:
         '503':
           $ref: '#/components/responses/Problem'
         '500':
+          $ref: '#/components/responses/Problem'
+  {TOOL_CALL_INSPECTION_PATH}:
+    get:
+      operationId: {INSPECT_TOOL_CALL_OPERATION_ID}
+      parameters:
+        - name: tool_call_id
+          in: path
+          required: true
+          schema: {{type: string}}
+        - name: max_source_bytes
+          in: query
+          required: true
+          schema: {{type: integer, minimum: 1}}
+          description: Byte budget for the frozen request batch and catalogue needed to verify the adopted source, plus capability text. Oversized source fails without partial arguments.
+      responses:
+        '200':
+          description: Read-only ToolCall source inspection. Arguments are untrusted model data; resolved host inputs and credentials are not included.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolCallInspectionResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '413':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
           $ref: '#/components/responses/Problem'
   {TOOL_CALL_APPROVAL_PATH}:
     post:

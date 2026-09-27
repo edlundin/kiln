@@ -32,6 +32,12 @@ use crate::{
 };
 
 enum Update {
+    ApprovalInspected {
+        connection_generation: u64,
+        session_id: String,
+        tool_call_id: String,
+        result: Result<kiln_protocol::ToolCallInspectionResponse, String>,
+    },
     Connected {
         generation: u64,
         result: Result<connection::ConnectionResult, String>,
@@ -157,6 +163,12 @@ struct DraftAttachment {
 }
 
 const ARTIFACT_PREVIEW_LIMIT: usize = 64 * 1024;
+
+enum ApprovalInspection {
+    Loading,
+    Loaded(kiln_protocol::ToolCallInspectionResponse),
+    Failed(String),
+}
 const USAGE_PAGE_LIMIT: u64 = 100;
 
 struct ArtifactPreview {
@@ -283,6 +295,7 @@ pub struct Desktop {
     daemon: Option<connection::DaemonConnection>,
     connection: Option<Connected>,
     conversation: Conversation,
+    approval_inspections: BTreeMap<String, ApprovalInspection>,
     runtime: Arc<Runtime>,
     updates: mpsc::UnboundedSender<Update>,
     stream: Option<JoinHandle<()>>,
@@ -402,6 +415,7 @@ impl Desktop {
             daemon: None,
             connection: None,
             conversation: Conversation::default(),
+            approval_inspections: BTreeMap::new(),
             runtime,
             updates,
             stream: None,
@@ -1236,6 +1250,14 @@ impl Desktop {
     }
 
     fn decide(&mut self, tool_call: String, decision: ApprovalDecision, cx: &mut Context<Self>) {
+        if decision == ApprovalDecision::Approved
+            && !matches!(
+                self.approval_inspections.get(&tool_call),
+                Some(ApprovalInspection::Loaded(_))
+            )
+        {
+            return;
+        }
         if self.busy || !self.online || self.switching_session.is_some() {
             return;
         }
@@ -1256,6 +1278,52 @@ impl Desktop {
             let _ = updates.send(Update::Command { session_id, result });
         });
         cx.notify();
+    }
+
+    fn ensure_approval_inspections(&mut self) {
+        if !self.online || self.switching_session.is_some() {
+            return;
+        }
+        let Some(connected) = &self.connection else {
+            return;
+        };
+        let pending = self
+            .conversation
+            .approvals
+            .values()
+            .filter(|approval| approval.state == ApprovalState::Pending)
+            .map(|approval| approval.tool_call_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.approval_inspections
+            .retain(|id, _| pending.contains(id));
+        for id in pending {
+            if self.approval_inspections.contains_key(&id) {
+                continue;
+            }
+            self.approval_inspections
+                .insert(id.clone(), ApprovalInspection::Loading);
+            let client = connected.client.clone();
+            let session_id = connected.session.session_id.clone();
+            let connection_generation = self.connection_generation;
+            let updates = self.updates.clone();
+            self.runtime.spawn(async move {
+                // Reuse the desktop's existing bounded text-preview allowance.
+                // Oversized source fails; approval never uses truncated arguments.
+                let budget = std::num::NonZeroUsize::new(ARTIFACT_PREVIEW_LIMIT).unwrap();
+                let result = client
+                    .inspect_tool_call(&id, budget)
+                    .await
+                    .map_err(|error| {
+                        connection::error_message("Inspect requested operation", &error)
+                    });
+                let _ = updates.send(Update::ApprovalInspected {
+                    connection_generation,
+                    session_id,
+                    tool_call_id: id,
+                    result,
+                });
+            });
+        }
     }
 
     fn toggle_run_details(&mut self, run_id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1640,6 +1708,7 @@ impl Desktop {
         self.selected_workspace_id = Some(connected.workspace.workspace_id.clone());
         self.selected_session_id = Some(session_id.clone());
         self.conversation = Conversation::default();
+        self.approval_inspections.clear();
         for run in connected.initial_runs.runs.iter().cloned() {
             self.conversation.apply_run(run);
         }
@@ -2015,6 +2084,7 @@ impl Desktop {
                         self.workspaces = daemon.workspaces;
                         self.connection = None;
                         self.conversation = Conversation::default();
+                        self.approval_inspections.clear();
                         self.online = true;
                         self.show_connection = false;
                         self.selected_run = None;
@@ -2196,6 +2266,37 @@ impl Desktop {
                         Err(error) => draft.error = Some(error),
                     }
                 }
+            }
+            Update::ApprovalInspected {
+                connection_generation,
+                session_id,
+                tool_call_id,
+                result,
+            } => {
+                if connection_generation != self.connection_generation
+                    || self.active_session_id() != Some(session_id.as_str())
+                {
+                    return;
+                }
+                let Some(approval) = self.conversation.approvals.values().find(|approval| {
+                    approval.tool_call_id == tool_call_id
+                        && approval.state == ApprovalState::Pending
+                }) else {
+                    return;
+                };
+                let state = match result {
+                    Ok(source)
+                        if source.tool_call_id == tool_call_id
+                            && source.run_id == approval.run_id =>
+                    {
+                        ApprovalInspection::Loaded(source)
+                    }
+                    Ok(_) => ApprovalInspection::Failed(
+                        "The returned operation does not match this approval.".into(),
+                    ),
+                    Err(error) => ApprovalInspection::Failed(error),
+                };
+                self.approval_inspections.insert(tool_call_id, state);
             }
             Update::Command { session_id, result } => {
                 if self.active_session_id() != Some(session_id.as_str()) {
@@ -3760,6 +3861,7 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_approval_inspections();
         let title = self.connection.as_ref().map_or_else(
             || {
                 self.selected_workspace_id
@@ -3886,6 +3988,37 @@ impl Render for Desktop {
         {
             let approve_id = approval.tool_call_id.clone();
             let reject_id = approve_id.clone();
+            let retry_id = approve_id.clone();
+            let (details, inspected, failed) = match self.approval_inspections.get(&approve_id) {
+                Some(ApprovalInspection::Loaded(inspection)) => {
+                    let details = match &inspection.source {
+                        Some(source) => {
+                            let arguments =
+                                serde_json::from_str::<serde_json::Value>(&source.arguments_json)
+                                    .ok()
+                                    .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                                    .unwrap_or_else(|| source.arguments_json.clone());
+                            format!(
+                                "Tool: {} (revision {})\nCapability: {}\n\nModel-supplied arguments:\n{}",
+                                source.name, source.revision, inspection.capability, arguments
+                            )
+                        }
+                        None => format!(
+                            "Capability: {}\nThis ToolCall has no model-supplied arguments.",
+                            inspection.capability
+                        ),
+                    };
+                    (details, true, false)
+                }
+                Some(ApprovalInspection::Failed(error)) => (
+                    format!(
+                        "Request details unavailable: {error}\nApproval is disabled until the complete request can be inspected."
+                    ),
+                    false,
+                    true,
+                ),
+                _ => ("Loading requested operation…".to_owned(), false, false),
+            };
             let approval_root = self
                 .connection
                 .as_ref()
@@ -3917,6 +4050,14 @@ impl Render for Desktop {
                                 this.decide(reject_id.clone(), ApprovalDecision::Rejected, cx)
                             }),
                         )
+                        .details(details)
+                        .approve_disabled(!inspected)
+                        .when(failed, |panel| {
+                            panel.retry(cx.listener(move |this, _, _, cx| {
+                                this.approval_inspections.remove(&retry_id);
+                                cx.notify();
+                            }))
+                        })
                         .disabled(self.busy || !self.online),
                     ),
             );

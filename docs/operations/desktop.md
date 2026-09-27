@@ -426,11 +426,18 @@ when no Run is active. During an active Run, the same action queues input for
 that Run. Stop requests cancellation of the active Run.
 
 Runs use the `ask` approval policy. A pending tool approval shows its repository
-scope and relative directory. Approve or Reject sends that decision to the
-daemon. The composer is disabled while a command is in progress, while the
+scope and relative directory. It also loads the immutable native tool name,
+revision, capability, and complete model-supplied arguments as plain text.
+Deterministic calls explicitly report that they have no model-supplied arguments.
+Approve or Reject sends that decision to the daemon. The composer is disabled while a command is in progress, while the
 client is disconnected, while a submission is pending, and while cancellation
-is pending. Approval buttons are disabled only while a command is in progress
-or the client is disconnected.
+is pending. Both approval buttons are disabled while a command is in progress or the client
+is disconnected. Approve also remains disabled until request inspection succeeds;
+Reject remains available if inspection fails. Retry inspection fetches the details
+again. Inspection reuses the 64 KiB text-preview allowance for the complete frozen
+request batch and catalogue, plus capability text, needed to verify stored hashes.
+An oversized source fails without displaying or approving partial arguments, even
+when the selected request alone would fit.
 
 Runs opens a temporary drawer in the conversation area. Close Runs restores the
 transcript. The root status and main composer remain visible while the drawer

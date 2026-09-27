@@ -1377,6 +1377,29 @@ impl Client {
         .await
     }
 
+    /// Fetch the complete frozen source within an explicit verification budget.
+    /// This does not approve, resolve credentials for, or execute the ToolCall.
+    pub async fn inspect_tool_call(
+        &self,
+        tool_call_id: &str,
+        max_source_bytes: std::num::NonZeroUsize,
+    ) -> Result<kiln_protocol::ToolCallInspectionResponse, Error> {
+        let path = path_with_segment(
+            kiln_protocol::TOOL_CALL_INSPECTION_PATH,
+            "{tool_call_id}",
+            "tool_call_id",
+            tool_call_id,
+        )?;
+        let mut url = self.http_url(&path);
+        url.query_pairs_mut()
+            .append_pair("max_source_bytes", &max_source_bytes.to_string());
+        self.send_json(
+            kiln_protocol::INSPECT_TOOL_CALL_OPERATION_ID,
+            self.http.get(url),
+        )
+        .await
+    }
+
     pub async fn list_session_events(
         &self,
         session_id: &str,

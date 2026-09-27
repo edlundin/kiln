@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.42.0";
+pub const PROTOCOL_VERSION: &str = "0.43.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -153,6 +153,7 @@ pub const TASK_ASSIGNMENT_PATH: &str = "/v1/tasks/{task_id}/assignment";
 pub const TASK_TRANSITION_PATH: &str = "/v1/tasks/{task_id}/transition";
 pub const RUN_CANCEL_PATH: &str = "/v1/runs/{run_id}/cancel";
 pub const TOOL_CALL_APPROVAL_PATH: &str = "/v1/tool-calls/{tool_call_id}/approval";
+pub const TOOL_CALL_INSPECTION_PATH: &str = "/v1/tool-calls/{tool_call_id}/inspection";
 pub const ARTIFACT_PATH: &str = "/v1/artifacts/{content_hash}";
 pub const ARTIFACTS_PATH: &str = "/v1/artifacts";
 pub const NEGOTIATE_OPERATION_ID: &str = "negotiate_protocol";
@@ -195,10 +196,14 @@ pub const SEND_RUN_INPUT_OPERATION_ID: &str = "send_run_input";
 pub const REACT_TO_RUN_ACTIVITY_OPERATION_ID: &str = "react_to_run_activity";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
+pub const INSPECT_TOOL_CALL_OPERATION_ID: &str = "inspect_tool_call";
 pub const GET_ARTIFACT_OPERATION_ID: &str = "get_artifact";
 pub const UPLOAD_ARTIFACT_OPERATION_ID: &str = "upload_artifact";
 
 pub mod error_code {
+    pub const TOOL_SOURCE_NOT_FOUND: &str = "tool_source_not_found";
+    pub const TOOL_SOURCE_LIMIT_EXCEEDED: &str = "tool_source_limit_exceeded";
+    pub const TOOL_SOURCE_UNAVAILABLE: &str = "tool_source_unavailable";
     pub const AUTHENTICATION_REQUIRED: &str = "authentication_required";
     pub const INVALID_AUTHENTICATION: &str = "invalid_authentication";
     pub const INVALID_HOST: &str = "invalid_host";
@@ -308,6 +313,9 @@ pub mod error_code {
     pub const PROVIDER_ACCOUNT_CLEANUP_REQUIRED: &str = "provider_account_cleanup_required";
 
     pub const ALL: &[&str] = &[
+        TOOL_SOURCE_NOT_FOUND,
+        TOOL_SOURCE_LIMIT_EXCEEDED,
+        TOOL_SOURCE_UNAVAILABLE,
         AUTHENTICATION_REQUIRED,
         INVALID_AUTHENTICATION,
         INVALID_HOST,
@@ -1478,6 +1486,27 @@ pub struct ToolCallResponse {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct NativeToolSourceResponse {
+    pub model_invocation_id: String,
+    pub provider_call_id: String,
+    pub name: String,
+    pub revision: String,
+    /// Complete canonical model arguments, untrusted display data.
+    pub arguments_json: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolCallInspectionResponse {
+    pub tool_call_id: String,
+    pub run_id: String,
+    pub capability: String,
+    #[schemars(with = "RequiredNullableNativeToolSource")]
+    pub source: Option<NativeToolSourceResponse>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct RunResponse {
@@ -2021,6 +2050,20 @@ impl JsonSchema for RequiredNullableApprovalPolicy {
 }
 
 struct RequiredNullableArtifact;
+
+struct RequiredNullableNativeToolSource;
+impl JsonSchema for RequiredNullableNativeToolSource {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "RequiredNullableNativeToolSource".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let source = generator.subschema_for::<NativeToolSourceResponse>();
+        json_schema!({"anyOf": [source, {"type": "null"}]})
+    }
+}
 
 impl JsonSchema for RequiredNullableArtifact {
     fn inline_schema() -> bool {

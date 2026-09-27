@@ -133,6 +133,15 @@ pub trait RunOperations: Send + Sync {
         decision: kiln_core::ApprovalState,
         idempotency_key: String,
     ) -> impl Future<Output = Result<kiln_core::ApprovalDecisionMutation, RunError>> + Send;
+    fn inspect_tool_call(
+        &self,
+        _tool_call_id: kiln_core::ToolCallId,
+        _max_source_bytes: std::num::NonZeroUsize,
+    ) -> impl Future<
+        Output = Result<kiln_core::ToolCallInspection, kiln_core::ToolCallInspectionError>,
+    > + Send {
+        async { Err(kiln_core::ToolCallInspectionError::Unavailable) }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1155,6 +1164,10 @@ where
         .route(RUN_REACTIONS_PATH, post(react_to_run_activity))
         .route(RUN_CANCEL_PATH, post(cancel_run))
         .route(TOOL_CALL_APPROVAL_PATH, post(decide_approval))
+        .route(
+            kiln_protocol::TOOL_CALL_INSPECTION_PATH,
+            get(inspect_tool_call),
+        )
         .route(ARTIFACTS_PATH, post(upload_artifact))
         .route(ARTIFACT_PATH, get(get_artifact))
         .route(EVENTS_WEBSOCKET_PATH, get(events))
@@ -1986,6 +1999,49 @@ where
     Ok(Json(SessionRunsResponse {
         runs: runs.iter().map(run_response).collect(),
     }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolCallInspectionQuery {
+    max_source_bytes: std::num::NonZeroUsize,
+}
+
+async fn inspect_tool_call<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(tool_call_id): Path<String>,
+    query: Result<Query<ToolCallInspectionQuery>, QueryRejection>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let Query(query) = query.map_err(|_| PublicError::InvalidRequest)?;
+    let id = kiln_core::ToolCallId::parse(tool_call_id).map_err(|_| PublicError::InvalidRequest)?;
+    let inspection = state
+        .run_operations
+        .inspect_tool_call(id, query.max_source_bytes)
+        .await
+        .map_err(PublicError::ToolInspection)?;
+    let response = kiln_protocol::ToolCallInspectionResponse {
+        tool_call_id: inspection.tool_call_id.as_str().to_owned(),
+        run_id: inspection.run_id.as_str().to_owned(),
+        capability: inspection.capability,
+        source: inspection
+            .source
+            .map(|source| kiln_protocol::NativeToolSourceResponse {
+                model_invocation_id: source.invocation_id.as_str().to_owned(),
+                provider_call_id: source.request.provider_call_id().to_owned(),
+                name: source.request.name().to_owned(),
+                revision: source.definition.revision().to_owned(),
+                arguments_json: source.request.arguments_json().to_owned(),
+            }),
+    };
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(response),
+    ))
 }
 
 async fn decide_approval<W, S, R>(
@@ -3289,6 +3345,8 @@ enum PublicError {
     Task(TaskError),
     #[error("run operation failed")]
     Run(RunError),
+    #[error("tool request inspection failed")]
+    ToolInspection(kiln_core::ToolCallInspectionError),
     #[error("artifact operation failed")]
     Artifact(ArtifactFetchError),
     #[error("artifact upload failed")]
@@ -3906,6 +3964,28 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::TASK_STORE_UNAVAILABLE,
                     "Task store unavailable",
+                ),
+            },
+            Self::ToolInspection(error) => match error {
+                kiln_core::ToolCallInspectionError::NotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::TOOL_SOURCE_NOT_FOUND,
+                    "ToolCall was not found",
+                ),
+                kiln_core::ToolCallInspectionError::LimitExceeded => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    error_code::TOOL_SOURCE_LIMIT_EXCEEDED,
+                    "Frozen tool source exceeds the requested inspection budget",
+                ),
+                kiln_core::ToolCallInspectionError::IntegrityViolation => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::TOOL_SOURCE_UNAVAILABLE,
+                    "Frozen tool source could not be verified",
+                ),
+                kiln_core::ToolCallInspectionError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::TOOL_SOURCE_UNAVAILABLE,
+                    "Tool request inspection is unavailable",
                 ),
             },
             Self::Run(error) => match error {

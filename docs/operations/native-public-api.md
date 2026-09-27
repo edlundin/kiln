@@ -96,3 +96,20 @@ requests; those remain blocked for explicit reconciliation.
 Live API, vault, cancellation, and replay acceptance remain unverified. This mode
 does not implement master-instance settings, global MCP, or global skills sync
 (EDL-322).
+
+## Inspecting native tool requests
+
+Protocol `0.43.0` adds authenticated
+`GET /v1/tool-calls/{tool_call_id}/inspection?max_source_bytes=<positive integer>`.
+It returns the ToolCall and Run IDs, capability, and a nullable native source
+containing invocation ID, provider call ID, tool name/revision, and arguments JSON.
+The source is checked against the immutable stored request batch and catalogue
+hashes in one read transaction; inspection never approves or executes the call.
+Deterministic ToolCalls have a null source. Responses use `Cache-Control: no-store`;
+arguments are not copied into Events.
+
+The byte budget covers stored request and catalogue text plus capability text,
+not response wire bytes or total process memory. The whole frozen source must fit
+so its hashes can be verified. Missing calls return 404, exhausted budgets 413,
+invalid budgets 400, integrity failures 500, and unavailable inspection 503.
+No partial arguments are returned.

@@ -17,6 +17,172 @@ use kiln_core::{
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn native_tool_inspection_is_bounded_hash_checked_and_does_not_approve() {
+    use kiln_core::*;
+    use std::num::NonZeroUsize;
+    let (_data, store, session) = seeded_session().await;
+    let ids = super::UlidIdGenerator;
+    let runs = RunApplication::new(store.clone(), ids);
+    let run = runs
+        .start_root_run(
+            session.id().clone(),
+            "inspection".into(),
+            ApprovalPolicy::Ask,
+            test_scope(),
+        )
+        .await
+        .unwrap();
+    let run_id = run.value.run().run_id().clone();
+    let manifest = ContextManifestApplication::new(store.clone(), ids)
+        .create_context_manifest(CreateContextManifest {
+            run_id: run_id.clone(),
+            entries: vec![ContextManifestEntryInput::Instruction {
+                provenance: ContextInstructionProvenance::Runtime,
+                content: "fixture".into(),
+            }],
+            idempotency_key: "inspection".into(),
+        })
+        .await
+        .unwrap();
+    let invocation = ModelInvocationApplication::new(store.clone(), ids)
+        .create_model_invocation(CreateModelInvocation {
+            run_id: run_id.clone(),
+            context_manifest_id: manifest.value.context_manifest_id().clone(),
+            context_manifest_hash: manifest.value.content_hash().clone(),
+            provider_account_id: ProviderAccountId::from_ulid(ulid::Ulid::generate()),
+            settings: ModelInvocationSettings::new(
+                ProviderType::parse("fixture").unwrap(),
+                ModelId::parse("fixture").unwrap(),
+                GenerationSettings::new(None).unwrap(),
+                ReasoningSettings::new(None).unwrap(),
+            ),
+            capabilities: ModelCapabilitySnapshot::new(
+                "fixture",
+                CapabilitySupport::Supported,
+                CapabilitySupport::Unsupported,
+                CapabilitySupport::Unsupported,
+            )
+            .unwrap(),
+            purpose: ModelInvocationPurpose::Generation,
+            retry_of: None,
+            idempotency_key: "inspection".into(),
+        })
+        .await
+        .unwrap()
+        .value;
+    let tool = WorkspaceFileReadTool::new(
+        WorkspaceFileReadLimits {
+            max_path_bytes: 128,
+            max_file_bytes: 4096,
+        },
+        ModelToolCatalogLimits {
+            max_tools: 1,
+            max_definition_bytes: 4096,
+            max_total_definition_bytes: 4096,
+        },
+    )
+    .unwrap();
+    store
+        .attach_model_tool_catalog(invocation.invocation_id(), tool.catalog())
+        .await
+        .unwrap();
+    let app = ProviderApplication::new(store.clone(), ids);
+    assert!(matches!(
+        app.claim(invocation.invocation_id().clone()).await.unwrap(),
+        ProviderClaim::Applied { .. }
+    ));
+    let invocation = store
+        .get_model_invocation(invocation.invocation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = ModelToolRequestBatch::new(
+        invocation.invocation_id().clone(),
+        vec![ModelToolRequestInput {
+            provider_call_id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path":"private-file.txt"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        }],
+        ModelToolRequestLimits {
+            max_requests: 1,
+            max_provider_call_id_bytes: 64,
+            max_name_bytes: 64,
+            max_arguments_bytes: 128,
+            max_total_arguments_bytes: 128,
+        },
+    )
+    .unwrap();
+    let usage = ProviderUsageUpdate::new(
+        ProviderUsageMetadata {
+            update_id: "inspection".into(),
+            provider_account_id: invocation.provider_account_id().clone(),
+            work_id: invocation.work_id().clone(),
+            model_invocation_id: invocation.invocation_id().clone(),
+            accounting: UsageAccounting::Cumulative,
+            finality: UsageFinality::Final,
+            completeness: UsageCompleteness::Unknown,
+            observed_at_unix_ms: 1,
+            request_id: None,
+            resolved_model: None,
+            service_tier: None,
+            source: UsageSource::NativeProvider,
+        },
+        vec![],
+    )
+    .unwrap();
+    app.record_tool_requests(&invocation, &requests, &usage)
+        .await
+        .unwrap();
+    let batch = app
+        .resolve_tool_requests(invocation.invocation_id().clone(), &tool)
+        .await
+        .unwrap();
+    let adopted = app
+        .adopt_tool_request(&batch.prepare_adoption(0, test_scope()).unwrap())
+        .await
+        .unwrap();
+    let inspection = store
+        .inspect_tool_call(&adopted.tool_call_id, NonZeroUsize::new(8192).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(inspection.run_id, run_id);
+    assert_eq!(inspection.capability, WORKSPACE_FILE_READ_CAPABILITY);
+    let source = inspection.source.unwrap();
+    assert_eq!(
+        source.request.arguments_json(),
+        r#"{"path":"private-file.txt"}"#
+    );
+    assert_eq!(source.definition.revision(), "1");
+    assert_eq!(
+        store
+            .inspect_tool_call(&adopted.tool_call_id, NonZeroUsize::new(1).unwrap())
+            .await
+            .err(),
+        Some(ToolCallInspectionError::LimitExceeded)
+    );
+    let after = runs.get_run(run_id).await.unwrap();
+    assert_eq!(
+        after.tool_call(&adopted.tool_call_id).unwrap().state(),
+        ToolCallState::AwaitingApproval
+    );
+    assert_eq!(after.approvals()[0].state(), ApprovalState::Pending);
+    let mut connection = store.connection.lock().await;
+    sqlx::query("UPDATE model_tool_requests SET arguments_json = '{\"path\":\"changed\"}' WHERE model_invocation_id = ?")
+        .bind(invocation.invocation_id().as_str()).execute(&mut *connection).await.unwrap();
+    drop(connection);
+    assert_eq!(
+        store
+            .inspect_tool_call(&adopted.tool_call_id, NonZeroUsize::new(8192).unwrap())
+            .await
+            .err(),
+        Some(ToolCallInspectionError::IntegrityViolation)
+    );
+}
+
 #[test]
 fn local_auth_credential_is_private_persistent_and_rejects_unsafe_files() {
     let data = tempfile::tempdir().unwrap();

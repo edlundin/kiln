@@ -1237,6 +1237,7 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
             .post(format!("http://{}{}", daemon.address, path))
             .json(&AppendMessageRequest {
                 content: content.to_owned(),
+                attachments: Vec::new(),
             })
             .send()
             .await
@@ -1422,6 +1423,7 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
         ))
         .json(&AppendMessageRequest {
             content: "message".to_owned(),
+            attachments: Vec::new(),
         })
         .send()
         .await
@@ -1437,6 +1439,7 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
         http.post(format!("http://{}{}", daemon.address, first_messages_path))
             .json(&AppendMessageRequest {
                 content: "  \n".to_owned(),
+                attachments: Vec::new(),
             })
             .send()
             .await
@@ -2314,6 +2317,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
     let input_path = RUN_INPUT_PATH.replace("{run_id}", &root.run_id);
     let input_request = SendRunInputRequest {
         content: "Use the durable cursor checkpoint.".to_owned(),
+        attachments: Vec::new(),
         delivery_mode: MessageDeliveryMode::Queued,
     };
     let response = http
@@ -2375,6 +2379,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
             .header(IDEMPOTENCY_KEY_HEADER, "root-guidance")
             .json(&SendRunInputRequest {
                 content: "different guidance".to_owned(),
+                attachments: Vec::new(),
                 delivery_mode: MessageDeliveryMode::Interrupt,
             })
             .send()
@@ -2548,6 +2553,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
     .await;
     let second_input_request = SendRunInputRequest {
         content: "Preserve this guidance while cancelling the subtree.".to_owned(),
+        attachments: Vec::new(),
         delivery_mode: MessageDeliveryMode::Queued,
     };
     let second_input_path = RUN_INPUT_PATH.replace("{run_id}", &second.run_id);
@@ -3041,6 +3047,60 @@ async fn ask_approval_survives_restart_resumes_once_and_is_idempotent() {
     assert_eq!(waiting.approvals.len(), 1);
     assert_eq!(waiting.approvals[0].state, ApprovalState::Pending);
     let tool_call_id = waiting.tool_calls[0].tool_call_id.clone();
+    let inspection_path =
+        kiln_protocol::TOOL_CALL_INSPECTION_PATH.replace("{tool_call_id}", &tool_call_id);
+    let inspection_url = format!(
+        "http://{}{}?max_source_bytes=4096",
+        daemon.address, inspection_path
+    );
+    let response = http.get(&inspection_url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .unwrap(),
+        "no-store"
+    );
+    let inspection: kiln_protocol::ToolCallInspectionResponse = response.json().await.unwrap();
+    assert_eq!(inspection.tool_call_id, tool_call_id);
+    assert_eq!(inspection.run_id, waiting.run_id);
+    assert_eq!(inspection.capability, waiting.tool_calls[0].capability);
+    assert!(
+        inspection.source.is_none(),
+        "deterministic subprocess has no native request"
+    );
+    assert_eq!(
+        http.get(format!(
+            "http://{}{}?max_source_bytes=1",
+            daemon.address, inspection_path
+        ))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        http.get(format!(
+            "http://{}{}?max_source_bytes=0",
+            daemon.address, inspection_path
+        ))
+        .send()
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        reqwest::Client::new()
+            .get(inspection_url)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
     let after = waiting_events.last().unwrap().cursor.clone();
     let original_token = daemon.token.clone();
     drop(socket);
@@ -4129,6 +4189,7 @@ async fn complete_first_vertical_slice() {
         .post(format!("http://{}{}", daemon.address, messages_path))
         .json(&AppendMessageRequest {
             content: "Run the complete deterministic vertical slice".to_owned(),
+            attachments: Vec::new(),
         })
         .send()
         .await

@@ -1033,6 +1033,18 @@ fn preflight_failure_message(error: RunError) -> &'static str {
 }
 
 impl RunOperations for RunService {
+    async fn inspect_tool_call(
+        &self,
+        tool_call_id: ToolCallId,
+        max_source_bytes: std::num::NonZeroUsize,
+    ) -> Result<kiln_core::ToolCallInspection, kiln_core::ToolCallInspectionError> {
+        kiln_core::ToolCallInspectionStore::inspect_tool_call(
+            &self.store,
+            &tool_call_id,
+            max_source_bytes,
+        )
+        .await
+    }
     fn start_run(
         &self,
         session_id: SessionId,

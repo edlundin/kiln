@@ -372,6 +372,9 @@ pub struct ApprovalPanel {
     on_approve: ClickHandler,
     on_reject: ClickHandler,
     disabled: bool,
+    approve_disabled: bool,
+    details: SharedString,
+    on_retry: Option<ClickHandler>,
 }
 
 impl ApprovalPanel {
@@ -385,11 +388,30 @@ impl ApprovalPanel {
             on_approve: Rc::new(on_approve),
             on_reject: Rc::new(on_reject),
             disabled: false,
+            approve_disabled: false,
+            details: SharedString::default(),
+            on_retry: None,
         }
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub fn details(mut self, details: impl Into<SharedString>) -> Self {
+        self.details = details.into();
+        self
+    }
+    pub fn approve_disabled(mut self, disabled: bool) -> Self {
+        self.approve_disabled = disabled;
+        self
+    }
+    pub fn retry(
+        mut self,
+        callback: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_retry = Some(Rc::new(callback));
         self
     }
 }
@@ -438,6 +460,26 @@ impl RenderOnce for ApprovalPanel {
             )
             .child(
                 div()
+                    .id("approval-request-details")
+                    .role(Role::Label)
+                    .aria_label(self.details.clone())
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(theme::TEXT_SOFT)
+                    .child(self.details),
+            )
+            .when_some(self.on_retry, |panel, retry| {
+                panel.child(
+                    Button::new("approval-retry")
+                        .label("Retry inspection")
+                        .small()
+                        .disabled(self.disabled)
+                        .on_click(move |event, window, cx| retry(event, window, cx)),
+                )
+            })
+            .child(
+                div()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -447,7 +489,7 @@ impl RenderOnce for ApprovalPanel {
                             .label("Approve")
                             .primary()
                             .small()
-                            .disabled(self.disabled)
+                            .disabled(self.disabled || self.approve_disabled)
                             .on_click(move |event, window, cx| {
                                 on_approve(event, window, cx);
                             }),

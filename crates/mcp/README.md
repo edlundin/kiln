@@ -133,7 +133,7 @@ adapters. Its trusted caller supplies separately authorized host-resolved inputs
 a generation ID and an absolute startup deadline. The worker reads the stored
 protocol policy, rejects non-stdio definitions, and starts a process only after an
 `Acquired` claim. `Existing` returns a typed error without launching or stopping
-the other owner's process. It does not yet look up/reuse another in-memory owner.
+the other owner's process. Scoped in-memory reuse belongs to `StdioRegistry`.
 
 The worker publishes readiness only after the store accepts the negotiated
 version. Startup failure, timeout or rejected readiness closes/reaps the process
@@ -150,10 +150,33 @@ replacement, handle drop during silent startup, timeout, changed definitions
 during negotiation, disconnect, and cleanup despite a failed stop-journal write.
 The latter retains the uncertain active record and blocks replacement rather
 than reporting a terminal state. These are macOS observations. Daemon startup
-and shutdown still need to own/drain a scoped registry and reconcile orphaned
+and shutdown still need to own/drain the registry and reconcile orphaned
 processes under exclusive store ownership. No public launch API or invocation
 method is exposed. Readiness snapshots do not authorize execution; future calls
 must revalidate current definitions and pass normal durable ToolCall approval.
+
+`StdioRegistry` retains those owners across Run waiters, keyed by the canonical
+definition/owner/auth-profile identity. Concurrent demand joins one startup;
+cancelling a waiter does not stop the shared server. Every successful return
+checks current definition enablement/version and durable ready generation/state,
+instead of treating a cached readiness receipt as current authority. A positive
+caller-supplied capacity bounds retained live owners; finished entries release
+slots, while durable uncertain claims still prevent replacement.
+
+The caller supplies a nonsecret local binding revision and must change it whenever
+resolved executable, arguments, environment, credentials, directory authorization
+or launch policy changes. Changed revisions or definitions require an explicit
+scope stop before reuse. The registry does not resolve or persist these bindings.
+Scope stop retains its owner until cleanup completes. Shutdown seals the registry,
+signals every owner before waiting, and can be awaited again after caller
+cancellation. Dropping the registry requests stop but cannot prove completion;
+the daemon must await shutdown before destroying its Tokio runtime.
+
+Real-process registry fixtures verify concurrent reuse, binding/definition change
+guards, cancellation of a startup waiter, repeated shutdown after cancellation,
+capacity admission and slot release. Registry operations still expose lifecycle
+metadata only; invocation remains unavailable until the durable ToolCall path is
+connected. No Run is made the owner of a shared server.
 
 Remaining broker work includes daemon integration of the scoped runtime registry
 and process recovery, public registration and host-binding resolution, durable

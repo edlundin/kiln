@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Retain scoped MCP generation owners across waiters and reuse them
+  after durable readiness and local binding revalidation.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Compose durable MCP instance claims with managed stdio startup,
   readiness revalidation, and cleanup before terminal journal states.
 

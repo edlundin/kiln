@@ -6,7 +6,10 @@ use std::{
 
 use kiln_core::*;
 use kiln_infrastructure::SqliteStore;
-use kiln_mcp::{StdioGeneration, StdioGenerationError, StdioGenerationLaunch, StdioProcessConfig};
+use kiln_mcp::{
+    StdioGeneration, StdioGenerationError, StdioGenerationLaunch, StdioProcessConfig,
+    StdioRegistry, StdioRegistryError,
+};
 use rustix::{
     io::Errno,
     process::{Pid, test_kill_process},
@@ -295,4 +298,159 @@ async fn failed_stop_journal_does_not_skip_cleanup_or_allow_replacement() {
         replacement.wait_ready().await.err(),
         Some(StdioGenerationError::Existing)
     );
+}
+
+#[tokio::test]
+async fn registry_reuses_one_owner_and_rejects_changed_bindings_and_definitions() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, key) = setup(directory.path()).await;
+    let registry = StdioRegistry::new(store.clone(), NonZeroUsize::new(1).unwrap());
+    let (first, second) = tokio::join!(
+        registry.ensure_ready(
+            launch(key.clone(), directory.path(), READY),
+            1.try_into().unwrap()
+        ),
+        registry.ensure_ready(
+            launch(key.clone(), directory.path(), "exit 99"),
+            1.try_into().unwrap()
+        ),
+    );
+    assert_eq!(first.unwrap().generation, second.unwrap().generation);
+    let process = pid(directory.path()).await;
+    assert_eq!(
+        registry
+            .ensure_ready(
+                launch(key.clone(), directory.path(), READY),
+                2.try_into().unwrap()
+            )
+            .await
+            .err(),
+        Some(StdioRegistryError::BindingChanged)
+    );
+    store
+        .register_mcp_definition(&definition(false), 1, "disable", limits())
+        .await
+        .unwrap();
+    assert_eq!(
+        registry
+            .ensure_ready(
+                launch(key.clone(), directory.path(), READY),
+                1.try_into().unwrap()
+            )
+            .await
+            .err(),
+        Some(StdioRegistryError::Generation(StdioGenerationError::Store(
+            McpInstanceError::DefinitionChanged
+        )))
+    );
+    registry.stop(&key).await.unwrap().unwrap();
+    assert_eq!(test_kill_process(process), Err(Errno::SRCH));
+    let results = registry.shutdown().await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_ok());
+    assert_eq!(
+        registry
+            .ensure_ready(launch(key, directory.path(), READY), 1.try_into().unwrap())
+            .await
+            .err(),
+        Some(StdioRegistryError::Closed)
+    );
+}
+
+#[tokio::test]
+async fn cancelled_registry_waiter_preserves_owner_and_shutdown_can_be_awaited_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, key) = setup(directory.path()).await;
+    let registry = Arc::new(StdioRegistry::new(
+        store.clone(),
+        NonZeroUsize::new(1).unwrap(),
+    ));
+    let mut inputs = launch(
+        key.clone(),
+        directory.path(),
+        "printf '%s' \"$$\" > \"$PID_FILE\"; exec /bin/sleep 60",
+    );
+    // Grace keeps cleanup pending so cancellation of the first shutdown waiter
+    // exercises the retained lifecycle worker, without a product timing default.
+    inputs.process.shutdown_grace = Duration::from_secs(1);
+    let waiter = tokio::spawn({
+        let registry = registry.clone();
+        async move { registry.ensure_ready(inputs, 1.try_into().unwrap()).await }
+    });
+    let process = pid(directory.path()).await;
+    waiter.abort();
+    assert!(waiter.await.err().unwrap().is_cancelled());
+    assert!(test_kill_process(process).is_ok());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), registry.shutdown())
+            .await
+            .is_err()
+    );
+    let results = registry.shutdown().await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].as_ref().unwrap().observed,
+        McpObservedState::Stopped
+    );
+    assert_eq!(test_kill_process(process), Err(Errno::SRCH));
+    assert_eq!(
+        store
+            .get_mcp_instance(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .observed,
+        McpObservedState::Stopped
+    );
+}
+
+#[tokio::test]
+async fn registry_capacity_bounds_live_owners_and_finished_scope_releases_slot() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, key) = setup(directory.path()).await;
+    let mut input = definition(true).server().clone();
+    input.id = SharedConfigurationKey::parse("second", 64).unwrap();
+    let second = McpServerDefinition::new(
+        input,
+        McpProtocolPolicy::Pinned(McpProtocolVersion::V20251125),
+        McpLifecycleScope::Core,
+        None,
+        limits(),
+    )
+    .unwrap();
+    store
+        .register_mcp_definition(&second, 0, "second", limits())
+        .await
+        .unwrap();
+    let second_key = McpInstanceKey::new(&second, McpInstanceOwner::Core, 4096).unwrap();
+    let registry = StdioRegistry::new(store, NonZeroUsize::new(1).unwrap());
+    let first = registry
+        .ensure_ready(
+            launch(key.clone(), directory.path(), READY),
+            1.try_into().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        registry
+            .ensure_ready(
+                launch(second_key.clone(), directory.path(), READY),
+                1.try_into().unwrap()
+            )
+            .await
+            .err(),
+        Some(StdioRegistryError::Capacity)
+    );
+    registry.stop(&key).await.unwrap();
+    let second = registry
+        .ensure_ready(
+            launch(second_key, directory.path(), READY),
+            1.try_into().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(first.generation, second.generation);
+    let results = registry.shutdown().await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_ok());
 }

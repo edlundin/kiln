@@ -5,6 +5,8 @@ mod generation;
 mod negotiation;
 #[cfg(unix)]
 mod process;
+#[cfg(unix)]
+mod registry;
 mod stdio;
 
 #[cfg(unix)]
@@ -12,4 +14,6 @@ pub use generation::{StdioGeneration, StdioGenerationError, StdioGenerationLaunc
 pub use negotiation::{ProtocolPolicy, ProtocolVersion, start_stdio_client};
 #[cfg(unix)]
 pub use process::{ManagedStdioProcess, StdioProcess, StdioProcessCleanup, StdioProcessConfig};
+#[cfg(unix)]
+pub use registry::{StdioRegistry, StdioRegistryError};
 pub use stdio::StdioTransport;

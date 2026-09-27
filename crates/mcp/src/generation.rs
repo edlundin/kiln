@@ -56,6 +56,46 @@ pub struct StdioGeneration {
     worker: Option<JoinHandle<Result<McpInstanceRecord, StdioGenerationError>>>,
 }
 
+pub(crate) struct GenerationObserver {
+    status: watch::Receiver<Status>,
+}
+
+impl GenerationObserver {
+    pub(crate) fn is_finished(&self) -> bool {
+        matches!(*self.status.borrow(), Status::Finished(_)) || self.status.has_changed().is_err()
+    }
+
+    pub(crate) async fn wait_ready(&mut self) -> Result<McpInstanceRecord, StdioGenerationError> {
+        loop {
+            match self.status.borrow_and_update().clone() {
+                Status::Starting => {}
+                Status::Ready(record) => return Ok(record),
+                Status::Finished(result) => {
+                    return Err(result.err().unwrap_or(StdioGenerationError::Ended));
+                }
+            }
+            self.status
+                .changed()
+                .await
+                .map_err(|_| StdioGenerationError::WorkerLost)?;
+        }
+    }
+
+    pub(crate) async fn wait_finished(
+        &mut self,
+    ) -> Result<McpInstanceRecord, StdioGenerationError> {
+        loop {
+            if let Status::Finished(result) = self.status.borrow_and_update().clone() {
+                return result;
+            }
+            self.status
+                .changed()
+                .await
+                .map_err(|_| StdioGenerationError::WorkerLost)?;
+        }
+    }
+}
+
 impl StdioGeneration {
     pub fn spawn<S>(store: Arc<S>, launch: StdioGenerationLaunch) -> Self
     where
@@ -76,18 +116,12 @@ impl StdioGeneration {
     }
 
     pub async fn wait_ready(&mut self) -> Result<McpInstanceRecord, StdioGenerationError> {
-        loop {
-            match self.status.borrow_and_update().clone() {
-                Status::Starting => {}
-                Status::Ready(record) => return Ok(record),
-                Status::Finished(result) => {
-                    return Err(result.err().unwrap_or(StdioGenerationError::Ended));
-                }
-            }
-            self.status
-                .changed()
-                .await
-                .map_err(|_| StdioGenerationError::WorkerLost)?;
+        self.observer().wait_ready().await
+    }
+
+    pub(crate) fn observer(&self) -> GenerationObserver {
+        GenerationObserver {
+            status: self.status.clone(),
         }
     }
 
@@ -100,7 +134,7 @@ impl StdioGeneration {
             .map_err(|_| StdioGenerationError::WorkerLost)?
     }
 
-    fn request_stop(&mut self) {
+    pub(crate) fn request_stop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }

@@ -405,10 +405,17 @@ piped input, never command arguments, shell history, portable definitions or log
 | --- | --- | --- |
 | `inspect` | None | Local `instance_id` and nullable snapshot with revision, retired flag and reference metadata; no vault reads |
 | `pending` | Positive `batch_size` | Bounded unpublished/retired reference list; no secret values |
-| `import_secret` | `definition_version`, `name`, `purpose` (`argument` or `environment`), `value` | Fresh `secret_ref` after a successful MCP-vault write |
+| `import_secret` | `definition_version`, `name`, `purpose` (`argument`, `environment` or `http_credential`), `value` | Fresh `secret_ref` after a successful MCP-vault write |
 | `publish` | `expected_revision`, `definition_version`, `runtime_binding`, absolute UTF-8 `executable`, `arguments` and `environment` maps of binding names to returned secret refs, optional `working_directory` object below | Immutable `registered_revision` receipt |
 | `retire` | Positive `expected_revision` | Immutable `retired_revision` receipt; vault deletion is separate |
 | `reconcile` | Positive `batch_size` | `reconciled` count after retiring pending refs, deleting their vault values, and retaining deletion receipts |
+
+`http_credential` imports require the exact `credential_binding` declared by an
+enabled HTTPS definition at the requested version and scoped identity. They use
+the isolated MCP vault and the same single-write reservation and cleanup receipts
+as stdio values. HostEndpoint names do not authorize credential imports. HTTP
+snapshot publication and daemon activation remain unimplemented; these imports
+remain pending and are eligible for explicit reconciliation.
 
 Import validates the current definition and exact binding role before reserving
 and writing a fresh reference. A failed/ambiguous write leaves its reservation for

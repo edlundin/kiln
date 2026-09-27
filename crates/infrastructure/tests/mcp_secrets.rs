@@ -996,3 +996,109 @@ async fn working_directory_cannot_cross_workspace_or_session_ownership() {
         }
     }
 }
+
+#[tokio::test]
+async fn http_credentials_require_declared_role_and_preserve_single_write_receipts() {
+    let data = tempfile::tempdir().unwrap();
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let instance = KilnInstanceId::from_ulid(Ulid::generate());
+    for (id, transport, allowed) in [
+        (
+            "https",
+            SharedMcpTransport::Https {
+                endpoint: "https://example.com/mcp".into(),
+                credential_binding: Some(name("token")),
+            },
+            true,
+        ),
+        (
+            "anonymous",
+            SharedMcpTransport::Https {
+                endpoint: "https://example.com/mcp".into(),
+                credential_binding: None,
+            },
+            false,
+        ),
+        (
+            "host",
+            SharedMcpTransport::HostEndpoint {
+                endpoint_binding: name("token"),
+            },
+            false,
+        ),
+        ("stdio", definition(true).server().transport.clone(), false),
+    ] {
+        let definition = McpServerDefinition::new(
+            SharedMcpServerInput {
+                id: name(id),
+                enabled: true,
+                transport,
+            },
+            McpProtocolPolicy::Auto,
+            McpLifecycleScope::Core,
+            None,
+            limits(),
+        )
+        .unwrap();
+        store
+            .register_mcp_definition(&definition, 0, id, limits())
+            .await
+            .unwrap();
+        let key = McpInstanceKey::new(&definition, McpInstanceOwner::Core, 2048).unwrap();
+        let secret = binding(
+            &instance,
+            &key,
+            &SecretRef::from_ulid(Ulid::generate()),
+            McpSecretPurpose::HttpCredential,
+            "token",
+        );
+        let result = store.reserve_mcp_secret(&secret, 1, limits()).await;
+        if !allowed {
+            assert_eq!(result.err(), Some(McpSecretJournalError::InvalidBinding));
+            continue;
+        }
+        assert!(matches!(result.unwrap(), McpSecretReservation::Fresh));
+        for (purpose, field) in [
+            (McpSecretPurpose::Environment, "token"),
+            (McpSecretPurpose::Argument, "token"),
+            (McpSecretPurpose::HttpCredential, "other"),
+        ] {
+            let wrong = binding(
+                &instance,
+                &key,
+                &SecretRef::from_ulid(Ulid::generate()),
+                purpose,
+                field,
+            );
+            assert_eq!(
+                store.reserve_mcp_secret(&wrong, 1, limits()).await.err(),
+                Some(McpSecretJournalError::InvalidBinding)
+            );
+        }
+        assert!(matches!(
+            store
+                .reserve_mcp_secret(&secret, 1, limits())
+                .await
+                .unwrap(),
+            McpSecretReservation::Existing(McpSecretReservationState::Reserved)
+        ));
+        let pending = store
+            .pending_mcp_secret_reservations(&instance, &key, NonZeroUsize::new(4).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0.purpose(), McpSecretPurpose::HttpCredential);
+        assert_eq!(pending[0].0.secret_ref(), secret.secret_ref());
+        store.retire_mcp_secret_reservation(&secret).await.unwrap();
+        store.finish_mcp_secret_deletion(&secret).await.unwrap();
+        assert!(matches!(
+            store
+                .reserve_mcp_secret(&secret, 1, limits())
+                .await
+                .unwrap(),
+            McpSecretReservation::Existing(McpSecretReservationState::Deleted)
+        ));
+    }
+}

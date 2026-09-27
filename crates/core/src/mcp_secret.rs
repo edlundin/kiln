@@ -9,12 +9,15 @@ use crate::{
 pub enum McpSecretPurpose {
     Argument,
     Environment,
+    /// Authentication material for a declared HTTP credential binding.
+    HttpCredential,
 }
 impl McpSecretPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Argument => "argument",
             Self::Environment => "environment",
+            Self::HttpCredential => "http_credential",
         }
     }
 }

@@ -80,21 +80,17 @@ impl McpSecretJournal for SqliteStore {
                 kiln_core::McpInstanceError::Unavailable => Error::Unavailable,
                 _ => Error::InvalidBinding,
             })?;
-        let SharedMcpTransport::Stdio {
-            arguments,
-            environment,
-            ..
-        } = &definition.server().transport
-        else {
-            return Err(Error::InvalidBinding);
-        };
-        let used = match binding.purpose() {
-            McpSecretPurpose::Argument => arguments.iter().any(
+        let used = match (&definition.server().transport, binding.purpose()) {
+            (SharedMcpTransport::Stdio { arguments, .. }, McpSecretPurpose::Argument) => arguments.iter().any(
                 |arg| matches!(arg, SharedMcpArgument::HostBinding(name) if name == binding.name()),
             ),
-            McpSecretPurpose::Environment => {
+            (SharedMcpTransport::Stdio { environment, .. }, McpSecretPurpose::Environment) => {
                 environment.values().any(|name| name == binding.name())
-            }
+            },
+            (SharedMcpTransport::Https { credential_binding, .. }, McpSecretPurpose::HttpCredential) => credential_binding.as_ref() == Some(binding.name()),
+            // HostEndpoint has no declared credential identity yet. An endpoint
+            // name must never implicitly authorize a credential reservation.
+            _ => false,
         };
         if !used {
             return Err(Error::InvalidBinding);
@@ -206,6 +202,7 @@ impl McpSecretJournal for SqliteStore {
                         match purpose.as_str() {
                             "argument" => McpSecretPurpose::Argument,
                             "environment" => McpSecretPurpose::Environment,
+                            "http_credential" => McpSecretPurpose::HttpCredential,
                             _ => return Err(Error::IntegrityViolation),
                         },
                         SecretRef::parse(reference).map_err(|_| Error::IntegrityViolation)?,

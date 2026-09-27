@@ -202,6 +202,7 @@ async fn execute<V: McpSecretStore>(
             let purpose = match purpose.as_str() {
                 "argument" => McpSecretPurpose::Argument,
                 "environment" => McpSecretPurpose::Environment,
+                "http_credential" => McpSecretPurpose::HttpCredential,
                 _ => return Err("invalid secret purpose"),
             };
             let secret =

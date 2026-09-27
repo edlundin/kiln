@@ -153,6 +153,7 @@ pub async fn resolve_stdio_launch_from_vault<S: McpSecretStore>(
         let (references, resolved) = match purpose {
             McpSecretPurpose::Argument => (&refs.arguments, &mut resolved_arguments),
             McpSecretPurpose::Environment => (&refs.environment, &mut resolved_environment),
+            McpSecretPurpose::HttpCredential => return Err(Error::UnsupportedTransport),
         };
         if resolved.contains_key(name) {
             continue;

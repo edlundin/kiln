@@ -1,4 +1,4 @@
-//! Single SDK requests; no cache fallback, MRTR loop or automatic redispatch.
+//! Claimed operations with explicit roots mediation; no SDK automatic redispatch.
 
 use std::{io::Write, num::NonZeroUsize};
 
@@ -11,6 +11,9 @@ use rmcp::{
 use tokio::{sync::oneshot, time::Instant};
 
 pub struct StdioCallLimits {
+    /// Explicit total roots requests across legacy callbacks and MRTR rounds.
+    /// None disables mediation; every accepted MRTR round consumes at least one.
+    pub max_input_requests: Option<NonZeroUsize>,
     pub deadline: Instant,
     /// Encoded result ceiling, in addition to the generation's frame ceiling.
     pub max_result_bytes: NonZeroUsize,
@@ -53,13 +56,14 @@ pub(crate) struct DispatchOutcome {
     pub result: Result<StdioCallResult, StdioCallError>,
 }
 
-pub(crate) async fn send_once(
+pub(crate) async fn send_once<S: kiln_core::McpInputStore>(
     peer: &Peer<RoleClient>,
     command: &McpCommand,
     generation: &McpGenerationId,
     epochs: &crate::catalog_state::CatalogEpochs,
     cache: &mut crate::catalog_cache::CatalogCache,
     limits: &StdioCallLimits,
+    handler: &crate::mediation::RuntimeClient<S>,
 ) -> Result<StdioCallResult, StdioCallError> {
     let operation = command.operation();
     cache.prune(epochs, limits.catalog);
@@ -157,7 +161,7 @@ pub(crate) async fn send_once(
             crate::McpCatalogError::CatalogChanged,
         ));
     }
-    let request = match operation {
+    let mut request = match operation {
         McpOperation::Tool { name, arguments } => {
             ClientRequest::CallToolRequest(CallToolRequest::new(
                 CallToolRequestParams::new(name.clone()).with_arguments(arguments.clone()),
@@ -180,13 +184,69 @@ pub(crate) async fn send_once(
     };
     // The raw request path avoids SDK resource cache fallback and automatic MRTR
     // rounds. Modern metadata/unique IDs still come from the negotiated peer.
-    let result = peer
-        .send_request(request)
-        .await
-        .map_err(|error| match error {
-            ServiceError::McpError(_) => StdioCallError::Server,
-            _ => StdioCallError::Interrupted,
-        })?;
+    let result = loop {
+        let result = peer
+            .send_request(request.clone())
+            .await
+            .map_err(|error| match error {
+                ServiceError::McpError(_) => StdioCallError::Server,
+                _ => StdioCallError::Interrupted,
+            })?;
+        let ServerResult::InputRequiredResult(input) = result else {
+            break result;
+        };
+        if peer
+            .peer_info()
+            .is_none_or(|info| info.protocol_version != ProtocolVersion::V_2026_07_28)
+        {
+            return Err(StdioCallError::UnsupportedContinuation);
+        }
+        let requests = input
+            .input_requests
+            .filter(|r| !r.is_empty())
+            .ok_or(StdioCallError::UnsupportedContinuation)?;
+        if requests.len() > limits.max_input_requests.map_or(0, |n| n.get())
+            || requests
+                .values()
+                .any(|r| !matches!(r, InputRequest::ListRoots(_)))
+        {
+            return Err(StdioCallError::UnsupportedContinuation);
+        }
+        let mut responses = InputResponses::new();
+        for (id, _) in requests {
+            let roots = handler
+                .roots()
+                .await
+                .map_err(|_| StdioCallError::UnsupportedContinuation)?;
+            responses.insert(
+                id,
+                serde_json::to_value(roots).map_err(|_| StdioCallError::InvalidOutput)?,
+            );
+        }
+        match &mut request {
+            ClientRequest::CallToolRequest(r) => {
+                r.params.input_responses = Some(responses);
+                r.params.request_state = input.request_state;
+            }
+            ClientRequest::ReadResourceRequest(r) => {
+                r.params.input_responses = Some(responses);
+                r.params.request_state = input.request_state;
+            }
+            ClientRequest::GetPromptRequest(r) => {
+                r.params.input_responses = Some(responses);
+                r.params.request_state = input.request_state;
+            }
+            _ => return Err(StdioCallError::UnsupportedContinuation),
+        }
+        // Re-enter the owner's biased cancellation select before continuing the
+        // same operation. Catalogue changes during mediation revoke this send.
+        tokio::task::yield_now().await;
+        if Instant::now() >= limits.deadline
+            || catalog_kind.is_some_and(|kind| !epochs.unchanged(kind, catalog_version))
+        {
+            return Err(StdioCallError::Interrupted);
+        }
+    };
     let is_error = match (&result, operation) {
         (ServerResult::CallToolResult(result), McpOperation::Tool { .. }) => {
             // An error result need not satisfy the success output contract.

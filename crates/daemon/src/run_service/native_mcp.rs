@@ -36,6 +36,8 @@ pub(crate) struct NativeMcpLimits {
     pub call_timeout_ms: NonZeroU64,
     pub shutdown_grace_ms: u64,
     #[serde(default)]
+    pub max_input_requests: Option<NonZeroUsize>,
+    #[serde(default)]
     pub http: Option<NativeMcpHttpLimits>,
 }
 
@@ -147,6 +149,7 @@ impl NativeMcpLimits {
             startup_deadline,
             shutdown_grace,
             call: StdioCallLimits {
+                max_input_requests: self.max_input_requests,
                 deadline,
                 max_result_bytes: self.max_result_bytes,
                 catalog: McpCatalogLimits {
@@ -274,6 +277,18 @@ mod tests {
     #[test]
     fn native_mcp_configuration_has_no_implicit_allowances() {
         assert!(NativeMcp::new(serde_json::from_value(limits_json()).unwrap()).is_ok());
+        let mut roots = limits_json();
+        roots["max_input_requests"] = json!(0);
+        assert!(serde_json::from_value::<NativeMcpLimits>(roots.clone()).is_err());
+        roots["max_input_requests"] = json!(1);
+        assert_eq!(
+            serde_json::from_value::<NativeMcpLimits>(roots)
+                .unwrap()
+                .max_input_requests
+                .unwrap()
+                .get(),
+            1
+        );
         for field in limits_json().as_object().unwrap().keys() {
             let mut value = limits_json();
             value.as_object_mut().unwrap().remove(field);
@@ -342,6 +357,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
             let task = tokio::spawn(async move {
+                let mut pending_call: Option<serde_json::Value> = None;
                 loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     let mut headers = Vec::new();
@@ -386,7 +402,7 @@ mod tests {
                         };
                         if method == "initialize" {
                             assert_identity(&request["params"]["clientInfo"]);
-                            assert_eq!(request["params"]["capabilities"], json!({}));
+                            assert_eq!(request["params"]["capabilities"], json!({"roots":{}}));
                         }
                         if protocol == McpProtocolVersion::V20260728 {
                             assert_eq!(header("mcp-protocol-version"), Some("2026-07-28"));
@@ -401,7 +417,7 @@ mod tests {
                                 assert_identity(&meta["io.modelcontextprotocol/clientInfo"]);
                                 assert_eq!(
                                     meta["io.modelcontextprotocol/clientCapabilities"],
-                                    json!({})
+                                    json!({"roots":{}})
                                 );
                             }
                             if method == "tools/call" {
@@ -449,7 +465,28 @@ mod tests {
                                 .unwrap();
                                 json!({"tools":[{"name":"write","inputSchema":{"type":"object"}}]})
                             }
+                            "tools/call"
+                                if protocol == McpProtocolVersion::V20260728
+                                    && request["params"]["inputResponses"].is_null() =>
+                            {
+                                assert!(pending_call.is_none());
+                                pending_call = Some(request.clone());
+                                json!({"resultType":"input_required","inputRequests":{"root-request":{"method":"roots/list"}},"requestState":"opaque-state"})
+                            }
                             "tools/call" => {
+                                if protocol == McpProtocolVersion::V20260728 {
+                                    let original = pending_call.take().unwrap();
+                                    assert_ne!(request["id"], original["id"]);
+                                    assert_eq!(
+                                        request["params"]["arguments"],
+                                        original["params"]["arguments"]
+                                    );
+                                    assert_eq!(request["params"]["requestState"], "opaque-state");
+                                    assert_eq!(
+                                        request["params"]["inputResponses"]["root-request"],
+                                        json!({"roots":[{"uri":format!("file://{}/",path.display())}]})
+                                    );
+                                }
                                 use std::io::Write;
                                 writeln!(
                                     std::fs::OpenOptions::new()
@@ -548,7 +585,7 @@ mod tests {
         let executable = path.join("server");
         std::fs::write(path.join("note.txt"), "local file output").unwrap();
         std::fs::write(&executable,r#"#!/usr/bin/python3
-import json, sys
+import json, sys, pathlib
 with open('starts','a') as log: log.write('start\n')
 for line in sys.stdin:
     request = json.loads(line)
@@ -558,6 +595,10 @@ for line in sys.stdin:
         with open('lists','a') as log: log.write('list\n')
         result = {'tools':[{'name':'write','inputSchema':{'type':'object'}}]}
     elif method == 'tools/call':
+        print(json.dumps({'jsonrpc':'2.0','id':'root-request','method':'roots/list'}),flush=True)
+        roots = json.loads(sys.stdin.readline())
+        assert roots['id'] == 'root-request'
+        assert roots['result'] == {'roots':[{'uri':pathlib.Path.cwd().as_uri() + '/'}]}
         with open('calls','a') as log: log.write('call\n')
         result = {'content':[{'type':'text','text':'remote output' * 500}]}
     else: continue
@@ -568,6 +609,8 @@ for line in sys.stdin:
         // This fixture's repeated output exercises artifact paging after completion.
         config.max_frame_bytes = NonZeroUsize::new(16384).unwrap();
         config.max_result_bytes = NonZeroUsize::new(16384).unwrap();
+        // The fixture asks for exactly one roots response per invocation.
+        config.max_input_requests = NonZeroUsize::new(1);
         if http_protocol.is_some() {
             config.http = Some(serde_json::from_value(http_limits_json()).unwrap());
         }
@@ -1062,5 +1105,32 @@ for line in sys.stdin:
                 .count(),
             1
         );
+        let page = store
+            .list_session_events(session.id(), EventCursor::zero())
+            .await
+            .unwrap();
+        let inputs: Vec<_> = page
+            .events()
+            .iter()
+            .filter_map(|event| match event.payload() {
+                SessionEventPayload::McpInputStateChanged {
+                    tool_call_id,
+                    state,
+                    ..
+                } => Some((tool_call_id.clone(), *state)),
+                _ => None,
+            })
+            .collect();
+        if http_protocol != Some(McpProtocolVersion::V20251125) {
+            assert_eq!(
+                inputs,
+                [
+                    (ids[3].clone(), McpInputState::Required),
+                    (ids[3].clone(), McpInputState::Resolved)
+                ]
+            );
+        } else {
+            assert!(inputs.is_empty());
+        }
     }
 }

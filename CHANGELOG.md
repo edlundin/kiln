@@ -2,6 +2,16 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Enable bounded roots mediation for live host-bound MCP calls and
+  supported modern stateful continuations. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add a roots-input lookup that returns only the approved local
   directory after rechecking live generation and workspace scope. ([pending])
 

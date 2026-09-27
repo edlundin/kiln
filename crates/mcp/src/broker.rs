@@ -77,7 +77,12 @@ pub async fn execute_mcp_call<S, V, P, PF, A, AF, E>(
     archive: A,
 ) -> Result<ToolCallResult, McpBrokerError>
 where
-    S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + McpLaunchStore + 'static,
+    S: McpInstanceStore
+        + McpDefinitionStore
+        + McpInvocationStore
+        + kiln_core::McpInputStore
+        + McpLaunchStore
+        + 'static,
     V: McpSecretStore,
     P: FnOnce(WorkspaceCheckout) -> PF,
     PF: Future<Output = Result<rustix::fd::OwnedFd, RunError>>,
@@ -208,7 +213,12 @@ pub async fn execute_stdio_call<S, V, P, PF, A, AF, E>(
     archive: A,
 ) -> Result<ToolCallResult, StdioBrokerError>
 where
-    S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + McpLaunchStore + 'static,
+    S: McpInstanceStore
+        + McpDefinitionStore
+        + McpInvocationStore
+        + kiln_core::McpInputStore
+        + McpLaunchStore
+        + 'static,
     V: McpSecretStore,
     P: FnOnce(WorkspaceCheckout) -> PF,
     PF: Future<Output = Result<rustix::fd::OwnedFd, RunError>>,

@@ -35,6 +35,7 @@ mod http_client;
 mod http_generation;
 mod http_negotiation;
 mod http_sse;
+mod mediation;
 mod negotiation;
 pub use http_bindings::{
     HttpBindingError, HttpLaunchAuthorization, HttpLaunchResources, ResolvedHttpLaunch,

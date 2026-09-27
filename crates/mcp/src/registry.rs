@@ -69,7 +69,10 @@ pub struct McpRegistry<S> {
     state: Mutex<State>,
 }
 
-impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> McpRegistry<S> {
+impl<
+    S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + kiln_core::McpInputStore + 'static,
+> McpRegistry<S>
+{
     pub fn new(store: Arc<S>, capacity: NonZeroUsize) -> Self {
         Self {
             store,

@@ -8,9 +8,9 @@ launch command. Offline host-binding administration is described below.
 ### HTTP transport preparation
 
 Runtime clients identify as `kiln` with the workspace package version, both in
-legacy initialization and modern per-request metadata. Sampling, elicitation,
-roots and other client capabilities remain unadvertised until mediated support
-is implemented.
+legacy initialization and modern per-request metadata. Host-bound runtime clients
+advertise roots; requests still require active invocation authority and an explicit
+budget. Sampling, elicitation and other client capabilities remain unadvertised.
 
 `kiln-mcp` provides an internal `BoundedHttpClient` adapter for Streamable HTTP.
 The daemon uses it only through the explicitly enabled native path and a published
@@ -147,7 +147,7 @@ remain valid without this object.
 Both transports use the same local approval, exact registered directory and host
 revision checks, shared-owner capacity, serial dispatch receipts, result artifacts
 and paging. Streamable HTTP supports the 2025 revisions and 2026 stateless mode;
-2024 HTTP+SSE, OAuth and server-request mediation are not yet implemented. Use
+2024 HTTP+SSE, OAuth, sampling and elicitation are not yet implemented. Use
 `publish_http` below to select a host endpoint/credential snapshot. The local
 HTTP fixture covers modern and legacy approved search/describe/call, artifact
 paging and completed-batch no-replay; it does not establish remote TLS, actual
@@ -161,8 +161,25 @@ not authorize provider calls, responses or operation replay. New input and
 resolution require the original live native claim and ready generation at the
 current definition version. Bodies, server request IDs, responses and opaque
 request state are not stored in this journal. Input transitions now project into
-public session events; runtime mediation and interaction routing are not yet
-connected.
+public session events. Roots mediation is connected; provider sampling and user
+interaction routing remain open.
+
+Optional `max_input_requests` in `KILN_NATIVE_MCP_LIMITS` enables roots mediation
+with an explicit positive per-invocation total; absent/null disables responses.
+It counts legacy `roots/list` callbacks and roots requests across all modern MRTR
+rounds. Roots responses share the invocation deadline and result-byte allowance.
+Each supported modern round contains at least one roots request, so the request
+budget also bounds the number of continuation rounds. Sampling, elicitation,
+state-only rounds and external Tasks remain unsupported and do not authorize a
+continuation. Roots callbacks handled without an active invocation are refused;
+pre-startup mediation remains unsupported.
+The invocation guard revokes in-progress callbacks when dispatch ends or is
+cancelled. Current generation/claim state is rechecked at journal boundaries.
+
+Modern continuation echoes opaque `requestState` and sends `inputResponses` on
+the original operation with a fresh wire request ID, retaining the same durable
+invocation. It uses no SDK automatic retry or MRTR loop. Cancellation, deadlines,
+catalogue changes or failed mediation prevent another continuation send.
 
 The internal roots lookup accepts only a pending roots input on a live invocation.
 It resolves the generation's exact local host revision and compares its directory

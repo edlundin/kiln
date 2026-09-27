@@ -150,7 +150,11 @@ impl GenerationObserver {
 impl McpGeneration {
     pub fn spawn<S>(store: Arc<S>, launch: StdioGenerationLaunch) -> Self
     where
-        S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static,
+        S: McpInstanceStore
+            + McpDefinitionStore
+            + McpInvocationStore
+            + kiln_core::McpInputStore
+            + 'static,
     {
         Self::spawn_launch(
             store,
@@ -170,7 +174,11 @@ impl McpGeneration {
     /// admission checks its exact host revision before constructing any worker.
     pub fn spawn_http<S>(store: Arc<S>, launch: crate::ResolvedHttpLaunch) -> Self
     where
-        S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static,
+        S: McpInstanceStore
+            + McpDefinitionStore
+            + McpInvocationStore
+            + kiln_core::McpInputStore
+            + 'static,
     {
         Self::spawn_launch(
             store,
@@ -188,14 +196,23 @@ impl McpGeneration {
 
     fn spawn_launch<S>(store: Arc<S>, launch: GenerationLaunch) -> Self
     where
-        S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static,
+        S: McpInstanceStore
+            + McpDefinitionStore
+            + McpInvocationStore
+            + kiln_core::McpInputStore
+            + 'static,
     {
         let (stop, stopped) = oneshot::channel();
         let (status, receiver) = watch::channel(Status::Starting);
         // Durable ownership permits at most one in-flight dispatch per generation.
         let (calls, requests) = mpsc::channel(1);
         let worker = tokio::spawn(async move {
-            let result = run(store.as_ref(), launch, stopped, requests, &status).await;
+            let handler = crate::mediation::RuntimeClient::new(
+                store.clone(),
+                launch.definition_limits,
+                launch.host_binding_version.is_some(),
+            );
+            let result = run(store.as_ref(), launch, stopped, requests, &status, handler).await;
             status.send_replace(Status::Finished(result.clone()));
             result
         });
@@ -295,12 +312,15 @@ async fn stopped<S: McpInstanceStore>(
     transition(store, &record, McpInstanceTransition::Stopped).await
 }
 
-async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
+async fn run<
+    S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + kiln_core::McpInputStore + 'static,
+>(
     store: &S,
     launch: GenerationLaunch,
     mut stop: oneshot::Receiver<()>,
     mut requests: mpsc::Receiver<DispatchRequest>,
     status: &watch::Sender<Status>,
+    handler: crate::mediation::RuntimeClient<S>,
 ) -> Result<McpInstanceRecord, McpGenerationError> {
     let definition = store
         .get_mcp_definition(launch.key.definition_id(), launch.definition_limits)
@@ -350,7 +370,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
         transition(store, &record, McpInstanceTransition::StartupFailed).await?;
         return Err(McpGenerationError::StartupDeadline);
     }
-    let catalog_epochs = crate::catalog_state::CatalogEpochs::default();
+    let catalog_epochs = handler.epochs.clone();
     let mut catalog_cache = crate::catalog_cache::CatalogCache::default();
     let (startup, cleanup) = match launch.transport {
         LaunchTransport::Stdio(config) => {
@@ -366,7 +386,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
                 biased;
                 _ = &mut stop => None,
                 result = tokio::time::timeout_at(launch.startup_deadline,
-                    start_stdio_client(Arc::new(catalog_epochs.clone()), transport, definition.definition.protocol())) => Some(match result {
+                    start_stdio_client(Arc::new(handler.clone()), transport, definition.definition.protocol())) => Some(match result {
                         Ok(Ok(client)) => Ok(client),
                         Ok(Err(_)) => Err(McpGenerationError::Startup),
                         Err(_) => Err(McpGenerationError::StartupDeadline),
@@ -376,7 +396,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
         }
         LaunchTransport::Http(config, policy) => {
             let (starting, cleanup) = crate::start_managed_http_client(
-                catalog_epochs.clone(),
+                handler.clone(),
                 config,
                 policy,
                 launch.startup_deadline,
@@ -470,6 +490,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
             {
                 Err(StdioCallError::Rejected)
             } else {
+                let _input_guard = handler.enter(call.permit.record(), &call.limits);
                 tokio::select! {
                     biased;
                     _ = &mut stop => { exit = Some(true); Err(StdioCallError::Interrupted) },
@@ -477,7 +498,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
                     _ = &mut call.cancellation => Err(StdioCallError::Interrupted),
                     _ = call.reply.closed() => Err(StdioCallError::Interrupted),
                     _ = tokio::time::sleep_until(call.limits.deadline) => Err(StdioCallError::Interrupted),
-                    result = send_once(&peer, call.permit.request().command(), &call.permit.record().generation, &catalog_epochs, &mut catalog_cache, &call.limits) => result,
+                    result = send_once(&peer, call.permit.request().command(), &call.permit.record().generation, &catalog_epochs, &mut catalog_cache, &call.limits, &handler) => result,
                 }
             }
         };

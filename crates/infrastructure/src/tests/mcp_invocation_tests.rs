@@ -1096,6 +1096,7 @@ for line in sys.stdin:
             let call = owner.dispatch(
                 permit,
                 StdioCallLimits {
+                    max_input_requests: None,
                     catalog: catalog_limits(),
                     deadline: Instant::now() + allowance,
                     max_result_bytes: NonZeroUsize::new(if mode == "oversize" { 1 } else { 8192 })
@@ -1208,6 +1209,7 @@ for line in sys.stdin:
                 .dispatch_tool_call(
                     permit,
                     StdioCallLimits {
+                        max_input_requests: None,
                         catalog: catalog_limits(),
                         deadline: Instant::now() + allowance,
                         max_result_bytes: NonZeroUsize::new(8192).unwrap(),
@@ -1392,6 +1394,7 @@ for line in sys.stdin:
         shutdown_grace: Duration::ZERO,
         startup_deadline: Instant::now() + Duration::from_secs(5),
         call: StdioCallLimits {
+            max_input_requests: None,
             catalog: catalog_limits(),
             deadline: Instant::now() + Duration::from_secs(5),
             max_result_bytes: NonZeroUsize::new(1024).unwrap(),
@@ -1670,6 +1673,7 @@ for line in sys.stdin:
             .dispatch(
                 permit,
                 StdioCallLimits {
+                    max_input_requests: None,
                     deadline: Instant::now() + Duration::from_secs(5),
                     max_result_bytes: NonZeroUsize::new(4096).unwrap(),
                     catalog,
@@ -1863,6 +1867,7 @@ for line in sys.stdin:
             .dispatch_tool_call(
                 permit,
                 StdioCallLimits {
+                    max_input_requests: None,
                     deadline: Instant::now() + Duration::from_secs(5),
                     max_result_bytes: NonZeroUsize::new(4096).unwrap(),
                     catalog,

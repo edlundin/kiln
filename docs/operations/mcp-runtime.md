@@ -53,12 +53,30 @@ Prompts also require bounded discovery and valid declared arguments. Resource
 reads require the resource capability and a valid absolute RFC 3986 URI, forwarded
 unchanged to the MCP server; file/HTTP URIs are never dereferenced locally.
 Resource links need not appear in `resources/list` under the MCP specification,
-so the broker does not impose a catalogue membership requirement. A low-level fresh catalogue adapter now lists tools, prompts, resources and
+so the broker does not impose a catalogue membership requirement. A low-level
+fresh catalogue adapter now lists tools, prompts, resources and
 resource templates with complete bounded traversal and an absolute deadline.
 Templates remain opaque metadata; no expansion or content read occurs. It grants
-no execution or cache authority. Provider-facing search/describe, generation-indexed
-caching/invalidation and daemon integration remain open, and the daemon still
-does not advertise `mcp_call`.
+no execution or cache authority.
+
+Internal `McpTools` contracts now include `mcp_search` and `mcp_describe` alongside
+`mcp_call`, each with a separate capability and normal durable approval/claim
+checks. Search emits compact identifier/name/title summaries with deterministic
+identifier ordering and explicit offset/limit; describe emits the selected full
+metadata entry and schema. Both use fresh complete bounded discovery and include
+server definition/version, generation and protocol provenance. For example:
+
+```json
+{"server_id":"notes","definition_version":1,"kind":"tool","query":"write","offset":0,"limit":5}
+```
+
+The corresponding `mcp_describe` arguments replace query/offset/limit with
+`"identifier":"write_note"`. Kinds also include `resource`, `prompt` and
+`resource_template`; their identifiers are exact URI, prompt name and template
+string respectively. Neither operation executes the selected item. Search pages
+are fresh traversals, not stable snapshots across requests. Generation-indexed
+caching/invalidation, stable paging and daemon coordinator installation remain
+open. The daemon does not yet advertise any of these MCP contracts.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown

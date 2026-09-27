@@ -3,8 +3,8 @@
 use std::num::NonZeroUsize;
 
 use crate::{
-    MCP_CALL_CAPABILITY, McpCallCommand, McpDefinitionLimits, McpGenerationId, McpInstanceRecord,
-    ModelToolExecutionRequest, ToolCallId, ToolCallState,
+    McpCommand, McpDefinitionLimits, McpGenerationId, McpInstanceRecord, ModelToolExecutionRequest,
+    ToolCallId, ToolCallState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub trait McpInvocationStore: Send + Sync {
     /// never authorize sending, even if their outcome is interrupted or unknown.
     fn begin_mcp_invocation(
         &self,
-        request: &ModelToolExecutionRequest<McpCallCommand>,
+        request: &ModelToolExecutionRequest<McpCommand>,
         target: &McpInstanceRecord,
         limits: McpDefinitionLimits,
     ) -> impl Future<Output = Result<McpInvocationMutation, McpInvocationError>> + Send;
@@ -106,7 +106,7 @@ pub trait McpLaunchStore: Send + Sync {
     /// Require the current local host snapshot to select that exact checkout.
     fn inspect_mcp_launch(
         &self,
-        request: &ModelToolExecutionRequest<McpCallCommand>,
+        request: &ModelToolExecutionRequest<McpCommand>,
         limits: McpDefinitionLimits,
     ) -> impl Future<Output = Result<McpLaunchContext, McpInvocationError>> + Send;
 }
@@ -114,11 +114,11 @@ pub trait McpLaunchStore: Send + Sync {
 /// One fresh claim, consumed by the broker. No Clone, deserialization, public
 /// constructor or recovery path. Dropping it cannot authorize another dispatch.
 pub struct McpDispatchPermit {
-    request: ModelToolExecutionRequest<McpCallCommand>,
+    request: ModelToolExecutionRequest<McpCommand>,
     record: McpInvocationRecord,
 }
 impl McpDispatchPermit {
-    pub fn request(&self) -> &ModelToolExecutionRequest<McpCallCommand> {
+    pub fn request(&self) -> &ModelToolExecutionRequest<McpCommand> {
         &self.request
     }
     pub fn record(&self) -> &McpInvocationRecord {
@@ -133,12 +133,12 @@ pub enum McpDispatchClaim {
 
 pub async fn claim_mcp_dispatch<S: McpInvocationStore>(
     store: &S,
-    request: ModelToolExecutionRequest<McpCallCommand>,
+    request: ModelToolExecutionRequest<McpCommand>,
     target: &McpInstanceRecord,
     limits: McpDefinitionLimits,
 ) -> Result<McpDispatchClaim, McpInvocationError> {
     if request.tool_call().state() != ToolCallState::Running
-        || request.tool_call().capability() != MCP_CALL_CAPABILITY
+        || request.tool_call().capability() != request.command().capability()
         || request.command().server_id() != target.key.definition_id()
         || request.command().definition_version() != target.definition_version
     {

@@ -1,10 +1,9 @@
 use std::num::NonZeroUsize;
 
 use kiln_core::{
-    MCP_CALL_CAPABILITY, McpCallCommand, McpDefinitionLimits, McpGenerationId, McpInstanceKey,
-    McpInstanceOwner, McpInstanceRecord, McpInvocationError as Error, McpInvocationMutation,
-    McpInvocationRecord, McpInvocationState, McpInvocationStore, ModelToolExecutionRequest,
-    ToolCallId,
+    McpCommand, McpDefinitionLimits, McpGenerationId, McpInstanceKey, McpInstanceOwner,
+    McpInstanceRecord, McpInvocationError as Error, McpInvocationMutation, McpInvocationRecord,
+    McpInvocationState, McpInvocationStore, ModelToolExecutionRequest, ToolCallId,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 
@@ -13,13 +12,13 @@ use super::SqliteStore;
 impl McpInvocationStore for SqliteStore {
     async fn begin_mcp_invocation(
         &self,
-        request: &ModelToolExecutionRequest<McpCallCommand>,
+        request: &ModelToolExecutionRequest<McpCommand>,
         target: &McpInstanceRecord,
         limits: McpDefinitionLimits,
     ) -> Result<McpInvocationMutation, Error> {
         let command = request.command();
         let tool = request.tool_call();
-        if tool.capability() != MCP_CALL_CAPABILITY
+        if tool.capability() != command.capability()
             || command.server_id() != target.key.definition_id()
             || command.definition_version() != target.definition_version
             || target.key.canonical_json().len() > limits.max_metadata_bytes
@@ -254,9 +253,9 @@ async fn append_event(
 
 async fn native_claim_owner(
     connection: &mut SqliteConnection,
-    request: &ModelToolExecutionRequest<McpCallCommand>,
+    request: &ModelToolExecutionRequest<McpCommand>,
 ) -> Result<(kiln_core::SessionId, kiln_core::WorkspaceId), Error> {
-    if request.tool_call().capability() != MCP_CALL_CAPABILITY {
+    if request.tool_call().capability() != request.command().capability() {
         return Err(Error::InvalidRequest);
     }
     let tool = request.tool_call();
@@ -267,11 +266,11 @@ async fn native_claim_owner(
             JOIN model_tool_requests q ON q.model_invocation_id = a.model_invocation_id AND q.provider_call_id = a.provider_call_id
             WHERE t.tool_call_id = ? AND t.run_id = ? AND t.capability = ? AND t.state = 'running'
               AND r.state = 'running' AND a.model_invocation_id = ? AND a.provider_call_id = ?
-              AND q.name = 'mcp_call' AND q.arguments_json = ?
+              AND q.name = ? AND q.arguments_json = ?
               AND t.effective_workspace_root_id = ? AND t.effective_relative_directory = ?")
-            .bind(tool.tool_call_id().as_str()).bind(tool.run_id().as_str()).bind(MCP_CALL_CAPABILITY)
+            .bind(tool.tool_call_id().as_str()).bind(tool.run_id().as_str()).bind(command.capability())
             .bind(request.invocation_id().as_str()).bind(request.provider_call_id())
-            .bind(command.canonical_json()).bind(request.scope().workspace_root_id().as_str())
+            .bind(command.tool_name()).bind(command.canonical_json()).bind(request.scope().workspace_root_id().as_str())
             .bind(request.scope().relative_directory()).fetch_optional(&mut *connection).await
             .map_err(|_| Error::Unavailable)?.ok_or(Error::InvalidRequest)?;
     let session: String = row
@@ -289,7 +288,7 @@ async fn native_claim_owner(
 impl kiln_core::McpLaunchStore for SqliteStore {
     async fn inspect_mcp_launch(
         &self,
-        request: &ModelToolExecutionRequest<McpCallCommand>,
+        request: &ModelToolExecutionRequest<McpCommand>,
         limits: McpDefinitionLimits,
     ) -> Result<kiln_core::McpLaunchContext, Error> {
         limits.validate().map_err(|_| Error::InvalidRequest)?;

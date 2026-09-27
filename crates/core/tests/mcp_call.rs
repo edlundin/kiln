@@ -2,11 +2,11 @@ use kiln_core::*;
 use serde_json::json;
 use std::num::NonZeroUsize;
 
-fn tool(bytes: usize) -> McpCallTool {
-    McpCallTool::new(
+fn tool(bytes: usize) -> McpTools {
+    McpTools::new(
         NonZeroUsize::new(bytes).unwrap(),
         ModelToolCatalogLimits {
-            max_tools: 1,
+            max_tools: 3,
             max_definition_bytes: usize::MAX,
             max_total_definition_bytes: usize::MAX,
         },
@@ -30,15 +30,16 @@ fn compact_call_preserves_operations_and_rejects_ambiguous_or_oversized_input() 
         assert_eq!(command.definition_version(), 2);
         assert_eq!(command.canonical_json(), source);
         match command.operation() {
-            McpCallOperation::Tool { name, arguments } => {
+            McpOperation::Tool { name, arguments } => {
                 assert_eq!(name, "write");
                 assert_eq!(arguments["nested"], json!([1, true, null]));
             }
-            McpCallOperation::Resource { uri } => assert_eq!(uri, "fixture://document"),
-            McpCallOperation::Prompt { name, arguments } => {
+            McpOperation::Resource { uri } => assert_eq!(uri, "fixture://document"),
+            McpOperation::Prompt { name, arguments } => {
                 assert_eq!(name, "review");
                 assert_eq!(arguments["subject"], "private");
             }
+            _ => panic!("expected call operation"),
         }
         let smaller = tool(source.len() - 1);
         assert!(matches!(
@@ -88,4 +89,66 @@ fn compact_call_rejects_unrecognized_authority_and_wrong_operation_shapes() {
     }
     let source = json!({"server_id":"fixture","definition_version":1,"scope":"core","operation":{"kind":"resource","uri":"fixture://document"}}).to_string();
     assert!(resolver.parse_arguments(definition, &source).is_err());
+}
+
+#[test]
+fn discovery_has_distinct_capabilities_and_strict_canonical_shapes() {
+    let resolver = tool(4096);
+    for (name, capability, arguments) in [
+        (
+            "mcp_search",
+            MCP_SEARCH_CAPABILITY,
+            json!({"server_id":"fixture","definition_version":1,"kind":"tool","query":"","offset":0,"limit":1}),
+        ),
+        (
+            "mcp_describe",
+            MCP_DESCRIBE_CAPABILITY,
+            json!({"server_id":"fixture","definition_version":1,"kind":"resource_template","identifier":"notes:///{id}"}),
+        ),
+    ] {
+        let definition = resolver.catalog().find(name).unwrap();
+        let command = resolver
+            .parse_arguments(definition, &arguments.to_string())
+            .unwrap();
+        assert_eq!(command.capability(), capability);
+        assert_eq!(command.tool_name(), name);
+        assert_eq!(command.canonical_json(), arguments.to_string());
+        assert!(
+            resolver
+                .parse_arguments(
+                    resolver.catalog().find("mcp_call").unwrap(),
+                    &arguments.to_string()
+                )
+                .is_err()
+        );
+        for (key, value) in [
+            ("kind", json!("sampling")),
+            ("scope", json!("core")),
+            ("definition_version", json!(0)),
+        ] {
+            let mut invalid = arguments.clone();
+            invalid[key] = value;
+            assert!(
+                resolver
+                    .parse_arguments(definition, &invalid.to_string())
+                    .is_err()
+            );
+        }
+    }
+    let definition = resolver.catalog().find("mcp_search").unwrap();
+    for (key, value) in [
+        ("limit", json!(0)),
+        ("offset", json!(-1)),
+        ("limit", json!(u64::MAX)),
+        ("query", json!("a\nb")),
+        ("query", json!(null)),
+    ] {
+        let mut args = json!({"server_id":"fixture","definition_version":1,"kind":"tool","query":"","offset":0,"limit":1});
+        args[key] = value;
+        assert!(
+            resolver
+                .parse_arguments(definition, &args.to_string())
+                .is_err()
+        );
+    }
 }

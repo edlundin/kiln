@@ -29,7 +29,7 @@ async fn request(
     store: &super::super::SqliteStore,
     session: &Session,
     key: &str,
-) -> ModelToolExecutionRequest<McpCallCommand> {
+) -> ModelToolExecutionRequest<McpCommand> {
     request_operation(
         store,
         session,
@@ -44,7 +44,24 @@ async fn request_operation(
     session: &Session,
     key: &str,
     operation: serde_json::Value,
-) -> ModelToolExecutionRequest<McpCallCommand> {
+) -> ModelToolExecutionRequest<McpCommand> {
+    request_native(
+        store,
+        session,
+        key,
+        "mcp_call",
+        serde_json::json!({"server_id":"fixture","definition_version":1,"operation":operation}),
+    )
+    .await
+}
+
+async fn request_native(
+    store: &super::super::SqliteStore,
+    session: &Session,
+    key: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> ModelToolExecutionRequest<McpCommand> {
     let ids = super::super::UlidIdGenerator;
     let runs = RunApplication::new(store.clone(), ids);
     let run = runs
@@ -94,10 +111,10 @@ async fn request_operation(
         .await
         .unwrap()
         .value;
-    let tool = McpCallTool::new(
+    let tool = McpTools::new(
         NonZeroUsize::new(4096).unwrap(),
         ModelToolCatalogLimits {
-            max_tools: 1,
+            max_tools: 3,
             max_definition_bytes: 8192,
             max_total_definition_bytes: 8192,
         },
@@ -121,12 +138,8 @@ async fn request_operation(
         invocation.invocation_id().clone(),
         vec![ModelToolRequestInput {
             provider_call_id: "call-1".into(),
-            name: "mcp_call".into(),
-            arguments: serde_json::json!({"server_id":"fixture","definition_version":1,
-            "operation":operation})
-            .as_object()
-            .unwrap()
-            .clone(),
+            name: name.into(),
+            arguments: arguments.as_object().unwrap().clone(),
         }],
         ModelToolRequestLimits {
             max_requests: 1,
@@ -1161,4 +1174,218 @@ for line in sys.stdin:
         );
         owner.stop().await.unwrap();
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_discovery_uses_distinct_approved_claims_and_compact_receipt_backed_results() {
+    use kiln_mcp::{StdioCallLimits, StdioGeneration, StdioGenerationLaunch, StdioProcessConfig};
+    use std::{sync::Arc, time::Duration};
+    use tokio::{sync::oneshot, time::Instant};
+    let script = r#"
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{},'resources':{},'prompts':{}},'serverInfo':{'name':'fixture','version':'1'}}
+    elif method == 'notifications/initialized': continue
+    else:
+        with open('discovery', 'a') as log: log.write(method+'\n')
+        if method == 'tools/list':
+            second = bool(request.get('params',{}).get('cursor'))
+            result = {'tools':[{'name':'alpha' if second else 'zeta','description':'Write a note','inputSchema':{'type':'object','properties':{'text':{'type':'string'}},'required':['text']}}]}
+            if not second: result['nextCursor'] = 'next'
+        elif method == 'resources/list': result = {'resources':[{'name':'note','uri':'file:///must-not-open','description':'Read a note'}]}
+        elif method == 'prompts/list': result = {'prompts':[{'name':'review','arguments':[{'name':'language','required':True}]}]}
+        elif method == 'resources/templates/list': result = {'resourceTemplates':[{'name':'notes','uriTemplate':'notes:///{+path}'}]}
+        else: raise AssertionError('discovery must not execute '+method)
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#;
+    let (data, store, session) = seeded_session().await;
+    let key = register(
+        &store,
+        McpInstanceOwner::Core,
+        McpProtocolPolicy::Pinned(McpProtocolVersion::V20251125),
+    )
+    .await;
+    let mut owner = StdioGeneration::spawn(
+        Arc::new(store.clone()),
+        StdioGenerationLaunch {
+            key,
+            definition_version: 1,
+            host_binding_version: None,
+            generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),
+            definition_limits: limits(),
+            startup_deadline: Instant::now() + Duration::from_secs(5),
+            process: StdioProcessConfig {
+                executable: "/usr/bin/python3".into(),
+                arguments: vec!["-c".into(), script.into()],
+                working_directory: std::fs::File::open(data.path()).unwrap().into(),
+                environment: BTreeMap::new(),
+                max_frame_bytes: NonZeroUsize::new(4096).unwrap(),
+                shutdown_grace: Duration::ZERO,
+            },
+        },
+    );
+    let target = owner.wait_ready().await.unwrap();
+    let mut catalog = catalog_limits();
+    catalog.max_pages = NonZeroUsize::new(2).unwrap();
+    catalog.max_entries = NonZeroUsize::new(2).unwrap();
+    let cases = [
+        (
+            "mcp_search",
+            serde_json::json!({"kind":"tool","query":"WRITE","offset":0,"limit":1}),
+        ),
+        (
+            "mcp_search",
+            serde_json::json!({"kind":"tool","query":"WRITE","offset":1,"limit":1}),
+        ),
+        (
+            "mcp_describe",
+            serde_json::json!({"kind":"tool","identifier":"zeta"}),
+        ),
+        (
+            "mcp_search",
+            serde_json::json!({"kind":"resource","query":"","offset":0,"limit":1}),
+        ),
+        (
+            "mcp_describe",
+            serde_json::json!({"kind":"resource","identifier":"file:///must-not-open"}),
+        ),
+        (
+            "mcp_search",
+            serde_json::json!({"kind":"prompt","query":"","offset":0,"limit":1}),
+        ),
+        (
+            "mcp_describe",
+            serde_json::json!({"kind":"prompt","identifier":"review"}),
+        ),
+        (
+            "mcp_search",
+            serde_json::json!({"kind":"resource_template","query":"","offset":0,"limit":1}),
+        ),
+        (
+            "mcp_describe",
+            serde_json::json!({"kind":"resource_template","identifier":"notes:///{+path}"}),
+        ),
+        (
+            "mcp_describe",
+            serde_json::json!({"kind":"tool","identifier":"absent"}),
+        ),
+    ];
+    for (index, (name, mut arguments)) in cases.into_iter().enumerate() {
+        let session =
+            SessionApplication::new(store.clone(), store.clone(), super::super::UlidIdGenerator)
+                .create_session(session.workspace_id().clone())
+                .await
+                .unwrap();
+        arguments["server_id"] = "fixture".into();
+        arguments["definition_version"] = 1.into();
+        let request = request_native(
+            &store,
+            &session,
+            &format!("discovery-{index}"),
+            name,
+            arguments,
+        )
+        .await;
+        assert_eq!(
+            request.tool_call().capability(),
+            if name == "mcp_search" {
+                MCP_SEARCH_CAPABILITY
+            } else {
+                MCP_DESCRIBE_CAPABILITY
+            }
+        );
+        let tool_call_id = request.tool_call().tool_call_id().clone();
+        let McpDispatchClaim::Acquired(permit) =
+            claim_mcp_dispatch(&store, request, &target, limits())
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let (_cancel, cancelled) = oneshot::channel();
+        let result = owner
+            .dispatch_tool_call(
+                permit,
+                StdioCallLimits {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    max_result_bytes: NonZeroUsize::new(4096).unwrap(),
+                    catalog,
+                },
+                cancelled,
+                |_| std::future::ready(Err::<Artifact, ()>(())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.state(),
+            if index == 9 {
+                ToolCallState::Failed
+            } else {
+                ToolCallState::Completed
+            }
+        );
+        if index != 9 {
+            let value: serde_json::Value = serde_json::from_str(result.stdout().unwrap()).unwrap();
+            assert_eq!(value["generation"], target.generation.as_str());
+            assert_eq!(value["server_id"], "fixture");
+            assert_eq!(value["protocol_version"], "2025-11-25");
+            if name == "mcp_search" {
+                assert!(!result.stdout().unwrap().contains("inputSchema"));
+                assert_eq!(value["result"]["entries"].as_array().unwrap().len(), 1);
+            }
+            match index {
+                0 => {
+                    assert_eq!(value["result"]["entries"][0]["identifier"], "alpha");
+                    assert_eq!(value["result"]["next_offset"], 1);
+                }
+                1 => {
+                    assert_eq!(value["result"]["entries"][0]["identifier"], "zeta");
+                    assert!(value["result"]["next_offset"].is_null());
+                }
+                2 => assert_eq!(value["result"]["inputSchema"]["required"][0], "text"),
+                4 => assert_eq!(value["result"]["uri"], "file:///must-not-open"),
+                6 => assert_eq!(value["result"]["arguments"][0]["name"], "language"),
+                8 => assert_eq!(value["result"]["uriTemplate"], "notes:///{+path}"),
+                _ => {}
+            }
+        }
+        ProviderApplication::new(store.clone(), super::super::UlidIdGenerator)
+            .finish_tool_call(&tool_call_id, &result)
+            .await
+            .unwrap();
+        let (_, stored) = store.get_tool_call(&tool_call_id).await.unwrap().unwrap();
+        assert_eq!(stored.state(), result.state());
+    }
+    // A valid parsed discovery request cannot claim a durable source relabelled
+    // as a call, even though it still names the same server and version.
+    let request = request_native(&store, &session, "wrong-source", "mcp_search", serde_json::json!({"server_id":"fixture","definition_version":1,"kind":"tool","query":"","offset":0,"limit":1})).await;
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query(
+            "UPDATE model_tool_requests SET name = 'mcp_call' WHERE model_invocation_id = ?",
+        )
+        .bind(request.invocation_id().as_str())
+        .execute(&mut *sql)
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        store
+            .begin_mcp_invocation(&request, &target, limits())
+            .await
+            .err(),
+        Some(McpInvocationError::InvalidRequest)
+    );
+    owner.stop().await.unwrap();
+    let wire = std::fs::read_to_string(data.path().join("discovery")).unwrap();
+    assert_eq!(wire.lines().filter(|line| *line == "tools/list").count(), 8);
+    assert_eq!(
+        wire.lines().count(),
+        14,
+        "fresh list for every approved discovery; no execution methods"
+    );
 }

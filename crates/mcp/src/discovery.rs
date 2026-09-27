@@ -8,13 +8,7 @@ use tokio::time::Instant;
 use crate::catalog::{PageBudget, valid_name, validate_resource_uri};
 use crate::{McpCatalogError, McpCatalogLimits, StdioCallError};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum McpCatalogKind {
-    Tools,
-    Prompts,
-    Resources,
-    ResourceTemplates,
-}
+pub use kiln_core::McpCatalogKind;
 
 /// Untrusted metadata, including schemas and annotations. No Debug to avoid
 /// accidental logging. This value carries no authorization or cache validity.
@@ -39,9 +33,13 @@ pub async fn discover_catalog(
     if Instant::now() >= deadline {
         return Err(StdioCallError::DeadlineBeforeSend);
     }
-    tokio::time::timeout_at(deadline, collect_catalog(peer, kind, limits))
+    let result = tokio::time::timeout_at(deadline, collect_catalog(peer, kind, limits))
         .await
-        .map_err(|_| StdioCallError::Interrupted)?
+        .map_err(|_| StdioCallError::Interrupted)?;
+    if Instant::now() >= deadline {
+        return Err(StdioCallError::Interrupted);
+    }
+    result
 }
 
 pub(crate) async fn collect_catalog(
@@ -166,5 +164,103 @@ fn append_page(
             Ok(page.next_cursor)
         }
         _ => Err(InvalidCatalog),
+    }
+}
+
+/// Build compact search output without copying full schemas into model context.
+/// Pagination is local to this fresh traversal; it is not a stable cache cursor.
+pub(crate) fn project_catalog(
+    entries: &McpCatalogEntries,
+    operation: &kiln_core::McpOperation,
+) -> Result<serde_json::Value, McpCatalogError> {
+    use kiln_core::McpOperation;
+    use serde_json::json;
+    struct Entry<'a> {
+        identifier: &'a str,
+        name: &'a str,
+        title: Option<&'a str>,
+        description: Option<&'a str>,
+    }
+    let metadata: Vec<Entry<'_>> = match entries {
+        McpCatalogEntries::Tools(items) => items
+            .iter()
+            .map(|e| Entry {
+                identifier: &e.name,
+                name: &e.name,
+                title: e.title.as_deref(),
+                description: e.description.as_deref(),
+            })
+            .collect(),
+        McpCatalogEntries::Prompts(items) => items
+            .iter()
+            .map(|e| Entry {
+                identifier: &e.name,
+                name: &e.name,
+                title: e.title.as_deref(),
+                description: e.description.as_deref(),
+            })
+            .collect(),
+        McpCatalogEntries::Resources(items) => items
+            .iter()
+            .map(|e| Entry {
+                identifier: &e.uri,
+                name: &e.name,
+                title: e.title.as_deref(),
+                description: e.description.as_deref(),
+            })
+            .collect(),
+        McpCatalogEntries::ResourceTemplates(items) => items
+            .iter()
+            .map(|e| Entry {
+                identifier: &e.uri_template,
+                name: &e.name,
+                title: e.title.as_deref(),
+                description: e.description.as_deref(),
+            })
+            .collect(),
+    };
+    match operation {
+        McpOperation::Search {
+            query,
+            offset,
+            limit,
+            ..
+        } => {
+            let query = query.to_lowercase();
+            let mut matches: Vec<_> = metadata
+                .iter()
+                .filter(|e| {
+                    [Some(e.identifier), Some(e.name), e.title, e.description]
+                        .into_iter()
+                        .flatten()
+                        .any(|text| text.to_lowercase().contains(&query))
+                })
+                .collect();
+            matches.sort_unstable_by_key(|e| e.identifier);
+            let selected: Vec<_> = matches
+                .iter()
+                .skip(*offset)
+                .take(limit.get())
+                .map(|e| json!({"identifier":e.identifier,"name":e.name,"title":e.title}))
+                .collect();
+            let next = offset
+                .checked_add(selected.len())
+                .filter(|next| *next < matches.len());
+            Ok(json!({"entries":selected,"next_offset":next,"total_matches":matches.len()}))
+        }
+        McpOperation::Describe { identifier, .. } => {
+            let index = metadata
+                .iter()
+                .position(|e| e.identifier == identifier)
+                .ok_or(McpCatalogError::UnknownEntry)?;
+            let value = match entries {
+                McpCatalogEntries::Tools(items) => serde_json::to_value(&items[index]),
+                McpCatalogEntries::Prompts(items) => serde_json::to_value(&items[index]),
+                McpCatalogEntries::Resources(items) => serde_json::to_value(&items[index]),
+                McpCatalogEntries::ResourceTemplates(items) => serde_json::to_value(&items[index]),
+            };
+            value.map_err(|_| McpCatalogError::InvalidCatalog)
+        }
+        _ => Err(McpCatalogError::InvalidCatalog),
     }
 }

@@ -4,7 +4,7 @@
 use std::{num::NonZeroUsize, time::Duration};
 
 use kiln_core::{
-    Artifact, McpCallCommand, McpDefinitionLimits, McpDefinitionStore, McpDispatchClaim,
+    Artifact, McpCommand, McpDefinitionLimits, McpDefinitionStore, McpDispatchClaim,
     McpGenerationId, McpInstanceStore, McpInvocationError, McpInvocationStore, McpLaunchStore,
     McpSecretStore, ModelToolExecutionRequest, RunError, ToolCallResult, WorkspaceCheckout,
     claim_mcp_dispatch,
@@ -49,7 +49,7 @@ pub enum StdioBrokerError {
 /// No error or dropped future is permission to replay this request.
 pub async fn execute_stdio_call<S, V, P, PF, A, AF, E>(
     registry: &StdioRegistry<S>,
-    request: ModelToolExecutionRequest<McpCallCommand>,
+    request: ModelToolExecutionRequest<McpCommand>,
     vault: &V,
     limits: StdioBrokerLimits,
     mut cancellation: oneshot::Receiver<()>,

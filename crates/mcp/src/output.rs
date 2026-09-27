@@ -37,7 +37,7 @@ where
                     "MCP dispatch was rejected before sending the operation request."
                 }
                 Error::Catalog(_) => {
-                    "The MCP capability, catalogue or arguments failed validation. No operation request was sent."
+                    "The MCP capability, catalogue or arguments failed validation. No tool call, resource read or prompt retrieval was sent."
                 }
                 Error::InvalidOutput => {
                     "The MCP server responded with output that failed validation. External effects may have occurred; the request was not retried."

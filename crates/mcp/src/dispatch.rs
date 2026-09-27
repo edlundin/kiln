@@ -2,7 +2,7 @@
 
 use std::{io::Write, num::NonZeroUsize};
 
-use kiln_core::{McpCallOperation, McpDispatchPermit, McpInvocationError};
+use kiln_core::{McpCommand, McpDispatchPermit, McpGenerationId, McpInvocationError, McpOperation};
 use rmcp::{
     RoleClient,
     model::*,
@@ -55,21 +55,47 @@ pub(crate) struct DispatchOutcome {
 
 pub(crate) async fn send_once(
     peer: &Peer<RoleClient>,
-    operation: &McpCallOperation,
+    command: &McpCommand,
+    generation: &McpGenerationId,
     limits: &StdioCallLimits,
 ) -> Result<StdioCallResult, StdioCallError> {
+    let operation = command.operation();
+    if let McpOperation::Search { kind, .. } | McpOperation::Describe { kind, .. } = operation {
+        let entries = crate::discovery::collect_catalog(peer, *kind, limits.catalog).await?;
+        let value = crate::discovery::project_catalog(&entries, operation)
+            .map_err(StdioCallError::Catalog)?;
+        // Projection is synchronous; observe cancellation/deadline again before
+        // accepting its result. This does not promise CPU-time preemption.
+        tokio::task::yield_now().await;
+        if Instant::now() >= limits.deadline {
+            return Err(StdioCallError::Interrupted);
+        }
+        return encode_result(
+            &serde_json::json!({
+                "server_id":command.server_id().as_str(),
+                "definition_version":command.definition_version(),
+                "generation":generation.as_str(),
+                "protocol_version":peer.peer_info().map(|info| info.protocol_version.as_str().to_owned()),
+                "kind":kind.as_str(),
+                "result":value,
+            }),
+            false,
+            limits.max_result_bytes,
+        );
+    }
     let output_validator = match operation {
-        McpCallOperation::Tool { name, arguments } => {
+        McpOperation::Tool { name, arguments } => {
             crate::catalog::validate_tool(peer, name, arguments, limits.catalog).await?
         }
-        McpCallOperation::Prompt { name, arguments } => {
+        McpOperation::Prompt { name, arguments } => {
             crate::catalog::validate_prompt(peer, name, arguments, limits.catalog).await?;
             None
         }
-        McpCallOperation::Resource { uri } => {
+        McpOperation::Resource { uri } => {
             crate::catalog::validate_resource(peer, uri)?;
             None
         }
+        McpOperation::Search { .. } | McpOperation::Describe { .. } => unreachable!(),
     };
     // Schema compilation is synchronous. Let the owner's biased cancellation
     // select run again, then recheck time before sending any operation request.
@@ -78,15 +104,15 @@ pub(crate) async fn send_once(
         return Err(StdioCallError::DeadlineBeforeSend);
     }
     let request = match operation {
-        McpCallOperation::Tool { name, arguments } => {
+        McpOperation::Tool { name, arguments } => {
             ClientRequest::CallToolRequest(CallToolRequest::new(
                 CallToolRequestParams::new(name.clone()).with_arguments(arguments.clone()),
             ))
         }
-        McpCallOperation::Resource { uri } => ClientRequest::ReadResourceRequest(
+        McpOperation::Resource { uri } => ClientRequest::ReadResourceRequest(
             ReadResourceRequest::new(ReadResourceRequestParams::new(uri.clone())),
         ),
-        McpCallOperation::Prompt { name, arguments } => {
+        McpOperation::Prompt { name, arguments } => {
             ClientRequest::GetPromptRequest(GetPromptRequest::new(
                 GetPromptRequestParams::new(name.clone()).with_arguments(
                     arguments
@@ -96,6 +122,7 @@ pub(crate) async fn send_once(
                 ),
             ))
         }
+        McpOperation::Search { .. } | McpOperation::Describe { .. } => unreachable!(),
     };
     // The raw request path avoids SDK resource cache fallback and automatic MRTR
     // rounds. Modern metadata/unique IDs still come from the negotiated peer.
@@ -107,7 +134,7 @@ pub(crate) async fn send_once(
             _ => StdioCallError::Interrupted,
         })?;
     let is_error = match (&result, operation) {
-        (ServerResult::CallToolResult(result), McpCallOperation::Tool { .. }) => {
+        (ServerResult::CallToolResult(result), McpOperation::Tool { .. }) => {
             // An error result need not satisfy the success output contract.
             // Invalid success output follows a send; it never permits a retry.
             if !result.is_error.unwrap_or(false)
@@ -122,7 +149,7 @@ pub(crate) async fn send_once(
             }
             result.is_error.unwrap_or(false)
         }
-        (ServerResult::ReadResourceResult(result), McpCallOperation::Resource { .. }) => {
+        (ServerResult::ReadResourceResult(result), McpOperation::Resource { .. }) => {
             for content in &result.contents {
                 let uri = match content {
                     ResourceContents::TextResourceContents { uri, .. }
@@ -134,17 +161,25 @@ pub(crate) async fn send_once(
             }
             false
         }
-        (ServerResult::GetPromptResult(_), McpCallOperation::Prompt { .. }) => false,
+        (ServerResult::GetPromptResult(_), McpOperation::Prompt { .. }) => false,
         (ServerResult::InputRequiredResult(_) | ServerResult::CreateTaskResult(_), _) => {
             return Err(StdioCallError::UnsupportedContinuation);
         }
         _ => return Err(StdioCallError::Interrupted),
     };
+    encode_result(&result, is_error, limits.max_result_bytes)
+}
+
+fn encode_result(
+    result: &impl serde::Serialize,
+    is_error: bool,
+    limit: NonZeroUsize,
+) -> Result<StdioCallResult, StdioCallError> {
     let mut writer = BoundedResult {
         bytes: Vec::new(),
-        limit: limits.max_result_bytes.get(),
+        limit: limit.get(),
     };
-    serde_json::to_writer(&mut writer, &result).map_err(|_| StdioCallError::ResultTooLarge)?;
+    serde_json::to_writer(&mut writer, result).map_err(|_| StdioCallError::ResultTooLarge)?;
     Ok(StdioCallResult {
         json: writer.bytes,
         is_error,

@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add distinct internal MCP search and describe contracts with bounded,
+  receipt-backed metadata results.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/c6e9053)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add fresh, bounded discovery of tool, prompt, resource and template
   metadata on an already authorized MCP peer.
 

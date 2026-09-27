@@ -360,9 +360,35 @@ read or local URL/file access occurs. The adapter bypasses SDK cache fallback.
 
 The caller still owns generation identity, serial scheduling and the durable
 ToolCall boundary. Returned entries carry no authority or cache validity and must
-not be reused across calls as a current snapshot. Provider-facing search/describe,
-compact projections, generation-indexed caching/invalidation and daemon wiring
-remain open; this adapter does not expose a new model tool.
+not be reused across calls as a current snapshot.
+
+Core `McpTools` now defines three compact native contracts: `mcp_call`,
+`mcp_search` and `mcp_describe`, with distinct `kiln.mcp.*` capabilities. Its
+private parsed `McpCommand` fixes the capability and native name as well as the
+server/version/arguments. Launch preflight and dispatch recheck that exact name,
+capability and canonical proposal against the live approved native claim. Search
+and describe therefore share the normal serial invocation journal, no-replay rule,
+receipt-backed output capture and ToolCall completion path; discovery is not an
+approval bypass. The internal broker executes all three, but the daemon does not
+yet install or advertise them.
+
+Search takes `server_id`, `definition_version`, `kind`, `query`, `offset` and
+positive `limit`. Kind is `tool`, `prompt`, `resource` or `resource_template`.
+It traverses a fresh complete bounded catalogue, matches a lowercase substring
+against identifiers/names/titles/descriptions, sorts by exact identifier and
+returns only identifier/name/title summaries, total matches and `next_offset`.
+Empty query lists all; no schemas or annotations enter search output. Describe
+takes the same server/version/kind plus an exact `identifier` and returns only
+that entry's full metadata, including its schema. Resource identifiers are exact
+URIs; template identifiers are the opaque template strings. Missing selections
+fail without executing a tool, reading a resource or retrieving a prompt.
+
+Both results include definition/version, generation, protocol version and kind
+provenance and obey normal output byte/artifact limits. Offsets address the fresh
+traversal, not a stable cross-request snapshot; a changing server can change the
+next page. Generation-indexed caching/invalidation and stable paging remain open.
+Synchronous projection is bounded by metadata budgets but is not CPU-preemptible;
+cancellation and deadline are checked again before accepting its output.
 
 Cancellation, deadline expiry during a possible send, unexpected response types,
 and connection loss record an interrupted/unknown outcome and retire the process

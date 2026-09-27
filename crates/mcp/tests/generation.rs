@@ -66,6 +66,7 @@ const READY: &str = r#"
 
 fn launch(key: McpInstanceKey, path: &Path, script: &str) -> StdioGenerationLaunch {
     StdioGenerationLaunch {
+        host_binding_version: None,
         key,
         definition_version: 1,
         generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),
@@ -453,4 +454,72 @@ async fn registry_capacity_bounds_live_owners_and_finished_scope_releases_slot()
     let results = registry.shutdown().await;
     assert_eq!(results.len(), 1);
     assert!(results[0].is_ok());
+}
+
+#[tokio::test]
+async fn durable_host_revision_is_checked_before_process_spawn() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, key) = setup(directory.path()).await;
+    let instance = KilnInstanceId::from_ulid(ulid::Ulid::generate());
+    let bindings = McpHostBindings::new(
+        key.clone(),
+        McpHostBindingInput {
+            instance_id: instance.clone(),
+            definition_version: 1,
+            runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),
+            executable: "/bin/sh".into(),
+            arguments: BTreeMap::new(),
+            environment: BTreeMap::new(),
+        },
+        limits(),
+    )
+    .unwrap();
+    store
+        .publish_mcp_host_bindings(&bindings, 0, limits())
+        .await
+        .unwrap();
+    store
+        .publish_mcp_host_bindings(&bindings, 1, limits())
+        .await
+        .unwrap();
+    let mut stale = launch(key.clone(), directory.path(), READY);
+    stale.host_binding_version = Some(McpHostBindingVersion {
+        instance_id: instance.clone(),
+        revision: 1.try_into().unwrap(),
+    });
+    let mut stale = StdioGeneration::spawn(store.clone(), stale);
+    assert_eq!(
+        stale.wait_ready().await.err(),
+        Some(StdioGenerationError::Store(
+            McpInstanceError::BindingChanged
+        ))
+    );
+    assert!(!directory.path().join("pid").exists());
+    assert!(store.get_mcp_instance(&key).await.unwrap().is_none());
+
+    let mut current = launch(key.clone(), directory.path(), READY);
+    current.host_binding_version = Some(McpHostBindingVersion {
+        instance_id: instance,
+        revision: 2.try_into().unwrap(),
+    });
+    let registry = StdioRegistry::new(store.clone(), NonZeroUsize::new(1).unwrap());
+    let record = registry
+        .ensure_ready(current, 2.try_into().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(record.host_binding_version.unwrap().revision.get(), 2);
+    let process = pid(directory.path()).await;
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&bindings, 2, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::ActiveGeneration)
+    );
+    registry.stop(&key).await.unwrap();
+    assert_eq!(test_kill_process(process), Err(Errno::SRCH));
+    store
+        .publish_mcp_host_bindings(&bindings, 2, limits())
+        .await
+        .unwrap();
 }

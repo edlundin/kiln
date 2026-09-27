@@ -74,6 +74,13 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
     ) -> Result<McpInstanceRecord, StdioRegistryError> {
         let key = launch.key.clone();
         let definition_version = launch.definition_version;
+        let host_binding_version = launch.host_binding_version.clone();
+        if host_binding_version
+            .as_ref()
+            .is_some_and(|v| v.revision != binding_revision)
+        {
+            return Err(StdioRegistryError::BindingChanged);
+        }
         let limits = launch.definition_limits;
         let mut observer = {
             let mut state = self.state.lock().await;
@@ -141,6 +148,7 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
             .map_err(StdioGenerationError::Store)?
             .ok_or(StdioGenerationError::Store(McpInstanceError::NotFound))?;
         if current.generation != ready.generation
+            || current.host_binding_version != host_binding_version
             || current.state_version != ready.state_version
             || current.observed != McpObservedState::Ready
             || current.desired != McpDesiredState::Running

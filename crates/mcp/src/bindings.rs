@@ -46,6 +46,40 @@ pub struct StdioHostBindingReferences {
     pub environment: BTreeMap<SharedConfigurationKey, SecretRef>,
 }
 
+/// Resolve a durable snapshot and carry its exact identity into the atomic
+/// generation claim. A revision change during vault reads makes startup fail
+/// before spawn; a successful claim fences publication until process cleanup.
+pub async fn resolve_persisted_stdio_launch<S: McpSecretStore>(
+    definition: &McpDefinitionRecord,
+    record: kiln_core::McpHostBindingRecord,
+    resources: StdioLaunchResources,
+    vault: &S,
+) -> Result<ResolvedStdioLaunch, StdioBindingError> {
+    let bindings = record.bindings;
+    let version = kiln_core::McpHostBindingVersion {
+        instance_id: bindings.instance_id().clone(),
+        revision: record.revision,
+    };
+    let mut resolved = resolve_stdio_launch_from_vault(
+        definition,
+        StdioHostBindingReferences {
+            instance_id: bindings.instance_id().clone(),
+            key: bindings.key().clone(),
+            definition_version: bindings.definition_version(),
+            revision: record.revision,
+            runtime_binding: bindings.runtime_binding().clone(),
+            executable: bindings.executable().into(),
+            arguments: bindings.arguments().clone(),
+            environment: bindings.environment().clone(),
+        },
+        resources,
+        vault,
+    )
+    .await?;
+    resolved.launch.host_binding_version = Some(version);
+    Ok(resolved)
+}
+
 /// Resolve only references used by this exact definition. There is no fallback
 /// to provider/configuration credentials, ambient environment or another scope.
 /// The OS read still uses SecretValue's per-value ceiling; the caller budget
@@ -230,6 +264,7 @@ pub fn resolve_stdio_launch(
         launch: StdioGenerationLaunch {
             key: bindings.key,
             definition_version: definition.version,
+            host_binding_version: None,
             generation: resources.generation,
             definition_limits: resources.definition_limits,
             startup_deadline: resources.startup_deadline,

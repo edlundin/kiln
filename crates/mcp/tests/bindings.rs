@@ -127,9 +127,35 @@ async fn vault_resolution_is_scoped_role_specific_and_reads_only_needed_referenc
     let directory = tempfile::tempdir().unwrap();
     let (definition, bindings, resources) = fixture(directory.path());
     let (refs, vault) = references(bindings);
-    let resolved = resolve_stdio_launch_from_vault(&definition, refs, resources, &vault)
-        .await
-        .unwrap();
+    let instance = refs.instance_id.clone();
+    let revision = refs.revision;
+    let snapshot = McpHostBindings::new(
+        refs.key,
+        McpHostBindingInput {
+            instance_id: refs.instance_id,
+            definition_version: refs.definition_version,
+            runtime_binding: refs.runtime_binding,
+            executable: refs.executable.to_str().unwrap().into(),
+            arguments: refs.arguments,
+            environment: refs.environment,
+        },
+        limits(),
+    )
+    .unwrap();
+    let resolved = resolve_persisted_stdio_launch(
+        &definition,
+        McpHostBindingRecord {
+            bindings: snapshot,
+            revision,
+        },
+        resources,
+        &vault,
+    )
+    .await
+    .unwrap();
+    let carried = resolved.launch.host_binding_version.as_ref().unwrap();
+    assert_eq!(carried.instance_id, instance);
+    assert_eq!(carried.revision, revision);
     assert_eq!(
         resolved.launch.process.arguments.last().unwrap(),
         "$(touch surprise)"

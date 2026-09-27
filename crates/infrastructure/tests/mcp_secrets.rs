@@ -50,6 +50,258 @@ fn binding(
     )
 }
 
+fn snapshot(
+    instance: &KilnInstanceId,
+    key: &McpInstanceKey,
+    argument: &SecretRef,
+    token: &SecretRef,
+) -> McpHostBindings {
+    McpHostBindings::new(
+        key.clone(),
+        McpHostBindingInput {
+            instance_id: instance.clone(),
+            definition_version: 1,
+            runtime_binding: name("python"),
+            executable: "/usr/bin/python3".into(),
+            arguments: BTreeMap::from([(name("argument"), argument.clone())]),
+            environment: BTreeMap::from([(name("token"), token.clone())]),
+        },
+        limits(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn publication_and_generation_claims_fence_rotation_and_preserve_secret_ownership() {
+    let data = tempfile::tempdir().unwrap();
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let definition = definition(true);
+    store
+        .register_mcp_definition(&definition, 0, "initial", limits())
+        .await
+        .unwrap();
+    let key = McpInstanceKey::new(&definition, McpInstanceOwner::Core, 2048).unwrap();
+    let instance = KilnInstanceId::from_ulid(Ulid::generate());
+    let argument = SecretRef::from_ulid(Ulid::generate());
+    let token = SecretRef::from_ulid(Ulid::generate());
+    let next_token = SecretRef::from_ulid(Ulid::generate());
+    let first = snapshot(&instance, &key, &argument, &token);
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&first, 0, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::InvalidBinding)
+    );
+    for (reference, purpose, name) in [
+        (&argument, McpSecretPurpose::Argument, "argument"),
+        (&token, McpSecretPurpose::Environment, "token"),
+        (&next_token, McpSecretPurpose::Environment, "token"),
+    ] {
+        store
+            .reserve_mcp_secret(
+                &binding(&instance, &key, reference, purpose, name),
+                1,
+                limits(),
+            )
+            .await
+            .unwrap();
+    }
+    let first_record = store
+        .publish_mcp_host_bindings(&first, 0, limits())
+        .await
+        .unwrap();
+    assert_eq!(first_record.revision.get(), 1);
+    let old_secret = binding(
+        &instance,
+        &key,
+        &token,
+        McpSecretPurpose::Environment,
+        "token",
+    );
+    assert_eq!(
+        store.retire_mcp_secret_reservation(&old_secret).await,
+        Err(McpSecretJournalError::Conflict)
+    );
+    let pending = store
+        .pending_mcp_secret_reservations(&instance, &key, NonZeroUsize::new(4).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0.secret_ref(), &next_token);
+    let host = McpHostBindingVersion {
+        instance_id: instance.clone(),
+        revision: first_record.revision,
+    };
+    assert_eq!(
+        store
+            .claim_mcp_instance(
+                &key,
+                1,
+                &McpGenerationId::from_ulid(Ulid::generate()),
+                limits()
+            )
+            .await
+            .err(),
+        Some(McpInstanceError::BindingChanged)
+    );
+    let claim = store
+        .claim_mcp_instance_with_host_bindings(
+            &key,
+            1,
+            &McpGenerationId::from_ulid(Ulid::generate()),
+            Some(&host),
+            limits(),
+        )
+        .await
+        .unwrap();
+    let McpInstanceClaim::Acquired(generation) = claim else {
+        panic!("fresh generation")
+    };
+    let second = snapshot(&instance, &key, &argument, &next_token);
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&second, 1, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::ActiveGeneration)
+    );
+    let generation = store
+        .transition_mcp_instance(&generation, McpInstanceTransition::ConnectionLost)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&second, 1, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::ActiveGeneration)
+    );
+    store
+        .transition_mcp_instance(&generation, McpInstanceTransition::Stopped)
+        .await
+        .unwrap();
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(data.path().join("kiln.sqlite3")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER fixture_reject_snapshot BEFORE INSERT ON mcp_host_binding_refs BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END")
+        .execute(&mut connection).await.unwrap();
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&second, 1, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::Unavailable)
+    );
+    assert_eq!(
+        store
+            .get_mcp_host_bindings(&key, limits())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision
+            .get(),
+        1
+    );
+    assert_eq!(
+        store.retire_mcp_secret_reservation(&old_secret).await,
+        Err(McpSecretJournalError::Conflict)
+    );
+    sqlx::query("DROP TRIGGER fixture_reject_snapshot")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let second_record = store
+        .publish_mcp_host_bindings(&second, 1, limits())
+        .await
+        .unwrap();
+    assert_eq!(second_record.revision.get(), 2);
+    // A read-before-rotation startup cannot claim its stale resolved credentials.
+    assert_eq!(
+        store
+            .claim_mcp_instance_with_host_bindings(
+                &key,
+                1,
+                &McpGenerationId::from_ulid(Ulid::generate()),
+                Some(&host),
+                limits()
+            )
+            .await
+            .err(),
+        Some(McpInstanceError::BindingChanged)
+    );
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&first, 0, limits())
+            .await
+            .unwrap()
+            .revision
+            .get(),
+        1
+    );
+    assert_eq!(
+        store
+            .get_mcp_host_bindings(&key, limits())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision
+            .get(),
+        2
+    );
+    let pending = store
+        .pending_mcp_secret_reservations(&instance, &key, NonZeroUsize::new(4).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0.secret_ref(), &token);
+    assert_eq!(pending[0].1, McpSecretReservationState::Retired);
+    store.finish_mcp_secret_deletion(&old_secret).await.unwrap();
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&first, 2, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::InvalidBinding)
+    );
+    drop(store);
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let current = store
+        .get_mcp_host_bindings(&key, limits())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.bindings.metadata_json(), second.metadata_json());
+    let host = McpHostBindingVersion {
+        instance_id: instance,
+        revision: current.revision,
+    };
+    let claim = store
+        .claim_mcp_instance_with_host_bindings(
+            &key,
+            1,
+            &McpGenerationId::from_ulid(Ulid::generate()),
+            Some(&host),
+            limits(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(claim, McpInstanceClaim::Acquired(_)));
+    let mut small = limits();
+    small.max_metadata_bytes = 1;
+    assert_eq!(
+        store.get_mcp_host_bindings(&key, small).await.err(),
+        Some(McpHostBindingError::LimitExceeded)
+    );
+}
+
 #[tokio::test]
 async fn reservation_receipts_survive_restart_and_deletion_without_reauthorizing_writes() {
     let data = tempfile::tempdir().unwrap();

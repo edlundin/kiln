@@ -121,6 +121,16 @@ impl McpSecretJournal for SqliteStore {
             .await?
             .ok_or(Error::NotFound)?;
         check_identity(&row, binding)?;
+        let published: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mcp_host_binding_refs WHERE secret_ref = ?)",
+        )
+        .bind(binding.secret_ref().as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+        if published {
+            return Err(Error::Conflict);
+        }
         let current = state(&row)?;
         if current == State::Reserved {
             sqlx::query(
@@ -173,7 +183,7 @@ impl McpSecretJournal for SqliteStore {
     ) -> Result<Vec<(McpSecretBinding, State)>, Error> {
         let limit = i64::try_from(batch_size.get()).map_err(|_| Error::InvalidRequest)?;
         let mut connection = self.connection.lock().await;
-        let rows = sqlx::query("SELECT secret_ref, binding_name, purpose, state FROM mcp_secret_reservations WHERE kiln_instance_id = ? AND instance_key = ? AND state != 'deleted' ORDER BY secret_ref LIMIT ?")
+        let rows = sqlx::query("SELECT secret_ref, binding_name, purpose, state FROM mcp_secret_reservations WHERE kiln_instance_id = ? AND instance_key = ? AND state != 'deleted' AND NOT EXISTS(SELECT 1 FROM mcp_host_binding_refs r WHERE r.secret_ref = mcp_secret_reservations.secret_ref) ORDER BY secret_ref LIMIT ?")
             .bind(instance_id.as_str()).bind(key.canonical_json()).bind(limit)
             .fetch_all(&mut *connection).await.map_err(|_| Error::Unavailable)?;
         rows.into_iter()

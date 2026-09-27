@@ -161,6 +161,7 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
         ));
         registry.ensure_ready(StdioGenerationLaunch {
+            host_binding_version: None,
             key: key.clone(), definition_version: 1,
             generation: McpGenerationId::from_ulid(ulid::Ulid::generate()), definition_limits: limits(),
             // The fixture has a bounded scheduling allowance, not a product default.

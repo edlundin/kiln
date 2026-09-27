@@ -47,6 +47,7 @@ enum Status {
 pub struct StdioGenerationLaunch {
     pub key: McpInstanceKey,
     pub definition_version: u64,
+    pub host_binding_version: Option<kiln_core::McpHostBindingVersion>,
     pub generation: McpGenerationId,
     pub definition_limits: McpDefinitionLimits,
     pub process: StdioProcessConfig,
@@ -224,10 +225,11 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
         return Err(StdioGenerationError::UnsupportedTransport);
     }
     let record = match store
-        .claim_mcp_instance(
+        .claim_mcp_instance_with_host_bindings(
             &launch.key,
             launch.definition_version,
             &launch.generation,
+            launch.host_binding_version.as_ref(),
             launch.definition_limits,
         )
         .await

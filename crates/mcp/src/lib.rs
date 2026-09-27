@@ -16,8 +16,9 @@ mod stdio;
 
 #[cfg(unix)]
 pub use bindings::{
-    ResolvedStdioLaunch, StdioBindingError, StdioHostBindings, StdioHostBindingReferences, StdioLaunchResources,
-    resolve_stdio_launch, resolve_stdio_launch_from_vault,
+    ResolvedStdioLaunch, StdioBindingError, StdioHostBindingReferences, StdioHostBindings,
+    StdioLaunchResources, resolve_persisted_stdio_launch, resolve_stdio_launch,
+    resolve_stdio_launch_from_vault,
 };
 #[cfg(unix)]
 pub use dispatch::{StdioCallError, StdioCallLimits, StdioCallResult};

@@ -8,11 +8,12 @@ use kiln_core::{
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteRow};
 
 impl McpInstanceStore for SqliteStore {
-    async fn claim_mcp_instance(
+    async fn claim_mcp_instance_with_host_bindings(
         &self,
         key: &McpInstanceKey,
         expected_definition_version: u64,
         generation: &McpGenerationId,
+        host_binding_version: Option<&kiln_core::McpHostBindingVersion>,
         limits: McpDefinitionLimits,
     ) -> Result<McpInstanceClaim, Error> {
         if key.canonical_json().len() > limits.max_metadata_bytes {
@@ -55,10 +56,36 @@ impl McpInstanceStore for SqliteStore {
             return Err(Error::OwnerMismatch);
         }
         validate_owner(&mut tx, key.owner()).await?;
+        let host = sqlx::query("SELECT h.revision, json_extract(v.metadata_json, '$.instance_id') AS instance_id, json_extract(v.metadata_json, '$.definition_version') AS definition_version FROM mcp_host_bindings h JOIN mcp_host_binding_versions v USING(instance_key, revision) WHERE h.instance_key = ?")
+            .bind(key.canonical_json()).fetch_optional(&mut *tx).await.map_err(|_| Error::Unavailable)?;
+        match (host, host_binding_version) {
+            (None, None) => {}
+            (Some(row), Some(expected)) => {
+                let revision: i64 = row
+                    .try_get("revision")
+                    .map_err(|_| Error::IntegrityViolation)?;
+                let instance: String = row
+                    .try_get("instance_id")
+                    .map_err(|_| Error::IntegrityViolation)?;
+                let version: i64 = row
+                    .try_get("definition_version")
+                    .map_err(|_| Error::IntegrityViolation)?;
+                if revision != positive(expected.revision.get())?
+                    || instance != expected.instance_id.as_str()
+                    || version != definition_version
+                {
+                    return Err(Error::BindingChanged);
+                }
+            }
+            _ => return Err(Error::BindingChanged),
+        }
         if let Some(current) = load_current(&mut tx, key).await? {
             if current.observed.is_active() || current.observed == McpObservedState::Interrupted {
                 if current.definition_version != expected_definition_version {
                     return Err(Error::DefinitionChanged);
+                }
+                if current.host_binding_version.as_ref() != host_binding_version {
+                    return Err(Error::BindingChanged);
                 }
                 tx.commit().await.map_err(|_| Error::Unavailable)?;
                 return Ok(McpInstanceClaim::Existing(current));
@@ -74,11 +101,13 @@ impl McpInstanceStore for SqliteStore {
         if used {
             return Err(Error::GenerationReused);
         }
-        sqlx::query("INSERT INTO mcp_instance_generations (generation_id, instance_key, definition_id, definition_version, state_version, desired, observed) VALUES (?, ?, ?, ?, 1, 'running', 'starting')")
+        sqlx::query("INSERT INTO mcp_instance_generations (generation_id, instance_key, definition_id, definition_version, host_instance_id, host_binding_revision, state_version, desired, observed) VALUES (?, ?, ?, ?, ?, ?, 1, 'running', 'starting')")
             .bind(generation.as_str())
             .bind(key.canonical_json())
             .bind(key.definition_id().as_str())
             .bind(definition_version)
+            .bind(host_binding_version.map(|v| v.instance_id.as_str()))
+            .bind(host_binding_version.map(|v| v.revision.get() as i64))
             .execute(&mut *tx).await
             .map_err(|_|Error::Unavailable)?;
         sqlx::query("INSERT INTO mcp_instances (instance_key, generation_id) VALUES (?, ?) ON CONFLICT (instance_key) DO UPDATE SET generation_id = excluded.generation_id")
@@ -90,6 +119,7 @@ impl McpInstanceStore for SqliteStore {
             key: key.clone(),
             generation: generation.clone(),
             definition_version: expected_definition_version,
+            host_binding_version: host_binding_version.cloned(),
             state_version: 1,
             desired: McpDesiredState::Running,
             observed: McpObservedState::Starting,
@@ -122,7 +152,7 @@ impl McpInstanceStore for SqliteStore {
             .map_err(|_| Error::Unavailable)?;
         // An event is also the immutable response receipt for this generation's
         // state-version transition. Replays never touch the current generation.
-        let receipt=sqlx::query("SELECT e.generation_id, g.definition_id, g.definition_version, e.state_version, e.desired, e.observed, e.negotiated_protocol, e.reason FROM mcp_instance_events e JOIN mcp_instance_generations g USING (generation_id) WHERE e.generation_id = ? AND e.state_version = ? AND g.instance_key = ?")
+        let receipt=sqlx::query("SELECT e.generation_id, g.definition_id, g.definition_version, g.host_instance_id, g.host_binding_revision, e.state_version, e.desired, e.observed, e.negotiated_protocol, e.reason FROM mcp_instance_events e JOIN mcp_instance_generations g USING (generation_id) WHERE e.generation_id = ? AND e.state_version = ? AND g.instance_key = ?")
             .bind(expected.generation.as_str())
             .bind(next_version)
             .bind(expected.key.canonical_json())
@@ -248,7 +278,7 @@ async fn load_current(
     connection: &mut SqliteConnection,
     key: &McpInstanceKey,
 ) -> Result<Option<McpInstanceRecord>, Error> {
-    let row=sqlx::query("SELECT g.generation_id, g.definition_id, g.definition_version, g.state_version, g.desired, g.observed, g.negotiated_protocol FROM mcp_instances i LEFT JOIN mcp_instance_generations g USING (instance_key, generation_id) WHERE i.instance_key = ?")
+    let row=sqlx::query("SELECT g.generation_id, g.definition_id, g.definition_version, g.host_instance_id, g.host_binding_revision, g.state_version, g.desired, g.observed, g.negotiated_protocol FROM mcp_instances i LEFT JOIN mcp_instance_generations g USING (instance_key, generation_id) WHERE i.instance_key = ?")
         .bind(key.canonical_json())
             .fetch_optional(connection).await
             .map_err(|_|Error::Unavailable)?;
@@ -282,7 +312,26 @@ fn parse_record(row: &SqliteRow, key: &McpInstanceKey) -> Result<McpInstanceReco
     let protocol: Option<String> = row
         .try_get("negotiated_protocol")
         .map_err(|_| Error::IntegrityViolation)?;
+    let host_instance: Option<String> = row
+        .try_get("host_instance_id")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let host_revision: Option<i64> = row
+        .try_get("host_binding_revision")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let host_binding_version = match (host_instance, host_revision) {
+        (None, None) => None,
+        (Some(instance), Some(revision)) if revision > 0 => {
+            Some(kiln_core::McpHostBindingVersion {
+                instance_id: kiln_core::KilnInstanceId::parse(instance)
+                    .map_err(|_| Error::IntegrityViolation)?,
+                revision: std::num::NonZeroU64::new(revision as u64)
+                    .ok_or(Error::IntegrityViolation)?,
+            })
+        }
+        _ => return Err(Error::IntegrityViolation),
+    };
     Ok(McpInstanceRecord {
+        host_binding_version,
         key: key.clone(),
         generation: McpGenerationId::parse(generation).map_err(|_| Error::IntegrityViolation)?,
         definition_version: definition_version as u64,

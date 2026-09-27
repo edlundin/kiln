@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Publish immutable, reference-backed MCP host snapshots with CAS,
+  rotation fencing and atomic generation binding claims.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Reserve MCP vault references durably with scoped validation,
   bounded cleanup reconciliation and permanent deletion tombstones.
 

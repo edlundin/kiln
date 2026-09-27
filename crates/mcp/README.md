@@ -218,10 +218,23 @@ binding name, argument/environment purpose and immutable SecretRef. Paths and
 binding names are not exposed in vault account metadata. Writes/deletes reuse the
 existing cancellation-safe per-entry serialization; clones share those locks.
 Callers must reserve fresh references durably before writes and change binding
-revision when values or authorization change. That reservation/administration
-flow is not implemented yet, and this change does not access a user's vault at
+revision when values or authorization change. Durable reservation and snapshot
+publication now have internal store ports, while administration commands remain
+open. This code does not access a user's vault at
 startup. Tests verify namespace partitioning and reference resolution with a fake
 vault; actual MCP OS-vault read/write integration remains unverified.
+
+`resolve_persisted_stdio_launch` accepts a stored `McpHostBindingRecord`, resolves
+its references and carries its local instance/revision into the generation claim.
+SQLite serializes that claim with host snapshot publication. A stale revision
+cannot spawn; an active or interrupted generation blocks replacement until its
+cleanup is established. Legacy materialized launches remain available only for
+keys without a persisted snapshot. Published references are excluded from pending
+cleanup; replacing them retires the old references atomically. Exact publication
+retries return immutable receipts without rolling the current snapshot back.
+Snapshots currently persist absolute UTF-8 Unix executable paths and reference
+maps. Snapshot removal and public administration remain open, and none of these
+ports grant host authorization or install MCP in the daemon native catalogue.
 
 The [internal daemon runtime](../../docs/operations/mcp-runtime.md) is opt-in with
 explicit instance-capacity and recovery-batch budgets. Its startup runs before

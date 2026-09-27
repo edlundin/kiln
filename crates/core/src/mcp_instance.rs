@@ -160,6 +160,7 @@ pub struct McpInstanceRecord {
     pub key: McpInstanceKey,
     pub generation: McpGenerationId,
     pub definition_version: u64,
+    pub host_binding_version: Option<crate::McpHostBindingVersion>,
     pub state_version: u64,
     pub desired: McpDesiredState,
     pub observed: McpObservedState,
@@ -233,6 +234,7 @@ pub enum McpInstanceError {
     LimitExceeded,
     DefinitionNotFound,
     DefinitionChanged,
+    BindingChanged,
     Disabled,
     OwnerMismatch,
     OwnerNotFound,
@@ -250,6 +252,25 @@ pub trait McpInstanceStore: Send + Sync {
         key: &McpInstanceKey,
         expected_definition_version: u64,
         generation: &McpGenerationId,
+        limits: McpDefinitionLimits,
+    ) -> impl Future<Output = Result<McpInstanceClaim, McpInstanceError>> + Send {
+        self.claim_mcp_instance_with_host_bindings(
+            key,
+            expected_definition_version,
+            generation,
+            None,
+            limits,
+        )
+    }
+    /// Claims the exact durable host snapshot in the same transaction as the
+    /// generation. Once claimed, publication is blocked until cleanup finishes.
+    /// None is allowed only for keys without a persisted host snapshot.
+    fn claim_mcp_instance_with_host_bindings(
+        &self,
+        key: &McpInstanceKey,
+        expected_definition_version: u64,
+        generation: &McpGenerationId,
+        host_binding_version: Option<&crate::McpHostBindingVersion>,
         limits: McpDefinitionLimits,
     ) -> impl Future<Output = Result<McpInstanceClaim, McpInstanceError>> + Send;
     fn get_mcp_instance(

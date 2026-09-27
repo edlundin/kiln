@@ -478,6 +478,7 @@ for line in sys.stdin:
         let mut owner = StdioGeneration::spawn(
             Arc::new(store.clone()),
             StdioGenerationLaunch {
+            host_binding_version: None,
                 key,
                 definition_version: 1,
                 generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),

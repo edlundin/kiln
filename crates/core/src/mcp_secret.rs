@@ -111,7 +111,8 @@ pub enum McpSecretJournalError {
 }
 
 /// Host-local write ownership and cleanup receipts; never stores secret bytes.
-/// This preparatory journal does not publish references into launch snapshots.
+/// Snapshot publication is owned by McpHostBindingStore. Published references
+/// are excluded from pending cleanup and cannot be retired through this port.
 /// Callers must serialize vault writes, retirement and deletion for a binding;
 /// restart reconciliation requires exclusive daemon ownership. A cancelled OS
 /// write must settle before its retirement is acknowledged as deleted.

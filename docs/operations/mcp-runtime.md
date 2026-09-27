@@ -32,7 +32,8 @@ runtime/argument/environment references within a caller byte budget. Persistent
 binding/revision administration remains to be implemented. A reference-backed
 resolver can read scoped argument/environment values through the separate MCP
 vault port; it is not installed at daemon startup and does not authorize launch.
-Durable reference reservation and credential import/removal remain open.
+Durable reference reservation and snapshot publication are available internally;
+credential import/removal commands remain open.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
@@ -103,9 +104,27 @@ scoped and batched, with retained deletion tombstones that prevent reference
 reuse across identities. Retired reservations can be reconciled after a definition
 is disabled or replaced.
 
-This is an unpublished-reservation primitive, not credential administration or
-launch authorization. It does not call the OS vault, publish host snapshots or
-run during startup. Its caller must serialize writes and cleanup, wait for any
-cancelled OS write to settle, and acknowledge deletion only after vault deletion
-succeeds. Snapshot publication and generation/revision coordination remain open;
-no published credential can be represented by this journal yet.
+The journal does not call the OS vault or run during startup. Its caller must
+serialize writes and cleanup, wait for any cancelled OS write to settle, and
+acknowledge deletion only after vault deletion succeeds.
+
+Migration 55 adds immutable host snapshot revisions and atomic publication of
+reserved references. Publication validates the exact current enabled definition,
+runtime, owner and required argument/environment names. It excludes published
+references from cleanup and retires replaced references in the same transaction.
+Expected revision zero creates the first snapshot; an exact retry returns the
+original revision without restoring older state. Snapshot metadata contains
+references and an absolute UTF-8 Unix executable path, never secret values, and
+is bounded together with its scoped key by the supplied metadata byte ceiling.
+
+`resolve_persisted_stdio_launch` carries the local instance and revision into the
+generation claim. Claims and publication serialize in SQLite: a stale snapshot
+is rejected before process spawn, while a claimed generation prevents publication
+until stopped/reaped. Interrupted generations also block publication. A key with
+a persisted snapshot rejects a launch lacking its revision. Resolution and a
+successful claim still require independent host/process authorization.
+
+These are internal ports; offline host-binding/credential administration, snapshot
+removal, automated cleanup, and daemon ToolCall launch wiring remain open. The
+targeted tests use fake vault values and real macOS process fixtures; actual MCP
+OS-vault integration and Linux runtime behavior remain unverified.

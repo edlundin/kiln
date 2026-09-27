@@ -10,7 +10,7 @@ setting is supplied. There are no product defaults.
 
 | Environment variable | Meaning |
 | --- | --- |
-| `KILN_MCP_MAX_INSTANCES` | Positive maximum live scoped owners retained by the daemon registry. Choose from the host's process and memory budget. |
+| `KILN_MCP_MAX_INSTANCES` | Positive maximum scoped owners retained by the daemon registry, including uncertain cleanup. Choose from the host's process and memory budget. |
 | `KILN_MCP_RECOVERY_BATCH_SIZE` | Positive maximum generation rows interrupted per startup transaction. Choose for the store's transaction and startup budget. |
 
 Startup runs recovery after acquiring the daemon's exclusive store lock and

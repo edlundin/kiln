@@ -77,11 +77,12 @@ impl<S: McpInstanceStore + McpDefinitionStore + 'static> StdioRegistry<S> {
             if state.closed {
                 return Err(StdioRegistryError::Closed);
             }
-            // Finished workers own no usable process. Durable claims still fence
-            // replacement if their journal/cleanup outcome was uncertain.
+            // Only workers with known process cleanup may release slots. Retain
+            // failed cleanup/lost workers for shutdown reporting; durable claims
+            // also fence replacement when journal state remains uncertain.
             state
                 .entries
-                .retain(|_, entry| !entry.owner.observer().is_finished());
+                .retain(|_, entry| !entry.owner.observer().can_release());
             if let Some(entry) = state.entries.get(key.canonical_json()) {
                 if entry.stopping {
                     return Err(StdioRegistryError::Stopping);

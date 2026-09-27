@@ -61,6 +61,13 @@ pub(crate) struct GenerationObserver {
 }
 
 impl GenerationObserver {
+    pub(crate) fn can_release(&self) -> bool {
+        // Cleanup failure and a lost worker provide no proof that ownership can
+        // be forgotten. Keep those entries available to shutdown/reporting.
+        matches!(&*self.status.borrow(), Status::Finished(result)
+            if !matches!(result, Err(StdioGenerationError::Cleanup | StdioGenerationError::WorkerLost)))
+    }
+
     pub(crate) fn is_finished(&self) -> bool {
         matches!(*self.status.borrow(), Status::Finished(_)) || self.status.has_changed().is_err()
     }

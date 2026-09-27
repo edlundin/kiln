@@ -161,8 +161,10 @@ definition/owner/auth-profile identity. Concurrent demand joins one startup;
 cancelling a waiter does not stop the shared server. Every successful return
 checks current definition enablement/version and durable ready generation/state,
 instead of treating a cached readiness receipt as current authority. A positive
-caller-supplied capacity bounds retained live owners; finished entries release
-slots, while durable uncertain claims still prevent replacement.
+caller-supplied capacity bounds retained owners; finished entries release slots
+only when process cleanup is known. Failed cleanup and lost workers retain their
+slots and remain visible to shutdown reporting. Durable uncertain claims also
+prevent replacement.
 
 The caller supplies a nonsecret local binding revision and must change it whenever
 resolved executable, arguments, environment, credentials, directory authorization

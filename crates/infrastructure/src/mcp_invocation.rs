@@ -216,7 +216,7 @@ impl McpInvocationStore for SqliteStore {
     }
 }
 
-async fn load(
+pub(super) async fn load(
     connection: &mut SqliteConnection,
     id: &ToolCallId,
 ) -> Result<Option<McpInvocationRecord>, Error> {

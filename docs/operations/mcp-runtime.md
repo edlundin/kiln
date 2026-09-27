@@ -153,6 +153,16 @@ HTTP fixture covers modern and legacy approved search/describe/call, artifact
 paging and completed-batch no-replay; it does not establish remote TLS, actual
 OS-vault or full protocol conformance acceptance.
 
+The internal mediation journal (migration 59) records input kind and ordinal on
+the original invocation, with required/resolved/interrupted states. It retains
+the dispatch slot while input is pending. Invocation termination and startup
+interruption atomically interrupt any pending input. Exact receipt retries do
+not authorize provider calls, responses or operation replay. New input and
+resolution require the original live native claim and ready generation at the
+current definition version. Bodies, server request IDs, responses and opaque
+request state are not stored in this journal. Runtime mediation, interaction
+routing and public session-event projection are not yet connected.
+
 
 Native file reading remains independently configurable. The daemon freezes one
 combined native catalogue and routes each approved command through a consuming

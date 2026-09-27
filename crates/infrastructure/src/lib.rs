@@ -27,6 +27,7 @@ pub use daemon_lock::DaemonStoreLock;
 mod host_model_account_binding;
 mod mcp_definition;
 mod mcp_host_binding;
+mod mcp_input;
 mod mcp_instance;
 mod mcp_invocation;
 mod mcp_secret;

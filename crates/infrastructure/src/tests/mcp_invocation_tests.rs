@@ -2,6 +2,222 @@ use super::*;
 use kiln_core::*;
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
+#[tokio::test]
+async fn mcp_input_journal_keeps_dispatch_owned_and_interrupts_pending_input() {
+    let (_data, store, session) = seeded_session().await;
+    let target = ready(&store, McpInstanceOwner::Core).await;
+    let request = request(&store, &session, "input").await;
+    let McpDispatchClaim::Acquired(permit) = claim_mcp_dispatch(&store, request, &target, limits())
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let one = std::num::NonZeroU64::new(1).unwrap();
+    let two = std::num::NonZeroU64::new(2).unwrap();
+    let McpInputMutation::Applied(first) = store
+        .require_mcp_input(permit.record(), one, McpInputKind::Roots)
+        .await
+        .unwrap()
+    else {
+        panic!("fresh input must be applied")
+    };
+    assert_eq!(first.state, McpInputState::Required);
+    assert_eq!(
+        store
+            .require_mcp_input(permit.record(), one, McpInputKind::Roots)
+            .await
+            .unwrap(),
+        McpInputMutation::Existing(first.clone())
+    );
+    assert_eq!(
+        store
+            .require_mcp_input(permit.record(), one, McpInputKind::Sampling)
+            .await
+            .err(),
+        Some(McpInvocationError::Conflict)
+    );
+    assert_eq!(
+        store
+            .require_mcp_input(permit.record(), two, McpInputKind::Sampling)
+            .await
+            .err(),
+        Some(McpInvocationError::Busy)
+    );
+    assert!(matches!(
+        store
+            .begin_mcp_invocation(permit.request(), &target, limits())
+            .await
+            .unwrap(),
+        McpInvocationMutation::Existing(_)
+    ));
+    let McpInputMutation::Applied(resolved) = store.resolve_mcp_input(&first).await.unwrap() else {
+        panic!("fresh resolution must be applied")
+    };
+    assert_eq!(resolved.state, McpInputState::Resolved);
+    assert_eq!(
+        store.resolve_mcp_input(&first).await.unwrap(),
+        McpInputMutation::Existing(resolved)
+    );
+    let McpInputMutation::Applied(second) = store
+        .require_mcp_input(permit.record(), two, McpInputKind::Elicitation)
+        .await
+        .unwrap()
+    else {
+        panic!("next input must be applied")
+    };
+    store
+        .interrupt_mcp_invocations(Some(&target.generation), NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.resolve_mcp_input(&second).await.err(),
+        Some(McpInvocationError::Conflict)
+    );
+    let McpInputMutation::Existing(interrupted) = store
+        .require_mcp_input(permit.record(), two, McpInputKind::Elicitation)
+        .await
+        .unwrap()
+    else {
+        panic!("interrupted retry is a receipt")
+    };
+    assert_eq!(interrupted.state, McpInputState::Interrupted);
+    assert_eq!(
+        interrupted.invocation.state,
+        McpInvocationState::Interrupted
+    );
+    assert_eq!(
+        store
+            .require_mcp_input(
+                permit.record(),
+                std::num::NonZeroU64::new(3).unwrap(),
+                McpInputKind::Roots
+            )
+            .await
+            .err(),
+        Some(McpInvocationError::Conflict)
+    );
+    let mut sql = store.connection.lock().await;
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM mcp_input_events ORDER BY sequence")
+            .fetch_all(&mut *sql)
+            .await
+            .unwrap();
+    assert_eq!(states, ["required", "resolved", "required", "interrupted"]);
+}
+
+#[tokio::test]
+async fn mcp_input_journal_rolls_back_and_rejects_lost_ownership() {
+    let (_data, store, session) = seeded_session().await;
+    let target = ready(&store, McpInstanceOwner::Core).await;
+    let request = request(&store, &session, "input-rollback").await;
+    let McpDispatchClaim::Acquired(permit) = claim_mcp_dispatch(&store, request, &target, limits())
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let one = std::num::NonZeroU64::new(1).unwrap();
+    assert_eq!(
+        store
+            .require_mcp_input(
+                permit.record(),
+                std::num::NonZeroU64::new(2).unwrap(),
+                McpInputKind::Roots
+            )
+            .await
+            .err(),
+        Some(McpInvocationError::Conflict)
+    );
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("CREATE TRIGGER fixture_input_failure BEFORE INSERT ON mcp_input_events BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END").execute(&mut *sql).await.unwrap();
+    }
+    assert_eq!(
+        store
+            .require_mcp_input(permit.record(), one, McpInputKind::Roots)
+            .await
+            .err(),
+        Some(McpInvocationError::Unavailable)
+    );
+    {
+        let mut sql = store.connection.lock().await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mcp_inputs")
+            .fetch_one(&mut *sql)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("DROP TRIGGER fixture_input_failure")
+            .execute(&mut *sql)
+            .await
+            .unwrap();
+    }
+    let McpInputMutation::Applied(input) = store
+        .require_mcp_input(permit.record(), one, McpInputKind::Roots)
+        .await
+        .unwrap()
+    else {
+        panic!("rolled back attempt must not consume ordinal")
+    };
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("CREATE TRIGGER fixture_input_failure BEFORE INSERT ON mcp_input_events BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END").execute(&mut *sql).await.unwrap();
+    }
+    assert_eq!(
+        store.resolve_mcp_input(&input).await.err(),
+        Some(McpInvocationError::Unavailable)
+    );
+    assert_eq!(
+        store
+            .finish_mcp_invocation(permit.record(), McpInvocationState::Interrupted)
+            .await
+            .err(),
+        Some(McpInvocationError::Unavailable)
+    );
+    {
+        let mut sql = store.connection.lock().await;
+        let state: String = sqlx::query_scalar("SELECT state FROM mcp_invocations")
+            .fetch_one(&mut *sql)
+            .await
+            .unwrap();
+        assert_eq!(state, "dispatching");
+        sqlx::query("DROP TRIGGER fixture_input_failure")
+            .execute(&mut *sql)
+            .await
+            .unwrap();
+    }
+    store
+        .transition_mcp_instance(&target, McpInstanceTransition::RequestStop)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.resolve_mcp_input(&input).await.err(),
+        Some(McpInvocationError::Conflict)
+    );
+    let mut wrong = permit.record().clone();
+    wrong.generation = McpGenerationId::from_ulid(ulid::Ulid::generate());
+    assert_eq!(
+        store
+            .require_mcp_input(&wrong, one, McpInputKind::Roots)
+            .await
+            .err(),
+        Some(McpInvocationError::Conflict)
+    );
+    store
+        .finish_mcp_invocation(permit.record(), McpInvocationState::Interrupted)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .require_mcp_input(permit.record(), one, McpInputKind::Roots)
+            .await
+            .unwrap()
+            .record()
+            .state,
+        McpInputState::Interrupted
+    );
+}
+
 fn limits() -> McpDefinitionLimits {
     McpDefinitionLimits {
         max_key_bytes: 64,

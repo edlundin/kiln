@@ -27,11 +27,16 @@ mod dispatch;
 pub use discovery::{McpCatalogEntries, McpCatalogKind, discover_catalog};
 #[cfg(unix)]
 mod generation;
+mod http_bindings;
 mod http_client;
 mod http_generation;
 mod http_negotiation;
 mod http_sse;
 mod negotiation;
+pub use http_bindings::{
+    HttpBindingError, HttpLaunchAuthorization, HttpLaunchResources, ResolvedHttpLaunch,
+    resolve_persisted_http_launch,
+};
 pub use http_client::{BoundedHttpClient, McpHttpError, McpHttpLimits};
 pub use http_generation::{McpHttpGenerationConfig, McpHttpTransport, http_generation_transport};
 pub use http_negotiation::{McpHttpStartError, start_http_client};

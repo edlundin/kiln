@@ -431,6 +431,17 @@ commit. Existing stdio metadata remains readable without rewriting history.
 HTTP daemon activation is still unimplemented; publication grants no execution
 authority. Unpublished HTTP imports remain eligible for explicit reconciliation.
 
+The internal `resolve_persisted_http_launch` boundary checks an independently
+authorized local instance, scoped key and optional directory against that exact
+snapshot before reading the MCP vault. It carries the host revision into the
+resolved launch so the future runtime owner can atomically reject rotations before
+network startup. Endpoint and retained bearer bytes have an explicit combined
+budget; vault reads consume the startup deadline. HTTP credentials must satisfy
+the RFC 6750 bearer-token syntax. No ambient headers, provider credentials or
+credential refresh are used. Auto begins with modern discovery; unsupported 2024
+HTTP+SSE pins fail before vault access. This resolver performs no network I/O and
+does not yet connect HTTP execution to the daemon.
+
 Import validates the current definition and exact binding role before reserving
 and writing a fresh reference. A failed/ambiguous write leaves its reservation for
 explicit reconciliation. Retrying import creates a **new** reference; it never

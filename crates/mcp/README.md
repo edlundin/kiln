@@ -97,9 +97,10 @@ an unseen ID). Replaying an earlier command returns its original record without
 changing the current version. Reusing a command key with changed content or
 preconditions conflicts. Reads preflight stored metadata size in SQLite using
 caller-provided definition budgets. There is no default definition size limit.
-The internal store port has no public registration API, shared-source ingestion,
-or process-start side effect yet. Audit rows are not yet exposed through client
-event replay.
+The offline `kilnd register-mcp-definition` and `inspect-mcp-definition` commands
+expose this store under the exclusive daemon lock; see [local administration](../../docs/operations/mcp-runtime.md#local-definition-administration). Online registration,
+shared-source ingestion and process launch remain open. Audit rows are not yet
+exposed through client event replay.
 
 Core `McpInstanceKey` separates instances by definition, concrete owner, and auth
 profile. Checkout owners include workspace/root IDs, resolved paths, relative

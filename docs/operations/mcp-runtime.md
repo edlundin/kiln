@@ -42,3 +42,47 @@ shell processes. They verify batched interruption without reacquisition and
 Run-service shutdown reaping before the stopped journal record. Linux process
 execution, orphan cleanup, live tool invocation, HTTP/OAuth and full MCP
 conformance remain unverified or unimplemented.
+
+## Local definition administration
+
+Stop the daemon before using `register-mcp-definition` or
+`inspect-mcp-definition`. Both acquire the same exclusive data-directory lock as
+`kilnd` and use `KILN_DATA_DIR`. Registration stores a portable local definition;
+it does not resolve host bindings, read credentials, grant permission, or start a
+server. The daemon runtime settings are not needed for these offline commands.
+
+Registration accepts canonical schema-version-1 local metadata on piped stdin,
+with one optional LF or CRLF. Object keys must be sorted, without insignificant
+whitespace; duplicate, missing and unknown fields are rejected by exact canonical
+regeneration. This is Kiln metadata, not a common `mcpServers` import format. A
+minimal stdio definition is:
+
+```json
+{"auth_profile":null,"protocol":"auto","schema_version":1,"scope":"workspace_checkout","server":{"enabled":true,"id":"example","transport":{"arguments":[],"environment":{},"kind":"stdio","runtime_binding":"example-runtime"}},"source":"local","trust_policy":"kiln_mediated_serial"}
+```
+
+Save that exact line as `definition.json`, then use these Nushell commands:
+
+```nu
+let definition = (open --raw definition.json | str trim --right)
+let budget = ($definition | str length --utf-8-bytes)
+$definition | rtk cargo run -p kiln-daemon --bin kilnd -- register-mcp-definition --max-bytes $budget --expected-version 0 --idempotency-key example-create-1 --stdin
+rtk cargo run -p kiln-daemon --bin kilnd -- inspect-mcp-definition --max-bytes $budget --id example
+```
+
+Choose the byte ceiling for the intended metadata and available memory. Each
+field and collection is also bounded by that ceiling, since each occupies at
+least one metadata byte. It is not a process-memory limit. Inspection needs a
+ceiling large enough for the current stored version.
+
+Expected version zero creates an unseen ID; replacement requires the current
+version returned by inspection and a new idempotency key. Changing `enabled` to
+false uses the same update flow. Retry an unconfirmed write with the exact same
+metadata, expected version and key. Success returns `definition_id` and
+`registered_version`: an old retry returns its original receipt without changing
+the current definition. Inspect separately when current state is needed.
+Inspection returns `version` and `definition`, including literal arguments;
+resolved credentials are never included. Errors omit supplied metadata.
+
+Online registration, common-format import, shared-source ingestion, public audit
+replay, and host-binding/credential administration remain open.

@@ -82,6 +82,7 @@ where
         + McpInvocationStore
         + kiln_core::McpInputStore
         + kiln_core::McpElicitationDecisionStore
+        + kiln_core::McpElicitationUrlStore
         + McpLaunchStore
         + 'static,
     V: McpSecretStore,
@@ -219,6 +220,7 @@ where
         + McpInvocationStore
         + kiln_core::McpInputStore
         + kiln_core::McpElicitationDecisionStore
+        + kiln_core::McpElicitationUrlStore
         + McpLaunchStore
         + 'static,
     V: McpSecretStore,

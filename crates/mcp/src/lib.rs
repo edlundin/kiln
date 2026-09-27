@@ -39,6 +39,7 @@ mod http_generation;
 mod http_negotiation;
 mod http_sse;
 mod mediation;
+pub use mediation::url::McpUrlElicitationConfig;
 mod negotiation;
 mod schema;
 pub use elicitation::{

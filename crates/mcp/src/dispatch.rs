@@ -57,7 +57,9 @@ pub(crate) struct DispatchOutcome {
 }
 
 pub(crate) async fn send_once<
-    S: kiln_core::McpInputStore + kiln_core::McpElicitationDecisionStore,
+    S: kiln_core::McpInputStore
+        + kiln_core::McpElicitationDecisionStore
+        + kiln_core::McpElicitationUrlStore,
 >(
     peer: &Peer<RoleClient>,
     command: &McpCommand,
@@ -204,12 +206,15 @@ pub(crate) async fn send_once<
             return Err(StdioCallError::UnsupportedContinuation);
         }
         use crate::continuation::Request;
-        // An unsupported URL round must not partially mediate roots/forms.
-        if input.requests.values().any(|request| {
-            !matches!(
-                request,
-                Request::Sdk(InputRequest::ListRoots(_) | InputRequest::Elicitation(_))
-            )
+        // A disabled URL round must not partially mediate roots/forms.
+        if input.requests.values().any(|request| match request {
+            Request::Url { .. }
+            | Request::Sdk(InputRequest::Elicitation(ElicitRequest {
+                params: ElicitRequestParams::UrlElicitationParams { .. },
+                ..
+            })) => !handler.supports_url_elicitation(),
+            Request::Sdk(InputRequest::ListRoots(_) | InputRequest::Elicitation(_)) => false,
+            _ => true,
         }) {
             return Err(StdioCallError::UnsupportedContinuation);
         }
@@ -222,19 +227,35 @@ pub(crate) async fn send_once<
                         .await
                         .map_err(|_| StdioCallError::UnsupportedContinuation)?,
                 ),
+                Request::Sdk(InputRequest::Elicitation(ElicitRequest {
+                    params: ElicitRequestParams::UrlElicitationParams { message, url, .. },
+                    ..
+                })) => serde_json::to_value(
+                    handler
+                        .url_elicitation(
+                            message,
+                            url,
+                            kiln_core::McpElicitationUrlContext::Stateless,
+                        )
+                        .await
+                        .map_err(|_| StdioCallError::UnsupportedContinuation)?,
+                ),
                 Request::Sdk(InputRequest::Elicitation(request)) => serde_json::to_value(
                     handler
                         .elicitation(request.params)
                         .await
                         .map_err(|_| StdioCallError::UnsupportedContinuation)?,
                 ),
-                // Decode the final-protocol URL shape without a fabricated
-                // legacy ID, but never mediate or continue it before opt-in URL
-                // policy and the authenticated browser-consent path exist.
-                Request::Url {
-                    message: _message,
-                    url: _url,
-                } => return Err(StdioCallError::UnsupportedContinuation),
+                Request::Url { message, url } => serde_json::to_value(
+                    handler
+                        .url_elicitation(
+                            message,
+                            url,
+                            kiln_core::McpElicitationUrlContext::Stateless,
+                        )
+                        .await
+                        .map_err(|_| StdioCallError::UnsupportedContinuation)?,
+                ),
                 _ => return Err(StdioCallError::UnsupportedContinuation),
             }
             .map_err(|_| StdioCallError::InvalidOutput)?;

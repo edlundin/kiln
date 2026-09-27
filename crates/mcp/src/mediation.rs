@@ -2,10 +2,12 @@
 // Roots remain part of Kiln's supported final protocol revisions.
 #![allow(deprecated)]
 
+pub(crate) mod url;
+
 use crate::{StdioCallLimits, catalog_state::CatalogEpochs};
 use kiln_core::{
-    McpDefinitionLimits, McpElicitationDecisionStore, McpElicitationFormMutation, McpInputKind,
-    McpInputMutation, McpInputStore, McpInvocationRecord,
+    McpDefinitionLimits, McpElicitationDecisionStore, McpElicitationFormMutation,
+    McpElicitationUrlStore, McpInputKind, McpInputMutation, McpInputStore, McpInvocationRecord,
 };
 use rmcp::{
     ClientHandler, ErrorData, RoleClient,
@@ -39,6 +41,7 @@ pub(crate) struct RuntimeClient<S> {
     active: Arc<Mutex<Option<Arc<Active>>>>,
     host_bound: bool,
     elicitation: Option<crate::McpElicitationValidationLimits>,
+    url_elicitation: Option<crate::McpUrlElicitationConfig>,
 }
 impl<S> Clone for RuntimeClient<S> {
     fn clone(&self) -> Self {
@@ -49,14 +52,30 @@ impl<S> Clone for RuntimeClient<S> {
             active: self.active.clone(),
             host_bound: self.host_bound,
             elicitation: self.elicitation,
+            url_elicitation: self.url_elicitation,
         }
     }
 }
-impl<S: McpInputStore + McpElicitationDecisionStore> RuntimeClient<S> {
+impl<S: McpInputStore + McpElicitationDecisionStore + McpElicitationUrlStore> RuntimeClient<S> {
     pub(crate) async fn elicitation(
         &self,
         request: ElicitRequestParams,
     ) -> Result<ElicitResult, ErrorData> {
+        if let ElicitRequestParams::UrlElicitationParams {
+            message,
+            url,
+            elicitation_id,
+            ..
+        } = request
+        {
+            return self
+                .url_elicitation(
+                    message,
+                    url,
+                    kiln_core::McpElicitationUrlContext::Legacy { elicitation_id },
+                )
+                .await;
+        }
         let unavailable = || ErrorData::internal_error("MCP elicitation unavailable", None);
         let active = self
             .active
@@ -142,6 +161,7 @@ impl<S: McpInputStore + McpElicitationDecisionStore> RuntimeClient<S> {
         limits: McpDefinitionLimits,
         host_bound: bool,
         elicitation: Option<crate::McpElicitationValidationLimits>,
+        url_elicitation: Option<crate::McpUrlElicitationConfig>,
     ) -> Self {
         Self {
             store,
@@ -150,6 +170,7 @@ impl<S: McpInputStore + McpElicitationDecisionStore> RuntimeClient<S> {
             active: Arc::new(Mutex::new(None)),
             host_bound,
             elicitation,
+            url_elicitation,
         }
     }
     pub(crate) fn enter(
@@ -231,17 +252,24 @@ impl<S: McpInputStore + McpElicitationDecisionStore> RuntimeClient<S> {
         Ok(result)
     }
 }
-impl<S: McpInputStore + McpElicitationDecisionStore + 'static> ClientHandler for RuntimeClient<S> {
+impl<S: McpInputStore + McpElicitationDecisionStore + McpElicitationUrlStore + 'static>
+    ClientHandler for RuntimeClient<S>
+{
     fn get_info(&self) -> ClientConfig {
         let mut info = self.epochs.get_info();
         if self.host_bound {
             info.capabilities.roots = Some(RootsCapabilities::default());
         }
-        if self.elicitation.is_some() {
-            info.capabilities.elicitation = Some(
-                ElicitationCapability::new()
-                    .with_form(FormElicitationCapability::new().with_schema_validation(true)),
-            );
+        if self.elicitation.is_some() || self.url_elicitation.is_some() {
+            let mut capability = ElicitationCapability::new();
+            if self.elicitation.is_some() {
+                capability = capability
+                    .with_form(FormElicitationCapability::new().with_schema_validation(true));
+            }
+            if self.url_elicitation.is_some() {
+                capability = capability.with_url(UrlElicitationCapability::default());
+            }
+            info.capabilities.elicitation = Some(capability);
         }
         info
     }
@@ -289,6 +317,8 @@ mod tests {
         resolved: AtomicUsize,
         form: Mutex<Option<kiln_core::McpElicitationFormRecord>>,
         decision: Mutex<Option<kiln_core::McpElicitationDecision>>,
+        url: Mutex<Option<kiln_core::McpElicitationUrlRecord>>,
+        url_decision: Mutex<Option<kiln_core::McpElicitationUrlDecision>>,
         changes: tokio::sync::watch::Sender<()>,
     }
     impl Store {
@@ -300,6 +330,8 @@ mod tests {
                 resolved: AtomicUsize::new(0),
                 form: Mutex::new(None),
                 decision: Mutex::new(None),
+                url: Mutex::new(None),
+                url_decision: Mutex::new(None),
                 changes: tokio::sync::watch::channel(()).0,
             }
         }
@@ -409,6 +441,218 @@ mod tests {
         }
     }
 
+    impl McpElicitationUrlStore for Store {
+        async fn require_mcp_elicitation_url(
+            &self,
+            invocation: &McpInvocationRecord,
+            ordinal: NonZeroU64,
+            request: &kiln_core::McpElicitationUrl,
+            _: kiln_core::McpElicitationUrlLimits,
+            _: kiln_core::McpElicitationUrlPolicy,
+        ) -> Result<kiln_core::McpElicitationUrlMutation, McpInvocationError> {
+            let mut slot = self.url.lock().unwrap();
+            if let Some(record) = &*slot {
+                return Ok(kiln_core::McpElicitationUrlMutation::Existing(
+                    record.clone(),
+                ));
+            }
+            let record = kiln_core::McpElicitationUrlRecord {
+                input: McpInputRecord {
+                    invocation: invocation.clone(),
+                    ordinal,
+                    kind: McpInputKind::Elicitation,
+                    state: McpInputState::Required,
+                },
+                interaction_run: kiln_core::RunId::parse("run_01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+                request: request.clone(),
+            };
+            *slot = Some(record.clone());
+            self.required.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.changes.send_replace(());
+            Ok(kiln_core::McpElicitationUrlMutation::Applied(record))
+        }
+        async fn get_mcp_elicitation_url(
+            &self,
+            _: &McpInputRecord,
+            _: &kiln_core::RunId,
+            _: kiln_core::McpElicitationUrlLimits,
+            _: kiln_core::McpElicitationUrlPolicy,
+        ) -> Result<kiln_core::McpElicitationUrlRecord, McpInvocationError> {
+            Ok(self.url.lock().unwrap().clone().unwrap())
+        }
+        async fn decide_mcp_elicitation_url(
+            &self,
+            _: &kiln_core::McpElicitationUrlRecord,
+            decision: &kiln_core::McpElicitationUrlDecision,
+            _: kiln_core::McpElicitationUrlLimits,
+            _: kiln_core::McpElicitationUrlPolicy,
+        ) -> Result<kiln_core::McpElicitationDecisionMutation, McpInvocationError> {
+            *self.url_decision.lock().unwrap() = Some(*decision);
+            self.changes.send_replace(());
+            Ok(kiln_core::McpElicitationDecisionMutation::Applied)
+        }
+        async fn get_mcp_elicitation_url_decision(
+            &self,
+            _: &kiln_core::McpElicitationUrlRecord,
+            _: kiln_core::McpElicitationUrlLimits,
+            _: kiln_core::McpElicitationUrlPolicy,
+        ) -> Result<Option<kiln_core::McpElicitationUrlDecision>, McpInvocationError> {
+            Ok(*self.url_decision.lock().unwrap())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn url_waiter_requires_explicit_consent_and_fresh_live_resolution() {
+        use kiln_core::{
+            McpElicitationUrlContext as Context, McpElicitationUrlDecision as Decision,
+        };
+        for mode in [
+            "accept",
+            "decline",
+            "cancel",
+            "drop",
+            "deadline",
+            "existing",
+            "invalid",
+            "small_result",
+            "legacy",
+        ] {
+            let store = Arc::new(Store::new());
+            let n = NonZeroUsize::new(1).unwrap();
+            let config = crate::McpUrlElicitationConfig {
+                limits: kiln_core::McpElicitationUrlLimits {
+                    max_message_bytes: NonZeroUsize::new(64).unwrap(),
+                    max_url_bytes: NonZeroUsize::new(256).unwrap(),
+                    max_legacy_id_bytes: NonZeroUsize::new(32).unwrap(),
+                },
+                policy: kiln_core::McpElicitationUrlPolicy::HttpsOnly,
+            };
+            let handler = RuntimeClient::new(
+                store.clone(),
+                McpDefinitionLimits {
+                    max_key_bytes: 64,
+                    max_metadata_bytes: 4096,
+                    max_arguments: 1,
+                    max_argument_bytes: 128,
+                    max_environment: 1,
+                    max_endpoint_bytes: 128,
+                },
+                true,
+                None,
+                Some(config),
+            );
+            let capability = handler.get_info().capabilities.elicitation.unwrap();
+            assert!(capability.form.is_none());
+            assert!(capability.url.is_some());
+            let invocation = McpInvocationRecord {
+                tool_call_id: kiln_core::ToolCallId::parse("tcl_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                    .unwrap(),
+                generation: kiln_core::McpGenerationId::parse("mcg_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                    .unwrap(),
+                state: kiln_core::McpInvocationState::Dispatching,
+            };
+            let limits = StdioCallLimits {
+                max_input_requests: Some(n),
+                deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                max_result_bytes: NonZeroUsize::new(if mode == "small_result" { 1 } else { 64 })
+                    .unwrap(),
+                catalog: crate::McpCatalogLimits {
+                    max_pages: n,
+                    max_entries: n,
+                    max_bytes: n,
+                    max_regex_bytes: n,
+                    max_regex_backtracks: n,
+                },
+            };
+            let mut guard = Some(handler.enter(&invocation, &limits));
+            if mode == "invalid" {
+                assert!(
+                    handler
+                        .url_elicitation(
+                            "message".into(),
+                            "file:///private".into(),
+                            Context::Stateless
+                        )
+                        .await
+                        .is_err()
+                );
+                assert!(handler.roots().await.is_err());
+                assert_eq!(store.required.load(Ordering::SeqCst), 0);
+                continue;
+            }
+            let context = if mode == "legacy" {
+                Context::Legacy {
+                    elicitation_id: "legacy-private-id".into(),
+                }
+            } else {
+                Context::Stateless
+            };
+            let mut pending = Box::pin(async {
+                if mode == "legacy" {
+                    handler.elicitation(serde_json::from_value(serde_json::json!({"mode":"url","message":"message","url":"https://example.com/","elicitationId":"legacy-private-id"})).unwrap()).await
+                } else {
+                    handler
+                        .url_elicitation(
+                            "message".into(),
+                            "https://example.com/".into(),
+                            context.clone(),
+                        )
+                        .await
+                }
+            });
+            tokio::select! { _ = store.entered.notified() => {}, _ = &mut pending => panic!("consent must wait") }
+            assert_eq!(store.resolved.load(Ordering::SeqCst), 0);
+            let record = store.url.lock().unwrap().clone().unwrap();
+            assert_eq!(record.request.context(), &context);
+            if mode == "existing" {
+                drop(pending);
+                drop(guard.take());
+                let _guard = handler.enter(&invocation, &limits);
+                assert!(
+                    handler
+                        .url_elicitation(
+                            "message".into(),
+                            "https://example.com/".into(),
+                            Context::Stateless
+                        )
+                        .await
+                        .is_err()
+                );
+            } else {
+                let decision = match mode {
+                    "decline" => Decision::Decline,
+                    "cancel" => Decision::Cancel,
+                    _ => Decision::Accept,
+                };
+                store
+                    .decide_mcp_elicitation_url(&record, &decision, config.limits, config.policy)
+                    .await
+                    .unwrap();
+                if mode == "drop" {
+                    drop(guard.take());
+                }
+                if mode == "deadline" {
+                    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+                }
+                let result = pending.await;
+                if matches!(mode, "accept" | "decline" | "cancel" | "legacy") {
+                    assert_eq!(
+                        serde_json::to_value(result.unwrap()).unwrap(),
+                        serde_json::json!({"action":decision.as_str()})
+                    );
+                    assert!(handler.roots().await.is_err());
+                } else {
+                    assert!(result.is_err(), "{mode}");
+                }
+            }
+            assert_eq!(
+                store.resolved.load(Ordering::SeqCst),
+                usize::from(matches!(mode, "accept" | "decline" | "cancel" | "legacy"))
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn form_waiter_obeys_decision_guard_deadline_and_receipts() {
         let request = || {
@@ -436,6 +680,7 @@ mod tests {
                 },
                 true,
                 Some(policy),
+                None,
             );
             let info = handler.get_info();
             assert_eq!(
@@ -543,6 +788,7 @@ mod tests {
                 max_endpoint_bytes: 128,
             },
             true,
+            None,
             None,
         );
         let n = NonZeroUsize::new(1).unwrap();

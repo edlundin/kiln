@@ -60,6 +60,7 @@ pub struct StdioGenerationLaunch {
 
 struct GenerationLaunch {
     elicitation: Option<crate::McpElicitationValidationLimits>,
+    url_elicitation: Option<crate::McpUrlElicitationConfig>,
     key: McpInstanceKey,
     definition_version: u64,
     host_binding_version: Option<kiln_core::McpHostBindingVersion>,
@@ -156,15 +157,17 @@ impl McpGeneration {
             + McpInvocationStore
             + kiln_core::McpInputStore
             + kiln_core::McpElicitationDecisionStore
+            + kiln_core::McpElicitationUrlStore
             + 'static,
     {
-        Self::spawn_with_elicitation(store, launch, None)
+        Self::spawn_with_elicitation(store, launch, None, None)
     }
 
     pub(crate) fn spawn_with_elicitation<S>(
         store: Arc<S>,
         launch: StdioGenerationLaunch,
         elicitation: Option<crate::McpElicitationValidationLimits>,
+        url_elicitation: Option<crate::McpUrlElicitationConfig>,
     ) -> Self
     where
         S: McpInstanceStore
@@ -172,12 +175,14 @@ impl McpGeneration {
             + McpInvocationStore
             + kiln_core::McpInputStore
             + kiln_core::McpElicitationDecisionStore
+            + kiln_core::McpElicitationUrlStore
             + 'static,
     {
         Self::spawn_launch(
             store,
             GenerationLaunch {
                 elicitation,
+                url_elicitation,
                 key: launch.key,
                 definition_version: launch.definition_version,
                 host_binding_version: launch.host_binding_version,
@@ -198,15 +203,17 @@ impl McpGeneration {
             + McpInvocationStore
             + kiln_core::McpInputStore
             + kiln_core::McpElicitationDecisionStore
+            + kiln_core::McpElicitationUrlStore
             + 'static,
     {
-        Self::spawn_http_with_elicitation(store, launch, None)
+        Self::spawn_http_with_elicitation(store, launch, None, None)
     }
 
     pub(crate) fn spawn_http_with_elicitation<S>(
         store: Arc<S>,
         launch: crate::ResolvedHttpLaunch,
         elicitation: Option<crate::McpElicitationValidationLimits>,
+        url_elicitation: Option<crate::McpUrlElicitationConfig>,
     ) -> Self
     where
         S: McpInstanceStore
@@ -214,12 +221,14 @@ impl McpGeneration {
             + McpInvocationStore
             + kiln_core::McpInputStore
             + kiln_core::McpElicitationDecisionStore
+            + kiln_core::McpElicitationUrlStore
             + 'static,
     {
         Self::spawn_launch(
             store,
             GenerationLaunch {
                 elicitation,
+                url_elicitation,
                 key: launch.key,
                 definition_version: launch.definition_version,
                 host_binding_version: Some(launch.host_binding_version),
@@ -238,6 +247,7 @@ impl McpGeneration {
             + McpInvocationStore
             + kiln_core::McpInputStore
             + kiln_core::McpElicitationDecisionStore
+            + kiln_core::McpElicitationUrlStore
             + 'static,
     {
         let (stop, stopped) = oneshot::channel();
@@ -250,6 +260,7 @@ impl McpGeneration {
                 launch.definition_limits,
                 launch.host_binding_version.is_some(),
                 launch.elicitation,
+                launch.url_elicitation,
             );
             let result = run(store.as_ref(), launch, stopped, requests, &status, handler).await;
             status.send_replace(Status::Finished(result.clone()));
@@ -357,6 +368,7 @@ async fn run<
         + McpInvocationStore
         + kiln_core::McpInputStore
         + kiln_core::McpElicitationDecisionStore
+        + kiln_core::McpElicitationUrlStore
         + 'static,
 >(
     store: &S,

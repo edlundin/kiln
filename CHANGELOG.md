@@ -2,6 +2,17 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add opt-in MCP URL elicitation consent mediation for configured
+  library hosts. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+
+[Commit](../../commit/pending)
+
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Decode modern MCP URL continuation requests without inventing legacy
   IDs, while keeping URL mediation disabled. ([pending])
 

@@ -702,8 +702,22 @@ Resolution requires a durable decision, including for direct SQL writes. Decisio
 storage alone does not resolve the input or authorize replay, navigation or
 external completion. Terminal inputs cannot return retained decisions. Legacy IDs
 remain private under the invocation/input key; no global ID lookup or completion
-notification authority is implemented. Storage is not yet wired into the runtime,
-authenticated API or desktop, and URL capability remains disabled.
+notification authority is implemented. The library runtime can use this store
+with explicit URL consent configuration. The daemon, authenticated API and desktop
+do not yet expose URL consent, and the ordinary constructors keep it disabled.
+
+`McpRegistry::new_with_url_elicitation` opts a host into URL mediation with immutable
+message/URL/legacy-ID budgets and HTTPS/loopback policy. The host must supply its
+own authenticated private consent surface and explicit OS-browser handoff. The
+runtime never navigates or fetches metadata. Legacy callbacks keep their private
+elicitation ID; modern MRTR requests use Stateless context even if a server sends
+an obsolete ID. All roots/forms/URLs share the live invocation's serial quota.
+URL requests consume quota before policy/validation, wait for a durable decision,
+check the encoded contentless action against the operation's result budget, and
+require a fresh live resolution before response. Guard drop, request cancellation
+and deadline stop waits; Existing receipts never authorize sending. Accept is
+consent only and cannot certify external completion. No daemon URL environment
+switch is exposed until its authenticated API and client consent flow exist.
 
 The pinned `rmcp` 3.4.1 `ElicitRequestParamsWire` still requires `elicitationId` for
 URL requests, including those nested in MRTR. The final 2026 protocol omits that
@@ -711,8 +725,8 @@ field. Such MRTR results survive SDK decoding as `CustomResult`; Kiln's local
 continuation adapter recognizes their URL requests without adding a legacy ID.
 It checks the round's request count before normalization, preserves opaque
 `requestState`, and keeps SDK decoding for roots/forms. Malformed and empty rounds
-reject. URL requests still return UnsupportedContinuation because runtime consent
-is not yet connected; decoding is not support advertisement or replay authority.
+reject. URL rounds return UnsupportedContinuation before sibling mediation when
+URL consent is disabled; decoding alone is not advertisement or replay authority.
 Legacy completion notifications and URL-required errors also need lifecycle handling.
 
 Before URL mode is enabled, the authenticated UI must identify the requesting

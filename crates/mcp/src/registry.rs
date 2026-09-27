@@ -67,6 +67,7 @@ pub struct McpRegistry<S> {
     store: Arc<S>,
     capacity: NonZeroUsize,
     elicitation: Option<crate::McpElicitationValidationLimits>,
+    url_elicitation: Option<crate::McpUrlElicitationConfig>,
     state: Mutex<State>,
 }
 
@@ -76,6 +77,7 @@ impl<
         + McpInvocationStore
         + kiln_core::McpInputStore
         + kiln_core::McpElicitationDecisionStore
+        + kiln_core::McpElicitationUrlStore
         + 'static,
 > McpRegistry<S>
 {
@@ -84,6 +86,7 @@ impl<
             store,
             capacity,
             elicitation: None,
+            url_elicitation: None,
             state: Mutex::new(State::default()),
         }
     }
@@ -100,6 +103,26 @@ impl<
             elicitation: Some(limits),
             ..Self::new(store, capacity)
         }
+    }
+
+    /// Enable URL consent only when the host provides an authenticated private
+    /// decision surface and explicit user-initiated OS-browser handoff. Consent
+    /// never proves external completion. Ordinary constructors keep URL off.
+    pub fn new_with_url_elicitation(
+        store: Arc<S>,
+        capacity: NonZeroUsize,
+        form: Option<crate::McpElicitationValidationLimits>,
+        url: crate::McpUrlElicitationConfig,
+    ) -> Self {
+        Self {
+            elicitation: form,
+            url_elicitation: Some(url),
+            ..Self::new(store, capacity)
+        }
+    }
+
+    pub fn url_elicitation_config(&self) -> Option<crate::McpUrlElicitationConfig> {
+        self.url_elicitation
     }
 
     pub(crate) fn store(&self) -> &S {
@@ -207,12 +230,14 @@ impl<
                         self.store.clone(),
                         launch,
                         self.elicitation,
+                        self.url_elicitation,
                     ),
                     RegistryLaunch::Http(launch, _) => {
                         crate::McpGeneration::spawn_http_with_elicitation(
                             self.store.clone(),
                             launch,
                             self.elicitation,
+                            self.url_elicitation,
                         )
                     }
                 };

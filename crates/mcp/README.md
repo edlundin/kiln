@@ -43,11 +43,14 @@ frames. This deliberately stricter transport avoids the SDK's unbounded
 frame limit; the host must choose one from its resource budget.
 
 On Unix, `StdioProcess` starts one process generation with an absolute executable
-and working directory, explicit arguments and environment, piped protocol I/O,
+and a pinned working-directory descriptor, explicit arguments and environment, piped protocol I/O,
 and discarded stderr. It clears the daemon environment and uses a separate process
 group. It is an execution adapter: the caller must authorize and resolve all launch
-inputs first. It does not yet bind them to a durable scoped instance or protect a
-validated directory against replacement between resolution and launch.
+inputs first. The caller opens and validates the directory descriptor against its
+scope before passing ownership to the adapter. The child uses `fchdir` on that
+descriptor before exec, and close-on-exec prevents leaking it to the server.
+Renaming/replacing the directory's former pathname cannot redirect launch.
+The adapter does not yet bind these inputs to a durable scoped instance.
 
 Explicit close shuts stdin, allows the caller's shutdown grace, signals remaining
 group members, and reaps the direct child. The leader stays unreaped for the full
@@ -62,7 +65,7 @@ process ownership is not implemented. There is no default grace or startup deadl
 
 Real-process fixtures cover environment/cwd isolation, legacy negotiation,
 idempotent close/reaping, EOF shutdown, descendant cleanup, malformed output,
-and cancellation during startup. These are local macOS observations; Linux
+startup cancellation, and directory-path replacement after pinning. These are local macOS observations; Linux
 execution and full MCP conformance remain unverified.
 
 Remaining broker work includes scoped instance ownership,

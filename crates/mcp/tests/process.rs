@@ -17,7 +17,7 @@ fn config(script: &str) -> StdioProcessConfig {
     StdioProcessConfig {
         executable: PathBuf::from("/bin/sh"),
         arguments: vec![OsString::from("-c"), OsString::from(script)],
-        working_directory: PathBuf::from("/"),
+        working_directory: std::fs::File::open("/").unwrap().into(),
         environment: BTreeMap::from([(
             OsString::from("KILN_MCP_FIXTURE"),
             OsString::from("explicit"),
@@ -152,11 +152,40 @@ async fn cancelling_startup_drops_and_reaps_the_owned_child() {
 }
 
 #[test]
-fn relative_launch_paths_are_rejected() {
+fn relative_executable_and_non_directory_descriptors_are_rejected() {
     let mut launch = config("");
     launch.executable = PathBuf::from("sh");
     assert!(StdioProcess::spawn(launch).is_err());
     let mut launch = config("");
-    launch.working_directory = PathBuf::from(".");
+    launch.working_directory = std::fs::File::open("/dev/null").unwrap().into();
     assert!(StdioProcess::spawn(launch).is_err());
+}
+
+#[tokio::test]
+async fn replaced_directory_path_cannot_redirect_launch() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = directory.path().join("checkout");
+    let moved = directory.path().join("moved-checkout");
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("authorized"), b"").unwrap();
+    let pinned = std::fs::File::open(&original).unwrap();
+    std::fs::rename(&original, &moved).unwrap();
+    std::fs::create_dir(&original).unwrap();
+    std::fs::write(original.join("replacement"), b"").unwrap();
+
+    let mut launch = config(
+        r#"
+        test -f authorized || exit 41
+        test ! -f replacement || exit 42
+        printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"pinned directory"}}'
+        while IFS= read -r request; do :; done
+    "#,
+    );
+    launch.working_directory = pinned.into();
+    let mut process = StdioProcess::spawn(launch).unwrap();
+    let Some(ServerJsonRpcMessage::Error(reply)) = process.receive().await else {
+        panic!("child failed pinned-directory checks");
+    };
+    assert_eq!(reply.error.message.as_ref(), "pinned directory");
+    process.close().await.unwrap();
 }

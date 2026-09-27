@@ -22,7 +22,9 @@ use crate::StdioTransport;
 pub struct StdioProcessConfig {
     pub executable: PathBuf,
     pub arguments: Vec<OsString>,
-    pub working_directory: PathBuf,
+    /// A directory descriptor pinned and authorized by the caller. Moving or
+    /// replacing its former path cannot redirect the launched process.
+    pub working_directory: rustix::fd::OwnedFd,
     pub environment: BTreeMap<OsString, OsString>,
     pub max_frame_bytes: NonZeroUsize,
     /// Time allowed after stdin closes before forced process-group cleanup.
@@ -43,16 +45,17 @@ pub struct StdioProcess {
 
 impl StdioProcess {
     pub fn spawn(config: StdioProcessConfig) -> io::Result<Self> {
-        if !config.executable.is_absolute() || !config.working_directory.is_absolute() {
+        if !config.executable.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "MCP executable and working directory must be absolute",
+                "MCP executable must be absolute",
             ));
         }
         let mut command = Command::new(config.executable);
+        let directory = config.working_directory;
+        rustix::io::fcntl_setfd(&directory, rustix::io::FdFlags::CLOEXEC)?;
         command
             .args(config.arguments)
-            .current_dir(config.working_directory)
             .env_clear()
             .envs(config.environment)
             .stdin(Stdio::piped())
@@ -60,6 +63,11 @@ impl StdioProcess {
             .stderr(Stdio::null())
             .process_group(0)
             .kill_on_drop(true);
+        // SAFETY: the post-fork closure only performs fchdir on an owned,
+        // pre-opened descriptor. It allocates nothing and takes no locks.
+        unsafe {
+            command.pre_exec(move || rustix::process::fchdir(&directory).map_err(io::Error::from));
+        }
         let mut child = command.spawn()?;
         let group = child
             .id()

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `fix`
+
+- EDL-314: Pin the MCP child working directory with an owned descriptor so
+  replacing its former pathname cannot redirect process launch.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
 ## 2026-09-27 — `feat`
 
 - EDL-314: Add Unix MCP stdio process ownership with explicit launch inputs,

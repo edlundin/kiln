@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Compose durable MCP instance claims with managed stdio startup,
+  readiness revalidation, and cleanup before terminal journal states.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Return SDK-owned MCP processes to a single-use cleanup receipt so
   failed or cancelled startup can be explicitly closed and reaped.
 

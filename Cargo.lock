@@ -3804,11 +3804,14 @@ name = "kiln-mcp"
 version = "0.1.0"
 dependencies = [
  "kiln-core",
+ "kiln-infrastructure",
  "rmcp",
  "rustix",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
+ "ulid",
 ]
 
 [[package]]

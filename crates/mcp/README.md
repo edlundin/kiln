@@ -50,7 +50,8 @@ inputs first. The caller opens and validates the directory descriptor against it
 scope before passing ownership to the adapter. The child uses `fchdir` on that
 descriptor before exec, and close-on-exec prevents leaking it to the server.
 Renaming/replacing the directory's former pathname cannot redirect launch.
-The adapter does not yet bind these inputs to a durable scoped instance.
+The adapter itself does not bind these inputs to a durable scoped instance;
+`StdioGeneration` provides that internal runtime composition.
 
 Explicit close shuts stdin, allows the caller's shutdown grace, signals remaining
 group members, and reaps the direct child. The leader stays unreaped for the full
@@ -127,8 +128,35 @@ checkout/profile separation, stale/pinned readiness rejection, historical retry
 behavior, restart interruption and transaction rollback. The daemon does not yet
 consume these ports, so end-to-end process reuse/recovery is not claimed.
 
-Remaining broker work includes runtime integration of scoped-instance claims and
-process cleanup/recovery, public registration and host-binding resolution, durable
+On Unix, `StdioGeneration` composes the store ports with the process and SDK
+adapters. Its trusted caller supplies separately authorized host-resolved inputs,
+a generation ID and an absolute startup deadline. The worker reads the stored
+protocol policy, rejects non-stdio definitions, and starts a process only after an
+`Acquired` claim. `Existing` returns a typed error without launching or stopping
+the other owner's process. It does not yet look up/reuse another in-memory owner.
+
+The worker publishes readiness only after the store accepts the negotiated
+version. Startup failure, timeout or rejected readiness closes/reaps the process
+before a failed state is attempted. Dropping the handle or cancelling `stop`
+requests shutdown while the detached worker continues cleanup and journaling.
+Explicit `stop` awaits that worker. Disconnect records interruption and then
+verified cleanup, retaining desired-running state without restarting or replaying.
+Storage conflicts or uncertain cleanup leave the generation nonterminal; no
+replacement is authorized on that basis. The lifecycle worker must be the sole
+state-transition writer for its generation; stop requests go through its handle.
+
+SQLite plus real-process fixtures exercise duplicate claims, readiness, stop and
+replacement, handle drop during silent startup, timeout, changed definitions
+during negotiation, disconnect, and cleanup despite a failed stop-journal write.
+The latter retains the uncertain active record and blocks replacement rather
+than reporting a terminal state. These are macOS observations. Daemon startup
+and shutdown still need to own/drain a scoped registry and reconcile orphaned
+processes under exclusive store ownership. No public launch API or invocation
+method is exposed. Readiness snapshots do not authorize execution; future calls
+must revalidate current definitions and pass normal durable ToolCall approval.
+
+Remaining broker work includes daemon integration of the scoped runtime registry
+and process recovery, public registration and host-binding resolution, durable
 ToolCall lifecycle and invocation events, Kiln grants/approvals, catalogue/result
 paging, HTTP/OAuth, mediated server requests, and full conformance. No MCP operation
 is offered to models until it is connected to the normal durable ToolCall boundary.

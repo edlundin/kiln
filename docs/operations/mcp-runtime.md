@@ -26,8 +26,8 @@ without replay in the adapter.
 `http_generation_transport` now constructs a protocol-pinned SDK worker with
 guarded HTTP I/O. Modern generations reject GET/resume, session IDs and initialize;
 legacy generations permit at most one initialize. SDK session recovery/replay is
-disabled. Network/protocol/limit failures close admission, while one separate
-legacy DELETE cleanup attempt remains available. Already admitted I/O can still
+disabled. Guard-detected network/protocol/limit failures close admission, while
+one separate legacy DELETE cleanup attempt remains available. Already admitted I/O can still
 finish; failure does not undo remote effects. These are in-memory transport guards,
 not durable generation retirement or permission to dispatch.
 Requests require a correlated JSON response or an SSE response stream; HTTP 202

@@ -1,6 +1,8 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
 mod assistant_message;
+mod artifact_page;
+pub use artifact_page::ArtifactPageError;
 mod configuration_access;
 mod configuration_credential;
 pub use configuration_credential::ConfigurationReadCredential;

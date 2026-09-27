@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add bounded, integrity-checked byte pages for stored artifacts as a
+  storage primitive for future result paging. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add generation-bound bounded MCP catalogue snapshots for explicit
   search continuation and describe requests. ([pending])
 

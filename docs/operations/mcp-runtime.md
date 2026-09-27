@@ -131,6 +131,14 @@ snapshots are checked against their own epoch before reuse and before output.
 Server cache hints, durable invalidation Event replay and result/artifact paging
 remain open.
 
+The artifact store has a bounded byte-page primitive for result-paging integration.
+It scans and hashes the complete file on every read, retaining only the requested
+page plus fixed scratch space. A caller-supplied total artifact-size limit bounds
+that scan; corruption anywhere in the file rejects the page. Returned bytes may
+split UTF-8 code points. This primitive grants no access by itself: a model-facing
+adapter still needs trusted metadata, session ownership and normal native approval
+checks. It is not yet advertised as a model tool.
+
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
 waiter can await those same owners again. The daemon retains another reference to

@@ -7,12 +7,15 @@ use std::{
 };
 
 use kiln_core::{
-    McpDefinitionStore, McpDesiredState, McpInstanceError, McpInstanceKey, McpInstanceRecord,
-    McpInstanceStore, McpObservedState,
+    McpDefinitionStore, McpDesiredState, McpDispatchPermit, McpInstanceError, McpInstanceKey,
+    McpInstanceRecord, McpInstanceStore, McpInvocationStore, McpObservedState,
 };
 use tokio::sync::Mutex;
 
-use crate::{StdioGeneration, StdioGenerationError, StdioGenerationLaunch};
+use crate::{
+    StdioCallError, StdioCallLimits, StdioCallResult, StdioGeneration, StdioGenerationError,
+    StdioGenerationLaunch,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioRegistryError {
@@ -52,7 +55,7 @@ pub struct StdioRegistry<S> {
     state: Mutex<State>,
 }
 
-impl<S: McpInstanceStore + McpDefinitionStore + 'static> StdioRegistry<S> {
+impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> StdioRegistry<S> {
     pub fn new(store: Arc<S>, capacity: NonZeroUsize) -> Self {
         Self {
             store,
@@ -157,6 +160,32 @@ impl<S: McpInstanceStore + McpDefinitionStore + 'static> StdioRegistry<S> {
             return Err(StdioRegistryError::Stopping);
         }
         Ok(current)
+    }
+
+    /// The permit fixes the native ToolCall and generation; readiness alone is
+    /// never an invocation token. The registry lock is not held during execution.
+    pub async fn dispatch(
+        &self,
+        key: &McpInstanceKey,
+        permit: McpDispatchPermit,
+        limits: StdioCallLimits,
+        cancellation: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<StdioCallResult, StdioCallError> {
+        let sender = {
+            let state = self.state.lock().await;
+            if state.closed {
+                return Err(StdioCallError::Rejected);
+            }
+            let entry = state
+                .entries
+                .get(key.canonical_json())
+                .ok_or(StdioCallError::Rejected)?;
+            if entry.stopping {
+                return Err(StdioCallError::Rejected);
+            }
+            entry.owner.dispatch_sender()
+        };
+        crate::generation::dispatch_to(sender, permit, limits, cancellation).await
     }
 
     /// Stop a scope before reconfiguration/retirement. Cancellation leaves the

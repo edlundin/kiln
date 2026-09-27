@@ -4,6 +4,8 @@
 mod bindings;
 
 #[cfg(unix)]
+mod dispatch;
+#[cfg(unix)]
 mod generation;
 mod negotiation;
 #[cfg(unix)]
@@ -17,6 +19,8 @@ pub use bindings::{
     ResolvedStdioLaunch, StdioBindingError, StdioHostBindings, StdioLaunchResources,
     resolve_stdio_launch,
 };
+#[cfg(unix)]
+pub use dispatch::{StdioCallError, StdioCallLimits, StdioCallResult};
 #[cfg(unix)]
 pub use generation::{StdioGeneration, StdioGenerationError, StdioGenerationLaunch};
 pub use negotiation::{ProtocolPolicy, ProtocolVersion, start_stdio_client};

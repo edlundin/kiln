@@ -226,14 +226,38 @@ conflicting outcomes fail. Startup interrupts unfinished invocation records afte
 interrupting generations. `dispatching` means a send may have occurred, not proof
 that a server accepted or completed it. Dropping a permit grants no replay.
 
-These are internal prerequisites: the daemon does not advertise `mcp_call` yet,
-and no SDK invocation consumes the permit. Catalogue/schema validation, effective
-host authorization and pinning, transport cancellation/result capture, and normal
-ToolCall finalization still need to be connected before enabling the operation.
-Invocation audit rows are not yet in public Event replay.
+The generation-owned SDK worker consumes a permit through `StdioGeneration::dispatch`
+or the registry dispatch route. It sends exactly one raw SDK request, avoiding
+SDK resource-cache fallback and automatic MRTR rounds. Results are serialized
+within an explicit caller byte ceiling in addition to the transport frame ceiling;
+no partial result is returned. Tool `isError` and structured protocol errors record
+failure. The worker returns typed errors without including raw server error text. Every call also has an explicit
+absolute deadline and cancellation receiver; dropping its sender requests
+cancellation, as does abandoning the reply waiter.
+
+Cancellation, deadline expiry during a possible send, unexpected response types,
+and connection loss record an interrupted/unknown outcome and retire the process
+generation. Durable readiness is removed before releasing an interrupted call's
+serial slot. Cleanup also interrupts any claim queued just before retirement.
+This conservative cancellation loses server application state; it does not prove
+that an external side effect was undone. MRTR/input-required and external-task
+responses currently interrupt and retire without automatic follow-up. Their full
+mediation is still open. Ordinary successful calls reuse the generation across
+Runs; caller abandonment never replays the operation. Journal failure still
+triggers process cleanup and is reported as a store error.
+
+These remain internal APIs: the daemon does not advertise `mcp_call` yet.
+Catalogue/schema validation, effective host authorization and pinning, result
+artifact capture, and normal ToolCall finalization still need to be connected
+before enabling the operation. Invocation audit rows are not yet in public Event
+replay. A real Python stdio fixture on macOS verifies single sends for success,
+server error, oversize output, disconnect, cancellation and deadline expiry;
+successive claims from distinct Runs reuse the same process. It requires
+`/usr/bin/python3`. Resource/prompt wire execution, modern MRTR and external Tasks
+are not covered by that fixture.
 
 Remaining broker work includes process recovery, online registration and persistent
-host-binding/credential administration, transport dispatch through the durable
-ToolCall boundary, catalogue/result paging, HTTP/OAuth, mediated server requests,
+host-binding/credential administration, daemon installation of the claimed
+dispatch path, catalogue/result paging, HTTP/OAuth, mediated server requests,
 and full conformance. No MCP operation
 is offered to models until it is connected to the normal durable ToolCall boundary.

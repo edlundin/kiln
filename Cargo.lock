@@ -3786,6 +3786,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "kiln-core",
+ "kiln-mcp",
  "rcgen",
  "rustix",
  "security-framework",

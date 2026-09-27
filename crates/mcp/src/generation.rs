@@ -1,24 +1,30 @@
-//! One trusted runtime owner per durable generation; no tool execution API.
+//! One trusted runtime owner per generation and serialized claimed dispatch.
 
 use std::sync::Arc;
 
 use kiln_core::{
-    McpDefinitionError, McpDefinitionLimits, McpDefinitionStore, McpGenerationId, McpInstanceClaim,
-    McpInstanceError, McpInstanceKey, McpInstanceRecord, McpInstanceStore, McpInstanceTransition,
+    McpDefinitionError, McpDefinitionLimits, McpDefinitionStore, McpDispatchPermit,
+    McpGenerationId, McpInstanceClaim, McpInstanceError, McpInstanceKey, McpInstanceRecord,
+    McpInstanceStore, McpInstanceTransition, McpInvocationState, McpInvocationStore,
     SharedMcpTransport,
 };
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::Instant,
 };
 
-use crate::{ProtocolVersion, StdioProcess, StdioProcessConfig, start_stdio_client};
+use crate::dispatch::{DispatchRequest, send_once};
+use crate::{
+    ProtocolVersion, StdioCallError, StdioCallLimits, StdioCallResult, StdioProcess,
+    StdioProcessConfig, start_stdio_client,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioGenerationError {
     Definition(McpDefinitionError),
     Store(McpInstanceError),
+    Invocation(kiln_core::McpInvocationError),
     UnsupportedTransport,
     Existing,
     Spawn,
@@ -51,6 +57,7 @@ pub struct StdioGenerationLaunch {
 /// journal cleanup. Orderly daemon shutdown must await `stop` before runtime exit.
 /// Readiness is lifecycle information, never permission to invoke an MCP tool.
 pub struct StdioGeneration {
+    calls: mpsc::Sender<DispatchRequest>,
     stop: Option<oneshot::Sender<()>>,
     status: watch::Receiver<Status>,
     worker: Option<JoinHandle<Result<McpInstanceRecord, StdioGenerationError>>>,
@@ -106,20 +113,38 @@ impl GenerationObserver {
 impl StdioGeneration {
     pub fn spawn<S>(store: Arc<S>, launch: StdioGenerationLaunch) -> Self
     where
-        S: McpInstanceStore + McpDefinitionStore + 'static,
+        S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static,
     {
         let (stop, stopped) = oneshot::channel();
         let (status, receiver) = watch::channel(Status::Starting);
+        // Durable ownership permits at most one in-flight dispatch per generation.
+        let (calls, requests) = mpsc::channel(1);
         let worker = tokio::spawn(async move {
-            let result = run(store.as_ref(), launch, stopped, &status).await;
+            let result = run(store.as_ref(), launch, stopped, requests, &status).await;
             status.send_replace(Status::Finished(result.clone()));
             result
         });
         Self {
+            calls,
             stop: Some(stop),
             status: receiver,
             worker: Some(worker),
         }
+    }
+
+    /// Consume a durable permit. Dropping the waiter cancels this operation and
+    /// causes the worker to retire the generation if a send may have occurred.
+    pub async fn dispatch(
+        &self,
+        permit: McpDispatchPermit,
+        limits: StdioCallLimits,
+        cancellation: oneshot::Receiver<()>,
+    ) -> Result<StdioCallResult, StdioCallError> {
+        dispatch_to(self.calls.clone(), permit, limits, cancellation).await
+    }
+
+    pub(crate) fn dispatch_sender(&self) -> mpsc::Sender<DispatchRequest> {
+        self.calls.clone()
     }
 
     pub async fn wait_ready(&mut self) -> Result<McpInstanceRecord, StdioGenerationError> {
@@ -173,10 +198,11 @@ async fn stopped<S: McpInstanceStore>(
     transition(store, &record, McpInstanceTransition::Stopped).await
 }
 
-async fn run<S: McpInstanceStore + McpDefinitionStore>(
+async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
     store: &S,
     launch: StdioGenerationLaunch,
     mut stop: oneshot::Receiver<()>,
+    mut requests: mpsc::Receiver<DispatchRequest>,
     status: &watch::Sender<Status>,
 ) -> Result<McpInstanceRecord, StdioGenerationError> {
     let definition = store
@@ -277,30 +303,154 @@ async fn run<S: McpInstanceStore + McpDefinitionStore>(
     };
     status.send_replace(Status::Ready(ready.clone()));
     let cancellation = client.cancellation_token();
+    let peer = client.peer().clone();
     let waiting = client.waiting();
     tokio::pin!(waiting);
-    let requested = tokio::select! {
-        biased;
-        _ = &mut stop => { cancellation.cancel(); true },
-        _ = &mut waiting => false,
+    let mut retiring = None;
+    let requested = loop {
+        let mut call = tokio::select! {
+            biased;
+            _ = &mut stop => { cancellation.cancel(); break true },
+            _ = &mut waiting => break false,
+            Some(call) = requests.recv() => call,
+        };
+        let mut exit = None;
+        let result = if call.permit.record().generation != ready.generation {
+            Err(StdioCallError::Rejected)
+        } else if call.reply.is_closed()
+            || !matches!(
+                call.cancellation.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            )
+        {
+            Err(StdioCallError::CancelledBeforeSend)
+        } else if Instant::now() >= call.limits.deadline {
+            Err(StdioCallError::DeadlineBeforeSend)
+        } else {
+            // Definition updates and lifecycle changes since permit acquisition
+            // may prevent sending; the immutable claim itself never gets replayed.
+            let current = store.get_mcp_instance(&ready.key).await;
+            let definition = store
+                .get_mcp_definition(ready.key.definition_id(), launch.definition_limits)
+                .await;
+            if !matches!(current, Ok(Some(ref current)) if current.generation == ready.generation
+                && current.state_version == ready.state_version)
+                || !matches!(definition, Ok(Some(ref definition)) if definition.version == ready.definition_version
+                    && definition.definition.server().enabled)
+            {
+                Err(StdioCallError::Rejected)
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = &mut stop => { exit = Some(true); Err(StdioCallError::Interrupted) },
+                    _ = &mut waiting => { exit = Some(false); Err(StdioCallError::Interrupted) },
+                    _ = &mut call.cancellation => Err(StdioCallError::Interrupted),
+                    _ = call.reply.closed() => Err(StdioCallError::Interrupted),
+                    _ = tokio::time::sleep_until(call.limits.deadline) => Err(StdioCallError::Interrupted),
+                    result = send_once(&peer, call.permit.request().command().operation(), call.limits.max_result_bytes) => result,
+                }
+            }
+        };
+        let state = match &result {
+            Ok(result) if result.is_error => McpInvocationState::Failed,
+            Ok(_) => McpInvocationState::Completed,
+            Err(StdioCallError::CancelledBeforeSend) => McpInvocationState::Cancelled,
+            Err(StdioCallError::Interrupted | StdioCallError::UnsupportedContinuation) => {
+                exit.get_or_insert(true);
+                McpInvocationState::Interrupted
+            }
+            // A complete oversized result is a known response, not a replay opportunity.
+            Err(_) => McpInvocationState::Failed,
+        };
+        if let Some(requested) = exit {
+            // Remove durable readiness before releasing the serial invocation
+            // slot; another Run must not claim this retiring generation.
+            retiring = Some(
+                transition(
+                    store,
+                    &ready,
+                    if requested {
+                        McpInstanceTransition::RequestStop
+                    } else {
+                        McpInstanceTransition::ConnectionLost
+                    },
+                )
+                .await,
+            );
+        }
+        // Never cancel this transaction. A failed journal leaves the claim
+        // uncertain and retires the owner before accepting another request.
+        let result = match store
+            .finish_mcp_invocation(call.permit.record(), state)
+            .await
+        {
+            Ok(_) => result,
+            Err(error) => {
+                exit.get_or_insert(true);
+                Err(StdioCallError::Store(error))
+            }
+        };
+        if exit.is_some() && retiring.is_none() {
+            retiring = Some(transition(store, &ready, McpInstanceTransition::RequestStop).await);
+        }
+        let _ = call.reply.send(result);
+        if let Some(requested) = exit {
+            if requested {
+                cancellation.cancel();
+            }
+            break requested;
+        }
     };
     // A journal failure must not skip process cleanup. Record the intent first,
     // retain its result, then wait for SDK ownership to return and reap.
-    let terminal_base = transition(
-        store,
-        &ready,
-        if requested {
-            McpInstanceTransition::RequestStop
-        } else {
-            McpInstanceTransition::ConnectionLost
-        },
-    )
-    .await;
+    let terminal_base = match retiring {
+        Some(record) => record,
+        None => {
+            transition(
+                store,
+                &ready,
+                if requested {
+                    McpInstanceTransition::RequestStop
+                } else {
+                    McpInstanceTransition::ConnectionLost
+                },
+            )
+            .await
+        }
+    };
+    // A permit queued just before shutdown may never have reached the worker.
+    // The unique active-generation index bounds this recovery batch to one.
+    let interrupted = store
+        .interrupt_mcp_invocations(
+            Some(&ready.generation),
+            std::num::NonZeroUsize::new(1).unwrap(),
+        )
+        .await;
     if requested {
         let _ = waiting.await;
     }
     if cleanup.finish().await.is_err() {
         return Err(StdioGenerationError::Cleanup);
     }
+    interrupted.map_err(StdioGenerationError::Invocation)?;
     transition(store, &terminal_base?, McpInstanceTransition::Stopped).await
+}
+
+pub(crate) async fn dispatch_to(
+    sender: mpsc::Sender<DispatchRequest>,
+    permit: McpDispatchPermit,
+    limits: StdioCallLimits,
+    cancellation: oneshot::Receiver<()>,
+) -> Result<StdioCallResult, StdioCallError> {
+    let (reply, result) = oneshot::channel();
+    sender
+        .send(DispatchRequest {
+            permit,
+            limits,
+            cancellation,
+            reply,
+        })
+        .await
+        .map_err(|_| StdioCallError::WorkerLost)?;
+    result.await.map_err(|_| StdioCallError::WorkerLost)?
 }

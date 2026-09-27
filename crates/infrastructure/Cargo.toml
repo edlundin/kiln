@@ -21,6 +21,7 @@ ulid.workspace = true
 zeroize = { version = "=1.9.0", features = ["serde"] }
 
 [dev-dependencies]
+kiln-mcp = { path = "../mcp" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7.0"

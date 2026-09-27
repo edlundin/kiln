@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Send durable MCP dispatch claims through a generation-owned SDK
+  worker with bounded results and conservative retirement.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Define compact MCP call proposals and durable single-attempt
   dispatch claims without enabling live transport dispatch.
 

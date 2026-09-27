@@ -167,7 +167,11 @@ async fn request(
     }
 }
 
-async fn ready(store: &super::super::SqliteStore, owner: McpInstanceOwner) -> McpInstanceRecord {
+async fn register(
+    store: &super::super::SqliteStore,
+    owner: McpInstanceOwner,
+    policy: McpProtocolPolicy,
+) -> McpInstanceKey {
     let definition = McpServerDefinition::new(
         SharedMcpServerInput {
             id: SharedConfigurationKey::parse("fixture", 64).unwrap(),
@@ -178,7 +182,7 @@ async fn ready(store: &super::super::SqliteStore, owner: McpInstanceOwner) -> Mc
                 environment: BTreeMap::new(),
             },
         },
-        McpProtocolPolicy::Auto,
+        policy,
         owner.scope(),
         None,
         limits(),
@@ -188,7 +192,11 @@ async fn ready(store: &super::super::SqliteStore, owner: McpInstanceOwner) -> Mc
         .register_mcp_definition(&definition, 0, "definition", limits())
         .await
         .unwrap();
-    let key = McpInstanceKey::new(&definition, owner, 4096).unwrap();
+    McpInstanceKey::new(&definition, owner, 4096).unwrap()
+}
+
+async fn ready(store: &super::super::SqliteStore, owner: McpInstanceOwner) -> McpInstanceRecord {
+    let key = register(store, owner, McpProtocolPolicy::Auto).await;
     let generation = McpGenerationId::from_ulid(ulid::Ulid::generate());
     let McpInstanceClaim::Acquired(record) = store
         .claim_mcp_instance(&key, 1, &generation, limits())
@@ -419,4 +427,215 @@ async fn mcp_dispatch_rejects_another_sessions_generation() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_live_dispatch_sends_once_and_retires_uncertain_processes() {
+    use kiln_mcp::{
+        StdioCallError, StdioCallLimits, StdioGeneration, StdioGenerationLaunch, StdioProcessConfig,
+    };
+    use std::{sync::Arc, time::Duration};
+    use tokio::{sync::oneshot, time::Instant};
+    // Match the existing real-process fixtures' five-second scheduling allowance.
+    let allowance = Duration::from_secs(5);
+    let script = r#"
+import json, os, sys, time
+mode = sys.argv[1]
+open('pid', 'w').write(str(os.getpid()))
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
+    elif method == 'tools/call':
+        with open('calls', 'a') as calls: calls.write(json.dumps(request['params'])+'\n')
+        if mode == 'disconnect': sys.exit(0)
+        if mode in ('cancel','deadline'): time.sleep(60)
+        if mode == 'server_error':
+            print(json.dumps({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32602,'message':'fixture error'}}), flush=True)
+            continue
+        result = {'content':[{'type':'text','text':'private-result'}]}
+    else:
+        continue
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#;
+    for mode in [
+        "complete",
+        "server_error",
+        "oversize",
+        "disconnect",
+        "cancel",
+        "deadline",
+    ] {
+        let (data, store, session) = seeded_session().await;
+        let key = register(
+            &store,
+            McpInstanceOwner::Core,
+            McpProtocolPolicy::Pinned(McpProtocolVersion::V20251125),
+        )
+        .await;
+        let mut owner = StdioGeneration::spawn(
+            Arc::new(store.clone()),
+            StdioGenerationLaunch {
+                key,
+                definition_version: 1,
+                generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),
+                definition_limits: limits(),
+                startup_deadline: Instant::now() + allowance,
+                process: StdioProcessConfig {
+                    executable: "/usr/bin/python3".into(),
+                    arguments: vec!["-c".into(), script.into(), mode.into()],
+                    working_directory: std::fs::File::open(data.path()).unwrap().into(),
+                    environment: BTreeMap::new(),
+                    max_frame_bytes: NonZeroUsize::new(4096).unwrap(),
+                    shutdown_grace: Duration::ZERO,
+                },
+            },
+        );
+        let target = owner.wait_ready().await.unwrap();
+        let request = request(&store, &session, mode).await;
+        let McpDispatchClaim::Acquired(permit) =
+            claim_mcp_dispatch(&store, request, &target, limits())
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let record = permit.record().clone();
+        let (cancel, cancelled) = oneshot::channel();
+        let result = {
+            let call = owner.dispatch(
+                permit,
+                StdioCallLimits {
+                    deadline: Instant::now() + allowance,
+                    max_result_bytes: NonZeroUsize::new(if mode == "oversize" { 1 } else { 4096 })
+                        .unwrap(),
+                },
+                cancelled,
+            );
+            let trigger = async {
+                if mode == "cancel" {
+                    tokio::time::timeout(allowance, async {
+                        while !data.path().join("calls").exists() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    cancel.send(()).unwrap();
+                } else {
+                    // Keep the cancellation sender alive until the call completes.
+                    std::future::pending::<()>().await;
+                    drop(cancel);
+                }
+            };
+            tokio::pin!(call, trigger);
+            tokio::select! {
+                result = &mut call => result,
+                _ = &mut trigger => call.as_mut().await,
+            }
+        };
+        let expected = match mode {
+            "complete" => {
+                assert!(
+                    String::from_utf8(result.unwrap().json)
+                        .unwrap()
+                        .contains("private-result")
+                );
+                McpInvocationState::Completed
+            }
+            "server_error" => {
+                assert_eq!(result.err(), Some(StdioCallError::Server));
+                McpInvocationState::Failed
+            }
+            "oversize" => {
+                assert_eq!(result.err(), Some(StdioCallError::ResultTooLarge));
+                McpInvocationState::Failed
+            }
+            _ => {
+                assert_eq!(result.err(), Some(StdioCallError::Interrupted));
+                McpInvocationState::Interrupted
+            }
+        };
+        assert_eq!(
+            std::fs::read_to_string(data.path().join("calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "{mode} must never replay"
+        );
+        if expected == McpInvocationState::Interrupted {
+            assert_ne!(
+                store
+                    .get_mcp_instance(&target.key)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .observed,
+                McpObservedState::Ready,
+                "retirement must precede releasing the interrupted invocation slot"
+            );
+        }
+        if mode == "complete" {
+            let next_session = SessionApplication::new(
+                store.clone(),
+                store.clone(),
+                super::super::UlidIdGenerator,
+            )
+            .create_session(session.workspace_id().clone())
+            .await
+            .unwrap();
+            let next = self::request(&store, &next_session, "reuse").await;
+            let McpDispatchClaim::Acquired(permit) =
+                claim_mcp_dispatch(&store, next, &target, limits())
+                    .await
+                    .unwrap()
+            else {
+                panic!()
+            };
+            let (_cancel, cancelled) = oneshot::channel();
+            let next = owner
+                .dispatch(
+                    permit,
+                    StdioCallLimits {
+                        deadline: Instant::now() + allowance,
+                        max_result_bytes: NonZeroUsize::new(4096).unwrap(),
+                    },
+                    cancelled,
+                )
+                .await
+                .unwrap();
+            assert!(!next.is_error);
+            assert_eq!(
+                std::fs::read_to_string(data.path().join("calls"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2,
+                "two distinct Runs reuse the same process for two distinct claims"
+            );
+        }
+        owner.stop().await.unwrap();
+        let pid = rustix::process::Pid::from_raw(
+            std::fs::read_to_string(data.path().join("pid"))
+                .unwrap()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            rustix::process::test_kill_process(pid),
+            Err(rustix::io::Errno::SRCH)
+        );
+        let mut sql = store.connection.lock().await;
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM mcp_invocations WHERE tool_call_id = ?")
+                .bind(record.tool_call_id.as_str())
+                .fetch_one(&mut *sql)
+                .await
+                .unwrap();
+        assert_eq!(state, expected.as_str(), "{mode}");
+    }
 }

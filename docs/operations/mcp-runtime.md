@@ -42,8 +42,10 @@ provides only best-effort process cleanup.
 The local tests use synthetic definitions, temporary SQLite stores and real macOS
 shell processes. They verify batched interruption without reacquisition and
 Run-service shutdown reaping before the stopped journal record. Linux process
-execution, orphan cleanup, live tool invocation, HTTP/OAuth and full MCP
-conformance remain unverified or unimplemented.
+execution, orphan cleanup, installed model-visible MCP tools, HTTP/OAuth and full
+MCP conformance remain unverified or unimplemented. Internal claimed stdio dispatch
+now has a real macOS process fixture, including interruption without replay; this
+is not acceptance of the end-to-end daemon broker.
 
 ## Local definition administration
 

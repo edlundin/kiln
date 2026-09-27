@@ -1,8 +1,10 @@
 use std::num::NonZeroU64;
 
 use kiln_core::{
-    McpInputKind, McpInputMutation, McpInputRecord, McpInputState, McpInputStore,
-    McpInvocationError as Error, McpInvocationRecord, McpInvocationState,
+    McpElicitationForm, McpElicitationFormLimits, McpElicitationFormMutation,
+    McpElicitationFormRecord, McpElicitationFormStore, McpInputKind, McpInputMutation,
+    McpInputRecord, McpInputState, McpInputStore, McpInvocationError as Error, McpInvocationRecord,
+    McpInvocationState,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 
@@ -111,7 +113,6 @@ impl McpInputStore for SqliteStore {
         ordinal: NonZeroU64,
         kind: McpInputKind,
     ) -> Result<McpInputMutation, Error> {
-        let number = i64::try_from(ordinal.get()).map_err(|_| Error::InvalidRequest)?;
         let mut connection = self.connection.lock().await;
         let mut tx = connection
             .begin_with("BEGIN IMMEDIATE")
@@ -126,32 +127,10 @@ impl McpInputStore for SqliteStore {
             return Ok(McpInputMutation::Existing(record));
         }
         validate_live(&mut tx, &current).await?;
-        let (last, pending): (i64, i64) = sqlx::query_as(
-            "SELECT COALESCE(MAX(ordinal), 0), COALESCE(SUM(state = 'required'), 0)
-             FROM mcp_inputs WHERE tool_call_id = ?",
-        )
-        .bind(current.tool_call_id.as_str())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| Error::Unavailable)?;
-        if pending != 0 {
-            return Err(Error::Busy);
-        }
-        if last.checked_add(1) != Some(number) {
-            return Err(Error::Conflict);
-        }
-        sqlx::query("INSERT INTO mcp_inputs (tool_call_id, ordinal, kind, state) VALUES (?, ?, ?, 'required')")
-            .bind(current.tool_call_id.as_str()).bind(number).bind(kind.as_str())
-            .execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
-        append_event(&mut tx, &current, number, "required").await?;
+        let record = insert_input(&mut tx, current, ordinal, kind).await?;
         tx.commit().await.map_err(|_| Error::Unavailable)?;
         self.mcp_invocation_events.send_replace(());
-        Ok(McpInputMutation::Applied(McpInputRecord {
-            invocation: current,
-            ordinal,
-            kind,
-            state: McpInputState::Required,
-        }))
+        Ok(McpInputMutation::Applied(record))
     }
 
     async fn resolve_mcp_input(
@@ -201,6 +180,168 @@ impl McpInputStore for SqliteStore {
     }
 }
 
+impl McpElicitationFormStore for SqliteStore {
+    async fn require_mcp_elicitation_form(
+        &self,
+        invocation: &McpInvocationRecord,
+        ordinal: NonZeroU64,
+        form: &McpElicitationForm,
+        limits: McpElicitationFormLimits,
+    ) -> Result<McpElicitationFormMutation, Error> {
+        form.validate(limits)?;
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let current = current_invocation(&mut tx, invocation).await?;
+        validate_live(&mut tx, &current).await?;
+        let interaction_run = interaction_owner(&mut tx, &current).await?;
+        if let Some(input) = load(&mut tx, current.clone(), ordinal).await? {
+            if input.kind != McpInputKind::Elicitation || input.state != McpInputState::Required {
+                return Err(Error::Conflict);
+            }
+            let record = load_form(&mut tx, input, limits)
+                .await?
+                .ok_or(Error::Conflict)?;
+            if record.form != *form || record.interaction_run != interaction_run {
+                return Err(Error::Conflict);
+            }
+            tx.commit().await.map_err(|_| Error::Unavailable)?;
+            return Ok(McpElicitationFormMutation::Existing(record));
+        }
+        let input = insert_input(&mut tx, current, ordinal, McpInputKind::Elicitation).await?;
+        sqlx::query("INSERT INTO mcp_elicitation_forms (tool_call_id, ordinal, interaction_run_id, message, schema_json)
+            VALUES (?, ?, ?, ?, ?)")
+            .bind(input.invocation.tool_call_id.as_str()).bind(i64::try_from(input.ordinal.get()).map_err(|_| Error::InvalidRequest)?)
+            .bind(interaction_run.as_str()).bind(form.message()).bind(form.schema_json())
+            .execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        self.mcp_invocation_events.send_replace(());
+        Ok(McpElicitationFormMutation::Applied(
+            McpElicitationFormRecord {
+                input,
+                interaction_run,
+                form: form.clone(),
+            },
+        ))
+    }
+
+    async fn get_mcp_elicitation_form(
+        &self,
+        expected: &McpInputRecord,
+        interaction_run: &kiln_core::RunId,
+        limits: McpElicitationFormLimits,
+    ) -> Result<McpElicitationFormRecord, Error> {
+        if expected.kind != McpInputKind::Elicitation || expected.state != McpInputState::Required {
+            return Err(Error::InvalidRequest);
+        }
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
+        let invocation = current_invocation(&mut tx, &expected.invocation).await?;
+        let input = load(&mut tx, invocation, expected.ordinal)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if input.kind != McpInputKind::Elicitation || input.state != McpInputState::Required {
+            return Err(Error::Conflict);
+        }
+        validate_live(&mut tx, &input.invocation).await?;
+        if interaction_owner(&mut tx, &input.invocation).await? != *interaction_run {
+            return Err(Error::Conflict);
+        }
+        let record = load_form(&mut tx, input, limits)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if record.interaction_run != *interaction_run {
+            return Err(Error::Conflict);
+        }
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(record)
+    }
+}
+
+async fn load_form(
+    connection: &mut SqliteConnection,
+    input: McpInputRecord,
+    limits: McpElicitationFormLimits,
+) -> Result<Option<McpElicitationFormRecord>, Error> {
+    // Check byte lengths in SQLite before copying a retained body into memory.
+    let row = sqlx::query(
+        "SELECT interaction_run_id,
+        CASE WHEN length(CAST(message AS BLOB)) <= ? THEN message END AS message,
+        CASE WHEN length(CAST(schema_json AS BLOB)) <= ? THEN schema_json END AS schema_json
+        FROM mcp_elicitation_forms WHERE tool_call_id = ? AND ordinal = ?",
+    )
+    .bind(i64::try_from(limits.max_message_bytes.get()).unwrap_or(i64::MAX))
+    .bind(i64::try_from(limits.max_schema_bytes.get()).unwrap_or(i64::MAX))
+    .bind(input.invocation.tool_call_id.as_str())
+    .bind(i64::try_from(input.ordinal.get()).map_err(|_| Error::InvalidRequest)?)
+    .fetch_optional(connection)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    row.map(|row| {
+        let owner: String = row
+            .try_get("interaction_run_id")
+            .map_err(|_| Error::IntegrityViolation)?;
+        let message: Option<String> = row
+            .try_get("message")
+            .map_err(|_| Error::IntegrityViolation)?;
+        let schema: Option<String> = row
+            .try_get("schema_json")
+            .map_err(|_| Error::IntegrityViolation)?;
+        Ok(McpElicitationFormRecord {
+            input,
+            interaction_run: kiln_core::RunId::parse(owner)
+                .map_err(|_| Error::IntegrityViolation)?,
+            form: McpElicitationForm::new(
+                message.ok_or(Error::InvalidRequest)?,
+                &schema.ok_or(Error::InvalidRequest)?,
+                limits,
+            )?,
+        })
+    })
+    .transpose()
+}
+
+async fn insert_input(
+    connection: &mut SqliteConnection,
+    current: McpInvocationRecord,
+    ordinal: NonZeroU64,
+    kind: McpInputKind,
+) -> Result<McpInputRecord, Error> {
+    let number = i64::try_from(ordinal.get()).map_err(|_| Error::InvalidRequest)?;
+    let (last, pending): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(MAX(ordinal), 0), COALESCE(SUM(state = 'required'), 0)
+         FROM mcp_inputs WHERE tool_call_id = ?",
+    )
+    .bind(current.tool_call_id.as_str())
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    if pending != 0 {
+        return Err(Error::Busy);
+    }
+    if last.checked_add(1) != Some(number) {
+        return Err(Error::Conflict);
+    }
+    sqlx::query(
+        "INSERT INTO mcp_inputs (tool_call_id, ordinal, kind, state) VALUES (?, ?, ?, 'required')",
+    )
+    .bind(current.tool_call_id.as_str())
+    .bind(number)
+    .bind(kind.as_str())
+    .execute(&mut *connection)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    append_event(connection, &current, number, "required").await?;
+    Ok(McpInputRecord {
+        invocation: current,
+        ordinal,
+        kind,
+        state: McpInputState::Required,
+    })
+}
+
 // Keep ancestry validation inside the caller's transaction so a cancelled
 // ancestor cannot race a fresh resolution after an earlier ownership lookup.
 async fn interaction_owner(
@@ -222,9 +363,22 @@ async fn interaction_owner(
         WHERE root.user_input_mode = 'interactive'
           AND NOT EXISTS (SELECT 1 FROM lineage a WHERE a.session_id != source.session_id
             OR a.state NOT IN ('queued','running','waiting_for_approval'))")
-        .bind(invocation.tool_call_id.as_str()).fetch_optional(connection).await.map_err(|_| Error::Unavailable)?;
+        .bind(invocation.tool_call_id.as_str()).fetch_optional(&mut *connection).await.map_err(|_| Error::Unavailable)?;
     let owner = kiln_core::RunId::parse(owner.ok_or(Error::Conflict)?)
         .map_err(|_| Error::IntegrityViolation)?;
+    // Once a form is presented, a changed ancestry cannot silently retarget it.
+    let recorded: Option<String> = sqlx::query_scalar(
+        "SELECT f.interaction_run_id
+        FROM mcp_elicitation_forms f JOIN mcp_inputs i USING (tool_call_id, ordinal)
+        WHERE f.tool_call_id = ? AND i.state = 'required'",
+    )
+    .bind(invocation.tool_call_id.as_str())
+    .fetch_optional(connection)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    if recorded.is_some_and(|recorded| recorded != owner.as_str()) {
+        return Err(Error::Conflict);
+    }
     Ok(owner)
 }
 

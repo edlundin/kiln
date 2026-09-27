@@ -99,3 +99,138 @@ pub trait McpInputStore: Send + Sync {
         expected: &McpInputRecord,
     ) -> impl Future<Output = Result<McpInputMutation, McpInvocationError>> + Send;
 }
+
+/// Host-selected storage budgets for normalized form fields, not wire frames.
+#[derive(Debug, Clone, Copy)]
+pub struct McpElicitationFormLimits {
+    pub max_message_bytes: std::num::NonZeroUsize,
+    pub max_schema_bytes: std::num::NonZeroUsize,
+}
+
+/// Private, untrusted form data. This container checks size and object shape;
+/// the protocol adapter must validate the supported schema before presenting it.
+/// Its fields exclude wire IDs, requestState and transport/credential metadata.
+/// The untrusted message and schema may themselves contain sensitive content.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpElicitationForm {
+    message: String,
+    schema_json: String,
+}
+
+impl std::fmt::Debug for McpElicitationForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpElicitationForm").finish_non_exhaustive()
+    }
+}
+
+impl McpElicitationForm {
+    pub fn new(
+        message: String,
+        schema_json: &str,
+        limits: McpElicitationFormLimits,
+    ) -> Result<Self, McpInvocationError> {
+        if message.len() > limits.max_message_bytes.get()
+            || schema_json.len() > limits.max_schema_bytes.get()
+        {
+            return Err(McpInvocationError::InvalidRequest);
+        }
+        let schema: serde_json::Value =
+            serde_json::from_str(schema_json).map_err(|_| McpInvocationError::InvalidRequest)?;
+        if !schema.is_object() || schema.get("type").and_then(|v| v.as_str()) != Some("object") {
+            return Err(McpInvocationError::InvalidRequest);
+        }
+        let form = Self {
+            message,
+            schema_json: serde_json::to_string(&schema)
+                .map_err(|_| McpInvocationError::InvalidRequest)?,
+        };
+        form.validate(limits)?;
+        Ok(form)
+    }
+
+    pub fn validate(&self, limits: McpElicitationFormLimits) -> Result<(), McpInvocationError> {
+        if self.message.len() > limits.max_message_bytes.get()
+            || self.schema_json.len() > limits.max_schema_bytes.get()
+        {
+            return Err(McpInvocationError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn schema_json(&self) -> &str {
+        &self.schema_json
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpElicitationFormRecord {
+    pub input: McpInputRecord,
+    pub interaction_run: crate::RunId,
+    pub form: McpElicitationForm,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpElicitationFormMutation {
+    Applied(McpElicitationFormRecord),
+    Existing(McpElicitationFormRecord),
+}
+
+/// Private interaction storage, separate from tool approval and public Events.
+/// Neither a record nor an Existing receipt grants response or provider authority.
+pub trait McpElicitationFormStore: Send + Sync {
+    /// Atomically create the pending input, its immutable form and live owner,
+    /// and the metadata-only input-required Event. Exact pending duplicates are
+    /// receipts; changed forms, missing forms and inactive ownership reject.
+    fn require_mcp_elicitation_form(
+        &self,
+        invocation: &McpInvocationRecord,
+        ordinal: NonZeroU64,
+        form: &McpElicitationForm,
+        limits: McpElicitationFormLimits,
+    ) -> impl Future<Output = Result<McpElicitationFormMutation, McpInvocationError>> + Send;
+
+    /// Inspect only through the recorded interactive owner while input and the
+    /// entire source ancestry remain live. No generic Session/Event projection
+    /// includes the body. The caller must authenticate access to the target Run.
+    fn get_mcp_elicitation_form(
+        &self,
+        expected: &McpInputRecord,
+        interaction_run: &crate::RunId,
+        limits: McpElicitationFormLimits,
+    ) -> impl Future<Output = Result<McpElicitationFormRecord, McpInvocationError>> + Send;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_form_checks_byte_budgets_and_canonical_shape_without_logging_body() {
+        let limits = McpElicitationFormLimits {
+            max_message_bytes: std::num::NonZeroUsize::new(4).unwrap(),
+            max_schema_bytes: std::num::NonZeroUsize::new(64).unwrap(),
+        };
+        let form = McpElicitationForm::new(
+            "éé".into(),
+            r#"{ "type": "object", "properties": {} }"#,
+            limits,
+        )
+        .unwrap();
+        assert_eq!(form.schema_json(), r#"{"properties":{},"type":"object"}"#);
+        assert!(!format!("{form:?}").contains("é"));
+        assert!(!format!("{form:?}").contains("properties"));
+        assert!(McpElicitationForm::new("ééé".into(), form.schema_json(), limits).is_err());
+        for invalid in ["false", "[]", "{}", r#"{"type":"string"}"#, "invalid"] {
+            assert!(McpElicitationForm::new(String::new(), invalid, limits).is_err());
+        }
+        let tighter = McpElicitationFormLimits {
+            max_schema_bytes: std::num::NonZeroUsize::new(1).unwrap(),
+            ..limits
+        };
+        assert!(form.validate(tighter).is_err());
+    }
+}

@@ -2,6 +2,136 @@ use super::*;
 use kiln_core::*;
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
+fn form_limits() -> McpElicitationFormLimits {
+    // Fixture allowances accommodate the exact message/schema exercised below.
+    McpElicitationFormLimits {
+        max_message_bytes: NonZeroUsize::new(64).unwrap(),
+        max_schema_bytes: NonZeroUsize::new(256).unwrap(),
+    }
+}
+
+fn private_form() -> McpElicitationForm {
+    McpElicitationForm::new(
+        "private-form-message".into(),
+        r#"{"type":"object","properties":{"private-form-field":{"type":"string"}}}"#,
+        form_limits(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn mcp_input_form_is_atomic_private_and_not_replayable() {
+    let (data, store, session) = seeded_session().await;
+    let target = ready(&store, McpInstanceOwner::Core).await;
+    let request = request(&store, &session, "form").await;
+    let McpDispatchClaim::Acquired(permit) = claim_mcp_dispatch(&store, request, &target, limits())
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let ordinal = std::num::NonZeroU64::new(1).unwrap();
+    let form = private_form();
+    let wake = store.subscribe_mcp_invocation_events();
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("CREATE TRIGGER reject_test_form BEFORE INSERT ON mcp_elicitation_forms BEGIN SELECT RAISE(ABORT, 'test'); END")
+            .execute(&mut *sql).await.unwrap();
+    }
+    assert_eq!(
+        store
+            .require_mcp_elicitation_form(permit.record(), ordinal, &form, form_limits())
+            .await
+            .err(),
+        Some(McpInvocationError::Unavailable)
+    );
+    assert!(!wake.has_changed().unwrap());
+    {
+        let mut sql = store.connection.lock().await;
+        let counts: (i64, i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM mcp_inputs), (SELECT COUNT(*) FROM mcp_input_events), (SELECT COUNT(*) FROM session_events WHERE event_type='mcp.input_state_changed')")
+            .fetch_one(&mut *sql).await.unwrap();
+        assert_eq!(counts, (0, 0, 0));
+        sqlx::query("DROP TRIGGER reject_test_form")
+            .execute(&mut *sql)
+            .await
+            .unwrap();
+    }
+    let McpElicitationFormMutation::Applied(record) = store
+        .require_mcp_elicitation_form(permit.record(), ordinal, &form, form_limits())
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(wake.has_changed().unwrap());
+    assert_eq!(
+        record.interaction_run,
+        *permit.request().tool_call().run_id()
+    );
+    assert!(!format!("{record:?}").contains("private-form"));
+    {
+        let mut sql = store.connection.lock().await;
+        assert!(
+            sqlx::query("UPDATE mcp_elicitation_forms SET message='replacement'")
+                .execute(&mut *sql)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("DELETE FROM mcp_elicitation_forms")
+                .execute(&mut *sql)
+                .await
+                .is_err()
+        );
+    }
+    // Restart interrupts the parent invocation; the retained body cannot become
+    // a new prompt or response just because the client reconnects.
+    drop(store);
+    let store = super::super::SqliteStore::open(data.path()).await.unwrap();
+    store
+        .interrupt_mcp_invocations(Some(&target.generation), NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_mcp_elicitation_form(&record.input, &record.interaction_run, form_limits())
+            .await
+            .err(),
+        Some(McpInvocationError::Conflict)
+    );
+    assert_eq!(
+        store
+            .require_mcp_elicitation_form(permit.record(), ordinal, &form, form_limits())
+            .await
+            .err(),
+        Some(McpInvocationError::Conflict)
+    );
+    let page = store
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    let public = format!("{:?}", page.events());
+    assert!(!public.contains("private-form"));
+    let states: Vec<_> = page
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            SessionEventPayload::McpInputStateChanged { state, .. } => Some(*state),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [McpInputState::Required, McpInputState::Interrupted]
+    );
+    let mut sql = store.connection.lock().await;
+    let retained: String = sqlx::query_scalar("SELECT message FROM mcp_elicitation_forms")
+        .fetch_one(&mut *sql)
+        .await
+        .unwrap();
+    assert_eq!(retained, form.message());
+}
+
 #[tokio::test]
 async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
     for mode in [RunInputMode::ReadOnly, RunInputMode::Interactive] {
@@ -52,17 +182,39 @@ async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
         else {
             panic!()
         };
-        let McpInputMutation::Applied(input) = store
-            .require_mcp_input(
+        let form = private_form();
+        let McpElicitationFormMutation::Applied(record) = store
+            .require_mcp_elicitation_form(
                 permit.record(),
                 std::num::NonZeroU64::new(1).unwrap(),
-                McpInputKind::Elicitation,
+                &form,
+                form_limits(),
             )
             .await
             .unwrap()
         else {
             panic!()
         };
+        let input = record.input.clone();
+        assert_eq!(
+            store
+                .get_mcp_elicitation_form(&input, &record.interaction_run, form_limits())
+                .await
+                .unwrap(),
+            record
+        );
+        let wrong_owner = if mode == RunInputMode::ReadOnly {
+            &child_id
+        } else {
+            &root_id
+        };
+        assert_eq!(
+            store
+                .get_mcp_elicitation_form(&input, wrong_owner, form_limits())
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
         let wake = store.subscribe_mcp_invocation_events();
         assert_eq!(
             store.mcp_input_interaction_run(&input).await.unwrap(),
@@ -71,6 +223,40 @@ async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
             } else {
                 child_id.clone()
             }
+        );
+        assert!(!wake.has_changed().unwrap());
+        assert_eq!(
+            store
+                .require_mcp_elicitation_form(permit.record(), input.ordinal, &form, form_limits())
+                .await
+                .unwrap(),
+            McpElicitationFormMutation::Existing(record.clone())
+        );
+        assert!(!wake.has_changed().unwrap());
+        let changed =
+            McpElicitationForm::new("changed".into(), form.schema_json(), form_limits()).unwrap();
+        assert_eq!(
+            store
+                .require_mcp_elicitation_form(
+                    permit.record(),
+                    input.ordinal,
+                    &changed,
+                    form_limits()
+                )
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        let smaller = McpElicitationFormLimits {
+            max_message_bytes: NonZeroUsize::new(1).unwrap(),
+            ..form_limits()
+        };
+        assert_eq!(
+            store
+                .get_mcp_elicitation_form(&input, &record.interaction_run, smaller)
+                .await
+                .err(),
+            Some(McpInvocationError::InvalidRequest)
         );
         assert!(!wake.has_changed().unwrap());
         let mut wrong = input.clone();
@@ -148,7 +334,44 @@ async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
                 .await
                 .unwrap();
         }
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET user_input_mode=? WHERE run_id=?")
+                .bind(if mode == RunInputMode::ReadOnly {
+                    "interactive"
+                } else {
+                    "read_only"
+                })
+                .bind(child_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.mcp_input_interaction_run(&input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert_eq!(
+            store.resolve_mcp_input(&input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET user_input_mode=? WHERE run_id=?")
+                .bind(mode.as_str())
+                .bind(child_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
         store.resolve_mcp_input(&input).await.unwrap();
+        assert_eq!(
+            store
+                .get_mcp_elicitation_form(&input, &record.interaction_run, form_limits())
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
         assert_eq!(
             store.mcp_input_interaction_run(&input).await.err(),
             Some(McpInvocationError::Conflict)

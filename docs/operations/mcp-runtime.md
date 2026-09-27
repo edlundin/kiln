@@ -199,8 +199,23 @@ action or execute a provider request; those writers must revalidate ownership.
 Fresh sampling/elicitation resolution rechecks this ancestry in its write
 transaction, so cancellation after a lookup cannot resolve the pending input.
 Rejected resolution leaves its journal and event stream unchanged.
-Sampling/elicitation runtime handlers and the user interaction surface are still
-unimplemented.
+Normalized elicitation form storage is available internally. It creates the
+pending input, its immutable message/schema and interactive owner, and the
+metadata-only input-required Event in one transaction. Failed persistence leaves
+none of these writes behind. Exact pending duplicates are receipts; changed
+forms or a changed owner reject. Inspection requires the recorded interactive
+Run and live same-Session ancestry, and rejects resolved or interrupted inputs.
+The schema/message have explicit host-provided byte allowances, enforced before
+retained payloads are copied out of SQLite. Debug output and public Events omit
+the form body. These private database rows use the existing local database
+protection; they are not encrypted by this feature.
+
+The form container checks size and JSON object shape, not the complete MCP
+elicitation schema or response validity. Protocol validation, authenticated user
+presentation/decision endpoints, response journaling and runtime handlers remain
+to be connected before advertising elicitation. Form persistence itself neither
+publishes a prompt nor grants user approval, provider access or response/replay
+authority. Sampling integration remains unimplemented.
 
 
 Native file reading remains independently configurable. The daemon freezes one

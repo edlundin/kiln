@@ -176,8 +176,7 @@ compares device/inode identity on every demand. A different directory is rejecte
 even with an unchanged revision; a non-directory descriptor is rejected before
 startup or reuse. This protects broader lifecycle scopes from silently inheriting
 another caller's cwd. It does not establish scope authorization or constrain a
-server that changes its own cwd. Directory policy still needs durable host and
-approved-scope integration.
+server that changes its own cwd. Approved-scope launch integration remains open.
 Scope stop retains its owner until cleanup completes. Shutdown seals the registry,
 signals every owner before waiting, and can be awaited again after caller
 cancellation. Dropping the registry requests stop but cannot prove completion;
@@ -233,14 +232,22 @@ vault; actual MCP OS-vault read/write integration remains unverified.
 
 `resolve_persisted_stdio_launch` accepts a stored `McpHostBindingRecord`, resolves
 its references and carries its local instance/revision into the generation claim.
+It requires a caller-authorized checkout equal to the snapshot's working-directory
+selection before reading secrets. The caller must revalidate approval and root
+registration and supply a descriptor pinned from that exact checkout. Snapshots
+without a directory remain readable for administration but cannot use this resolver.
 SQLite serializes that claim with host snapshot publication. A stale revision
 cannot spawn; an active or interrupted generation blocks replacement until its
 cleanup is established. Legacy materialized launches remain available only for
 keys without a persisted snapshot. Published references are excluded from pending
 cleanup; replacing them retires the old references atomically. Exact publication
 retries return immutable receipts without rolling the current snapshot back.
-Snapshots currently persist absolute UTF-8 Unix executable paths and reference
-maps. `retire_mcp_host_bindings` advances the revision and retires its references
+Snapshots persist absolute UTF-8 Unix executable paths, reference maps and an
+optional registered working-directory checkout. Publication and generation
+admission recheck its available root and filesystem identity in the transaction;
+workspace/checkout owners must match, and session owners must belong to its
+workspace. Core ownership still requires an explicitly registered checkout.
+`retire_mcp_host_bindings` advances the revision and retires its references
 atomically after process cleanup. A retained removal tombstone blocks all launch
 claims until explicit republication; retired records fail resolution before vault
 reads. Exact retirement retries never remove a newer publication. Public

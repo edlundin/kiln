@@ -534,6 +534,7 @@ async fn durable_host_revision_is_checked_before_process_spawn() {
     let bindings = McpHostBindings::new(
         key.clone(),
         McpHostBindingInput {
+            working_directory: None,
             instance_id: instance.clone(),
             definition_version: 1,
             runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),

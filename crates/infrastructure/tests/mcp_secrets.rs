@@ -59,6 +59,7 @@ fn snapshot(
     McpHostBindings::new(
         key.clone(),
         McpHostBindingInput {
+            working_directory: None,
             instance_id: instance.clone(),
             definition_version: 1,
             runtime_binding: name("python"),
@@ -276,6 +277,7 @@ async fn removal_is_atomic_idempotent_and_retains_the_launch_fence() {
     let replacement = McpHostBindings::new(
         key.clone(),
         McpHostBindingInput {
+            working_directory: None,
             instance_id: instance,
             definition_version: 3,
             runtime_binding: name("python"),
@@ -741,4 +743,256 @@ async fn reservations_validate_definition_role_and_budget_before_creating_owners
             .unwrap(),
         McpSecretReservation::Fresh
     ));
+}
+
+#[tokio::test]
+async fn working_directory_publication_and_claim_recheck_registered_identity() {
+    let data = tempfile::tempdir().unwrap();
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let def = definition(true);
+    store
+        .register_mcp_definition(&def, 0, "initial", limits())
+        .await
+        .unwrap();
+    let key = McpInstanceKey::new(&def, McpInstanceOwner::Core, 2048).unwrap();
+    let instance = KilnInstanceId::from_ulid(Ulid::generate());
+    let argument = SecretRef::from_ulid(Ulid::generate());
+    let token = SecretRef::from_ulid(Ulid::generate());
+    for (reference, purpose, field) in [
+        (&argument, McpSecretPurpose::Argument, "argument"),
+        (&token, McpSecretPurpose::Environment, "token"),
+    ] {
+        store
+            .reserve_mcp_secret(
+                &binding(&instance, &key, reference, purpose, field),
+                1,
+                limits(),
+            )
+            .await
+            .unwrap();
+    }
+    let workspace = WorkspaceId::from_ulid(Ulid::generate());
+    let root = WorkspaceRootId::from_ulid(Ulid::generate());
+    let checkout = WorkspaceCheckout::from_resolved_paths(
+        workspace.clone(),
+        root.clone(),
+        "subdir",
+        "/fixture",
+        "/fixture/.git",
+        FilesystemIdentity::new("unix:1:2").unwrap(),
+    )
+    .unwrap();
+    let legacy = snapshot(&instance, &key, &argument, &token);
+    let mut metadata: serde_json::Value = serde_json::from_str(legacy.metadata_json()).unwrap();
+    metadata["working_directory"] =
+        serde_json::to_value(McpHostWorkingDirectory::from(&checkout)).unwrap();
+    let selected = McpHostBindings::from_metadata_json(
+        key.clone(),
+        &serde_json::to_vec(&metadata).unwrap(),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(selected.working_directory(), Some(&checkout));
+    metadata["working_directory"]["relative_directory"] = "../escape".into();
+    assert!(
+        McpHostBindings::from_metadata_json(
+            key.clone(),
+            &serde_json::to_vec(&metadata).unwrap(),
+            limits()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&selected, 0, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::InvalidBinding)
+    );
+    let mut sql = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(data.path().join("kiln.sqlite3")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO workspaces (workspace_id,name) VALUES (?, 'fixture')")
+        .bind(workspace.as_str())
+        .execute(&mut sql)
+        .await
+        .unwrap();
+    // Metadata fixture: directory pinning and filesystem access are not claimed.
+    sqlx::query("INSERT INTO workspace_roots (workspace_root_id,workspace_id,name,display_path,canonical_path,git_common_directory_path,position,state,filesystem_identity) VALUES (?, ?, 'root', '/fixture', '/fixture', '/fixture/.git', 0, 'available', 'unix:1:2')")
+        .bind(root.as_str()).bind(workspace.as_str()).execute(&mut sql).await.unwrap();
+    let published = store
+        .publish_mcp_host_bindings(&selected, 0, limits())
+        .await
+        .unwrap();
+    let stored = store
+        .get_mcp_host_bindings(&key, limits())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.bindings.working_directory(), Some(&checkout));
+    let version = McpHostBindingVersion {
+        instance_id: instance,
+        revision: published.revision,
+    };
+    sqlx::query(
+        "UPDATE workspace_roots SET filesystem_identity = 'unix:1:3' WHERE workspace_root_id = ?",
+    )
+    .bind(root.as_str())
+    .execute(&mut sql)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .claim_mcp_instance_with_host_bindings(
+                &key,
+                1,
+                &McpGenerationId::from_ulid(Ulid::generate()),
+                Some(&version),
+                limits()
+            )
+            .await
+            .err(),
+        Some(McpInstanceError::BindingChanged)
+    );
+    assert!(store.get_mcp_instance(&key).await.unwrap().is_none());
+    sqlx::query(
+        "UPDATE workspace_roots SET filesystem_identity = 'unix:1:2' WHERE workspace_root_id = ?",
+    )
+    .bind(root.as_str())
+    .execute(&mut sql)
+    .await
+    .unwrap();
+    assert!(matches!(
+        store
+            .claim_mcp_instance_with_host_bindings(
+                &key,
+                1,
+                &McpGenerationId::from_ulid(Ulid::generate()),
+                Some(&version),
+                limits()
+            )
+            .await
+            .unwrap(),
+        McpInstanceClaim::Acquired(_)
+    ));
+}
+
+#[tokio::test]
+async fn working_directory_cannot_cross_workspace_or_session_ownership() {
+    let data = tempfile::tempdir().unwrap();
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let mut sql = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(data.path().join("kiln.sqlite3")),
+    )
+    .await
+    .unwrap();
+    let workspace = WorkspaceId::from_ulid(Ulid::generate());
+    let other = WorkspaceId::from_ulid(Ulid::generate());
+    let root = WorkspaceRootId::from_ulid(Ulid::generate());
+    for id in [&workspace, &other] {
+        sqlx::query("INSERT INTO workspaces (workspace_id,name) VALUES (?, 'fixture')")
+            .bind(id.as_str())
+            .execute(&mut sql)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO workspace_roots (workspace_root_id,workspace_id,name,display_path,canonical_path,git_common_directory_path,position,state,filesystem_identity) VALUES (?, ?, 'root', '/fixture', '/fixture', '/fixture/.git', 0, 'available', 'unix:1:2')")
+        .bind(root.as_str()).bind(workspace.as_str()).execute(&mut sql).await.unwrap();
+    let own_session = SessionId::from_ulid(Ulid::generate());
+    let other_session = SessionId::from_ulid(Ulid::generate());
+    for (id, owner) in [(&own_session, &workspace), (&other_session, &other)] {
+        sqlx::query("INSERT INTO sessions (session_id,workspace_id) VALUES (?, ?)")
+            .bind(id.as_str())
+            .bind(owner.as_str())
+            .execute(&mut sql)
+            .await
+            .unwrap();
+    }
+    let checkout = WorkspaceCheckout::from_resolved_paths(
+        workspace.clone(),
+        root,
+        "subdir",
+        "/fixture",
+        "/fixture/.git",
+        FilesystemIdentity::new("unix:1:2").unwrap(),
+    )
+    .unwrap();
+    let other_checkout = WorkspaceCheckout::from_resolved_paths(
+        workspace.clone(),
+        checkout.workspace_root_id().clone(),
+        "other",
+        "/fixture",
+        "/fixture/.git",
+        checkout.filesystem_identity().clone(),
+    )
+    .unwrap();
+    for (index, owner, valid) in [
+        (0, McpInstanceOwner::Workspace(workspace), true),
+        (1, McpInstanceOwner::Workspace(other), false),
+        (2, McpInstanceOwner::Session(own_session), true),
+        (3, McpInstanceOwner::Session(other_session), false),
+        (
+            4,
+            McpInstanceOwner::WorkspaceCheckout(checkout.clone()),
+            true,
+        ),
+        (
+            5,
+            McpInstanceOwner::WorkspaceCheckout(other_checkout),
+            false,
+        ),
+    ] {
+        let def = McpServerDefinition::new(
+            SharedMcpServerInput {
+                id: name(&format!("scope-{index}")),
+                enabled: true,
+                transport: SharedMcpTransport::Stdio {
+                    runtime_binding: name("runtime"),
+                    arguments: vec![],
+                    environment: BTreeMap::new(),
+                },
+            },
+            McpProtocolPolicy::Auto,
+            owner.scope(),
+            None,
+            limits(),
+        )
+        .unwrap();
+        store
+            .register_mcp_definition(&def, 0, &format!("register-{index}"), limits())
+            .await
+            .unwrap();
+        let key = McpInstanceKey::new(&def, owner, 2048).unwrap();
+        let input = McpHostBindingInput {
+            instance_id: KilnInstanceId::from_ulid(Ulid::generate()),
+            definition_version: 1,
+            runtime_binding: name("runtime"),
+            executable: "/bin/sh".into(),
+            working_directory: Some((&checkout).into()),
+            arguments: BTreeMap::new(),
+            environment: BTreeMap::new(),
+        };
+        match McpHostBindings::new(key, input, limits()) {
+            Ok(bindings) => {
+                let result = store
+                    .publish_mcp_host_bindings(&bindings, 0, limits())
+                    .await;
+                if valid {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.err(), Some(McpHostBindingError::InvalidBinding));
+                }
+            }
+            Err(error) => {
+                assert!(!valid);
+                assert_eq!(error, McpHostBindingError::InvalidBinding);
+            }
+        }
+    }
 }

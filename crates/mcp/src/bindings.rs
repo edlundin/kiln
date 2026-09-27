@@ -52,6 +52,7 @@ pub struct StdioHostBindingReferences {
 pub async fn resolve_persisted_stdio_launch<S: McpSecretStore>(
     definition: &McpDefinitionRecord,
     record: kiln_core::McpHostBindingRecord,
+    authorized_directory: &kiln_core::WorkspaceCheckout,
     resources: StdioLaunchResources,
     vault: &S,
 ) -> Result<ResolvedStdioLaunch, StdioBindingError> {
@@ -59,6 +60,12 @@ pub async fn resolve_persisted_stdio_launch<S: McpSecretStore>(
         return Err(StdioBindingError::Disabled);
     }
     let bindings = record.bindings;
+    // The caller must revalidate this checkout against the effective approval
+    // and registered root, then supply the descriptor pinned from that checkout.
+    // A legacy snapshot without cwd metadata is administration-only.
+    if bindings.working_directory() != Some(authorized_directory) {
+        return Err(StdioBindingError::InvalidValue);
+    }
     let version = kiln_core::McpHostBindingVersion {
         instance_id: bindings.instance_id().clone(),
         revision: record.revision,

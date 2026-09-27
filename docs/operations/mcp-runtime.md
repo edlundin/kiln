@@ -40,7 +40,7 @@ The registry independently checks the pinned directory's device/inode identity
 before reuse, including for session, workspace and core owners. A different
 directory requires an explicit stop; an unchanged binding revision cannot bypass
 this check. This is a runtime consistency guard, not launch authorization or a
-filesystem sandbox. Durable cwd policy and approved-scope launch wiring remain open.
+filesystem sandbox. Approved-scope launch wiring remains open.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
@@ -200,7 +200,7 @@ piped input, never command arguments, shell history, portable definitions or log
 | `inspect` | None | Local `instance_id` and nullable snapshot with revision, retired flag and reference metadata; no vault reads |
 | `pending` | Positive `batch_size` | Bounded unpublished/retired reference list; no secret values |
 | `import_secret` | `definition_version`, `name`, `purpose` (`argument` or `environment`), `value` | Fresh `secret_ref` after a successful MCP-vault write |
-| `publish` | `expected_revision`, `definition_version`, `runtime_binding`, absolute UTF-8 `executable`, `arguments` and `environment` maps of binding names to returned secret refs | Immutable `registered_revision` receipt |
+| `publish` | `expected_revision`, `definition_version`, `runtime_binding`, absolute UTF-8 `executable`, `arguments` and `environment` maps of binding names to returned secret refs, optional `working_directory` object below | Immutable `registered_revision` receipt |
 | `retire` | Positive `expected_revision` | Immutable `retired_revision` receipt; vault deletion is separate |
 | `reconcile` | Positive `batch_size` | `reconciled` count after retiring pending refs, deleting their vault values, and retaining deletion receipts |
 
@@ -216,6 +216,21 @@ reads, then verifies that the referenced values exist and revalidates in the
 publication transaction. Exact old receipts are returned without vault reads,
 even if their old values have since been deleted. Inspect separately for current
 state. A changed binding revision requires process cleanup first.
+
+`working_directory` selects a registered checkout with `workspace_id`,
+`workspace_root_id`, `relative_directory`, `root_path`,
+`git_common_directory_path` and `filesystem_identity`. Use the registered root's
+exact paths and identity; relative directories cannot traverse upward. Publication
+and generation admission recheck the available root in the same transaction.
+Workspace/checkout owners must match the selection; session owners must belong to
+its workspace. Core owners also use an explicitly selected registered checkout.
+These paths describe registration and never grant filesystem authority.
+
+Old snapshots without `working_directory` remain inspectable, replaceable and
+retirable. They cannot use the persisted launch resolver until republished with a
+directory. Resolution rejects an absent selection or a mismatch with the caller's
+authorized checkout before any vault read. The caller must still recheck approval
+and pin the directory from that checkout; the daemon coordinator is not wired yet.
 
 **Publish wanted imports before reconciliation.** Reconciliation deletes all
 unpublished values in its selected batch, including successful imports that have

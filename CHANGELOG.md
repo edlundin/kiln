@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Bind persisted MCP launch snapshots to a registered checkout and
+  reject unapproved or stale directory selections before vault reads.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/4dd20e4)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Pin MCP generation working-directory identity across registry reuse
   and require explicit stop before adopting a replacement directory.
 

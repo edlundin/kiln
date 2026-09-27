@@ -42,6 +42,8 @@ enum Action {
         definition_version: u64,
         runtime_binding: String,
         executable: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_directory: Option<McpHostWorkingDirectory>,
         arguments: BTreeMap<String, String>,
         environment: BTreeMap<String, String>,
     },
@@ -233,6 +235,7 @@ async fn execute<V: McpSecretStore>(
             definition_version,
             runtime_binding,
             executable,
+            working_directory,
             arguments,
             environment,
         } => {
@@ -255,6 +258,7 @@ async fn execute<V: McpSecretStore>(
                     runtime_binding: SharedConfigurationKey::parse(runtime_binding, budget)
                         .map_err(|_| "invalid runtime binding")?,
                     executable,
+                    working_directory,
                     arguments: refs(arguments)?,
                     environment: refs(environment)?,
                 },
@@ -464,6 +468,21 @@ mod tests {
         invalid["runtime_binding"] = "wrong".into();
         assert!(
             execute(&store, &vault, request(&key, invalid), 4096)
+                .await
+                .is_err()
+        );
+        assert_eq!(*vault.calls.lock().unwrap(), ["put"]);
+        let mut unknown_directory = publish.clone();
+        unknown_directory["working_directory"] = serde_json::json!({
+            "workspace_id": WorkspaceId::from_ulid(ulid::Ulid::generate()).as_str(),
+            "workspace_root_id": WorkspaceRootId::from_ulid(ulid::Ulid::generate()).as_str(),
+            "relative_directory": "",
+            "root_path": "/fixture",
+            "git_common_directory_path": "/fixture/.git",
+            "filesystem_identity": "unix:1:2",
+        });
+        assert!(
+            execute(&store, &vault, request(&key, unknown_directory), 4096)
                 .await
                 .is_err()
         );

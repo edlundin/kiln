@@ -5,6 +5,55 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
+/// Host-local registered checkout selection. Decoding this metadata grants no
+/// authority; publication checks registration and launch must recheck approval
+/// and pin the directory against its recorded filesystem identity.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHostWorkingDirectory {
+    pub workspace_id: String,
+    pub workspace_root_id: String,
+    pub relative_directory: String,
+    pub root_path: String,
+    pub git_common_directory_path: String,
+    pub filesystem_identity: String,
+}
+
+impl From<&crate::WorkspaceCheckout> for McpHostWorkingDirectory {
+    fn from(checkout: &crate::WorkspaceCheckout) -> Self {
+        Self {
+            workspace_id: checkout.workspace_id().as_str().into(),
+            workspace_root_id: checkout.workspace_root_id().as_str().into(),
+            relative_directory: checkout.relative_directory().into(),
+            root_path: checkout.root_path().into(),
+            git_common_directory_path: checkout.git_common_directory_path().into(),
+            filesystem_identity: checkout.filesystem_identity().as_str().into(),
+        }
+    }
+}
+
+impl McpHostWorkingDirectory {
+    fn into_checkout(self) -> Result<crate::WorkspaceCheckout, McpHostBindingError> {
+        let invalid = McpHostBindingError::InvalidRequest;
+        if !self.root_path.starts_with('/')
+            || !self.git_common_directory_path.starts_with('/')
+            || self.root_path.contains('\0')
+            || self.git_common_directory_path.contains('\0')
+        {
+            return Err(invalid);
+        }
+        crate::WorkspaceCheckout::from_resolved_paths(
+            crate::WorkspaceId::parse(self.workspace_id).map_err(|_| invalid)?,
+            crate::WorkspaceRootId::parse(self.workspace_root_id).map_err(|_| invalid)?,
+            self.relative_directory,
+            self.root_path,
+            self.git_common_directory_path,
+            crate::FilesystemIdentity::new(self.filesystem_identity).ok_or(invalid)?,
+        )
+        .map_err(|_| invalid)
+    }
+}
+
 /// Persisted executable paths are UTF-8 absolute Unix paths. Native callers with
 /// other path encodings must use an explicitly authorized materialized launch.
 /// No Debug: paths and binding identities can be private host information.
@@ -13,6 +62,7 @@ pub struct McpHostBindingInput {
     pub definition_version: u64,
     pub runtime_binding: SharedConfigurationKey,
     pub executable: String,
+    pub working_directory: Option<McpHostWorkingDirectory>,
     pub arguments: BTreeMap<SharedConfigurationKey, SecretRef>,
     pub environment: BTreeMap<SharedConfigurationKey, SecretRef>,
 }
@@ -24,6 +74,7 @@ pub struct McpHostBindings {
     definition_version: u64,
     runtime_binding: SharedConfigurationKey,
     executable: String,
+    working_directory: Option<crate::WorkspaceCheckout>,
     arguments: BTreeMap<SharedConfigurationKey, SecretRef>,
     environment: BTreeMap<SharedConfigurationKey, SecretRef>,
     metadata_json: String,
@@ -36,6 +87,8 @@ struct Metadata {
     definition_version: u64,
     runtime_binding: String,
     executable: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    working_directory: Option<McpHostWorkingDirectory>,
     arguments: BTreeMap<String, String>,
     environment: BTreeMap<String, String>,
 }
@@ -73,11 +126,27 @@ impl McpHostBindings {
                 .map(|(key, value)| (key.as_str().to_owned(), value.as_str().to_owned()))
                 .collect()
         };
+        let working_directory = input
+            .working_directory
+            .map(McpHostWorkingDirectory::into_checkout)
+            .transpose()?;
+        if let Some(directory) = &working_directory {
+            let matches_owner = match key.owner() {
+                crate::McpInstanceOwner::WorkspaceCheckout(owner) => owner == directory,
+                crate::McpInstanceOwner::Workspace(id) => id == directory.workspace_id(),
+                // Session membership is checked against the store at publication.
+                crate::McpInstanceOwner::Session(_) | crate::McpInstanceOwner::Core => true,
+            };
+            if !matches_owner {
+                return Err(Error::InvalidBinding);
+            }
+        }
         let metadata = Metadata {
             instance_id: input.instance_id.as_str().into(),
             definition_version: input.definition_version,
             runtime_binding: input.runtime_binding.as_str().into(),
             executable: input.executable.clone(),
+            working_directory: working_directory.as_ref().map(Into::into),
             arguments: refs(&input.arguments),
             environment: refs(&input.environment),
         };
@@ -98,6 +167,7 @@ impl McpHostBindings {
             definition_version: input.definition_version,
             runtime_binding: input.runtime_binding,
             executable: input.executable,
+            working_directory,
             arguments: input.arguments,
             environment: input.environment,
             metadata_json,
@@ -141,6 +211,7 @@ impl McpHostBindings {
                 )
                 .map_err(|_| Error::InvalidRequest)?,
                 executable: raw.executable,
+                working_directory: raw.working_directory,
                 arguments: refs(raw.arguments)?,
                 environment: refs(raw.environment)?,
             },
@@ -165,6 +236,9 @@ impl McpHostBindings {
     }
     pub fn executable(&self) -> &str {
         &self.executable
+    }
+    pub fn working_directory(&self) -> Option<&crate::WorkspaceCheckout> {
+        self.working_directory.as_ref()
     }
     pub fn arguments(&self) -> &BTreeMap<SharedConfigurationKey, SecretRef> {
         &self.arguments

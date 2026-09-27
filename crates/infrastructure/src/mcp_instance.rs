@@ -80,6 +80,20 @@ impl McpInstanceStore for SqliteStore {
                 {
                     return Err(Error::BindingChanged);
                 }
+                let bindings =
+                    super::mcp_host_binding::load_version(&mut tx, key, revision, limits)
+                        .await
+                        .map_err(|e| match e {
+                            kiln_core::McpHostBindingError::Unavailable => Error::Unavailable,
+                            _ => Error::BindingChanged,
+                        })?
+                        .ok_or(Error::BindingChanged)?;
+                super::mcp_host_binding::validate_directory(&mut tx, &bindings.bindings)
+                    .await
+                    .map_err(|e| match e {
+                        kiln_core::McpHostBindingError::Unavailable => Error::Unavailable,
+                        _ => Error::BindingChanged,
+                    })?;
             }
             _ => return Err(Error::BindingChanged),
         }

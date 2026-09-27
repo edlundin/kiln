@@ -129,9 +129,19 @@ async fn vault_resolution_is_scoped_role_specific_and_reads_only_needed_referenc
     let (refs, vault) = references(bindings);
     let instance = refs.instance_id.clone();
     let revision = refs.revision;
+    let checkout = WorkspaceCheckout::from_resolved_paths(
+        WorkspaceId::from_ulid(ulid::Ulid::generate()),
+        WorkspaceRootId::from_ulid(ulid::Ulid::generate()),
+        ".",
+        directory.path().to_str().unwrap(),
+        directory.path().to_str().unwrap(),
+        FilesystemIdentity::new("fixture").unwrap(),
+    )
+    .unwrap();
     let snapshot = McpHostBindings::new(
         refs.key,
         McpHostBindingInput {
+            working_directory: Some((&checkout).into()),
             instance_id: refs.instance_id,
             definition_version: refs.definition_version,
             runtime_binding: refs.runtime_binding,
@@ -151,6 +161,7 @@ async fn vault_resolution_is_scoped_role_specific_and_reads_only_needed_referenc
                 revision,
                 retired: true,
             },
+            &checkout,
             retired_resources,
             &vault
         )
@@ -159,6 +170,47 @@ async fn vault_resolution_is_scoped_role_specific_and_reads_only_needed_referenc
         Some(StdioBindingError::Disabled)
     );
     assert!(vault.reads.lock().unwrap().is_empty());
+    let mut legacy_json: serde_json::Value =
+        serde_json::from_str(snapshot.metadata_json()).unwrap();
+    legacy_json
+        .as_object_mut()
+        .unwrap()
+        .remove("working_directory");
+    let legacy = McpHostBindings::from_metadata_json(
+        snapshot.key().clone(),
+        &serde_json::to_vec(&legacy_json).unwrap(),
+        limits(),
+    )
+    .unwrap();
+    let other_checkout = WorkspaceCheckout::from_resolved_paths(
+        checkout.workspace_id().clone(),
+        checkout.workspace_root_id().clone(),
+        "other",
+        checkout.root_path(),
+        checkout.git_common_directory_path(),
+        checkout.filesystem_identity().clone(),
+    )
+    .unwrap();
+    for (bindings, authorized) in [(legacy, &checkout), (snapshot.clone(), &other_checkout)] {
+        let (_, _, resources) = fixture(directory.path());
+        assert_eq!(
+            resolve_persisted_stdio_launch(
+                &definition,
+                McpHostBindingRecord {
+                    bindings,
+                    revision,
+                    retired: false
+                },
+                authorized,
+                resources,
+                &vault,
+            )
+            .await
+            .err(),
+            Some(StdioBindingError::InvalidValue)
+        );
+        assert!(vault.reads.lock().unwrap().is_empty());
+    }
     let resolved = resolve_persisted_stdio_launch(
         &definition,
         McpHostBindingRecord {
@@ -166,6 +218,7 @@ async fn vault_resolution_is_scoped_role_specific_and_reads_only_needed_referenc
             revision,
             retired: false,
         },
+        &checkout,
         resources,
         &vault,
     )

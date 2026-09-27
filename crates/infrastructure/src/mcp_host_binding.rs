@@ -215,7 +215,7 @@ fn references(
         )
 }
 
-async fn load_version(
+pub(super) async fn load_version(
     connection: &mut SqliteConnection,
     key: &McpInstanceKey,
     revision: i64,
@@ -319,6 +319,7 @@ async fn validate_publication(
             kiln_core::McpInstanceError::Unavailable => Error::Unavailable,
             _ => Error::InvalidBinding,
         })?;
+    validate_directory(&mut *connection, bindings).await?;
     let SharedMcpTransport::Stdio {
         runtime_binding,
         arguments,
@@ -350,4 +351,36 @@ async fn validate_publication(
         }
     }
     Ok(None)
+}
+
+/// Rechecked transactionally at publication and generation admission.
+pub(super) async fn validate_directory(
+    connection: &mut SqliteConnection,
+    bindings: &McpHostBindings,
+) -> Result<(), Error> {
+    if let Some(directory) = bindings.working_directory() {
+        super::mcp_instance::validate_owner(
+            &mut *connection,
+            &kiln_core::McpInstanceOwner::WorkspaceCheckout(directory.clone()),
+        )
+        .await
+        .map_err(|e| match e {
+            kiln_core::McpInstanceError::Unavailable => Error::Unavailable,
+            _ => Error::InvalidBinding,
+        })?;
+        if let kiln_core::McpInstanceOwner::Session(id) = bindings.key().owner() {
+            let matches: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ? AND workspace_id = ?)",
+            )
+            .bind(id.as_str())
+            .bind(directory.workspace_id().as_str())
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+            if !matches {
+                return Err(Error::InvalidBinding);
+            }
+        }
+    }
+    Ok(())
 }

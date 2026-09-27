@@ -23,11 +23,35 @@ JSON-RPC errors remain protocol messages. Arbitrary HTTP failures never synthesi
 a discovery response or authorize a version downgrade. Session expiry is reported
 without replay in the adapter.
 
-The SDK worker's separate reconnect, session recovery and metadata cache policies
-still need lifecycle integration before enabling HTTP in the broker. OAuth,
-legacy HTTP+SSE, live credential administration and official HTTP conformance
-remain open. Tests for this adapter use local HTTP socket fixtures, not remote
-services or real OAuth credentials.
+`http_generation_transport` now constructs a protocol-pinned SDK worker with
+guarded HTTP I/O. Modern generations reject GET/resume, session IDs and initialize;
+legacy generations permit at most one initialize. SDK session recovery/replay is
+disabled. Network/protocol/limit failures close admission, while one separate
+legacy DELETE cleanup attempt remains available. Already admitted I/O can still
+finish; failure does not undo remote effects. These are in-memory transport guards,
+not durable generation retirement or permission to dispatch.
+Requests require a correlated JSON response or an SSE response stream; HTTP 202
+cannot leave a request pending indefinitely. Notifications and replies require
+the accepted response instead.
+
+Hosts must additionally choose a channel capacity, lifetime POST/GET exchange
+allowance and cumulative encoded tools/list allowance. The latter conservatively
+bounds the SDK's retained tool-header schema cache, including changing names;
+repeated catalogue results also consume it. Exhaustion requires owner retirement,
+never silent budget reset. These are encoded-byte and count bounds, not exact
+heap-size measurements. The worker serializes ordinary POSTs and keeps its separate
+control slot available for cancellation/replies.
+
+Legacy SSE reconnects require an explicit `legacy_resume_delay`; all attempts
+consume the same exchange allowance. Network interruptions can resume, while
+malformed or over-budget streams cannot. Modern HTTP requires that option unset
+and has an I/O guard because SDK `NeverRetry` alone does not prevent every resume.
+The 2024 HTTP+SSE adapter is separate and remains unimplemented.
+
+HTTP startup negotiation, durable lifecycle/host-binding and broker integration,
+OAuth, live credential administration and official HTTP conformance remain open.
+Tests use local HTTP socket fixtures and the real SDK worker, not remote services
+or real OAuth credentials.
 
 ### Stdio lifecycle settings
 

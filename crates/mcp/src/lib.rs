@@ -28,9 +28,11 @@ pub use discovery::{McpCatalogEntries, McpCatalogKind, discover_catalog};
 #[cfg(unix)]
 mod generation;
 mod http_client;
+mod http_generation;
 mod http_sse;
 mod negotiation;
 pub use http_client::{BoundedHttpClient, McpHttpError, McpHttpLimits};
+pub use http_generation::{McpHttpGenerationConfig, http_generation_transport};
 #[cfg(unix)]
 mod output;
 #[cfg(unix)]

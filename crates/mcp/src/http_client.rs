@@ -40,6 +40,9 @@ pub enum McpHttpError {
     InvalidResponse,
     HttpStatus(u16),
     Network,
+    GenerationClosed,
+    GenerationLimit,
+    ProtocolViolation,
 }
 
 impl std::fmt::Display for McpHttpError {

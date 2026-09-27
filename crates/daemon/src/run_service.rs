@@ -1085,6 +1085,47 @@ fn preflight_failure_message(error: RunError) -> &'static str {
 }
 
 impl RunOperations for RunService {
+    #[cfg(unix)]
+    async fn inspect_mcp_elicitation(
+        &self,
+        input: kiln_core::McpInputRecord,
+        interaction_run: RunId,
+    ) -> Result<kiln_core::McpElicitationForm, kiln_core::McpInvocationError> {
+        let limits = self.mcp_elicitation_limits()?;
+        let record = kiln_core::McpElicitationFormStore::get_mcp_elicitation_form(
+            &self.store,
+            &input,
+            &interaction_run,
+            limits.form,
+        )
+        .await?;
+        kiln_mcp::McpElicitationValidator::new(&record.form, limits)
+            .map_err(|_| kiln_core::McpInvocationError::IntegrityViolation)?;
+        Ok(record.form)
+    }
+
+    #[cfg(unix)]
+    async fn decide_mcp_elicitation(
+        &self,
+        input: kiln_core::McpInputRecord,
+        interaction_run: RunId,
+        decision_json: String,
+    ) -> Result<kiln_core::McpElicitationDecisionMutation, kiln_core::McpInvocationError> {
+        let limits = self.mcp_elicitation_limits()?;
+        let decision = kiln_core::McpElicitationDecision::from_json(
+            &decision_json,
+            limits.max_response_bytes,
+        )?;
+        kiln_mcp::decide_elicitation_form(&self.store, &input, &interaction_run, &decision, limits)
+            .await
+            .map_err(|error| match error {
+                kiln_mcp::McpElicitationDecisionError::Store(error) => error,
+                kiln_mcp::McpElicitationDecisionError::Validation(_) => {
+                    kiln_core::McpInvocationError::InvalidRequest
+                }
+            })
+    }
+
     async fn inspect_tool_call(
         &self,
         tool_call_id: ToolCallId,

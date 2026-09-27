@@ -237,19 +237,40 @@ Deciding does not resolve the input or send a response. An attached form cannot
 resolve until a decision exists; both the store and database enforce this.
 Resolved/interrupted inputs and cancelled ancestry cannot return a decision for
 replay. Callers must authenticate user access to the interaction owner; the
-internal storage API does not establish user identity. Authenticated daemon
-presentation/decision endpoints remain to be connected before the daemon can
-advertise elicitation. Form persistence itself neither
+internal storage API does not establish user identity. The daemon exposes the
+authenticated inspection/decision API described below. Form persistence itself neither
 publishes a prompt nor grants user approval, provider access or response/replay
 authority. Sampling integration remains unimplemented.
 
 A Rust host with an authenticated interaction surface can construct
 `McpRegistry::new_with_elicitation` using explicit form-message, schema and
 response byte allowances. The policy is immutable for all generations owned by
-that registry; ordinary `new`, direct generation spawns and the daemon remain
-default-off. Enabled generations advertise form elicitation with schema
+that registry; ordinary `new` and direct generation spawns remain default-off.
+The daemon opts in only when `KILN_MCP_ELICITATION_LIMITS` supplies an object with
+explicit positive `max_message_bytes`, `max_schema_bytes` and
+`max_response_bytes`. Missing fields, zero values and unknown fields reject
+startup. These are host resource budgets; Kiln supplies no implicit values.
+The lifecycle registry settings are required as well. Enabled generations advertise form elicitation with schema
 validation, never URL elicitation or sampling. The existing per-call input quota
 must also be enabled.
+
+Protocol 0.46.0 adds `GET` and `POST` on
+`/v1/runs/{run_id}/mcp-elicitation/{tool_call_id}/{generation}/{ordinal}`.
+The identifiers come from the input-state Event; `run_id` identifies the live
+interactive owner (the interactive root for a read-only child). All routes use
+the daemon's existing bearer credential, Host and Origin checks. Inspection
+returns the private untrusted `message` and `schema_json`; render these as data,
+never executable UI or instructions. Both successful operations use
+`Cache-Control: no-store`. Forms and decisions stay outside public Events.
+
+POST accepts exactly `{"action":"accept","content":{...}}`,
+`{"action":"decline"}` or `{"action":"cancel"}`. Acceptance validates the
+requested schema, field names and encoded response budget. First decision wins;
+a pending exact repeat returns `{"applied":false}`. Changed decisions, stale
+generations, wrong owners, cancelled ancestry and terminal input reject. There
+is no replay permit and no separate idempotency key. Clients must reconcile via
+input-state Events after an uncertain response rather than replaying an MCP call.
+The typed Rust client supports both operations. A graphical form UI remains open.
 
 Legacy `elicitation/create` callbacks and modern form MRTR use the same handler.
 It normalizes SDK-decoded form fields into private storage, validates the form,

@@ -88,6 +88,26 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 pub trait RunOperations: Send + Sync {
+    fn inspect_mcp_elicitation(
+        &self,
+        _input: kiln_core::McpInputRecord,
+        _interaction_run: RunId,
+    ) -> impl Future<Output = Result<kiln_core::McpElicitationForm, kiln_core::McpInvocationError>> + Send
+    {
+        async { Err(kiln_core::McpInvocationError::Unavailable) }
+    }
+
+    fn decide_mcp_elicitation(
+        &self,
+        _input: kiln_core::McpInputRecord,
+        _interaction_run: RunId,
+        _decision_json: String,
+    ) -> impl Future<
+        Output = Result<kiln_core::McpElicitationDecisionMutation, kiln_core::McpInvocationError>,
+    > + Send {
+        async { Err(kiln_core::McpInvocationError::Unavailable) }
+    }
+
     fn start_run(
         &self,
         session_id: SessionId,
@@ -1159,6 +1179,10 @@ where
         .route(SESSION_RUNS_PATH, post(start_run).get(list_session_runs))
         .route(RUN_CHILDREN_PATH, post(start_child_run))
         .route(RUN_PATH, get(get_run))
+        .route(
+            kiln_protocol::MCP_ELICITATION_PATH,
+            get(inspect_mcp_elicitation).post(decide_mcp_elicitation),
+        )
         .route(RUN_MODEL_SELECTION_PATH, get(get_run_model_selection))
         .route(RUN_INPUT_PATH, post(send_run_input))
         .route(RUN_REACTIONS_PATH, post(react_to_run_activity))
@@ -2041,6 +2065,77 @@ where
     Ok((
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(response),
+    ))
+}
+
+// Path identities are expectations only; the store revalidates the entire live
+// input and interaction ancestry before exposing content or recording a choice.
+fn elicitation_input(
+    (run, tool, generation, ordinal): (String, String, String, String),
+) -> Result<(RunId, kiln_core::McpInputRecord), PublicError> {
+    let invalid = || PublicError::InvalidRequest;
+    Ok((
+        RunId::parse(run).map_err(|_| invalid())?,
+        kiln_core::McpInputRecord {
+            invocation: kiln_core::McpInvocationRecord {
+                tool_call_id: kiln_core::ToolCallId::parse(tool).map_err(|_| invalid())?,
+                generation: kiln_core::McpGenerationId::parse(generation).map_err(|_| invalid())?,
+                state: kiln_core::McpInvocationState::Dispatching,
+            },
+            ordinal: ordinal.parse().map_err(|_| invalid())?,
+            kind: kiln_core::McpInputKind::Elicitation,
+            state: kiln_core::McpInputState::Required,
+        },
+    ))
+}
+
+async fn inspect_mcp_elicitation<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(identity): Path<(String, String, String, String)>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let (owner, input) = elicitation_input(identity)?;
+    let form = state
+        .run_operations
+        .inspect_mcp_elicitation(input, owner)
+        .await
+        .map_err(PublicError::McpInput)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(kiln_protocol::McpElicitationFormResponse {
+            message: form.message().to_owned(),
+            schema_json: form.schema_json().to_owned(),
+        }),
+    ))
+}
+
+async fn decide_mcp_elicitation<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(identity): Path<(String, String, String, String)>,
+    StrictJson(request): StrictJson<kiln_protocol::McpElicitationDecisionRequest>,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let _command = state.lifecycle.begin_command()?;
+    let (owner, input) = elicitation_input(identity)?;
+    let decision = serde_json::to_string(&request).map_err(|_| PublicError::InvalidRequest)?;
+    let mutation = state
+        .run_operations
+        .decide_mcp_elicitation(input, owner, decision)
+        .await
+        .map_err(PublicError::McpInput)?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(kiln_protocol::McpElicitationDecisionResponse {
+            applied: matches!(mutation, kiln_core::McpElicitationDecisionMutation::Applied),
+        }),
     ))
 }
 
@@ -3394,6 +3489,8 @@ enum PublicError {
     Run(RunError),
     #[error("tool request inspection failed")]
     ToolInspection(kiln_core::ToolCallInspectionError),
+    #[error("MCP input operation failed")]
+    McpInput(kiln_core::McpInvocationError),
     #[error("artifact operation failed")]
     Artifact(ArtifactFetchError),
     #[error("artifact upload failed")]
@@ -4011,6 +4108,33 @@ impl PublicError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     error_code::TASK_STORE_UNAVAILABLE,
                     "Task store unavailable",
+                ),
+            },
+            Self::McpInput(error) => match error {
+                kiln_core::McpInvocationError::InvalidRequest => (
+                    StatusCode::BAD_REQUEST,
+                    error_code::INVALID_REQUEST,
+                    "Invalid MCP input",
+                ),
+                kiln_core::McpInvocationError::NotFound => (
+                    StatusCode::NOT_FOUND,
+                    error_code::MCP_INPUT_NOT_FOUND,
+                    "MCP input not found",
+                ),
+                kiln_core::McpInvocationError::Unavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::MCP_INPUT_UNAVAILABLE,
+                    "MCP input unavailable",
+                ),
+                kiln_core::McpInvocationError::IntegrityViolation => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code::MCP_INPUT_UNAVAILABLE,
+                    "MCP input unavailable",
+                ),
+                _ => (
+                    StatusCode::CONFLICT,
+                    error_code::MCP_INPUT_CONFLICT,
+                    "MCP input changed",
                 ),
             },
             Self::ToolInspection(error) => match error {

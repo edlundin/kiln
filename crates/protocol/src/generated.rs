@@ -19,17 +19,18 @@ use crate::{
     ConfigurationFollowerEnrollmentResponse, ConfigurationIdentitySetupResponse,
     ConfigurationReadGrantListResponse, ConfigurationReadGrantResponse,
     ConfigurationSnapshotApplyDisposition, ConfigureMasterIdentityRequest,
-    EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    DECIDE_MCP_ELICITATION_OPERATION_ID, EXCHANGE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     ExchangeConfigurationFollowerEnrollmentRequest,
     FETCH_CONFIGURATION_FOLLOWER_SNAPSHOT_OPERATION_ID, FetchConfigurationFollowerSnapshotRequest,
     FetchConfigurationFollowerSnapshotResponse, GET_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     GET_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     GET_CONFIGURATION_READ_GRANT_BY_ATTEMPT_OPERATION_ID,
-    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, INSPECT_TOOL_CALL_OPERATION_ID,
-    LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID,
+    GET_CONFIGURATION_READ_GRANT_OPERATION_ID, INSPECT_MCP_ELICITATION_OPERATION_ID,
+    INSPECT_TOOL_CALL_OPERATION_ID, LIST_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_OPERATION_ID,
     LIST_CONFIGURATION_FOLLOWER_ENROLLMENTS_OPERATION_ID,
-    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID, NativeToolSourceResponse,
-    PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
+    LIST_CONFIGURATION_READ_GRANTS_OPERATION_ID, MCP_ELICITATION_PATH,
+    McpElicitationDecisionRequest, McpElicitationDecisionResponse, McpElicitationFormResponse,
+    NativeToolSourceResponse, PREPARE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
     PrepareConfigurationFollowerEnrollmentRequest,
     REJECT_CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_OPERATION_ID,
     RETIRE_CONFIGURATION_FOLLOWER_ENROLLMENT_OPERATION_ID,
@@ -561,6 +562,18 @@ fn schema() -> String {
         ),
         ("ApprovalDecision", schema_for!(ApprovalDecision)),
         (
+            "McpElicitationFormResponse",
+            schema_for!(McpElicitationFormResponse),
+        ),
+        (
+            "McpElicitationDecisionRequest",
+            schema_for!(McpElicitationDecisionRequest),
+        ),
+        (
+            "McpElicitationDecisionResponse",
+            schema_for!(McpElicitationDecisionResponse),
+        ),
+        (
             "NativeToolSourceResponse",
             schema_for!(NativeToolSourceResponse),
         ),
@@ -760,6 +773,9 @@ fn typescript() -> String {
         ApprovalPolicy::decl(&config),
         ApprovalDecisionRequest::decl(&config),
         ApprovalDecision::decl(&config),
+        McpElicitationFormResponse::decl(&config),
+        McpElicitationDecisionRequest::decl(&config),
+        McpElicitationDecisionResponse::decl(&config),
         NativeToolSourceResponse::decl(&config),
         ToolCallInspectionResponse::decl(&config),
         RunState::decl(&config),
@@ -1027,6 +1043,8 @@ fn catalogue() -> String {
         .expect("catalogue HTTP operations are an array")
         .extend([
             json!({"method":"GET", "path":TOOL_CALL_INSPECTION_PATH, "operation":INSPECT_TOOL_CALL_OPERATION_ID}),
+            json!({"method":"GET", "path":MCP_ELICITATION_PATH, "operation":INSPECT_MCP_ELICITATION_OPERATION_ID}),
+            json!({"method":"POST", "path":MCP_ELICITATION_PATH, "operation":DECIDE_MCP_ELICITATION_OPERATION_ID}),
             json!({
                 "method": "GET",
                 "path": CONFIGURATION_FOLLOWER_ENROLLMENT_REQUESTS_PATH,
@@ -3062,6 +3080,76 @@ paths:
           $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
+  {MCP_ELICITATION_PATH}:
+    parameters:
+      - name: run_id
+        in: path
+        required: true
+        description: Live interactive owner, including the root owner of read-only children.
+        schema: {{type: string}}
+      - name: tool_call_id
+        in: path
+        required: true
+        schema: {{type: string}}
+      - name: generation
+        in: path
+        required: true
+        schema: {{type: string}}
+      - name: ordinal
+        in: path
+        required: true
+        schema: {{type: integer, minimum: 1}}
+    get:
+      operationId: {INSPECT_MCP_ELICITATION_OPERATION_ID}
+      responses:
+        '200':
+          description: Private untrusted form, only while the exact input and owner remain live.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpElicitationFormResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
+    post:
+      operationId: {DECIDE_MCP_ELICITATION_OPERATION_ID}
+      description: First decision wins. Exact pending repeats return applied=false; terminal or changed inputs reject. No transport retry or replay is authorized. Content is private and is not written to public Events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/McpElicitationDecisionRequest'
+      responses:
+        '200':
+          description: Durable decision receipt, not an execution permit.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/McpElicitationDecisionResponse'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '500':
+          $ref: '#/components/responses/Problem'
+        '503':
+          $ref: '#/components/responses/Problem'
   {TOOL_CALL_APPROVAL_PATH}:
     post:
       operationId: {DECIDE_APPROVAL_OPERATION_ID}
@@ -3584,6 +3672,18 @@ components:
             openapi_schema::<ApprovalDecisionRequest>(),
         ),
         ("ApprovalDecision", openapi_schema::<ApprovalDecision>()),
+        (
+            "McpElicitationFormResponse",
+            openapi_schema::<McpElicitationFormResponse>(),
+        ),
+        (
+            "McpElicitationDecisionRequest",
+            openapi_schema::<McpElicitationDecisionRequest>(),
+        ),
+        (
+            "McpElicitationDecisionResponse",
+            openapi_schema::<McpElicitationDecisionResponse>(),
+        ),
         ("RunState", openapi_schema::<RunState>()),
         ("RunInputMode", openapi_schema::<RunInputMode>()),
         ("ToolCallState", openapi_schema::<ToolCallState>()),

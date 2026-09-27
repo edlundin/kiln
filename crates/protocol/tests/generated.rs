@@ -22,6 +22,29 @@ use kiln_protocol::{
 use serde_json::json;
 
 #[test]
+fn elicitation_decisions_require_exact_action_and_object_content() {
+    use kiln_protocol::McpElicitationDecisionRequest as Decision;
+    for value in [
+        json!({"action":"accept","content":{"proceed":true}}),
+        json!({"action":"decline"}),
+        json!({"action":"cancel"}),
+    ] {
+        let decision: Decision = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decision).unwrap(), value);
+    }
+    for value in [
+        json!({"action":"accept"}),
+        json!({"action":"accept","content":null}),
+        json!({"action":"accept","content":[]}),
+        json!({"action":"decline","content":{}}),
+        json!({"action":"cancel","content":null}),
+        json!({"action":"cancel","_meta":{}}),
+    ] {
+        assert!(serde_json::from_value::<Decision>(value).is_err());
+    }
+}
+
+#[test]
 fn stored_artifacts_match_rust_protocol_types() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest_dir.join("../../protocol/generated");

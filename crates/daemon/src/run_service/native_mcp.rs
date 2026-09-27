@@ -176,6 +176,26 @@ pub(crate) fn configured_native_mcp() -> Result<Option<NativeMcp>, &'static str>
 }
 
 impl RunService {
+    pub(super) fn mcp_elicitation_limits(
+        &self,
+    ) -> Result<kiln_mcp::McpElicitationValidationLimits, kiln_core::McpInvocationError> {
+        let mut limits = self
+            .mcp_registry
+            .as_ref()
+            .and_then(|registry| registry.elicitation_limits())
+            .ok_or(kiln_core::McpInvocationError::Unavailable)?;
+        let native = self
+            .native_mcp
+            .as_ref()
+            .ok_or(kiln_core::McpInvocationError::Unavailable)?;
+        // Match the runtime waiter's effective response allowance so a decision
+        // accepted by the API cannot exceed the invocation's response budget.
+        limits.max_response_bytes = limits
+            .max_response_bytes
+            .min(native.limits.max_result_bytes);
+        Ok(limits)
+    }
+
     pub(crate) fn with_native_mcp(mut self, mcp: Option<NativeMcp>) -> Result<Self, &'static str> {
         if mcp.is_some() && self.mcp_registry.is_none() {
             return Err("native MCP tools require the configured MCP lifecycle registry");
@@ -933,28 +953,126 @@ for line in sys.stdin:
                         store.mcp_input_interaction_run(&input).await.unwrap(),
                         run_id
                     );
-                    let form = store
-                        .get_mcp_elicitation_form(&input, &run_id, form_limits.form)
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let token = [b'a'; 80];
+                    let state = kiln_server::AppState::with_operations(
+                        StoreMetadata::default(),
+                        address,
+                        WorkspaceApplication::new(
+                            kiln_infrastructure::GitWorkspaceRootDiscovery,
+                            store.clone(),
+                            UlidIdGenerator,
+                        ),
+                        SessionApplication::new(store.clone(), store.clone(), UlidIdGenerator),
+                        service.clone(),
+                        service.events.clone(),
+                        kiln_server::AuthToken::from_bytes(token),
+                    );
+                    let server = tokio::spawn(kiln_server::serve(listener, state));
+                    let client =
+                        kiln_client::Client::new(address, std::str::from_utf8(&token).unwrap())
+                            .unwrap();
+                    let path = kiln_protocol::MCP_ELICITATION_PATH
+                        .replace("{run_id}", run_id.as_str())
+                        .replace("{tool_call_id}", input.invocation.tool_call_id.as_str())
+                        .replace("{generation}", input.invocation.generation.as_str())
+                        .replace("{ordinal}", &input.ordinal.to_string());
+                    let url = format!("http://{address}{path}");
+                    let http = reqwest::Client::new();
+                    assert_eq!(
+                        http.get(&url).send().await.unwrap().status(),
+                        reqwest::StatusCode::UNAUTHORIZED
+                    );
+                    let inspected = http
+                        .get(&url)
+                        .bearer_auth(std::str::from_utf8(&token).unwrap())
+                        .send()
                         .await
                         .unwrap();
-                    assert_eq!(form.form.message(), "Confirm fixture action");
-                    let decision = McpElicitationDecision::from_json(
-                        r#"{"action":"accept","content":{"proceed":true}}"#,
-                        form_limits.max_response_bytes,
-                    )
-                    .unwrap();
+                    assert_eq!(inspected.status(), reqwest::StatusCode::OK);
                     assert_eq!(
-                        kiln_mcp::decide_elicitation_form(
-                            &store,
-                            &input,
-                            &run_id,
-                            &decision,
-                            form_limits
+                        inspected.headers()[reqwest::header::CACHE_CONTROL],
+                        "no-store"
+                    );
+                    let form = client
+                        .inspect_mcp_elicitation(
+                            run_id.as_str(),
+                            input.invocation.tool_call_id.as_str(),
+                            input.invocation.generation.as_str(),
+                            input.ordinal,
                         )
                         .await
-                        .unwrap(),
-                        McpElicitationDecisionMutation::Applied
+                        .unwrap();
+                    assert_eq!(form.message, "Confirm fixture action");
+                    let wrong_owner = RunId::from_ulid(ulid::Ulid::generate());
+                    assert_eq!(
+                        http.post(&url)
+                            .json(&serde_json::json!({"action":"cancel"}))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        reqwest::StatusCode::UNAUTHORIZED
                     );
+                    assert!(
+                        client
+                            .decide_mcp_elicitation(
+                                wrong_owner.as_str(),
+                                input.invocation.tool_call_id.as_str(),
+                                input.invocation.generation.as_str(),
+                                input.ordinal,
+                                &kiln_protocol::McpElicitationDecisionRequest::Cancel {}
+                            )
+                            .await
+                            .is_err()
+                    );
+                    assert!(
+                        client
+                            .inspect_mcp_elicitation(
+                                wrong_owner.as_str(),
+                                input.invocation.tool_call_id.as_str(),
+                                input.invocation.generation.as_str(),
+                                input.ordinal
+                            )
+                            .await
+                            .is_err()
+                    );
+                    assert!(
+                        client
+                            .decide_mcp_elicitation(
+                                run_id.as_str(),
+                                input.invocation.tool_call_id.as_str(),
+                                input.invocation.generation.as_str(),
+                                input.ordinal,
+                                &kiln_protocol::McpElicitationDecisionRequest::Accept {
+                                    content: serde_json::from_value(
+                                        serde_json::json!({"proceed":42})
+                                    )
+                                    .unwrap()
+                                }
+                            )
+                            .await
+                            .is_err()
+                    );
+                    let decision = client
+                        .decide_mcp_elicitation(
+                            run_id.as_str(),
+                            input.invocation.tool_call_id.as_str(),
+                            input.invocation.generation.as_str(),
+                            input.ordinal,
+                            &kiln_protocol::McpElicitationDecisionRequest::Accept {
+                                content: serde_json::from_value(
+                                    serde_json::json!({"proceed":true}),
+                                )
+                                .unwrap(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    assert!(decision.applied);
+                    server.abort();
+                    let _ = server.await;
                     return;
                 }
                 input_changes.changed().await.unwrap();

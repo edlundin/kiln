@@ -11,8 +11,14 @@ pub(crate) async fn configured_registry(
 ) -> Result<Option<Arc<StdioRegistry<SqliteStore>>>, &'static str> {
     let capacity = std::env::var("KILN_MCP_MAX_INSTANCES");
     let recovery_batch = std::env::var("KILN_MCP_RECOVERY_BATCH_SIZE");
+    let elicitation = match std::env::var("KILN_MCP_ELICITATION_LIMITS") {
+        Ok(json) => Some(elicitation_limits(&json)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err("MCP elicitation limits must be valid JSON"),
+    };
     if matches!(capacity, Err(std::env::VarError::NotPresent))
         && matches!(recovery_batch, Err(std::env::VarError::NotPresent))
+        && elicitation.is_none()
     {
         return Ok(None);
     }
@@ -26,10 +32,33 @@ pub(crate) async fn configured_registry(
         .parse()
         .map_err(|_| invalid)?;
     recover(store, recovery_batch).await?;
-    Ok(Some(Arc::new(StdioRegistry::new(
-        Arc::new(store.clone()),
-        capacity,
-    ))))
+    let store = Arc::new(store.clone());
+    Ok(Some(Arc::new(match elicitation {
+        Some(limits) => StdioRegistry::new_with_elicitation(store, capacity, limits),
+        None => StdioRegistry::new(store, capacity),
+    })))
+}
+
+fn elicitation_limits(
+    json: &str,
+) -> Result<kiln_mcp::McpElicitationValidationLimits, &'static str> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Limits {
+        max_message_bytes: NonZeroUsize,
+        max_schema_bytes: NonZeroUsize,
+        max_response_bytes: NonZeroUsize,
+    }
+    let limits: Limits = serde_json::from_str(json).map_err(
+        |_| "MCP elicitation requires explicit positive message, schema and response byte limits",
+    )?;
+    Ok(kiln_mcp::McpElicitationValidationLimits {
+        form: kiln_core::McpElicitationFormLimits {
+            max_message_bytes: limits.max_message_bytes,
+            max_schema_bytes: limits.max_schema_bytes,
+        },
+        max_response_bytes: limits.max_response_bytes,
+    })
 }
 
 async fn recover(store: &SqliteStore, batch_size: NonZeroUsize) -> Result<(), &'static str> {
@@ -60,6 +89,27 @@ mod tests {
     use super::*;
     use kiln_core::*;
     use std::{collections::BTreeMap, time::Duration};
+
+    #[test]
+    fn elicitation_configuration_requires_all_positive_budgets() {
+        let valid = serde_json::json!({"max_message_bytes":64,"max_schema_bytes":512,"max_response_bytes":128});
+        assert!(elicitation_limits(&valid.to_string()).is_ok());
+        for key in [
+            "max_message_bytes",
+            "max_schema_bytes",
+            "max_response_bytes",
+        ] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(elicitation_limits(&missing.to_string()).is_err());
+            let mut zero = valid.clone();
+            zero[key] = serde_json::json!(0);
+            assert!(elicitation_limits(&zero.to_string()).is_err());
+        }
+        let mut extra = valid;
+        extra["unknown"] = serde_json::json!(1);
+        assert!(elicitation_limits(&extra.to_string()).is_err());
+    }
 
     fn limits() -> McpDefinitionLimits {
         McpDefinitionLimits {

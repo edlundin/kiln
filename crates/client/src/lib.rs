@@ -1400,6 +1400,39 @@ impl Client {
         .await
     }
 
+    pub async fn inspect_mcp_elicitation(
+        &self,
+        run_id: &str,
+        tool_call_id: &str,
+        generation: &str,
+        ordinal: std::num::NonZeroU64,
+    ) -> Result<kiln_protocol::McpElicitationFormResponse, Error> {
+        let path = mcp_elicitation_path(run_id, tool_call_id, generation, ordinal)?;
+        self.send_json(
+            kiln_protocol::INSPECT_MCP_ELICITATION_OPERATION_ID,
+            self.http.get(self.http_url(&path)),
+        )
+        .await
+    }
+
+    /// Records a private decision; an exact pending repeat returns applied=false.
+    /// Terminal or changed inputs fail instead of authorizing another response.
+    pub async fn decide_mcp_elicitation(
+        &self,
+        run_id: &str,
+        tool_call_id: &str,
+        generation: &str,
+        ordinal: std::num::NonZeroU64,
+        request: &kiln_protocol::McpElicitationDecisionRequest,
+    ) -> Result<kiln_protocol::McpElicitationDecisionResponse, Error> {
+        let path = mcp_elicitation_path(run_id, tool_call_id, generation, ordinal)?;
+        self.send_json(
+            kiln_protocol::DECIDE_MCP_ELICITATION_OPERATION_ID,
+            self.http.post(self.http_url(&path)).json(request),
+        )
+        .await
+    }
+
     pub async fn list_session_events(
         &self,
         session_id: &str,
@@ -1795,6 +1828,23 @@ fn with_idempotency_key(
     }
     let value = HeaderValue::from_str(idempotency_key).map_err(|_| Error::InvalidIdempotencyKey)?;
     Ok(request.header(IDEMPOTENCY_KEY_HEADER, value))
+}
+
+fn mcp_elicitation_path(
+    run_id: &str,
+    tool_call_id: &str,
+    generation: &str,
+    ordinal: std::num::NonZeroU64,
+) -> Result<String, Error> {
+    path_with_segments(
+        kiln_protocol::MCP_ELICITATION_PATH,
+        &[
+            ("{run_id}", "run_id", run_id),
+            ("{tool_call_id}", "tool_call_id", tool_call_id),
+            ("{generation}", "generation", generation),
+            ("{ordinal}", "ordinal", &ordinal.to_string()),
+        ],
+    )
 }
 
 fn path_with_segment(

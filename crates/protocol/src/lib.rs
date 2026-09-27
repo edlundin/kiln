@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.45.0";
+pub const PROTOCOL_VERSION: &str = "0.46.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -197,10 +197,17 @@ pub const REACT_TO_RUN_ACTIVITY_OPERATION_ID: &str = "react_to_run_activity";
 pub const CANCEL_RUN_OPERATION_ID: &str = "cancel_run";
 pub const DECIDE_APPROVAL_OPERATION_ID: &str = "decide_approval";
 pub const INSPECT_TOOL_CALL_OPERATION_ID: &str = "inspect_tool_call";
+pub const MCP_ELICITATION_PATH: &str =
+    "/v1/runs/{run_id}/mcp-elicitation/{tool_call_id}/{generation}/{ordinal}";
+pub const INSPECT_MCP_ELICITATION_OPERATION_ID: &str = "inspect_mcp_elicitation";
+pub const DECIDE_MCP_ELICITATION_OPERATION_ID: &str = "decide_mcp_elicitation";
 pub const GET_ARTIFACT_OPERATION_ID: &str = "get_artifact";
 pub const UPLOAD_ARTIFACT_OPERATION_ID: &str = "upload_artifact";
 
 pub mod error_code {
+    pub const MCP_INPUT_NOT_FOUND: &str = "mcp_input_not_found";
+    pub const MCP_INPUT_UNAVAILABLE: &str = "mcp_input_unavailable";
+    pub const MCP_INPUT_CONFLICT: &str = "mcp_input_conflict";
     pub const TOOL_SOURCE_NOT_FOUND: &str = "tool_source_not_found";
     pub const TOOL_SOURCE_LIMIT_EXCEEDED: &str = "tool_source_limit_exceeded";
     pub const TOOL_SOURCE_UNAVAILABLE: &str = "tool_source_unavailable";
@@ -314,6 +321,9 @@ pub mod error_code {
 
     pub const ALL: &[&str] = &[
         TOOL_SOURCE_NOT_FOUND,
+        MCP_INPUT_NOT_FOUND,
+        MCP_INPUT_UNAVAILABLE,
+        MCP_INPUT_CONFLICT,
         TOOL_SOURCE_LIMIT_EXCEEDED,
         TOOL_SOURCE_UNAVAILABLE,
         AUTHENTICATION_REQUIRED,
@@ -1317,6 +1327,31 @@ pub enum ApprovalDecision {
 #[serde(rename_all = "snake_case")]
 pub struct ApprovalDecisionRequest {
     pub decision: ApprovalDecision,
+}
+
+/// Private, untrusted server form. Never copy its content into public Events.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct McpElicitationFormResponse {
+    pub message: String,
+    pub schema_json: String,
+}
+
+/// First decision wins while the exact input and its interaction owner are live.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum McpElicitationDecisionRequest {
+    Accept {
+        #[ts(type = "Record<string, unknown>")]
+        content: serde_json::Map<String, serde_json::Value>,
+    },
+    Decline {},
+    Cancel {},
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct McpElicitationDecisionResponse {
+    /// False denotes an exact pending duplicate, never new response authority.
+    pub applied: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

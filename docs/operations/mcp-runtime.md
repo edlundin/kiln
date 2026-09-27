@@ -78,7 +78,17 @@ ownership. It tracks both permitted attempts and remains usable after a cancelle
 cleanup wait. Dropping startup without ever polling it creates no worker. The
 cleanup handle observes termination; it does not itself request cancellation.
 
-Durable HTTP lifecycle and broker integration, OAuth, live credential
+`McpGeneration::spawn_http` now owns an already-authorized resolved HTTP launch.
+It claims the exact definition and host revision before creating a transport,
+shares the serial dispatch/receipt loop with stdio, and awaits all local worker
+cleanup before reporting terminal lifecycle state. Dropping the owner requests
+stop while its task retains cleanup and journaling responsibility. Legacy fallback
+stays inside one durable startup owner; existing active/uncertain instances cannot
+be replaced. `StdioGeneration` remains a compatibility name for the shared owner.
+The daemon still admits only stdio launches; HTTP registry/broker activation and
+end-to-end approved HTTP dispatch remain follow-up work.
+
+HTTP registry and daemon broker integration, OAuth, live credential
 administration and official HTTP conformance remain open. Tests use local HTTP
 socket fixtures and the real SDK worker, not remote services or real credentials.
 

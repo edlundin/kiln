@@ -59,7 +59,9 @@ pub use bindings::{
 #[cfg(unix)]
 pub use dispatch::{StdioCallError, StdioCallLimits, StdioCallResult};
 #[cfg(unix)]
-pub use generation::{StdioGeneration, StdioGenerationError, StdioGenerationLaunch};
+pub use generation::{
+    McpGeneration, McpGenerationError, StdioGeneration, StdioGenerationError, StdioGenerationLaunch,
+};
 pub use negotiation::{ProtocolPolicy, ProtocolVersion, start_stdio_client};
 #[cfg(unix)]
 pub use process::{ManagedStdioProcess, StdioProcess, StdioProcessCleanup, StdioProcessConfig};

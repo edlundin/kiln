@@ -270,7 +270,8 @@ pub enum McpInstanceClaim {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpInstanceTransition {
     // Stopped and StartupFailed are observations from the trusted lifecycle
-    // owner after process cleanup, never acknowledgements of a user intention.
+    // owner after local transport cleanup, never acknowledgements of a user
+    // intention or proof that a remote HTTP session was deleted.
     Ready(McpProtocolVersion),
     RequestStop,
     Stopped,

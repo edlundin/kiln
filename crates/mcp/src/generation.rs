@@ -21,7 +21,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StdioGenerationError {
+pub enum McpGenerationError {
     Definition(McpDefinitionError),
     Store(McpInstanceError),
     Invocation(kiln_core::McpInvocationError),
@@ -35,11 +35,15 @@ pub enum StdioGenerationError {
     WorkerLost,
 }
 
+/// Compatibility names for existing stdio callers.
+pub type StdioGeneration = McpGeneration;
+pub type StdioGenerationError = McpGenerationError;
+
 #[derive(Clone)]
 enum Status {
     Starting,
     Ready(McpInstanceRecord),
-    Finished(Result<McpInstanceRecord, StdioGenerationError>),
+    Finished(Result<McpInstanceRecord, McpGenerationError>),
 }
 
 /// Host-resolved, independently authorized launch inputs for one scoped key.
@@ -54,14 +58,48 @@ pub struct StdioGenerationLaunch {
     pub startup_deadline: Instant,
 }
 
-/// Dropping this handle requests stop but leaves the worker alive to reap and
-/// journal cleanup. Orderly daemon shutdown must await `stop` before runtime exit.
+struct GenerationLaunch {
+    key: McpInstanceKey,
+    definition_version: u64,
+    host_binding_version: Option<kiln_core::McpHostBindingVersion>,
+    generation: McpGenerationId,
+    definition_limits: McpDefinitionLimits,
+    startup_deadline: Instant,
+    transport: LaunchTransport,
+}
+
+enum LaunchTransport {
+    Stdio(StdioProcessConfig),
+    Http(crate::McpHttpGenerationConfig, crate::ProtocolPolicy),
+}
+
+enum Cleanup {
+    Stdio(crate::StdioProcessCleanup),
+    Http(crate::McpHttpClientCleanup),
+}
+impl Cleanup {
+    async fn finish(self) -> Result<(), McpGenerationError> {
+        match self {
+            Self::Stdio(cleanup) => cleanup
+                .finish()
+                .await
+                .map_err(|_| McpGenerationError::Cleanup),
+            Self::Http(mut cleanup) => cleanup
+                .finish()
+                .await
+                .map_err(|_| McpGenerationError::Cleanup),
+        }
+    }
+}
+
+/// Dropping this handle requests stop but leaves the worker alive to join transport cleanup and
+/// journal termination. Orderly daemon shutdown must await `stop` before runtime exit.
 /// Readiness is lifecycle information, never permission to invoke an MCP tool.
-pub struct StdioGeneration {
+pub struct McpGeneration {
     calls: mpsc::Sender<DispatchRequest>,
     stop: Option<oneshot::Sender<()>>,
     status: watch::Receiver<Status>,
-    worker: Option<JoinHandle<Result<McpInstanceRecord, StdioGenerationError>>>,
+    worker: Option<JoinHandle<Result<McpInstanceRecord, McpGenerationError>>>,
 }
 
 pub(crate) struct GenerationObserver {
@@ -73,32 +111,30 @@ impl GenerationObserver {
         // Cleanup failure and a lost worker provide no proof that ownership can
         // be forgotten. Keep those entries available to shutdown/reporting.
         matches!(&*self.status.borrow(), Status::Finished(result)
-            if !matches!(result, Err(StdioGenerationError::Cleanup | StdioGenerationError::WorkerLost)))
+            if !matches!(result, Err(McpGenerationError::Cleanup | McpGenerationError::WorkerLost)))
     }
 
     pub(crate) fn is_finished(&self) -> bool {
         matches!(*self.status.borrow(), Status::Finished(_)) || self.status.has_changed().is_err()
     }
 
-    pub(crate) async fn wait_ready(&mut self) -> Result<McpInstanceRecord, StdioGenerationError> {
+    pub(crate) async fn wait_ready(&mut self) -> Result<McpInstanceRecord, McpGenerationError> {
         loop {
             match self.status.borrow_and_update().clone() {
                 Status::Starting => {}
                 Status::Ready(record) => return Ok(record),
                 Status::Finished(result) => {
-                    return Err(result.err().unwrap_or(StdioGenerationError::Ended));
+                    return Err(result.err().unwrap_or(McpGenerationError::Ended));
                 }
             }
             self.status
                 .changed()
                 .await
-                .map_err(|_| StdioGenerationError::WorkerLost)?;
+                .map_err(|_| McpGenerationError::WorkerLost)?;
         }
     }
 
-    pub(crate) async fn wait_finished(
-        &mut self,
-    ) -> Result<McpInstanceRecord, StdioGenerationError> {
+    pub(crate) async fn wait_finished(&mut self) -> Result<McpInstanceRecord, McpGenerationError> {
         loop {
             if let Status::Finished(result) = self.status.borrow_and_update().clone() {
                 return result;
@@ -106,13 +142,51 @@ impl GenerationObserver {
             self.status
                 .changed()
                 .await
-                .map_err(|_| StdioGenerationError::WorkerLost)?;
+                .map_err(|_| McpGenerationError::WorkerLost)?;
         }
     }
 }
 
-impl StdioGeneration {
+impl McpGeneration {
     pub fn spawn<S>(store: Arc<S>, launch: StdioGenerationLaunch) -> Self
+    where
+        S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static,
+    {
+        Self::spawn_launch(
+            store,
+            GenerationLaunch {
+                key: launch.key,
+                definition_version: launch.definition_version,
+                host_binding_version: launch.host_binding_version,
+                generation: launch.generation,
+                definition_limits: launch.definition_limits,
+                startup_deadline: launch.startup_deadline,
+                transport: LaunchTransport::Stdio(launch.process),
+            },
+        )
+    }
+
+    /// Start an independently authorized, resolved HTTP snapshot. Durable
+    /// admission checks its exact host revision before constructing any worker.
+    pub fn spawn_http<S>(store: Arc<S>, launch: crate::ResolvedHttpLaunch) -> Self
+    where
+        S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static,
+    {
+        Self::spawn_launch(
+            store,
+            GenerationLaunch {
+                key: launch.key,
+                definition_version: launch.definition_version,
+                host_binding_version: Some(launch.host_binding_version),
+                generation: launch.generation,
+                definition_limits: launch.definition_limits,
+                startup_deadline: launch.startup_deadline,
+                transport: LaunchTransport::Http(launch.config, launch.policy),
+            },
+        )
+    }
+
+    fn spawn_launch<S>(store: Arc<S>, launch: GenerationLaunch) -> Self
     where
         S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static,
     {
@@ -170,7 +244,7 @@ impl StdioGeneration {
         self.calls.clone()
     }
 
-    pub async fn wait_ready(&mut self) -> Result<McpInstanceRecord, StdioGenerationError> {
+    pub async fn wait_ready(&mut self) -> Result<McpInstanceRecord, McpGenerationError> {
         self.observer().wait_ready().await
     }
 
@@ -180,13 +254,13 @@ impl StdioGeneration {
         }
     }
 
-    pub async fn stop(mut self) -> Result<McpInstanceRecord, StdioGenerationError> {
+    pub async fn stop(mut self) -> Result<McpInstanceRecord, McpGenerationError> {
         self.request_stop();
         self.worker
             .take()
             .expect("generation worker")
             .await
-            .map_err(|_| StdioGenerationError::WorkerLost)?
+            .map_err(|_| McpGenerationError::WorkerLost)?
     }
 
     pub(crate) fn request_stop(&mut self) {
@@ -196,7 +270,7 @@ impl StdioGeneration {
     }
 }
 
-impl Drop for StdioGeneration {
+impl Drop for McpGeneration {
     fn drop(&mut self) {
         self.request_stop();
     }
@@ -206,45 +280,52 @@ async fn transition<S: McpInstanceStore>(
     store: &S,
     record: &McpInstanceRecord,
     next: McpInstanceTransition,
-) -> Result<McpInstanceRecord, StdioGenerationError> {
+) -> Result<McpInstanceRecord, McpGenerationError> {
     store
         .transition_mcp_instance(record, next)
         .await
-        .map_err(StdioGenerationError::Store)
+        .map_err(McpGenerationError::Store)
 }
 
 async fn stopped<S: McpInstanceStore>(
     store: &S,
     record: &McpInstanceRecord,
-) -> Result<McpInstanceRecord, StdioGenerationError> {
+) -> Result<McpInstanceRecord, McpGenerationError> {
     let record = transition(store, record, McpInstanceTransition::RequestStop).await?;
     transition(store, &record, McpInstanceTransition::Stopped).await
 }
 
 async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
     store: &S,
-    launch: StdioGenerationLaunch,
+    launch: GenerationLaunch,
     mut stop: oneshot::Receiver<()>,
     mut requests: mpsc::Receiver<DispatchRequest>,
     status: &watch::Sender<Status>,
-) -> Result<McpInstanceRecord, StdioGenerationError> {
+) -> Result<McpInstanceRecord, McpGenerationError> {
     let definition = store
         .get_mcp_definition(launch.key.definition_id(), launch.definition_limits)
         .await
-        .map_err(StdioGenerationError::Definition)?
-        .ok_or(StdioGenerationError::Store(
+        .map_err(McpGenerationError::Definition)?
+        .ok_or(McpGenerationError::Store(
             McpInstanceError::DefinitionNotFound,
         ))?;
     if definition.version != launch.definition_version {
-        return Err(StdioGenerationError::Store(
+        return Err(McpGenerationError::Store(
             McpInstanceError::DefinitionChanged,
         ));
     }
-    if !matches!(
-        definition.definition.server().transport,
-        SharedMcpTransport::Stdio { .. }
-    ) {
-        return Err(StdioGenerationError::UnsupportedTransport);
+    let valid_transport = match (&launch.transport, &definition.definition.server().transport) {
+        (LaunchTransport::Stdio(_), SharedMcpTransport::Stdio { .. }) => true,
+        (LaunchTransport::Http(config, policy), SharedMcpTransport::Https { endpoint, .. }) => {
+            *policy == definition.definition.protocol() && &config.endpoint == endpoint
+        }
+        (LaunchTransport::Http(_, policy), SharedMcpTransport::HostEndpoint { .. }) => {
+            *policy == definition.definition.protocol()
+        }
+        _ => false,
+    };
+    if !valid_transport {
+        return Err(McpGenerationError::UnsupportedTransport);
     }
     let record = match store
         .claim_mcp_instance_with_host_bindings(
@@ -255,10 +336,10 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
             launch.definition_limits,
         )
         .await
-        .map_err(StdioGenerationError::Store)?
+        .map_err(McpGenerationError::Store)?
     {
         McpInstanceClaim::Acquired(record) => record,
-        McpInstanceClaim::Existing(_) => return Err(StdioGenerationError::Existing),
+        McpInstanceClaim::Existing(_) => return Err(McpGenerationError::Existing),
     };
     // Do not cancel a store transaction. Once its outcome is known, an abandoned
     // request can terminate without ever creating an external process.
@@ -267,34 +348,57 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
     }
     if Instant::now() >= launch.startup_deadline {
         transition(store, &record, McpInstanceTransition::StartupFailed).await?;
-        return Err(StdioGenerationError::StartupDeadline);
+        return Err(McpGenerationError::StartupDeadline);
     }
-    let process = match StdioProcess::spawn(launch.process) {
-        Ok(process) => process,
-        Err(_) => {
-            transition(store, &record, McpInstanceTransition::StartupFailed).await?;
-            return Err(StdioGenerationError::Spawn);
-        }
-    };
-    let (transport, cleanup) = process.into_managed();
     let catalog_epochs = crate::catalog_state::CatalogEpochs::default();
     let mut catalog_cache = crate::catalog_cache::CatalogCache::default();
-    let startup = tokio::select! {
-        biased;
-        _ = &mut stop => None,
-        result = tokio::time::timeout_at(launch.startup_deadline,
-            start_stdio_client(catalog_epochs.clone(), transport, definition.definition.protocol())) => Some(match result {
-                Ok(Ok(client)) => Ok(client),
-                Ok(Err(_)) => Err(StdioGenerationError::Startup),
-                Err(_) => Err(StdioGenerationError::StartupDeadline),
-            }),
+    let (startup, cleanup) = match launch.transport {
+        LaunchTransport::Stdio(config) => {
+            let process = match StdioProcess::spawn(config) {
+                Ok(process) => process,
+                Err(_) => {
+                    transition(store, &record, McpInstanceTransition::StartupFailed).await?;
+                    return Err(McpGenerationError::Spawn);
+                }
+            };
+            let (transport, cleanup) = process.into_managed();
+            let startup = tokio::select! {
+                biased;
+                _ = &mut stop => None,
+                result = tokio::time::timeout_at(launch.startup_deadline,
+                    start_stdio_client(Arc::new(catalog_epochs.clone()), transport, definition.definition.protocol())) => Some(match result {
+                        Ok(Ok(client)) => Ok(client),
+                        Ok(Err(_)) => Err(McpGenerationError::Startup),
+                        Err(_) => Err(McpGenerationError::StartupDeadline),
+                    }),
+            };
+            (startup, Cleanup::Stdio(cleanup))
+        }
+        LaunchTransport::Http(config, policy) => {
+            let (starting, cleanup) = crate::start_managed_http_client(
+                catalog_epochs.clone(),
+                config,
+                policy,
+                launch.startup_deadline,
+            );
+            let startup = tokio::select! {
+                biased;
+                _ = &mut stop => None,
+                result = starting => Some(result.map_err(|error| match error {
+                    crate::McpHttpStartError::Deadline => McpGenerationError::StartupDeadline,
+                    crate::McpHttpStartError::Cleanup => McpGenerationError::Cleanup,
+                    _ => McpGenerationError::Startup,
+                })),
+            };
+            (startup, Cleanup::Http(cleanup))
+        }
     };
     let client = match startup {
         Some(Ok(client)) => client,
         other => {
             if cleanup.finish().await.is_err() {
                 let _ = transition(store, &record, McpInstanceTransition::ConnectionLost).await;
-                return Err(StdioGenerationError::Cleanup);
+                return Err(McpGenerationError::Cleanup);
             }
             return match other {
                 None => stopped(store, &record).await,
@@ -311,7 +415,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
         .and_then(|info| ProtocolVersion::parse(info.protocol_version.as_str()).ok());
     let ready = match protocol {
         Some(protocol) => transition(store, &record, McpInstanceTransition::Ready(protocol)).await,
-        None => Err(StdioGenerationError::Startup),
+        None => Err(McpGenerationError::Startup),
     };
     let ready = match ready {
         Ok(ready) => ready,
@@ -319,7 +423,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
             let _ = client.cancel().await;
             if cleanup.finish().await.is_err() {
                 let _ = transition(store, &record, McpInstanceTransition::ConnectionLost).await;
-                return Err(StdioGenerationError::Cleanup);
+                return Err(McpGenerationError::Cleanup);
             }
             // If storage is unavailable/conflicted this remains nonterminal;
             // recovery must reconcile it, never infer successful cleanup.
@@ -427,7 +531,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
             break requested;
         }
     };
-    // A journal failure must not skip process cleanup. Record the intent first,
+    // A journal failure must not skip transport cleanup. Record the intent first,
     // retain its result, then wait for SDK ownership to return and reap.
     let terminal_base = match retiring {
         Some(record) => record,
@@ -456,9 +560,9 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
         let _ = waiting.await;
     }
     if cleanup.finish().await.is_err() {
-        return Err(StdioGenerationError::Cleanup);
+        return Err(McpGenerationError::Cleanup);
     }
-    interrupted.map_err(StdioGenerationError::Invocation)?;
+    interrupted.map_err(McpGenerationError::Invocation)?;
     transition(store, &terminal_base?, McpInstanceTransition::Stopped).await
 }
 

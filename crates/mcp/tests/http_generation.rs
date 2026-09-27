@@ -632,3 +632,203 @@ async fn http_generation_legacy_expiry_never_reinitializes_or_replays() {
         1
     );
 }
+
+#[cfg(unix)]
+mod durable {
+    use super::*;
+    use kiln_core::*;
+    use kiln_mcp::{McpGeneration, McpGenerationError, ResolvedHttpLaunch};
+
+    fn limits() -> McpDefinitionLimits {
+        McpDefinitionLimits {
+            max_key_bytes: 64,
+            max_metadata_bytes: 4096,
+            max_arguments: 4,
+            max_argument_bytes: 128,
+            max_environment: 4,
+            max_endpoint_bytes: 128,
+        }
+    }
+    async fn setup(
+        path: &std::path::Path,
+        fixture: &Fixture,
+        policy: ProtocolPolicy,
+    ) -> (Arc<kiln_infrastructure::SqliteStore>, McpHostBindingRecord) {
+        let store = Arc::new(kiln_infrastructure::SqliteStore::open(path).await.unwrap());
+        let name = |s| SharedConfigurationKey::parse(s, 64).unwrap();
+        let definition = McpServerDefinition::new(
+            SharedMcpServerInput {
+                id: name("fixture"),
+                enabled: true,
+                transport: SharedMcpTransport::HostEndpoint {
+                    endpoint_binding: name("local"),
+                },
+            },
+            policy,
+            McpLifecycleScope::Core,
+            None,
+            limits(),
+        )
+        .unwrap();
+        store
+            .register_mcp_definition(&definition, 0, "initial", limits())
+            .await
+            .unwrap();
+        let key = McpInstanceKey::new(&definition, McpInstanceOwner::Core, 4096).unwrap();
+        let bindings = McpHostBindings::new_http(
+            key,
+            McpHttpHostBindingInput {
+                instance_id: KilnInstanceId::from_ulid(ulid::Ulid::generate()),
+                definition_version: 1,
+                working_directory: None,
+                endpoint: fixture.endpoint.clone(),
+                endpoint_binding: Some(name("local")),
+                credential: None,
+            },
+            limits(),
+        )
+        .unwrap();
+        let record = store
+            .publish_mcp_host_bindings(&bindings, 0, limits())
+            .await
+            .unwrap();
+        (store, record)
+    }
+    fn launch(
+        record: &McpHostBindingRecord,
+        fixture: &Fixture,
+        policy: ProtocolPolicy,
+    ) -> ResolvedHttpLaunch {
+        ResolvedHttpLaunch {
+            key: record.bindings.key().clone(),
+            definition_version: 1,
+            host_binding_version: McpHostBindingVersion {
+                instance_id: record.bindings.instance_id().clone(),
+                revision: record.revision,
+            },
+            generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),
+            definition_limits: limits(),
+            policy,
+            config: fixture.config(match policy {
+                ProtocolPolicy::Auto => ProtocolVersion::V20260728,
+                ProtocolPolicy::Pinned(v) => v,
+            }),
+            startup_deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_owner_claims_before_io_and_journals_joined_stop() {
+        for (case, protocol) in [
+            (StartupCase::ModernSse, ProtocolVersion::V20260728),
+            (StartupCase::UnsupportedJson, ProtocolVersion::V20251125),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(Mode::Startup(case)).await;
+            let (store, host) = setup(directory.path(), &fixture, ProtocolPolicy::Auto).await;
+            let key = host.bindings.key();
+            let mut owner = McpGeneration::spawn_http(
+                store.clone(),
+                launch(&host, &fixture, ProtocolPolicy::Auto),
+            );
+            let ready = owner.wait_ready().await.unwrap();
+            assert_eq!(ready.observed, McpObservedState::Ready);
+            assert_eq!(ready.negotiated_protocol, Some(protocol));
+            let count = fixture.received.lock().unwrap().len();
+            let mut duplicate = McpGeneration::spawn_http(
+                store.clone(),
+                launch(&host, &fixture, ProtocolPolicy::Auto),
+            );
+            assert!(matches!(
+                duplicate.wait_ready().await,
+                Err(McpGenerationError::Existing)
+            ));
+            assert!(matches!(
+                duplicate.stop().await,
+                Err(McpGenerationError::Existing)
+            ));
+            assert_eq!(fixture.received.lock().unwrap().len(), count);
+            assert_eq!(
+                store
+                    .retire_mcp_host_bindings(key, host.revision, limits())
+                    .await
+                    .err(),
+                Some(McpHostBindingError::ActiveGeneration)
+            );
+            let stopped = owner.stop().await.unwrap();
+            assert_eq!(stopped.observed, McpObservedState::Stopped);
+            assert_eq!(
+                store.get_mcp_instance(key).await.unwrap().unwrap().observed,
+                McpObservedState::Stopped
+            );
+            if protocol != ProtocolVersion::V20260728 {
+                assert!(
+                    fixture
+                        .received
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(method, _)| method == "DELETE")
+                );
+            }
+            store
+                .retire_mcp_host_bindings(key, host.revision, limits())
+                .await
+                .unwrap();
+            let count = fixture.received.lock().unwrap().len();
+            let mut stale = McpGeneration::spawn_http(
+                store.clone(),
+                launch(&host, &fixture, ProtocolPolicy::Auto),
+            );
+            assert!(matches!(
+                stale.wait_ready().await,
+                Err(McpGenerationError::Store(McpInstanceError::BindingChanged))
+            ));
+            assert_eq!(fixture.received.lock().unwrap().len(), count);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_http_startup_keeps_host_fenced_until_worker_joins() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(Mode::Startup(StartupCase::Stall)).await;
+        let (store, host) = setup(directory.path(), &fixture, ProtocolPolicy::Auto).await;
+        let key = host.bindings.key();
+        let owner =
+            McpGeneration::spawn_http(store.clone(), launch(&host, &fixture, ProtocolPolicy::Auto));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while fixture.received.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(owner);
+        assert_eq!(
+            store
+                .retire_mcp_host_bindings(key, host.revision, limits())
+                .await
+                .err(),
+            Some(McpHostBindingError::ActiveGeneration)
+        );
+        assert_ne!(
+            store.get_mcp_instance(key).await.unwrap().unwrap().observed,
+            McpObservedState::Stopped
+        );
+        fixture.release.as_ref().unwrap().notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.get_mcp_instance(key).await.unwrap().unwrap().observed
+                != McpObservedState::Stopped
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fixture.received.lock().unwrap().len(), 1);
+        store
+            .retire_mcp_host_bindings(key, host.revision, limits())
+            .await
+            .unwrap();
+    }
+}

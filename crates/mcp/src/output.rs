@@ -36,6 +36,9 @@ where
                 Error::Rejected => {
                     "MCP dispatch was rejected before sending the operation request."
                 }
+                Error::Catalog(crate::McpCatalogError::CatalogChanged) => {
+                    "The MCP catalogue is no longer valid for this request. No tool call, resource read or prompt retrieval was sent."
+                }
                 Error::Catalog(_) => {
                     "The MCP capability, catalogue or arguments failed validation. No tool call, resource read or prompt retrieval was sent."
                 }

@@ -111,6 +111,14 @@ are fresh traversals, not stable snapshots across requests. Generation-indexed
 caching/invalidation and stable paging remain open. The daemon advertises these
 contracts only with the explicit native opt-in above.
 
+Generation-owned SDK handlers now observe tool/prompt/resource list-change
+notifications. They reject discovery results or tool/prompt validation that
+crosses an observed change before dispatch; resources and templates share the
+resource epoch. Resource reads still do not require list membership. Search and
+describe include `catalog_notification_epoch` as provenance. It counts observed
+notifications only, not silent server changes or a stable snapshot. Retained
+catalogue caching, stable paging and durable invalidation Event replay remain open.
+
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
 waiter can await those same owners again. The daemon retains another reference to

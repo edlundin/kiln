@@ -1017,7 +1017,8 @@ for line in sys.stdin:
     elif method == 'prompts/list':
         with open('lists', 'a') as log: log.write('list\n')
         prompt = {'name':'review','arguments':[{'name':'language','required':True}]}
-        if mode == 'pagination' and not request.get('params', {}).get('cursor'):
+        if mode in ('pagination','changed') and not request.get('params', {}).get('cursor'):
+            if mode == 'changed': print(json.dumps({'jsonrpc':'2.0','method':'notifications/prompts/list_changed'}), flush=True)
             result = {'prompts':[], 'nextCursor':'second'}
         elif mode == 'duplicate': result = {'prompts':[prompt,prompt]}
         else: result = {'prompts':[prompt]}
@@ -1043,6 +1044,11 @@ for line in sys.stdin:
             "pagination",
             serde_json::json!({"kind":"prompt","name":"review","arguments":{"language":"en"}}),
             None,
+        ),
+        (
+            "changed",
+            serde_json::json!({"kind":"prompt","name":"review","arguments":{"language":"en"}}),
+            Some(StdioCallError::Catalog(McpCatalogError::CatalogChanged)),
         ),
         (
             "missing",
@@ -1166,7 +1172,7 @@ for line in sys.stdin:
             lists,
             if operation["kind"] == "resource" {
                 0
-            } else if mode == "pagination" {
+            } else if matches!(mode, "pagination" | "changed") {
                 2
             } else {
                 1
@@ -1184,6 +1190,7 @@ async fn mcp_discovery_uses_distinct_approved_claims_and_compact_receipt_backed_
     use tokio::{sync::oneshot, time::Instant};
     let script = r#"
 import json, sys
+tools_lists = 0
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('method')
@@ -1193,6 +1200,8 @@ for line in sys.stdin:
     else:
         with open('discovery', 'a') as log: log.write(method+'\n')
         if method == 'tools/list':
+            tools_lists += 1
+            if tools_lists == 9: print(json.dumps({'jsonrpc':'2.0','method':'notifications/tools/list_changed'}), flush=True)
             second = bool(request.get('params',{}).get('cursor'))
             result = {'tools':[{'name':'alpha' if second else 'zeta','description':'Write a note','inputSchema':{'type':'object','properties':{'text':{'type':'string'}},'required':['text']}}]}
             if not second: result['nextCursor'] = 'next'
@@ -1273,6 +1282,10 @@ for line in sys.stdin:
             "mcp_describe",
             serde_json::json!({"kind":"tool","identifier":"absent"}),
         ),
+        (
+            "mcp_search",
+            serde_json::json!({"kind":"tool","query":"","offset":0,"limit":1}),
+        ),
     ];
     for (index, (name, mut arguments)) in cases.into_iter().enumerate() {
         let session =
@@ -1322,13 +1335,13 @@ for line in sys.stdin:
             .unwrap();
         assert_eq!(
             result.state(),
-            if index == 9 {
+            if index >= 9 {
                 ToolCallState::Failed
             } else {
                 ToolCallState::Completed
             }
         );
-        if index != 9 {
+        if index < 9 {
             let value: serde_json::Value = serde_json::from_str(result.stdout().unwrap()).unwrap();
             assert_eq!(value["generation"], target.generation.as_str());
             assert_eq!(value["server_id"], "fixture");
@@ -1352,6 +1365,14 @@ for line in sys.stdin:
                 8 => assert_eq!(value["result"]["uriTemplate"], "notes:///{+path}"),
                 _ => {}
             }
+        }
+        if index == 10 {
+            assert!(
+                result
+                    .stderr()
+                    .unwrap()
+                    .contains("catalogue is no longer valid")
+            );
         }
         ProviderApplication::new(store.clone(), super::super::UlidIdGenerator)
             .finish_tool_call(&tool_call_id, &result)
@@ -1382,10 +1403,13 @@ for line in sys.stdin:
     );
     owner.stop().await.unwrap();
     let wire = std::fs::read_to_string(data.path().join("discovery")).unwrap();
-    assert_eq!(wire.lines().filter(|line| *line == "tools/list").count(), 8);
+    assert_eq!(
+        wire.lines().filter(|line| *line == "tools/list").count(),
+        10
+    );
     assert_eq!(
         wire.lines().count(),
-        14,
+        16,
         "fresh list for every approved discovery; no execution methods"
     );
 }

@@ -277,11 +277,12 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
         }
     };
     let (transport, cleanup) = process.into_managed();
+    let catalog_epochs = crate::catalog_state::CatalogEpochs::default();
     let startup = tokio::select! {
         biased;
         _ = &mut stop => None,
         result = tokio::time::timeout_at(launch.startup_deadline,
-            start_stdio_client((), transport, definition.definition.protocol())) => Some(match result {
+            start_stdio_client(catalog_epochs.clone(), transport, definition.definition.protocol())) => Some(match result {
                 Ok(Ok(client)) => Ok(client),
                 Ok(Err(_)) => Err(StdioGenerationError::Startup),
                 Err(_) => Err(StdioGenerationError::StartupDeadline),
@@ -371,7 +372,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
                     _ = &mut call.cancellation => Err(StdioCallError::Interrupted),
                     _ = call.reply.closed() => Err(StdioCallError::Interrupted),
                     _ = tokio::time::sleep_until(call.limits.deadline) => Err(StdioCallError::Interrupted),
-                    result = send_once(&peer, call.permit.request().command(), &call.permit.record().generation, &call.limits) => result,
+                    result = send_once(&peer, call.permit.request().command(), &call.permit.record().generation, &catalog_epochs, &call.limits) => result,
                 }
             }
         };

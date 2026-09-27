@@ -57,10 +57,17 @@ pub(crate) async fn send_once(
     peer: &Peer<RoleClient>,
     command: &McpCommand,
     generation: &McpGenerationId,
+    epochs: &crate::catalog_state::CatalogEpochs,
     limits: &StdioCallLimits,
 ) -> Result<StdioCallResult, StdioCallError> {
     let operation = command.operation();
     if let McpOperation::Search { kind, .. } | McpOperation::Describe { kind, .. } = operation {
+        let version = epochs.version(*kind);
+        if version.is_none() {
+            return Err(StdioCallError::Catalog(
+                crate::McpCatalogError::CatalogChanged,
+            ));
+        }
         let entries = crate::discovery::collect_catalog(peer, *kind, limits.catalog).await?;
         let value = crate::discovery::project_catalog(&entries, operation)
             .map_err(StdioCallError::Catalog)?;
@@ -70,6 +77,11 @@ pub(crate) async fn send_once(
         if Instant::now() >= limits.deadline {
             return Err(StdioCallError::Interrupted);
         }
+        if !epochs.unchanged(*kind, version) {
+            return Err(StdioCallError::Catalog(
+                crate::McpCatalogError::CatalogChanged,
+            ));
+        }
         return encode_result(
             &serde_json::json!({
                 "server_id":command.server_id().as_str(),
@@ -77,11 +89,25 @@ pub(crate) async fn send_once(
                 "generation":generation.as_str(),
                 "protocol_version":peer.peer_info().map(|info| info.protocol_version.as_str().to_owned()),
                 "kind":kind.as_str(),
+                "catalog_notification_epoch":version,
                 "result":value,
             }),
             false,
             limits.max_result_bytes,
         );
+    }
+    // Resource links need not occur in a list: list changes cannot turn a
+    // previously approved URI into a discovery-membership requirement.
+    let catalog_kind = match operation {
+        McpOperation::Tool { .. } => Some(kiln_core::McpCatalogKind::Tools),
+        McpOperation::Prompt { .. } => Some(kiln_core::McpCatalogKind::Prompts),
+        _ => None,
+    };
+    let catalog_version = catalog_kind.and_then(|kind| epochs.version(kind));
+    if catalog_kind.is_some() && catalog_version.is_none() {
+        return Err(StdioCallError::Catalog(
+            crate::McpCatalogError::CatalogChanged,
+        ));
     }
     let output_validator = match operation {
         McpOperation::Tool { name, arguments } => {
@@ -102,6 +128,11 @@ pub(crate) async fn send_once(
     tokio::task::yield_now().await;
     if Instant::now() >= limits.deadline {
         return Err(StdioCallError::DeadlineBeforeSend);
+    }
+    if catalog_kind.is_some_and(|kind| !epochs.unchanged(kind, catalog_version)) {
+        return Err(StdioCallError::Catalog(
+            crate::McpCatalogError::CatalogChanged,
+        ));
     }
     let request = match operation {
         McpOperation::Tool { name, arguments } => {

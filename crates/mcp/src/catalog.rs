@@ -25,6 +25,7 @@ pub enum McpCatalogError {
     Unsupported,
     LimitExceeded,
     InvalidCatalog,
+    CatalogChanged,
     UnknownTool,
     UnknownPrompt,
     UnknownEntry,

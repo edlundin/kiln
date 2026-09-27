@@ -8,6 +8,8 @@ mod broker;
 
 #[cfg(unix)]
 mod catalog;
+#[cfg(unix)]
+mod catalog_state;
 
 #[cfg(unix)]
 pub use catalog::{McpCatalogError, McpCatalogLimits};

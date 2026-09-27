@@ -392,6 +392,23 @@ next page. Generation-indexed caching/invalidation and stable paging remain open
 Synchronous projection is bounded by metadata budgets but is not CPU-preemptible;
 cancellation and deadline are checked again before accepting its output.
 
+The generation now installs an SDK notification handler for tool, prompt and
+resource list changes. Each channel has an independent generation-local epoch;
+resources and resource templates share the resource channel. An observed change
+during discovery rejects the result instead of returning a mixture of pages.
+Tool/prompt calls also check the epoch after fresh validation and before the
+operation send. A `CatalogChanged` rejection sends no tool call, resource read or
+prompt retrieval and does not retry. Resource reads remain independent of list
+membership. Counter saturation fails closed until a new generation instead of
+wrapping back to an earlier epoch.
+
+Search/describe provenance includes `catalog_notification_epoch`, which counts
+observed list-change notifications; it is not a content hash, stable snapshot ID,
+or proof that a server did not change silently. Notifications arriving after the
+final check cannot undo an operation already sent. This constant-size invalidation
+state is a prerequisite for caching; retained catalogue snapshots, stable paging,
+cache hints and durable catalogue invalidation Events remain open.
+
 Cancellation, deadline expiry during a possible send, unexpected response types,
 and connection loss record an interrupted/unknown outcome and retire the process
 generation. Durable readiness is removed before releasing an interrupted call's

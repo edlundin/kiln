@@ -14,7 +14,7 @@ pub struct StdioCallLimits {
     pub deadline: Instant,
     /// Encoded result ceiling, in addition to the generation's frame ceiling.
     pub max_result_bytes: NonZeroUsize,
-    pub tool_catalog: crate::ToolCatalogLimits,
+    pub catalog: crate::McpCatalogLimits,
 }
 
 /// Untrusted server output. No Debug; the broker must apply ordinary output and
@@ -26,7 +26,7 @@ pub struct StdioCallResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioCallError {
-    Catalog(crate::ToolCatalogError),
+    Catalog(crate::McpCatalogError),
     InvalidOutput,
     Rejected,
     CancelledBeforeSend,
@@ -58,10 +58,18 @@ pub(crate) async fn send_once(
     operation: &McpCallOperation,
     limits: &StdioCallLimits,
 ) -> Result<StdioCallResult, StdioCallError> {
-    let output_validator = if let McpCallOperation::Tool { name, arguments } = operation {
-        crate::catalog::validate_tool(peer, name, arguments, limits.tool_catalog).await?
-    } else {
-        None
+    let output_validator = match operation {
+        McpCallOperation::Tool { name, arguments } => {
+            crate::catalog::validate_tool(peer, name, arguments, limits.catalog).await?
+        }
+        McpCallOperation::Prompt { name, arguments } => {
+            crate::catalog::validate_prompt(peer, name, arguments, limits.catalog).await?;
+            None
+        }
+        McpCallOperation::Resource { uri } => {
+            crate::catalog::validate_resource(peer, uri)?;
+            None
+        }
     };
     // Schema compilation is synchronous. Let the owner's biased cancellation
     // select run again, then recheck time before sending any operation request.
@@ -114,8 +122,19 @@ pub(crate) async fn send_once(
             }
             result.is_error.unwrap_or(false)
         }
-        (ServerResult::ReadResourceResult(_), McpCallOperation::Resource { .. })
-        | (ServerResult::GetPromptResult(_), McpCallOperation::Prompt { .. }) => false,
+        (ServerResult::ReadResourceResult(result), McpCallOperation::Resource { .. }) => {
+            for content in &result.contents {
+                let uri = match content {
+                    ResourceContents::TextResourceContents { uri, .. }
+                    | ResourceContents::BlobResourceContents { uri, .. } => uri,
+                    _ => return Err(StdioCallError::InvalidOutput),
+                };
+                crate::catalog::validate_resource_uri(uri)
+                    .map_err(|_| StdioCallError::InvalidOutput)?;
+            }
+            false
+        }
+        (ServerResult::GetPromptResult(_), McpCallOperation::Prompt { .. }) => false,
         (ServerResult::InputRequiredResult(_) | ServerResult::CreateTaskResult(_), _) => {
             return Err(StdioCallError::UnsupportedContinuation);
         }

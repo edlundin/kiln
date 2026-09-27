@@ -1,16 +1,19 @@
-//! Bounded, untrusted server tool metadata. Schemas validate input, never policy.
+//! Bounded, untrusted server metadata. Catalogues validate input, never policy.
 
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, HashSet},
+    num::NonZeroUsize,
+};
 
 use rmcp::{RoleClient, model::*, service::Peer};
 
 use crate::StdioCallError;
 
 #[derive(Clone, Copy)]
-pub struct ToolCatalogLimits {
+pub struct McpCatalogLimits {
     pub max_pages: NonZeroUsize,
-    pub max_tools: NonZeroUsize,
-    /// Cumulative encoded tools/list result bytes, in addition to frame limits.
+    pub max_entries: NonZeroUsize,
+    /// Cumulative encoded list result bytes, in addition to frame limits.
     pub max_bytes: NonZeroUsize,
     /// Per-pattern compiled/DFA size allowance, not total validator memory.
     pub max_regex_bytes: NonZeroUsize,
@@ -18,11 +21,13 @@ pub struct ToolCatalogLimits {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolCatalogError {
+pub enum McpCatalogError {
     Unsupported,
     LimitExceeded,
     InvalidCatalog,
     UnknownTool,
+    UnknownPrompt,
+    InvalidUri,
     InvalidSchema,
     InvalidArguments,
 }
@@ -37,19 +42,166 @@ impl jsonschema::Retrieve for NoRetrieval {
     }
 }
 
+struct PageBudget {
+    limits: McpCatalogLimits,
+    pages: usize,
+    entries: usize,
+    bytes: usize,
+    cursors: HashSet<String>,
+}
+
+impl PageBudget {
+    fn new(limits: McpCatalogLimits) -> Self {
+        Self {
+            limits,
+            pages: 0,
+            entries: 0,
+            bytes: 0,
+            cursors: HashSet::new(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        page: &impl serde::Serialize,
+        entries: usize,
+        cursor: Option<&str>,
+    ) -> Result<(), McpCatalogError> {
+        use McpCatalogError as Error;
+        if self.pages >= self.limits.max_pages.get()
+            || entries > self.limits.max_entries.get() - self.entries
+        {
+            return Err(Error::LimitExceeded);
+        }
+        // The frame bounds the page. Count its encoding without retaining an
+        // additional serialized copy across pages, including empty pages.
+        let mut counter = ByteBudget {
+            remaining: self.limits.max_bytes.get() - self.bytes,
+        };
+        serde_json::to_writer(&mut counter, page).map_err(|_| Error::LimitExceeded)?;
+        self.bytes = self.limits.max_bytes.get() - counter.remaining;
+        if let Some(cursor) = cursor {
+            if !self.cursors.insert(cursor.to_owned()) {
+                return Err(Error::InvalidCatalog);
+            }
+        }
+        self.pages += 1;
+        self.entries += entries;
+        Ok(())
+    }
+}
+
+pub(crate) async fn validate_prompt(
+    peer: &Peer<RoleClient>,
+    name: &str,
+    arguments: &BTreeMap<String, String>,
+    limits: McpCatalogLimits,
+) -> Result<(), StdioCallError> {
+    if peer
+        .peer_info()
+        .is_none_or(|info| info.capabilities.prompts.is_none())
+    {
+        return Err(StdioCallError::Catalog(McpCatalogError::Unsupported));
+    }
+    let mut budget = PageBudget::new(limits);
+    let mut names = HashSet::new();
+    let mut selected = None;
+    let mut cursor = None;
+    for _ in 0..limits.max_pages.get() {
+        let response = peer
+            .send_request(ClientRequest::ListPromptsRequest(
+                ListPromptsRequest::with_param(
+                    PaginatedRequestParams::default().with_cursor(cursor),
+                ),
+            ))
+            .await
+            .map_err(|error| match error {
+                rmcp::service::ServiceError::McpError(_) => {
+                    StdioCallError::Catalog(McpCatalogError::InvalidCatalog)
+                }
+                _ => StdioCallError::Interrupted,
+            })?;
+        let ServerResult::ListPromptsResult(page) = response else {
+            return Err(StdioCallError::Catalog(McpCatalogError::InvalidCatalog));
+        };
+        budget
+            .record(&page, page.prompts.len(), page.next_cursor.as_deref())
+            .map_err(StdioCallError::Catalog)?;
+        for prompt in page.prompts {
+            if !valid_name(&prompt.name) || !names.insert(prompt.name.clone()) {
+                return Err(StdioCallError::Catalog(McpCatalogError::InvalidCatalog));
+            }
+            if prompt.name == name {
+                selected = Some(prompt);
+            }
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            return validate_prompt_arguments(selected.as_ref(), arguments)
+                .map_err(StdioCallError::Catalog);
+        }
+    }
+    Err(StdioCallError::Catalog(McpCatalogError::LimitExceeded))
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(char::is_control)
+}
+
+fn validate_prompt_arguments(
+    prompt: Option<&Prompt>,
+    arguments: &BTreeMap<String, String>,
+) -> Result<(), McpCatalogError> {
+    let prompt = prompt.ok_or(McpCatalogError::UnknownPrompt)?;
+    let mut declared = HashSet::new();
+    for argument in prompt.arguments.iter().flatten() {
+        if !valid_name(&argument.name) || !declared.insert(argument.name.as_str()) {
+            return Err(McpCatalogError::InvalidCatalog);
+        }
+        if argument.required.unwrap_or(false) && !arguments.contains_key(&argument.name) {
+            return Err(McpCatalogError::InvalidArguments);
+        }
+    }
+    if arguments
+        .keys()
+        .any(|name| !declared.contains(name.as_str()))
+    {
+        return Err(McpCatalogError::InvalidArguments);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_resource(peer: &Peer<RoleClient>, uri: &str) -> Result<(), StdioCallError> {
+    if peer
+        .peer_info()
+        .is_none_or(|info| info.capabilities.resources.is_none())
+    {
+        return Err(StdioCallError::Catalog(McpCatalogError::Unsupported));
+    }
+    validate_resource_uri(uri).map_err(StdioCallError::Catalog)
+}
+
+pub(crate) fn validate_resource_uri(uri: &str) -> Result<(), McpCatalogError> {
+    // RFC 3986 Uri requires a scheme. Do not normalize, expand templates, fetch
+    // URLs or open local paths. Resource links need not occur in resources/list.
+    fluent_uri::Uri::parse(uri)
+        .map(|_| ())
+        .map_err(|_| McpCatalogError::InvalidUri)
+}
+
 /// Re-list before each call; never treat cached metadata as authorization. A
 /// complete bounded traversal is required so ambiguous duplicate names fail.
 pub(crate) async fn validate_tool(
     peer: &Peer<RoleClient>,
     name: &str,
     arguments: &serde_json::Map<String, serde_json::Value>,
-    limits: ToolCatalogLimits,
+    limits: McpCatalogLimits,
 ) -> Result<Option<jsonschema::Validator>, StdioCallError> {
     if peer
         .peer_info()
         .is_none_or(|info| info.capabilities.tools.is_none())
     {
-        return Err(StdioCallError::Catalog(ToolCatalogError::Unsupported));
+        return Err(StdioCallError::Catalog(McpCatalogError::Unsupported));
     }
     let mut catalog = Catalog::new(limits);
     let mut cursor = None;
@@ -61,12 +213,12 @@ pub(crate) async fn validate_tool(
             .await
             .map_err(|error| match error {
                 rmcp::service::ServiceError::McpError(_) => {
-                    StdioCallError::Catalog(ToolCatalogError::InvalidCatalog)
+                    StdioCallError::Catalog(McpCatalogError::InvalidCatalog)
                 }
                 _ => StdioCallError::Interrupted,
             })?;
         let ServerResult::ListToolsResult(page) = response else {
-            return Err(StdioCallError::Catalog(ToolCatalogError::InvalidCatalog));
+            return Err(StdioCallError::Catalog(McpCatalogError::InvalidCatalog));
         };
         cursor = catalog.push(page).map_err(StdioCallError::Catalog)?;
         if cursor.is_none() {
@@ -75,45 +227,30 @@ pub(crate) async fn validate_tool(
                 .map_err(StdioCallError::Catalog);
         }
     }
-    Err(StdioCallError::Catalog(ToolCatalogError::LimitExceeded))
+    Err(StdioCallError::Catalog(McpCatalogError::LimitExceeded))
 }
 
 struct Catalog {
-    limits: ToolCatalogLimits,
+    limits: McpCatalogLimits,
     tools: Vec<Tool>,
     names: HashSet<String>,
-    cursors: HashSet<String>,
-    bytes: usize,
+    budget: PageBudget,
 }
 
 impl Catalog {
-    fn new(limits: ToolCatalogLimits) -> Self {
+    fn new(limits: McpCatalogLimits) -> Self {
         Self {
             limits,
             tools: Vec::new(),
             names: HashSet::new(),
-            cursors: HashSet::new(),
-            bytes: 0,
+            budget: PageBudget::new(limits),
         }
     }
 
-    fn push(&mut self, page: ListToolsResult) -> Result<Option<String>, ToolCatalogError> {
-        use ToolCatalogError as Error;
-        // A transport frame already bounds this page. Count re-encoded metadata
-        // without retaining a second serialized copy across catalogue pages.
-        let mut counter = ByteBudget {
-            remaining: self.limits.max_bytes.get() - self.bytes,
-        };
-        serde_json::to_writer(&mut counter, &page).map_err(|_| Error::LimitExceeded)?;
-        self.bytes = self.limits.max_bytes.get() - counter.remaining;
-        if page.tools.len() > self.limits.max_tools.get() - self.tools.len() {
-            return Err(Error::LimitExceeded);
-        }
-        if let Some(cursor) = &page.next_cursor {
-            if !self.cursors.insert(cursor.clone()) {
-                return Err(Error::InvalidCatalog);
-            }
-        }
+    fn push(&mut self, page: ListToolsResult) -> Result<Option<String>, McpCatalogError> {
+        use McpCatalogError as Error;
+        self.budget
+            .record(&page, page.tools.len(), page.next_cursor.as_deref())?;
         for tool in &page.tools {
             if tool.name.is_empty()
                 || tool.name.chars().any(char::is_control)
@@ -130,8 +267,8 @@ impl Catalog {
         &self,
         name: &str,
         arguments: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Option<jsonschema::Validator>, ToolCatalogError> {
-        use ToolCatalogError as Error;
+    ) -> Result<Option<jsonschema::Validator>, McpCatalogError> {
+        use McpCatalogError as Error;
         let tool = self
             .tools
             .iter()
@@ -150,9 +287,9 @@ impl Catalog {
 
 fn compile_schema(
     schema: &serde_json::Map<String, serde_json::Value>,
-    limits: ToolCatalogLimits,
-) -> Result<jsonschema::Validator, ToolCatalogError> {
-    use ToolCatalogError as Error;
+    limits: McpCatalogLimits,
+) -> Result<jsonschema::Validator, McpCatalogError> {
+    use McpCatalogError as Error;
     // MCP input/output schemas describe objects. Draft detection honors declared
     // standard dialects; the library defaults to 2020-12 when absent. Inline
     // references remain supported, but no URL or file is ever retrieved.
@@ -192,10 +329,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn limits() -> ToolCatalogLimits {
-        ToolCatalogLimits {
+    fn limits() -> McpCatalogLimits {
+        McpCatalogLimits {
             max_pages: NonZeroUsize::new(2).unwrap(),
-            max_tools: NonZeroUsize::new(2).unwrap(),
+            max_entries: NonZeroUsize::new(2).unwrap(),
             max_bytes: NonZeroUsize::new(4096).unwrap(),
             max_regex_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
             max_regex_backtracks: NonZeroUsize::new(10_000).unwrap(),
@@ -203,6 +340,62 @@ mod tests {
     }
     fn page(schema: serde_json::Value) -> ListToolsResult {
         serde_json::from_value(json!({"tools":[{"name":"write","inputSchema":schema}]})).unwrap()
+    }
+
+    #[test]
+    fn prompts_check_required_declared_arguments_and_resources_use_uri_syntax() {
+        let prompt: Prompt = serde_json::from_value(json!({
+            "name":"review", "arguments":[{"name":"language","required":true},{"name":"style"}]
+        }))
+        .unwrap();
+        assert!(
+            validate_prompt_arguments(
+                Some(&prompt),
+                &BTreeMap::from([("language".into(), "en".into())])
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_prompt_arguments(Some(&prompt), &BTreeMap::new()),
+            Err(McpCatalogError::InvalidArguments)
+        );
+        assert_eq!(
+            validate_prompt_arguments(
+                Some(&prompt),
+                &BTreeMap::from([
+                    ("language".into(), "en".into()),
+                    ("extra".into(), "x".into())
+                ])
+            ),
+            Err(McpCatalogError::InvalidArguments)
+        );
+        let duplicate: Prompt = serde_json::from_value(
+            json!({"name":"review","arguments":[{"name":"language"},{"name":"language"}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_prompt_arguments(Some(&duplicate), &BTreeMap::new()),
+            Err(McpCatalogError::InvalidCatalog)
+        );
+        for uri in [
+            "notes://host/a%20b?x=1#part",
+            "file:///not-a-local-read",
+            "urn:fixture:document",
+        ] {
+            assert!(validate_resource_uri(uri).is_ok(), "{uri}");
+        }
+        for uri in [
+            "relative/path",
+            "notes://host/%zz",
+            "notes://host/a b",
+            "notes://host/{template}",
+        ] {
+            assert_eq!(
+                validate_resource_uri(uri),
+                Err(McpCatalogError::InvalidUri),
+                "{uri}"
+            );
+        }
     }
 
     #[test]
@@ -228,12 +421,12 @@ mod tests {
         ] {
             assert_eq!(
                 catalog.validate("write", args.as_object().unwrap()).err(),
-                Some(ToolCatalogError::InvalidArguments)
+                Some(McpCatalogError::InvalidArguments)
             );
         }
         assert_eq!(
             catalog.validate("unknown", &Default::default()).err(),
-            Some(ToolCatalogError::UnknownTool)
+            Some(McpCatalogError::UnknownTool)
         );
         for schema in [
             json!({"type":"object","properties":{"text":{"$ref":"https://example.invalid/schema"}}}),
@@ -247,7 +440,7 @@ mod tests {
                 catalog
                     .validate("write", json!({"text":"hello"}).as_object().unwrap())
                     .err(),
-                Some(ToolCatalogError::InvalidSchema)
+                Some(McpCatalogError::InvalidSchema)
             );
         }
     }
@@ -264,13 +457,13 @@ mod tests {
         let mut second = page(json!({"type":"object"}));
         assert_eq!(
             catalog.push(second.clone()),
-            Err(ToolCatalogError::InvalidCatalog)
+            Err(McpCatalogError::InvalidCatalog)
         );
         let mut catalog = Catalog::new(limits());
         catalog.push(first).unwrap();
         second.tools.clear();
         second.next_cursor = Some("next".into());
-        assert_eq!(catalog.push(second), Err(ToolCatalogError::InvalidCatalog));
+        assert_eq!(catalog.push(second), Err(McpCatalogError::InvalidCatalog));
         let page = page(json!({"type":"object"}));
         let size = serde_json::to_vec(&page).unwrap().len();
         let mut exact = limits();
@@ -279,12 +472,12 @@ mod tests {
         exact.max_bytes = NonZeroUsize::new(size - 1).unwrap();
         assert_eq!(
             Catalog::new(exact).push(page.clone()),
-            Err(ToolCatalogError::LimitExceeded)
+            Err(McpCatalogError::LimitExceeded)
         );
         let mut count = limits();
-        count.max_tools = NonZeroUsize::new(1).unwrap();
+        count.max_entries = NonZeroUsize::new(1).unwrap();
         let mut catalog = Catalog::new(count);
         catalog.push(page.clone()).unwrap();
-        assert_eq!(catalog.push(page), Err(ToolCatalogError::LimitExceeded));
+        assert_eq!(catalog.push(page), Err(McpCatalogError::LimitExceeded));
     }
 }

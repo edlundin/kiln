@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Validate bounded MCP prompt catalogues and absolute resource URIs
+  without treating resource discovery as an authorization allowlist.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/7722a86)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Validate bounded MCP tool catalogues and schemas before calls, then
   validate successful structured output without retrying external operations.
 

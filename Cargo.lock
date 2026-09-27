@@ -3946,11 +3946,13 @@ dependencies = [
 name = "kiln-mcp"
 version = "0.1.0"
 dependencies = [
+ "fluent-uri 0.4.1",
  "jsonschema",
  "kiln-core",
  "kiln-infrastructure",
  "rmcp",
  "rustix",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",

@@ -10,7 +10,7 @@ mod broker;
 mod catalog;
 
 #[cfg(unix)]
-pub use catalog::{ToolCatalogError, ToolCatalogLimits};
+pub use catalog::{McpCatalogError, McpCatalogLimits};
 
 #[cfg(unix)]
 pub use broker::{StdioBrokerError, StdioBrokerLimits, execute_stdio_call};

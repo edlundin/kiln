@@ -14,11 +14,11 @@ fn limits() -> McpDefinitionLimits {
 }
 
 #[cfg(unix)]
-fn catalog_limits() -> kiln_mcp::ToolCatalogLimits {
+fn catalog_limits() -> kiln_mcp::McpCatalogLimits {
     // Fixture catalogue is one short page with one simple object schema.
-    kiln_mcp::ToolCatalogLimits {
+    kiln_mcp::McpCatalogLimits {
         max_pages: NonZeroUsize::new(1).unwrap(),
-        max_tools: NonZeroUsize::new(1).unwrap(),
+        max_entries: NonZeroUsize::new(1).unwrap(),
         max_bytes: NonZeroUsize::new(1024).unwrap(),
         max_regex_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
         max_regex_backtracks: NonZeroUsize::new(10_000).unwrap(),
@@ -29,6 +29,21 @@ async fn request(
     store: &super::super::SqliteStore,
     session: &Session,
     key: &str,
+) -> ModelToolExecutionRequest<McpCallCommand> {
+    request_operation(
+        store,
+        session,
+        key,
+        serde_json::json!({"kind":"tool","name":"write","arguments":{"text":"private-payload"}}),
+    )
+    .await
+}
+
+async fn request_operation(
+    store: &super::super::SqliteStore,
+    session: &Session,
+    key: &str,
+    operation: serde_json::Value,
 ) -> ModelToolExecutionRequest<McpCallCommand> {
     let ids = super::super::UlidIdGenerator;
     let runs = RunApplication::new(store.clone(), ids);
@@ -108,7 +123,7 @@ async fn request(
             provider_call_id: "call-1".into(),
             name: "mcp_call".into(),
             arguments: serde_json::json!({"server_id":"fixture","definition_version":1,
-            "operation":{"kind":"tool","name":"write","arguments":{"text":"private-payload"}}})
+            "operation":operation})
             .as_object()
             .unwrap()
             .clone(),
@@ -537,7 +552,7 @@ for line in sys.stdin:
             let call = owner.dispatch(
                 permit,
                 StdioCallLimits {
-                    tool_catalog: catalog_limits(),
+                    catalog: catalog_limits(),
                     deadline: Instant::now() + allowance,
                     max_result_bytes: NonZeroUsize::new(if mode == "oversize" { 1 } else { 8192 })
                         .unwrap(),
@@ -577,9 +592,9 @@ for line in sys.stdin:
             }
             "invalid_arguments" | "unknown_tool" | "catalog_limit" => {
                 let error = match mode {
-                    "invalid_arguments" => kiln_mcp::ToolCatalogError::InvalidArguments,
-                    "unknown_tool" => kiln_mcp::ToolCatalogError::UnknownTool,
-                    _ => kiln_mcp::ToolCatalogError::LimitExceeded,
+                    "invalid_arguments" => kiln_mcp::McpCatalogError::InvalidArguments,
+                    "unknown_tool" => kiln_mcp::McpCatalogError::UnknownTool,
+                    _ => kiln_mcp::McpCatalogError::LimitExceeded,
                 };
                 assert_eq!(result.err(), Some(StdioCallError::Catalog(error)));
                 McpInvocationState::Failed
@@ -649,7 +664,7 @@ for line in sys.stdin:
                 .dispatch_tool_call(
                     permit,
                     StdioCallLimits {
-                        tool_catalog: catalog_limits(),
+                        catalog: catalog_limits(),
                         deadline: Instant::now() + allowance,
                         max_result_bytes: NonZeroUsize::new(8192).unwrap(),
                     },
@@ -833,7 +848,7 @@ for line in sys.stdin:
         shutdown_grace: Duration::ZERO,
         startup_deadline: Instant::now() + Duration::from_secs(5),
         call: StdioCallLimits {
-            tool_catalog: catalog_limits(),
+            catalog: catalog_limits(),
             deadline: Instant::now() + Duration::from_secs(5),
             max_result_bytes: NonZeroUsize::new(1024).unwrap(),
         },
@@ -966,4 +981,184 @@ for line in sys.stdin:
         2
     );
     assert!(registry.shutdown().await.into_iter().all(|r| r.is_ok()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_prompt_and_resource_dispatch_validate_without_inventing_a_resource_allowlist() {
+    use kiln_mcp::{
+        McpCatalogError, StdioCallError, StdioCallLimits, StdioGeneration, StdioGenerationLaunch,
+        StdioProcessConfig,
+    };
+    use std::{sync::Arc, time::Duration};
+    use tokio::{sync::oneshot, time::Instant};
+    let script = r#"
+import json, sys
+mode = sys.argv[1]
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        caps = {} if mode == 'unsupported' else {'resources':{},'prompts':{}}
+        result = {'protocolVersion':'2025-11-25','capabilities':caps,'serverInfo':{'name':'fixture','version':'1'}}
+    elif method == 'prompts/list':
+        with open('lists', 'a') as log: log.write('list\n')
+        prompt = {'name':'review','arguments':[{'name':'language','required':True}]}
+        if mode == 'pagination' and not request.get('params', {}).get('cursor'):
+            result = {'prompts':[], 'nextCursor':'second'}
+        elif mode == 'duplicate': result = {'prompts':[prompt,prompt]}
+        else: result = {'prompts':[prompt]}
+    elif method == 'prompts/get':
+        with open('operations', 'a') as log: log.write(json.dumps(request['params'])+'\n')
+        result = {'messages':[{'role':'user','content':{'type':'text','text':'untrusted prompt content'}}]}
+    elif method == 'resources/read':
+        with open('operations', 'a') as log: log.write(json.dumps(request['params'])+'\n')
+        uri = 'relative/bad' if mode == 'bad_output' else request['params']['uri']
+        result = {'contents':[{'uri':uri,'text':'server resource content'}]}
+    elif method == 'resources/list':
+        raise AssertionError('unlisted resource links are valid; no allowlist probe')
+    else: continue
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#;
+    for (mode, operation, expected) in [
+        (
+            "prompt",
+            serde_json::json!({"kind":"prompt","name":"review","arguments":{"language":"en"}}),
+            None,
+        ),
+        (
+            "pagination",
+            serde_json::json!({"kind":"prompt","name":"review","arguments":{"language":"en"}}),
+            None,
+        ),
+        (
+            "missing",
+            serde_json::json!({"kind":"prompt","name":"review","arguments":{}}),
+            Some(StdioCallError::Catalog(McpCatalogError::InvalidArguments)),
+        ),
+        (
+            "extra",
+            serde_json::json!({"kind":"prompt","name":"review","arguments":{"language":"en","extra":"x"}}),
+            Some(StdioCallError::Catalog(McpCatalogError::InvalidArguments)),
+        ),
+        (
+            "unknown",
+            serde_json::json!({"kind":"prompt","name":"unknown","arguments":{}}),
+            Some(StdioCallError::Catalog(McpCatalogError::UnknownPrompt)),
+        ),
+        (
+            "duplicate",
+            serde_json::json!({"kind":"prompt","name":"review","arguments":{"language":"en"}}),
+            Some(StdioCallError::Catalog(McpCatalogError::InvalidCatalog)),
+        ),
+        (
+            "resource",
+            serde_json::json!({"kind":"resource","uri":"notes://host/a%20b?x=1#part"}),
+            None,
+        ),
+        (
+            "file_uri",
+            serde_json::json!({"kind":"resource","uri":"file:///not-a-local-read"}),
+            None,
+        ),
+        (
+            "invalid_uri",
+            serde_json::json!({"kind":"resource","uri":"notes://host/%zz"}),
+            Some(StdioCallError::Catalog(McpCatalogError::InvalidUri)),
+        ),
+        (
+            "unsupported",
+            serde_json::json!({"kind":"resource","uri":"notes://host/document"}),
+            Some(StdioCallError::Catalog(McpCatalogError::Unsupported)),
+        ),
+        (
+            "bad_output",
+            serde_json::json!({"kind":"resource","uri":"notes://host/document"}),
+            Some(StdioCallError::InvalidOutput),
+        ),
+    ] {
+        let (data, store, session) = seeded_session().await;
+        let key = register(
+            &store,
+            McpInstanceOwner::Core,
+            McpProtocolPolicy::Pinned(McpProtocolVersion::V20251125),
+        )
+        .await;
+        let mut owner = StdioGeneration::spawn(
+            Arc::new(store.clone()),
+            StdioGenerationLaunch {
+                key,
+                definition_version: 1,
+                host_binding_version: None,
+                generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),
+                definition_limits: limits(),
+                startup_deadline: Instant::now() + Duration::from_secs(5),
+                process: StdioProcessConfig {
+                    executable: "/usr/bin/python3".into(),
+                    arguments: vec!["-c".into(), script.into(), mode.into()],
+                    working_directory: std::fs::File::open(data.path()).unwrap().into(),
+                    environment: BTreeMap::new(),
+                    max_frame_bytes: NonZeroUsize::new(4096).unwrap(),
+                    shutdown_grace: Duration::ZERO,
+                },
+            },
+        );
+        let target = owner.wait_ready().await.unwrap();
+        let request = request_operation(&store, &session, mode, operation.clone()).await;
+        let McpDispatchClaim::Acquired(permit) =
+            claim_mcp_dispatch(&store, request, &target, limits())
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let (_cancel, cancelled) = oneshot::channel();
+        let mut catalog = catalog_limits();
+        catalog.max_pages = NonZeroUsize::new(2).unwrap();
+        catalog.max_entries = NonZeroUsize::new(2).unwrap();
+        let result = owner
+            .dispatch(
+                permit,
+                StdioCallLimits {
+                    deadline: Instant::now() + Duration::from_secs(5),
+                    max_result_bytes: NonZeroUsize::new(4096).unwrap(),
+                    catalog,
+                },
+                cancelled,
+            )
+            .await;
+        let sent = expected.is_none() || expected == Some(StdioCallError::InvalidOutput);
+        match expected {
+            Some(error) => assert_eq!(result.err(), Some(error), "{mode}"),
+            None => {
+                let text = String::from_utf8(result.unwrap().json).unwrap();
+                assert!(text.contains(if operation["kind"] == "prompt" {
+                    "untrusted prompt content"
+                } else {
+                    "server resource content"
+                }));
+            }
+        }
+        let wire = std::fs::read_to_string(data.path().join("operations")).unwrap_or_default();
+        assert_eq!(wire.lines().count(), usize::from(sent), "{mode}");
+        if sent && operation["kind"] == "resource" {
+            let params: serde_json::Value = serde_json::from_str(wire.trim()).unwrap();
+            assert_eq!(params["uri"], operation["uri"]);
+        }
+        let lists = std::fs::read_to_string(data.path().join("lists"))
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(
+            lists,
+            if operation["kind"] == "resource" {
+                0
+            } else if mode == "pagination" {
+                2
+            } else {
+                1
+            }
+        );
+        owner.stop().await.unwrap();
+    }
 }

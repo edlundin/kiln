@@ -49,8 +49,13 @@ the selected tool's input schema before sending `tools/call`. Hosts must supply
 page/count/byte and regex budgets; there are no defaults. External schema URL/file
 retrieval is disabled. Successful structured output is checked against any declared
 output schema; a failure after sending does not imply effects were undone.
-Prompt/resource catalogue validation and provider-facing search/describe remain
-open, so the daemon still does not advertise `mcp_call`.
+Prompts also require bounded discovery and valid declared arguments. Resource
+reads require the resource capability and a valid absolute RFC 3986 URI, forwarded
+unchanged to the MCP server; file/HTTP URIs are never dereferenced locally.
+Resource links need not appear in `resources/list` under the MCP specification,
+so the broker does not impose a catalogue membership requirement. Resource/template
+discovery and provider-facing search/describe remain open, and the daemon still
+does not advertise `mcp_call`.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown

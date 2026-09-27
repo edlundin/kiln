@@ -314,7 +314,7 @@ absolute deadline and cancellation receiver; dropping its sender requests
 cancellation, as does abandoning the reply waiter.
 
 Before a tool invocation, the worker traverses `tools/list` with explicit positive
-page, tool-count and cumulative encoded-byte budgets from `ToolCatalogLimits`.
+page, entry-count and cumulative encoded-byte budgets from `McpCatalogLimits`.
 It requires advertised tool support and rejects duplicate names, repeated cursors,
 incomplete traversal and unknown selections. Metadata is fetched afresh for each
 call, including reuse of an existing process; annotations confer no permission.
@@ -331,9 +331,24 @@ Invalid metadata/schema/arguments fail before `tools/call`. A declared output
 schema is compiled before sending and checked against successful structured
 content afterward. Missing or invalid structured output produces a Failed outcome
 that explicitly preserves possible external effects and never retries the call.
-Tool error results need not satisfy the success output schema. Prompt/resource
-catalogue validation and provider-facing search/describe remain open; this tool
-validation does not install `mcp_call` in the daemon catalogue.
+Tool error results need not satisfy the success output schema.
+
+Prompt retrieval requires advertised prompt support and a complete bounded
+`prompts/list` traversal using the same page/count/byte accounting. Duplicate
+names/cursors, unknown prompts, malformed/duplicate argument declarations, missing
+required values and undeclared arguments fail before `prompts/get`. Prompt content
+remains untrusted ToolCall output; it is not promoted to system instructions.
+
+Resource reads require advertised resource support and an absolute RFC 3986 URI.
+`fluent-uri` validates syntax without normalizing the approved URI. The broker
+forwards it verbatim to `resources/read`; it never opens a file, fetches a URL or
+expands a template locally. Resource response URIs are validated too, while
+allowing valid sub-resource URIs different from the requested URI.
+[The MCP specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#resource-links)
+explicitly permits resource links absent from `resources/list`, so discovery is
+not used as an authorization allowlist. Resource/template discovery and
+provider-facing search/describe remain open. These validations do not install
+`mcp_call` in the daemon catalogue.
 
 Cancellation, deadline expiry during a possible send, unexpected response types,
 and connection loss record an interrupted/unknown outcome and retire the process

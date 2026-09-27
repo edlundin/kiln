@@ -679,7 +679,7 @@ batches until `pending` is empty. No automatic reconciliation runs at startup.
 
 ## URL elicitation foundation
 
-The private core `McpElicitationUrl` value validates URL requests before future
+The private core `McpElicitationUrl` value validates URL requests before
 persistence or presentation. It retains the exact full server URL and separately
 exposes its parsed ASCII host/origin for consent UI, including a Punycode indicator.
 It rejects non-web schemes, embedded credentials, raw whitespace/control characters
@@ -690,8 +690,20 @@ have explicit host budgets. Messages, URLs and legacy IDs are redacted from Debu
 Legacy requests retain their server `elicitationId`; modern requests use a separate
 Stateless context with no invented ID. A URL decision has only accept/decline/cancel,
 never form content. Accept records consent to an out-of-band interaction, not its
-completion. This foundation does not persist a URL, navigate, fetch metadata, grant
-consent, change capabilities or enable URL mediation.
+completion. Validation does not navigate, fetch metadata, grant consent, change
+capabilities or enable URL mediation.
+
+Migration 63 adds private immutable URL requests and contentless first-wins
+decisions. `McpElicitationUrlStore` atomically creates the request, its live
+interaction owner and the metadata-only pending-input Event. Reads and decisions
+revalidate the exact invocation, pending input and entire live same-Session
+ancestry; a changed owner rejects. An input cannot contain both a form and a URL.
+Resolution requires a durable decision, including for direct SQL writes. Decision
+storage alone does not resolve the input or authorize replay, navigation or
+external completion. Terminal inputs cannot return retained decisions. Legacy IDs
+remain private under the invocation/input key; no global ID lookup or completion
+notification authority is implemented. Storage is not yet wired into the runtime,
+authenticated API or desktop, and URL capability remains disabled.
 
 The pinned `rmcp` 3.4.1 `ElicitRequestParamsWire` still requires `elicitationId` for
 URL requests, including those nested in MRTR. The final 2026 protocol omits that

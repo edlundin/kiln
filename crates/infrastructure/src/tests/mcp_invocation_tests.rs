@@ -20,6 +20,275 @@ fn private_form() -> McpElicitationForm {
 }
 
 #[tokio::test]
+async fn mcp_input_url_consent_is_private_atomic_and_live() {
+    let url_limits = McpElicitationUrlLimits {
+        max_message_bytes: NonZeroUsize::new(64).unwrap(),
+        max_url_bytes: NonZeroUsize::new(256).unwrap(),
+        max_legacy_id_bytes: NonZeroUsize::new(32).unwrap(),
+    };
+    let policy = McpElicitationUrlPolicy::HttpsOnly;
+    for terminal in ["resolved", "interrupted", "cancelled"] {
+        let (_data, store, session) = seeded_session().await;
+        let target = ready(&store, McpInstanceOwner::Core).await;
+        let dispatch = request(&store, &session, "url-consent").await;
+        let McpDispatchClaim::Acquired(permit) =
+            claim_mcp_dispatch(&store, dispatch, &target, limits())
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let context = if terminal == "resolved" {
+            McpElicitationUrlContext::Stateless
+        } else {
+            McpElicitationUrlContext::Legacy {
+                elicitation_id: "private-legacy-id".into(),
+            }
+        };
+        let request = McpElicitationUrl::new(
+            "private-url-message".into(),
+            "https://example.com/?private-url-state".into(),
+            context,
+            url_limits,
+            policy,
+        )
+        .unwrap();
+        let ordinal = std::num::NonZeroU64::new(1).unwrap();
+        let mut wake = store.subscribe_mcp_invocation_events();
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("CREATE TRIGGER reject_test_url BEFORE INSERT ON mcp_elicitation_urls BEGIN SELECT RAISE(ABORT, 'test'); END").execute(&mut *sql).await.unwrap();
+        }
+        assert_eq!(
+            store
+                .require_mcp_elicitation_url(permit.record(), ordinal, &request, url_limits, policy)
+                .await
+                .err(),
+            Some(McpInvocationError::Unavailable)
+        );
+        assert!(!wake.has_changed().unwrap());
+        {
+            let mut sql = store.connection.lock().await;
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mcp_inputs")
+                .fetch_one(&mut *sql)
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
+            sqlx::query("DROP TRIGGER reject_test_url")
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        let McpElicitationUrlMutation::Applied(record) = store
+            .require_mcp_elicitation_url(permit.record(), ordinal, &request, url_limits, policy)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(wake.has_changed().unwrap());
+        wake.borrow_and_update();
+        assert_eq!(
+            store
+                .get_mcp_elicitation_url(&record.input, &record.interaction_run, url_limits, policy)
+                .await
+                .unwrap(),
+            record
+        );
+        assert_eq!(
+            store
+                .require_mcp_elicitation_url(permit.record(), ordinal, &request, url_limits, policy)
+                .await
+                .unwrap(),
+            McpElicitationUrlMutation::Existing(record.clone())
+        );
+        assert_eq!(
+            store
+                .get_mcp_elicitation_url_decision(&record, url_limits, policy)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .require_mcp_elicitation_form(
+                    permit.record(),
+                    ordinal,
+                    &private_form(),
+                    form_limits()
+                )
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert_eq!(
+            store.resolve_mcp_input(&record.input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        let mut stale = record.clone();
+        stale.request = McpElicitationUrl::new(
+            "changed".into(),
+            request.url().into(),
+            request.context().clone(),
+            url_limits,
+            policy,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_url(
+                    &stale,
+                    &McpElicitationUrlDecision::Accept,
+                    url_limits,
+                    policy
+                )
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        let smaller = McpElicitationUrlLimits {
+            max_url_bytes: NonZeroUsize::new(1).unwrap(),
+            ..url_limits
+        };
+        assert_eq!(
+            store
+                .get_mcp_elicitation_url(&record.input, &record.interaction_run, smaller, policy)
+                .await
+                .err(),
+            Some(McpInvocationError::InvalidRequest)
+        );
+        if matches!(request.context(), McpElicitationUrlContext::Legacy { .. }) {
+            let smaller = McpElicitationUrlLimits {
+                max_legacy_id_bytes: NonZeroUsize::new(1).unwrap(),
+                ..url_limits
+            };
+            assert_eq!(
+                store
+                    .get_mcp_elicitation_url(
+                        &record.input,
+                        &record.interaction_run,
+                        smaller,
+                        policy
+                    )
+                    .await
+                    .err(),
+                Some(McpInvocationError::InvalidRequest)
+            );
+        }
+        {
+            let mut sql = store.connection.lock().await;
+            for query in [
+                "UPDATE mcp_inputs SET state='resolved'",
+                "UPDATE mcp_elicitation_urls SET url='https://other.example/'",
+                "DELETE FROM mcp_elicitation_urls",
+                "INSERT INTO mcp_elicitation_forms SELECT tool_call_id,ordinal,interaction_run_id,'message','{}' FROM mcp_elicitation_urls",
+            ] {
+                assert!(sqlx::query(query).execute(&mut *sql).await.is_err());
+            }
+        }
+        assert!(!wake.has_changed().unwrap());
+        let decision = McpElicitationUrlDecision::Accept;
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_url(&record, &decision, url_limits, policy)
+                .await
+                .unwrap(),
+            McpElicitationDecisionMutation::Applied
+        );
+        assert!(wake.has_changed().unwrap());
+        wake.borrow_and_update();
+        assert_eq!(
+            store
+                .get_mcp_elicitation_url_decision(&record, url_limits, policy)
+                .await
+                .unwrap(),
+            Some(decision)
+        );
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_url(&record, &decision, url_limits, policy)
+                .await
+                .unwrap(),
+            McpElicitationDecisionMutation::Existing
+        );
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_url(
+                    &record,
+                    &McpElicitationUrlDecision::Decline,
+                    url_limits,
+                    policy
+                )
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert!(!wake.has_changed().unwrap());
+        {
+            let mut sql = store.connection.lock().await;
+            let state: String = sqlx::query_scalar("SELECT state FROM mcp_inputs")
+                .fetch_one(&mut *sql)
+                .await
+                .unwrap();
+            assert_eq!(state, "required");
+            for query in [
+                "UPDATE mcp_elicitation_url_decisions SET action='cancel'",
+                "DELETE FROM mcp_elicitation_url_decisions",
+            ] {
+                assert!(sqlx::query(query).execute(&mut *sql).await.is_err());
+            }
+        }
+        match terminal {
+            "resolved" => {
+                store.resolve_mcp_input(&record.input).await.unwrap();
+            }
+            "interrupted" => {
+                store
+                    .interrupt_mcp_invocations(
+                        Some(&target.generation),
+                        NonZeroUsize::new(1).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            "cancelled" => {
+                RunApplication::new(store.clone(), super::super::UlidIdGenerator)
+                    .request_cancellation(record.interaction_run.clone())
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            store
+                .get_mcp_elicitation_url_decision(&record, url_limits, policy)
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_url(&record, &decision, url_limits, policy)
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        let page = store
+            .list_session_events(session.id(), EventCursor::zero())
+            .await
+            .unwrap();
+        let public = format!("{:?}", page.events());
+        for private in [
+            "private-url-message",
+            "private-url-state",
+            "private-legacy-id",
+        ] {
+            assert!(!public.contains(private));
+        }
+    }
+}
+
+#[tokio::test]
 async fn mcp_input_decisions_validate_and_journal_without_resolving() {
     use kiln_mcp::{
         McpElicitationDecisionError as DecisionError, McpElicitationError,
@@ -382,6 +651,179 @@ async fn mcp_input_form_is_atomic_private_and_not_replayable() {
         .await
         .unwrap();
     assert_eq!(retained, form.message());
+}
+
+#[tokio::test]
+async fn mcp_input_url_owner_cannot_change_or_outlive_ancestors() {
+    for mode in [RunInputMode::ReadOnly, RunInputMode::Interactive] {
+        let (_data, store, session) = seeded_session().await;
+        let target = ready(&store, McpInstanceOwner::Core).await;
+        let runs = RunApplication::new(store.clone(), super::super::UlidIdGenerator);
+        let root = runs
+            .start_root_run(
+                session.id().clone(),
+                "interaction-root".into(),
+                ApprovalPolicy::Ask,
+                test_scope(),
+            )
+            .await
+            .unwrap();
+        let root_id = root.value.run().run_id().clone();
+        let parent = runs
+            .start_child_run(
+                root_id.clone(),
+                None,
+                RunInputMode::ReadOnly,
+                "parent".into(),
+                ApprovalPolicy::Ask,
+                test_scope(),
+            )
+            .await
+            .unwrap();
+        let parent_id = parent.value.run().run_id().clone();
+        let child = runs
+            .start_child_run(
+                parent_id.clone(),
+                None,
+                mode,
+                "child".into(),
+                ApprovalPolicy::Ask,
+                test_scope(),
+            )
+            .await
+            .unwrap();
+        let child_id = child.value.run().run_id().clone();
+        let request = request_on_run(&store, child_id.clone(), "child-input", "mcp_call", serde_json::json!({
+            "server_id":"fixture","definition_version":1,"operation":{"kind":"tool","name":"write","arguments":{}}
+        }), test_scope()).await;
+        let McpDispatchClaim::Acquired(permit) =
+            claim_mcp_dispatch(&store, request, &target, limits())
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let budgets = McpElicitationUrlLimits {
+            max_message_bytes: NonZeroUsize::new(64).unwrap(),
+            max_url_bytes: NonZeroUsize::new(256).unwrap(),
+            max_legacy_id_bytes: NonZeroUsize::new(32).unwrap(),
+        };
+        let policy = McpElicitationUrlPolicy::HttpsOnly;
+        let request = McpElicitationUrl::new(
+            "consent".into(),
+            "https://example.com/".into(),
+            McpElicitationUrlContext::Stateless,
+            budgets,
+            policy,
+        )
+        .unwrap();
+        let McpElicitationUrlMutation::Applied(record) = store
+            .require_mcp_elicitation_url(
+                permit.record(),
+                std::num::NonZeroU64::new(1).unwrap(),
+                &request,
+                budgets,
+                policy,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        let expected_owner = if mode == RunInputMode::ReadOnly {
+            &root_id
+        } else {
+            &child_id
+        };
+        let wrong_owner = if mode == RunInputMode::ReadOnly {
+            &child_id
+        } else {
+            &root_id
+        };
+        assert_eq!(&record.interaction_run, expected_owner);
+        assert_eq!(
+            store
+                .mcp_input_interaction_run(&record.input)
+                .await
+                .unwrap(),
+            *expected_owner
+        );
+        assert_eq!(
+            store
+                .get_mcp_elicitation_url(&record.input, wrong_owner, budgets, policy)
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        // Even live ancestry cannot silently retarget a request already shown.
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET user_input_mode=? WHERE run_id=?")
+                .bind(if mode == RunInputMode::ReadOnly {
+                    "interactive"
+                } else {
+                    "read_only"
+                })
+                .bind(child_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.mcp_input_interaction_run(&record.input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_url(
+                    &record,
+                    &McpElicitationUrlDecision::Accept,
+                    budgets,
+                    policy
+                )
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET user_input_mode=? WHERE run_id=?")
+                .bind(mode.as_str())
+                .bind(child_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        store
+            .decide_mcp_elicitation_url(
+                &record,
+                &McpElicitationUrlDecision::Cancel,
+                budgets,
+                policy,
+            )
+            .await
+            .unwrap();
+        // Stop an intermediate ancestor while the request's source remains live.
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET state='cancelled' WHERE run_id=?")
+                .bind(parent_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .get_mcp_elicitation_url_decision(&record, budgets, policy)
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert_eq!(
+            store.resolve_mcp_input(&record.input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+    }
 }
 
 #[tokio::test]

@@ -169,8 +169,13 @@ impl McpInputStore for SqliteStore {
             let awaiting_decision: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM mcp_elicitation_forms f
                 LEFT JOIN mcp_elicitation_decisions d USING (tool_call_id, ordinal)
-                WHERE f.tool_call_id = ? AND f.ordinal = ? AND d.tool_call_id IS NULL)",
+                WHERE f.tool_call_id = ? AND f.ordinal = ? AND d.tool_call_id IS NULL
+                UNION ALL SELECT 1 FROM mcp_elicitation_urls u
+                LEFT JOIN mcp_elicitation_url_decisions d USING (tool_call_id, ordinal)
+                WHERE u.tool_call_id = ? AND u.ordinal = ? AND d.tool_call_id IS NULL)",
             )
+            .bind(current.invocation.tool_call_id.as_str())
+            .bind(number)
             .bind(current.invocation.tool_call_id.as_str())
             .bind(number)
             .fetch_one(&mut *tx)
@@ -417,7 +422,7 @@ async fn load_form(
     .transpose()
 }
 
-async fn insert_input(
+pub(super) async fn insert_input(
     connection: &mut SqliteConnection,
     current: McpInvocationRecord,
     ordinal: NonZeroU64,
@@ -458,7 +463,7 @@ async fn insert_input(
 
 // Keep ancestry validation inside the caller's transaction so a cancelled
 // ancestor cannot race a fresh resolution after an earlier ownership lookup.
-async fn interaction_owner(
+pub(super) async fn interaction_owner(
     connection: &mut SqliteConnection,
     invocation: &McpInvocationRecord,
 ) -> Result<kiln_core::RunId, Error> {
@@ -480,12 +485,16 @@ async fn interaction_owner(
         .bind(invocation.tool_call_id.as_str()).fetch_optional(&mut *connection).await.map_err(|_| Error::Unavailable)?;
     let owner = kiln_core::RunId::parse(owner.ok_or(Error::Conflict)?)
         .map_err(|_| Error::IntegrityViolation)?;
-    // Once a form is presented, a changed ancestry cannot silently retarget it.
+    // Once elicitation is presented, changed ancestry cannot silently retarget it.
     let recorded: Option<String> = sqlx::query_scalar(
         "SELECT f.interaction_run_id
         FROM mcp_elicitation_forms f JOIN mcp_inputs i USING (tool_call_id, ordinal)
-        WHERE f.tool_call_id = ? AND i.state = 'required'",
+        WHERE f.tool_call_id = ? AND i.state = 'required'
+        UNION ALL SELECT u.interaction_run_id
+        FROM mcp_elicitation_urls u JOIN mcp_inputs i USING (tool_call_id, ordinal)
+        WHERE u.tool_call_id = ? AND i.state = 'required'",
     )
+    .bind(invocation.tool_call_id.as_str())
     .bind(invocation.tool_call_id.as_str())
     .fetch_optional(connection)
     .await
@@ -496,7 +505,7 @@ async fn interaction_owner(
     Ok(owner)
 }
 
-async fn current_invocation(
+pub(super) async fn current_invocation(
     connection: &mut SqliteConnection,
     expected: &McpInvocationRecord,
 ) -> Result<McpInvocationRecord, Error> {
@@ -511,7 +520,7 @@ async fn current_invocation(
     Ok(current)
 }
 
-async fn validate_live(
+pub(super) async fn validate_live(
     connection: &mut SqliteConnection,
     invocation: &McpInvocationRecord,
 ) -> Result<(), Error> {
@@ -534,7 +543,7 @@ async fn validate_live(
     if live { Ok(()) } else { Err(Error::Conflict) }
 }
 
-async fn load(
+pub(super) async fn load(
     connection: &mut SqliteConnection,
     invocation: McpInvocationRecord,
     ordinal: NonZeroU64,

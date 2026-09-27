@@ -178,6 +178,62 @@ impl McpElicitationUrlDecision {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpElicitationUrlRecord {
+    pub input: crate::McpInputRecord,
+    pub interaction_run: crate::RunId,
+    pub request: McpElicitationUrl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpElicitationUrlMutation {
+    Applied(McpElicitationUrlRecord),
+    Existing(McpElicitationUrlRecord),
+}
+
+/// Private consent storage. Callers authenticate access to the interaction Run.
+/// Records and decisions never authorize navigation, response replay, or external
+/// completion. URL policy and budgets are host-selected on every access.
+pub trait McpElicitationUrlStore: Send + Sync {
+    /// Atomically persist an immutable request, live owner, pending input and
+    /// metadata-only Event. Existing receipts require an exact pending match.
+    fn require_mcp_elicitation_url(
+        &self,
+        invocation: &crate::McpInvocationRecord,
+        ordinal: std::num::NonZeroU64,
+        request: &McpElicitationUrl,
+        limits: McpElicitationUrlLimits,
+        policy: McpElicitationUrlPolicy,
+    ) -> impl Future<Output = Result<McpElicitationUrlMutation, McpInvocationError>> + Send;
+
+    fn get_mcp_elicitation_url(
+        &self,
+        expected: &crate::McpInputRecord,
+        interaction_run: &crate::RunId,
+        limits: McpElicitationUrlLimits,
+        policy: McpElicitationUrlPolicy,
+    ) -> impl Future<Output = Result<McpElicitationUrlRecord, McpInvocationError>> + Send;
+
+    /// First decision wins after atomic live ancestry/request/owner checks.
+    /// An identical pending retry is a receipt. Resolution remains separate.
+    fn decide_mcp_elicitation_url(
+        &self,
+        expected: &McpElicitationUrlRecord,
+        decision: &McpElicitationUrlDecision,
+        limits: McpElicitationUrlLimits,
+        policy: McpElicitationUrlPolicy,
+    ) -> impl Future<Output = Result<crate::McpElicitationDecisionMutation, McpInvocationError>> + Send;
+
+    /// Terminal input never yields a retained decision for replay. Subscribe to
+    /// input change hints before reading and revalidate durable state on wake.
+    fn get_mcp_elicitation_url_decision(
+        &self,
+        expected: &McpElicitationUrlRecord,
+        limits: McpElicitationUrlLimits,
+        policy: McpElicitationUrlPolicy,
+    ) -> impl Future<Output = Result<Option<McpElicitationUrlDecision>, McpInvocationError>> + Send;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Journal scoped MCP instance generations with atomic claims,
+  compare-and-set transitions, and restart interruption records.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add canonical inert MCP definition metadata and transactional local
   version registration with exact retries and metadata-only audit records.
 

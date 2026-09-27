@@ -116,7 +116,7 @@ async fn current_version(
     Ok(version)
 }
 
-async fn load_version(
+pub(super) async fn load_version(
     connection: &mut SqliteConnection,
     id: &SharedConfigurationKey,
     version: i64,

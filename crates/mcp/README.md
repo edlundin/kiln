@@ -87,8 +87,35 @@ The internal store port has no public registration API, shared-source ingestion,
 or process-start side effect yet. Audit rows are not yet exposed through client
 event replay.
 
-Remaining broker work includes scoped instance ownership,
-public registration and host binding resolution, durable lifecycle and invocation
-events, Kiln grants/approvals, catalogue/result paging, interruption/recovery,
-HTTP/OAuth, mediated server requests, and full conformance. No MCP operation is
-offered to models until it is connected to the normal durable ToolCall boundary.
+Core `McpInstanceKey` separates instances by definition, concrete owner, and auth
+profile. Checkout owners include workspace/root IDs, resolved paths, relative
+directory and filesystem identity; session ownership is a distinct explicit scope.
+These keys are metadata and confer no launch or filesystem permission.
+
+Migration 52 journals instance generations, desired/observed state, selected
+protocol, state versions and metadata-only lifecycle events. Atomic claims return
+`Acquired` only for a newly recorded generation; retries and competing claims see
+`Existing` and must never spawn from that result. Claims recheck current definition
+version, enablement, scope/profile and stored owner metadata. A changed definition
+cannot silently replace an active generation. Readiness also rechecks definition
+version and exact protocol pins. Trusted lifecycle owners report process cleanup
+before `Stopped` or `StartupFailed`; desired stop alone is not cleanup evidence.
+
+State-transition events double as exact retry receipts. A historical retry may
+return an old generation's original state without changing the current generation;
+that receipt is not current readiness or execution authority. Restart recovery,
+called under exclusive daemon ownership before dispatch, marks active generations
+interrupted in caller-sized batches and retains desired state. Interrupted
+generations cannot be replaced until cleanup is confirmed. This records lost state
+without replaying calls, but it does not locate, kill or adopt orphan processes.
+
+Focused SQLite fixtures prove independent-connection competing claims, scoped
+checkout/profile separation, stale/pinned readiness rejection, historical retry
+behavior, restart interruption and transaction rollback. The daemon does not yet
+consume these ports, so end-to-end process reuse/recovery is not claimed.
+
+Remaining broker work includes runtime integration of scoped-instance claims and
+process cleanup/recovery, public registration and host-binding resolution, durable
+ToolCall lifecycle and invocation events, Kiln grants/approvals, catalogue/result
+paging, HTTP/OAuth, mediated server requests, and full conformance. No MCP operation
+is offered to models until it is connected to the normal durable ToolCall boundary.

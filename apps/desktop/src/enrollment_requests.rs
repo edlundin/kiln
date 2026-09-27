@@ -13,7 +13,7 @@ use kiln_protocol::{
     ConfigurationFollowerEnrollmentRequestListResponse as Page,
     ConfigurationFollowerEnrollmentRequestPhase as Phase,
     ConfigurationFollowerEnrollmentRequestResponse as Request, ConfigurationSyncRole,
-    ConfigurationSyncStatusResponse,
+    ConfigurationSyncStatusResponse, RevokeConfigurationReadGrantRequest,
 };
 use tokio::{runtime::Runtime, sync::mpsc};
 use ulid::Ulid;
@@ -24,6 +24,13 @@ enum Update {
     Page(Result<Page, String>),
     Loaded(Result<(Request, ConfigurationSyncStatusResponse), String>),
     Decided(Result<Request, String>),
+    Revoked(Result<(), String>),
+}
+
+#[derive(Clone)]
+enum Confirmation {
+    Decision(bool, Decision),
+    Revoke(String, RevokeConfigurationReadGrantRequest),
 }
 
 pub struct EnrollmentRequests {
@@ -35,7 +42,7 @@ pub struct EnrollmentRequests {
     page: Vec<Request>,
     next_cursor: Option<String>,
     selected: Option<(Request, ConfigurationSyncStatusResponse)>,
-    confirmation: Option<(bool, Decision)>,
+    confirmation: Option<Confirmation>,
     error: Option<String>,
     notice: Option<String>,
 }
@@ -149,12 +156,35 @@ impl EnrollmentRequests {
         let Some(decision) = decision(request, status) else {
             return;
         };
-        self.confirmation = Some((approve, decision));
+        self.confirmation = Some(Confirmation::Decision(approve, decision));
+        cx.notify();
+    }
+
+    fn prepare_revocation(&mut self, cx: &mut Context<Self>) {
+        if !self.online || self.operation.is_some() {
+            return;
+        }
+        let Some((request, status)) = &self.selected else {
+            return;
+        };
+        if request.phase != Phase::Approved || !current_master(request, status) {
+            return;
+        }
+        let Some(grant) = request.grant.as_ref().filter(|grant| !grant.revoked) else {
+            return;
+        };
+        self.confirmation = Some(Confirmation::Revoke(
+            grant.grant_id.clone(),
+            RevokeConfigurationReadGrantRequest {
+                expected_instance_id: status.instance_id.clone(),
+                expected_state_version: status.state_version,
+            },
+        ));
         cx.notify();
     }
 
     fn decide(&mut self, cx: &mut Context<Self>) {
-        let Some((approve, decision)) = self.confirmation.clone() else {
+        let Some(confirmation) = self.confirmation.clone() else {
             return;
         };
         let Some(id) = self.begin(cx) else {
@@ -163,28 +193,44 @@ impl EnrollmentRequests {
         let client = self.client.clone();
         let updates = self.updates.clone();
         self.runtime.spawn(async move {
-            let result = if approve {
-                client
-                    .approve_configuration_follower_enrollment_request(
-                        &decision.request_id,
-                        &decision,
-                    )
-                    .await
-            } else {
-                client
-                    .reject_configuration_follower_enrollment_request(
-                        &decision.request_id,
-                        &decision,
-                    )
-                    .await
-            }
-            .map_err(|e| {
-                format!(
-                    "{} Reload the request to learn its current state before deciding again.",
-                    connection::error_message("Decide follower enrollment", &e)
-                )
-            });
-            let _ = updates.send((id, Update::Decided(result)));
+            let update = match confirmation {
+                Confirmation::Revoke(grant, request) => Update::Revoked(
+                    client
+                        .revoke_configuration_read_grant(&grant, &request)
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "{} Reload the request to inspect its grant before retrying.",
+                                connection::error_message("Revoke follower access", &error),
+                            )
+                        }),
+                ),
+                Confirmation::Decision(approve, decision) => {
+                    let result = if approve {
+                            client
+                                .approve_configuration_follower_enrollment_request(
+                                    &decision.request_id,
+                                    &decision,
+                                )
+                                .await
+                        } else {
+                            client
+                                .reject_configuration_follower_enrollment_request(
+                                    &decision.request_id,
+                                    &decision,
+                                )
+                                .await
+                        }
+                        .map_err(|e| {
+                            format!(
+                                "{} Reload the request to learn its current state before deciding again.",
+                                connection::error_message("Decide follower enrollment", &e)
+                            )
+                        });
+                    Update::Decided(result)
+                }
+            };
+            let _ = updates.send((id, update));
         });
     }
 
@@ -202,6 +248,11 @@ impl EnrollmentRequests {
                 }
             }
             Update::Loaded(Ok(selected)) => self.selected = Some(selected),
+            Update::Revoked(Ok(())) => {
+                self.page.clear();
+                self.next_cursor = None;
+                self.notice = Some("Follower read access revoked permanently. Previously fetched data remains on the follower. Refresh requests to inspect the grant.".into());
+            }
             Update::Decided(Ok(request)) => {
                 if let Some(row) = self
                     .page
@@ -216,9 +267,10 @@ impl EnrollmentRequests {
                     phase(&request)
                 ));
             }
-            Update::Page(Err(error)) | Update::Loaded(Err(error)) | Update::Decided(Err(error)) => {
-                self.error = Some(error)
-            }
+            Update::Page(Err(error))
+            | Update::Loaded(Err(error))
+            | Update::Decided(Err(error))
+            | Update::Revoked(Err(error)) => self.error = Some(error),
         }
         cx.notify();
     }
@@ -236,13 +288,15 @@ fn phase(request: &Request) -> &'static str {
 }
 
 // Metadata from a historical authority cannot authorize a current decision.
+fn current_master(request: &Request, status: &ConfigurationSyncStatusResponse) -> bool {
+    status.role == ConfigurationSyncRole::Master
+        && status.instance_id == request.master_instance_id
+        && status.master_instance_id.as_deref() == Some(request.master_instance_id.as_str())
+        && status.group_id.as_deref() == Some(request.group_id.as_str())
+}
+
 fn decision(request: &Request, status: &ConfigurationSyncStatusResponse) -> Option<Decision> {
-    if request.phase != Phase::Pending
-        || status.role != ConfigurationSyncRole::Master
-        || status.instance_id != request.master_instance_id
-        || status.master_instance_id.as_deref() != Some(request.master_instance_id.as_str())
-        || status.group_id.as_deref() != Some(request.group_id.as_str())
-    {
+    if request.phase != Phase::Pending || !current_master(request, status) {
         return None;
     }
     Some(Decision {
@@ -330,6 +384,28 @@ impl Render for EnrollmentRequests {
                         }
                     })),
             );
+            if let Some(grant) = &request.grant {
+                view = view.child(div().text_sm().child(format!(
+                    "Read grant: {} · {}",
+                    grant.grant_id,
+                    if grant.revoked {
+                        "Revoked permanently"
+                    } else {
+                        "Not revoked in this response"
+                    }
+                )));
+                if request.phase == Phase::Approved
+                    && !grant.revoked
+                    && current_master(request, status)
+                {
+                    view = view.child(
+                        Button::new("revoke-follower-grant")
+                            .label("Revoke follower access…")
+                            .disabled(disabled || self.confirmation.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.prepare_revocation(cx))),
+                    );
+                }
+            }
             if decision(request, status).is_some() {
                 view = view.child(
                     div()
@@ -353,16 +429,39 @@ impl Render for EnrollmentRequests {
                 view = view.child(div().text_sm().text_color(theme::ATTENTION).child("This pending request does not belong to the current master authority. It cannot be decided here."));
             }
         }
-        if let Some((approve, _)) = &self.confirmation {
-            let approve = *approve;
-            view = view.child(div().text_sm().text_color(theme::ATTENTION).child(if approve {
-                "Approve this exact request only after comparing its fingerprint with the intended follower. Approval grants read access to this authority’s shared configuration."
-            } else { "Reject this exact request permanently? It cannot later be approved." }))
-                .child(div().flex().flex_wrap().gap_2()
-                    .child(Button::new("confirm-enrollment-decision").label(if approve { "Fingerprint verified — approve" } else { "Confirm permanent rejection" }).primary().disabled(disabled)
-                        .on_click(cx.listener(|this, _, _, cx| this.decide(cx))))
-                    .child(Button::new("cancel-enrollment-decision").label("Cancel").disabled(disabled)
-                        .on_click(cx.listener(|this, _, _, cx| { this.confirmation = None; cx.notify(); }))));
+        if let Some(confirmation) = &self.confirmation {
+            let (message, label) = match confirmation {
+                Confirmation::Decision(true, _) => (
+                    "Approve this exact request only after comparing its fingerprint with the intended follower. Approval grants read access to this authority’s shared configuration.".to_owned(),
+                    "Fingerprint verified — approve",
+                ),
+                Confirmation::Decision(false, _) => ("Reject this exact request permanently? It cannot later be approved.".to_owned(), "Confirm permanent rejection"),
+                Confirmation::Revoke(grant, _) => (format!("Permanently revoke grant {grant}? Future snapshot reads using it will be denied. This does not delete configuration already fetched by the follower or erase its local credential."), "Confirm permanent revocation"),
+            };
+            view = view
+                .child(div().text_sm().text_color(theme::ATTENTION).child(message))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Button::new("confirm-enrollment-decision")
+                                .label(label)
+                                .primary()
+                                .disabled(disabled)
+                                .on_click(cx.listener(|this, _, _, cx| this.decide(cx))),
+                        )
+                        .child(
+                            Button::new("cancel-enrollment-decision")
+                                .label("Cancel")
+                                .disabled(disabled)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.confirmation = None;
+                                    cx.notify();
+                                })),
+                        ),
+                );
         }
         view
     }

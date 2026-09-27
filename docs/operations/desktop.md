@@ -252,6 +252,12 @@ fingerprint, and request fingerprint. **Fingerprint verified — approve** grant
 read access to that authority’s shared configuration. **Reject request…** requires
 separate confirmation and permanently rejects the exact request.
 
+For an approved request with an unrevoked grant, **Revoke follower access…**
+requires confirmation of permanent revocation. The request must belong to the
+current master and group; the daemon checks the displayed authority state version.
+Revocation denies future snapshot reads using that grant. It does not erase data
+already fetched by the follower or remove its locally stored credential.
+
 After a decision or uncertain response, select the request again to load its
 current state. An approved record with a revoked grant is labeled as revoked;
 approval cannot revive it. Disconnect invalidates selection and confirmation,

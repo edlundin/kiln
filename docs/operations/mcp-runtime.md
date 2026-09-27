@@ -676,3 +676,34 @@ unpublished values in its selected batch, including successful imports that have
 not yet been published. Published refs are excluded. If deletion fails, the retired
 reference remains pending for retry; completed deletions retain tombstones. Repeat
 batches until `pending` is empty. No automatic reconciliation runs at startup.
+
+## URL elicitation foundation
+
+The private core `McpElicitationUrl` value validates URL requests before future
+persistence or presentation. It retains the exact full server URL and separately
+exposes its parsed ASCII host/origin for consent UI, including a Punycode indicator.
+It rejects non-web schemes, embedded credentials, raw whitespace/control characters
+and backslashes. HTTPS is required unless the host explicitly permits loopback HTTP
+development. Original and normalized URL bytes, message bytes and legacy ID bytes
+have explicit host budgets. Messages, URLs and legacy IDs are redacted from Debug.
+
+Legacy requests retain their server `elicitationId`; modern requests use a separate
+Stateless context with no invented ID. A URL decision has only accept/decline/cancel,
+never form content. Accept records consent to an out-of-band interaction, not its
+completion. This foundation does not persist a URL, navigate, fetch metadata, grant
+consent, change capabilities or enable URL mediation.
+
+The pinned `rmcp` 3.4.1 `ElicitRequestParamsWire` still requires `elicitationId` for
+URL requests, including those nested in MRTR. The final 2026 protocol omits that
+field. The adapter must handle this difference before advertising modern URL
+support; it must not require servers to send a legacy ID or invent one on the wire.
+Legacy completion notifications and URL-required errors also need lifecycle handling.
+
+Before URL mode is enabled, the authenticated UI must identify the requesting
+server, show the full URL and actual host, and obtain explicit consent before an
+OS-browser handoff. Neither Kiln nor the model may inspect browser contents, collect
+third-party credentials, prefetch the URL or its metadata, or treat navigation as
+external-flow completion. This flow is separate from MCP transport authorization.
+
+Sources: [2026 elicitation](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation)
+and [2025 elicitation](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation).

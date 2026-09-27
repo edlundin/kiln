@@ -2,6 +2,17 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add bounded private URL elicitation validation without enabling URL
+  mediation or browser handoff. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+
+[Commit](../../commit/pending)
+
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add native desktop form cards for authenticated MCP elicitation,
   with private drafts and explicit decisions. ([pending])
 

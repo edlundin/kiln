@@ -24,8 +24,10 @@ The registry belongs to the daemon, rather than a Run. Concurrent callers for a
 scope share startup and reuse a valid ready generation. Reuse rechecks the stored
 definition and current generation. Host-local binding revisions must change when
 resolved launch inputs or authorization change; a revision change requires an
-explicit stop before replacement. Binding resolution and revision persistence
-remain to be implemented.
+explicit stop before replacement. The internal resolver accepts already authorized,
+materialized host values and a pinned directory; it substitutes only explicit
+runtime/argument/environment references within a caller byte budget. Persistent
+binding/revision administration and vault lookup remain to be implemented.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown

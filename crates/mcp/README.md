@@ -181,13 +181,33 @@ capacity admission and slot release. Registry operations still expose lifecycle
 metadata only; invocation remains unavailable until the durable ToolCall path is
 connected. No Run is made the owner of a shared server.
 
+`resolve_stdio_launch` substitutes a materialized `StdioHostBindings` snapshot into
+one exact definition version and instance key. Runtime, argument and environment
+bindings are separate: a missing value never falls back to another role, PATH,
+the daemon environment or a shell expression. It checks definition enablement,
+scope/profile identity, runtime key, absolute executable and NUL-free strings.
+A caller byte budget bounds all resolved executable/argument/environment strings,
+including terminators/separators; it is not a total process-memory limit. The
+resolver carries the local binding revision into its result for registry admission.
+
+The snapshot and output have no Debug/serialization implementation. Values may
+contain private local paths or credentials supplied by a separate authorized
+credential boundary; provider credentials must never be passed to an MCP server.
+Resolution itself neither reads a vault nor grants launch permission. Its caller
+must authorize all inputs and supply a directory descriptor pinned against the
+owner scope before using the result. Persistence, secret-reference lookup and
+administration of these snapshots remain open. Real-process and validation
+fixtures cover explicit literal substitution, version/profile/runtime/role
+mismatch, NUL rejection and the exact resolved-byte boundary.
+
 The [internal daemon runtime](../../docs/operations/mcp-runtime.md) is opt-in with
 explicit instance-capacity and recovery-batch budgets. Its startup runs before
 dispatch under the store lock; its Run-service shutdown drains registry owners.
 An additional listener-exit drain covers a dropped graceful-shutdown future.
 This lifecycle wiring does not yet expose an MCP launch or invocation endpoint.
 
-Remaining broker work includes process recovery, public registration and host-binding resolution, durable
+Remaining broker work includes process recovery, public registration and persistent
+host-binding/credential administration, durable
 ToolCall lifecycle and invocation events, Kiln grants/approvals, catalogue/result
 paging, HTTP/OAuth, mediated server requests, and full conformance. No MCP operation
 is offered to models until it is connected to the normal durable ToolCall boundary.

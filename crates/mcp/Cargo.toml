@@ -6,7 +6,12 @@ rust-version.workspace = true
 
 [dependencies]
 kiln-core = { path = "../core" }
-rmcp = { version = "=3.4.1", default-features = false, features = ["client"] }
+rmcp = { version = "=3.4.1", default-features = false, features = ["client", "transport-streamable-http-client"] }
+reqwest.workspace = true
+futures-util.workspace = true
+http = "1"
+bytes = "1"
+sse-stream = "0.2.4"
 tokio = { workspace = true, features = ["io-util"] }
 serde_json.workspace = true
 serde.workspace = true

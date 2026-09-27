@@ -5,6 +5,32 @@ shutdown. Native model Runs can opt into `mcp_search`, `mcp_describe` and `mcp_c
 through the separate limits configuration below. There is no public direct server
 launch command. Offline host-binding administration is described below.
 
+### HTTP transport preparation
+
+`kiln-mcp` provides an internal `BoundedHttpClient` adapter for Streamable HTTP.
+It is not connected to daemon execution or host bindings yet. It requires explicit
+request, JSON response, whole SSE stream, per-event and header byte allowances plus
+a whole-request timeout. Per-event accounting treats CRLF as one terminator;
+whole-stream accounting counts every wire body byte. HTTP stack buffers, parsed
+response headers and decoded values have additional memory costs; these limits
+are not a process-wide memory or CPU sandbox.
+
+The adapter pins one endpoint, requires HTTPS except for loopback HTTP, disables
+redirects, ambient proxies and reqwest retries, and rejects framing/authentication
+header overrides. JSON and SSE responses are bounded before retained parsing;
+transport errors omit response bodies, endpoints and credentials. Correlated
+JSON-RPC errors remain protocol messages. Arbitrary HTTP failures never synthesize
+a discovery response or authorize a version downgrade. Session expiry is reported
+without replay in the adapter.
+
+The SDK worker's separate reconnect, session recovery and metadata cache policies
+still need lifecycle integration before enabling HTTP in the broker. OAuth,
+legacy HTTP+SSE, live credential administration and official HTTP conformance
+remain open. Tests for this adapter use local HTTP socket fixtures, not remote
+services or real OAuth credentials.
+
+### Stdio lifecycle settings
+
 Both settings below are required to enable the runtime. If neither is set, it is
 disabled. Missing, zero, invalid or overflowing values prevent startup when either
 setting is supplied. There are no product defaults.

@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add a bounded fixed-endpoint HTTP transport adapter and SSE decoder
+  for future MCP lifecycle integration. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Publish durable Session Events for new MCP invocation receipt
   transitions and recovery interruptions. ([pending])
 

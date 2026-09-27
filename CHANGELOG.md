@@ -2,6 +2,16 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add pure validation for elicitation forms and bounded response
+  envelopes without granting send authority. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add bounded private storage for elicitation forms tied atomically to
   a live interaction owner, without enabling prompts or decisions. ([pending])
 

@@ -28,6 +28,7 @@ mod discovery;
 mod dispatch;
 #[cfg(unix)]
 pub use discovery::{McpCatalogEntries, McpCatalogKind, discover_catalog};
+mod elicitation;
 #[cfg(unix)]
 mod generation;
 mod http_bindings;
@@ -37,6 +38,10 @@ mod http_negotiation;
 mod http_sse;
 mod mediation;
 mod negotiation;
+mod schema;
+pub use elicitation::{
+    McpElicitationError, McpElicitationValidationLimits, McpElicitationValidator,
+};
 pub use http_bindings::{
     HttpBindingError, HttpLaunchAuthorization, HttpLaunchResources, ResolvedHttpLaunch,
     resolve_persisted_http_launch,

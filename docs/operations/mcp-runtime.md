@@ -210,8 +210,19 @@ retained payloads are copied out of SQLite. Debug output and public Events omit
 the form body. These private database rows use the existing local database
 protection; they are not encrypted by this feature.
 
-The form container checks size and JSON object shape, not the complete MCP
-elicitation schema or response validity. Protocol validation, authenticated user
+The form container checks size and JSON object shape. The separate MCP form
+validator accepts the pinned SDK's primitive and enum/multi-select schema
+vocabulary, validates against the original stored schema, and rejects fields
+that would disappear in SDK conversion, including lossy numeric bounds. Exact
+integer/float representation changes are allowed. It supports the default 2020-12 dialect
+and explicit Draft 7, 2019-09 and 2020-12 declarations; earlier or unknown dialects
+reject because they may ignore supported constraints such as `const`. It never
+fetches external schemas. String formats are validated. Accepted response data
+must match the schema and contain only requested fields; decline/cancel must
+carry no data. Validation never fills server defaults, and bounds the complete
+encoded result including its action and JSON escaping.
+
+Validation is a pure helper, not a user decision or send permit. Authenticated
 presentation/decision endpoints, response journaling and runtime handlers remain
 to be connected before advertising elicitation. Form persistence itself neither
 publishes a prompt nor grants user approval, provider access or response/replay

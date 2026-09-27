@@ -7,7 +7,7 @@ use std::{
 
 use rmcp::{RoleClient, model::*, service::Peer};
 
-use crate::StdioCallError;
+use crate::{StdioCallError, schema::NoRetrieval};
 
 #[derive(Clone, Copy)]
 pub struct McpCatalogLimits {
@@ -34,16 +34,6 @@ pub enum McpCatalogError {
     InvalidUri,
     InvalidSchema,
     InvalidArguments,
-}
-
-struct NoRetrieval;
-impl jsonschema::Retrieve for NoRetrieval {
-    fn retrieve(
-        &self,
-        _: &jsonschema::Uri<String>,
-    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-        Err(std::io::Error::other("external schema retrieval is disabled").into())
-    }
 }
 
 #[derive(Clone, Copy)]

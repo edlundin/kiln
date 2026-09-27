@@ -71,7 +71,14 @@ The startup deadline does not truncate cleanup; shutdown may therefore finish
 after it. Completion proves local worker termination, not remote session deletion
 or cleanup of a session created by a malformed handshake.
 
-Durable HTTP lifecycle/host-binding and broker integration, OAuth, live credential
+`start_managed_http_client` returns the startup future and a separate
+`McpHttpClientCleanup` handle before any I/O. Retain the handle, drop/cancel startup
+or cancel the running client, then await `finish` before releasing durable
+ownership. It tracks both permitted attempts and remains usable after a cancelled
+cleanup wait. Dropping startup without ever polling it creates no worker. The
+cleanup handle observes termination; it does not itself request cancellation.
+
+Durable HTTP lifecycle and broker integration, OAuth, live credential
 administration and official HTTP conformance remain open. Tests use local HTTP
 socket fixtures and the real SDK worker, not remote services or real credentials.
 

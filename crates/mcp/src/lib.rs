@@ -39,7 +39,9 @@ pub use http_bindings::{
 };
 pub use http_client::{BoundedHttpClient, McpHttpError, McpHttpLimits};
 pub use http_generation::{McpHttpGenerationConfig, McpHttpTransport, http_generation_transport};
-pub use http_negotiation::{McpHttpStartError, start_http_client};
+pub use http_negotiation::{
+    McpHttpClientCleanup, McpHttpStartError, start_http_client, start_managed_http_client,
+};
 #[cfg(unix)]
 mod output;
 #[cfg(unix)]

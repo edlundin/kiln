@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Return awaitable HTTP worker cleanup ownership across startup
+  cancellation, fallback and running-client shutdown. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Resolve explicitly authorized HTTP host snapshots into bounded,
   deadline-aware transport configuration without starting network I/O. ([pending])
 

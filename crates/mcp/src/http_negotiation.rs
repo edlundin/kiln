@@ -8,7 +8,10 @@ use rmcp::{
     service::RunningService,
     transport::Transport,
 };
-use tokio::time::Instant;
+use tokio::{
+    sync::{mpsc, watch},
+    time::Instant,
+};
 
 use crate::http_generation::wait_http_cleanup;
 use crate::{
@@ -39,9 +42,81 @@ impl std::error::Error for McpHttpStartError {}
 /// even after that deadline; local shutdown does not prove remote session deletion.
 pub async fn start_http_client<S: ClientHandler>(
     service: S,
+    config: McpHttpGenerationConfig,
+    policy: ProtocolPolicy,
+    deadline: Instant,
+) -> Result<RunningService<RoleClient, Arc<S>>, McpHttpStartError> {
+    let (startup, _cleanup) = start_managed_http_client(service, config, policy, deadline);
+    startup.await
+}
+
+/// Owns completion evidence for every attempt, including a fallback worker and
+/// a successfully started client. Stop/drop the startup future or cancel the
+/// running client before awaiting cleanup. Local worker completion does not
+/// prove successful remote session deletion.
+pub struct McpHttpClientCleanup {
+    attempts: mpsc::Receiver<watch::Receiver<Option<bool>>>,
+    current: Option<watch::Receiver<Option<bool>>>,
+    failed: bool,
+}
+
+impl McpHttpClientCleanup {
+    /// Cancellation-safe while this handle is retained: another call resumes
+    /// waiting for the same worker, never losing a received completion handle.
+    pub async fn finish(&mut self) -> Result<(), McpHttpStartError> {
+        loop {
+            if self.current.is_none() {
+                self.current = self.attempts.recv().await;
+                if self.current.is_none() {
+                    return if self.failed {
+                        Err(McpHttpStartError::Cleanup)
+                    } else {
+                        Ok(())
+                    };
+                }
+            }
+            self.failed |=
+                !wait_http_cleanup(self.current.as_ref().expect("received worker").clone()).await;
+            self.current = None;
+        }
+    }
+}
+
+/// Return startup and its cleanup owner before polling can start any I/O.
+/// Dropping an unpolled startup creates no worker. Dropping a polled startup
+/// closes its transport; `finish` waits for the owned close task. After success,
+/// the same handle waits for the running client's worker termination. The caller
+/// must retain it through durable lifecycle retirement and runtime shutdown.
+pub fn start_managed_http_client<S: ClientHandler>(
+    service: S,
+    config: McpHttpGenerationConfig,
+    policy: ProtocolPolicy,
+    deadline: Instant,
+) -> (
+    impl Future<Output = Result<RunningService<RoleClient, Arc<S>>, McpHttpStartError>> + Send,
+    McpHttpClientCleanup,
+) {
+    // At most one preferred attempt and one evidence-authorized fallback exist.
+    // Registration never waits for cleanup to be polled by the lifecycle owner.
+    let (attempts, receiver) = mpsc::channel(2);
+    let startup =
+        async move { start_http_client_inner(service, config, policy, deadline, &attempts).await };
+    (
+        startup,
+        McpHttpClientCleanup {
+            attempts: receiver,
+            current: None,
+            failed: false,
+        },
+    )
+}
+
+async fn start_http_client_inner<S: ClientHandler>(
+    service: S,
     mut config: McpHttpGenerationConfig,
     policy: ProtocolPolicy,
     deadline: Instant,
+    attempts: &mpsc::Sender<watch::Receiver<Option<bool>>>,
 ) -> Result<RunningService<RoleClient, Arc<S>>, McpHttpStartError> {
     let initial = match policy {
         ProtocolPolicy::Auto => ProtocolVersion::V20260728,
@@ -67,6 +142,9 @@ pub async fn start_http_client<S: ClientHandler>(
         let transport =
             http_generation_transport(config.clone()).map_err(McpHttpStartError::Configuration)?;
         let cleanup = transport.cleanup_receiver();
+        // A dropped observer must not prevent the transport's own close task.
+        // Capacity cannot fill: negotiation admits at most two total attempts.
+        let _ = attempts.try_send(cleanup.clone());
         let observed = ObservedStartup {
             inner: transport,
             discover_id: None,

@@ -1,6 +1,6 @@
 use kiln_mcp::{
     McpHttpGenerationConfig, McpHttpLimits, McpHttpStartError, ProtocolPolicy, ProtocolVersion,
-    http_generation_transport, start_http_client, start_stdio_client,
+    http_generation_transport, start_http_client, start_managed_http_client, start_stdio_client,
 };
 use rmcp::{ClientLifecycleMode, model::DiscoverResult, serve_client_with_lifecycle};
 use serde_json::{Value, json};
@@ -458,6 +458,76 @@ async fn http_startup_deadline_waits_for_worker_shutdown() {
         .unwrap();
     assert!(matches!(result, Err(McpHttpStartError::Deadline)));
     assert_eq!(fixture.received.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn managed_http_cleanup_tracks_unpolled_cancelled_and_successful_startup() {
+    // Dropping before polling cannot create a worker or an HTTP exchange.
+    let fixture = Fixture::new(Mode::Startup(StartupCase::ModernSse)).await;
+    let (startup, mut cleanup) = start_managed_http_client(
+        (),
+        fixture.config(ProtocolVersion::V20260728),
+        ProtocolPolicy::Auto,
+        tokio::time::Instant::now() + Duration::from_secs(5),
+    );
+    drop(startup);
+    cleanup.finish().await.unwrap();
+    assert!(fixture.received.lock().unwrap().is_empty());
+
+    // A dropped startup retains evidence for the in-flight worker. Cancelling
+    // a cleanup waiter must not consume and lose that worker's receiver.
+    let fixture = Fixture::new(Mode::Startup(StartupCase::Stall)).await;
+    let (startup, mut cleanup) = start_managed_http_client(
+        (),
+        fixture.config(ProtocolVersion::V20260728),
+        ProtocolPolicy::Auto,
+        tokio::time::Instant::now() + Duration::from_secs(5),
+    );
+    let startup = tokio::spawn(startup);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.received.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    startup.abort();
+    assert!(startup.await.unwrap_err().is_cancelled());
+    {
+        let finishing = cleanup.finish();
+        tokio::pin!(finishing);
+        assert!(futures_util::poll!(&mut finishing).is_pending());
+    }
+    fixture.release.as_ref().unwrap().notify_one();
+    tokio::time::timeout(Duration::from_secs(5), cleanup.finish())
+        .await
+        .unwrap()
+        .unwrap();
+    cleanup.finish().await.unwrap();
+    assert_eq!(fixture.received.lock().unwrap().len(), 1);
+
+    // A success keeps its cleanup owner alive through client cancellation,
+    // including when startup traversed both modern and legacy attempts.
+    for case in [StartupCase::ModernSse, StartupCase::UnsupportedJson] {
+        let fixture = Fixture::new(Mode::Startup(case)).await;
+        let (startup, mut cleanup) = start_managed_http_client(
+            (),
+            fixture.config(ProtocolVersion::V20260728),
+            ProtocolPolicy::Auto,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        );
+        let client = startup.await.unwrap();
+        {
+            let finishing = cleanup.finish();
+            tokio::pin!(finishing);
+            assert!(futures_util::poll!(&mut finishing).is_pending());
+        }
+        client.cancel().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), cleanup.finish())
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }
 
 #[tokio::test]

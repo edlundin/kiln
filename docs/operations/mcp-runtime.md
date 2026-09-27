@@ -707,8 +707,12 @@ authenticated API or desktop, and URL capability remains disabled.
 
 The pinned `rmcp` 3.4.1 `ElicitRequestParamsWire` still requires `elicitationId` for
 URL requests, including those nested in MRTR. The final 2026 protocol omits that
-field. The adapter must handle this difference before advertising modern URL
-support; it must not require servers to send a legacy ID or invent one on the wire.
+field. Such MRTR results survive SDK decoding as `CustomResult`; Kiln's local
+continuation adapter recognizes their URL requests without adding a legacy ID.
+It checks the round's request count before normalization, preserves opaque
+`requestState`, and keeps SDK decoding for roots/forms. Malformed and empty rounds
+reject. URL requests still return UnsupportedContinuation because runtime consent
+is not yet connected; decoding is not support advertisement or replay authority.
 Legacy completion notifications and URL-required errors also need lifecycle handling.
 
 Before URL mode is enabled, the authenticated UI must identify the requesting

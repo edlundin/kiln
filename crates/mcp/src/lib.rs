@@ -23,6 +23,8 @@ pub use broker::{
 };
 
 #[cfg(unix)]
+mod continuation;
+#[cfg(unix)]
 mod discovery;
 #[cfg(unix)]
 mod dispatch;

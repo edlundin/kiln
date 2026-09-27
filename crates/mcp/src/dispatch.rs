@@ -194,7 +194,7 @@ pub(crate) async fn send_once<
                 ServiceError::McpError(_) => StdioCallError::Server,
                 _ => StdioCallError::Interrupted,
             })?;
-        let ServerResult::InputRequiredResult(input) = result else {
+        let Some(input) = crate::continuation::decode(&result, limits.max_input_requests)? else {
             break result;
         };
         if peer
@@ -203,32 +203,38 @@ pub(crate) async fn send_once<
         {
             return Err(StdioCallError::UnsupportedContinuation);
         }
-        let requests = input
-            .input_requests
-            .filter(|r| !r.is_empty())
-            .ok_or(StdioCallError::UnsupportedContinuation)?;
-        if requests.len() > limits.max_input_requests.map_or(0, |n| n.get())
-            || requests
-                .values()
-                .any(|r| !matches!(r, InputRequest::ListRoots(_) | InputRequest::Elicitation(_)))
-        {
+        use crate::continuation::Request;
+        // An unsupported URL round must not partially mediate roots/forms.
+        if input.requests.values().any(|request| {
+            !matches!(
+                request,
+                Request::Sdk(InputRequest::ListRoots(_) | InputRequest::Elicitation(_))
+            )
+        }) {
             return Err(StdioCallError::UnsupportedContinuation);
         }
         let mut responses = InputResponses::new();
-        for (id, input) in requests {
+        for (id, input) in input.requests {
             let response = match input {
-                InputRequest::ListRoots(_) => serde_json::to_value(
+                Request::Sdk(InputRequest::ListRoots(_)) => serde_json::to_value(
                     handler
                         .roots()
                         .await
                         .map_err(|_| StdioCallError::UnsupportedContinuation)?,
                 ),
-                InputRequest::Elicitation(request) => serde_json::to_value(
+                Request::Sdk(InputRequest::Elicitation(request)) => serde_json::to_value(
                     handler
                         .elicitation(request.params)
                         .await
                         .map_err(|_| StdioCallError::UnsupportedContinuation)?,
                 ),
+                // Decode the final-protocol URL shape without a fabricated
+                // legacy ID, but never mediate or continue it before opt-in URL
+                // policy and the authenticated browser-consent path exist.
+                Request::Url {
+                    message: _message,
+                    url: _url,
+                } => return Err(StdioCallError::UnsupportedContinuation),
                 _ => return Err(StdioCallError::UnsupportedContinuation),
             }
             .map_err(|_| StdioCallError::InvalidOutput)?;
@@ -237,15 +243,15 @@ pub(crate) async fn send_once<
         match &mut request {
             ClientRequest::CallToolRequest(r) => {
                 r.params.input_responses = Some(responses);
-                r.params.request_state = input.request_state;
+                r.params.request_state = input.state;
             }
             ClientRequest::ReadResourceRequest(r) => {
                 r.params.input_responses = Some(responses);
-                r.params.request_state = input.request_state;
+                r.params.request_state = input.state;
             }
             ClientRequest::GetPromptRequest(r) => {
                 r.params.input_responses = Some(responses);
-                r.params.request_state = input.request_state;
+                r.params.request_state = input.state;
             }
             _ => return Err(StdioCallError::UnsupportedContinuation),
         }

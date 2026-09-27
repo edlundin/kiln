@@ -91,6 +91,26 @@ pub trait McpInvocationStore: Send + Sync {
     ) -> impl Future<Output = Result<usize, McpInvocationError>> + Send;
 }
 
+/// A consistent launch snapshot, not a lease or permission to replay a call.
+/// The caller still pins the selected directory and consumes the fresh native
+/// request. Generation admission fences snapshot revisions before process spawn.
+pub struct McpLaunchContext {
+    pub definition: crate::McpDefinitionRecord,
+    pub host: crate::McpHostBindingRecord,
+    pub directory: crate::WorkspaceCheckout,
+}
+
+pub trait McpLaunchStore: Send + Sync {
+    /// Recheck the live native claim and immutable proposal; derive the owner
+    /// from its current definition and approved scope, never from model input.
+    /// Require the current local host snapshot to select that exact checkout.
+    fn inspect_mcp_launch(
+        &self,
+        request: &ModelToolExecutionRequest<McpCallCommand>,
+        limits: McpDefinitionLimits,
+    ) -> impl Future<Output = Result<McpLaunchContext, McpInvocationError>> + Send;
+}
+
 /// One fresh claim, consumed by the broker. No Clone, deserialization, public
 /// constructor or recovery path. Dropping it cannot authorize another dispatch.
 pub struct McpDispatchPermit {

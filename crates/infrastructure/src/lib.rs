@@ -711,6 +711,19 @@ fn canonical_subprocess_directory(
 }
 
 #[cfg(unix)]
+/// Pin an already approved registered checkout. This verifies filesystem
+/// identity and containment, but does not itself grant execution authority.
+pub fn pin_mcp_working_directory(
+    checkout: &kiln_core::WorkspaceCheckout,
+) -> Result<rustix::fd::OwnedFd, kiln_core::RunError> {
+    pin_subprocess_directory(&SubprocessRequest::new(
+        checkout.root_path().to_owned(),
+        checkout.filesystem_identity().clone(),
+        checkout.scope(),
+    )?)
+}
+
+#[cfg(unix)]
 fn pin_subprocess_directory(
     request: &SubprocessRequest,
 ) -> Result<rustix::fd::OwnedFd, kiln_core::RunError> {

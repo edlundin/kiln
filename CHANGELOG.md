@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Compose approved stdio MCP claims through snapshot checks, pinned
+  checkout preparation, single dispatch and receipt-backed output capture.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/268e9e1)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Bind persisted MCP launch snapshots to a registered checkout and
   reject unapproved or stale directory selections before vault reads.
 

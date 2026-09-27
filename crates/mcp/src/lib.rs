@@ -4,6 +4,12 @@
 mod bindings;
 
 #[cfg(unix)]
+mod broker;
+
+#[cfg(unix)]
+pub use broker::{StdioBrokerError, StdioBrokerLimits, execute_stdio_call};
+
+#[cfg(unix)]
 mod dispatch;
 #[cfg(unix)]
 mod generation;

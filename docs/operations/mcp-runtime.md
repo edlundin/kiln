@@ -40,7 +40,9 @@ The registry independently checks the pinned directory's device/inode identity
 before reuse, including for session, workspace and core owners. A different
 directory requires an explicit stop; an unchanged binding revision cannot bypass
 this check. This is a runtime consistency guard, not launch authorization or a
-filesystem sandbox. Approved-scope launch wiring remains open.
+filesystem sandbox. The internal approved-call composition now connects durable
+scope checks, directory pinning, host resolution and single dispatch. Daemon
+coordinator/catalogue installation remains open.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
@@ -230,7 +232,12 @@ Old snapshots without `working_directory` remain inspectable, replaceable and
 retirable. They cannot use the persisted launch resolver until republished with a
 directory. Resolution rejects an absent selection or a mismatch with the caller's
 authorized checkout before any vault read. The caller must still recheck approval
-and pin the directory from that checkout; the daemon coordinator is not wired yet.
+and pin the directory from that checkout. The internal `execute_stdio_call` path
+does this through `McpLaunchStore` and a trusted pinning callback, then rechecks the
+context after preparation. It derives ownership from the approved scope and
+definition and requires the snapshot's local instance to match this daemon store.
+The dispatch transaction checks directory registration/scope and host revision
+again. The daemon coordinator is not wired yet.
 
 **Publish wanted imports before reconciliation.** Reconciliation deletes all
 unpublished values in its selected batch, including successful imports that have

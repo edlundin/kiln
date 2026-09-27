@@ -176,7 +176,7 @@ compares device/inode identity on every demand. A different directory is rejecte
 even with an unchanged revision; a non-directory descriptor is rejected before
 startup or reuse. This protects broader lifecycle scopes from silently inheriting
 another caller's cwd. It does not establish scope authorization or constrain a
-server that changes its own cwd. Approved-scope launch integration remains open.
+server that changes its own cwd. Daemon coordinator installation remains open.
 Scope stop retains its owner until cleanup completes. Shutdown seals the registry,
 signals every owner before waiting, and can be awaited again after caller
 cancellation. Dropping the registry requests stop but cannot prove completion;
@@ -255,6 +255,29 @@ administration is available through the offline `kilnd mcp-host-admin` command;
 see `docs/operations/mcp-runtime.md` for its pipe-only schema, import/publication
 ordering and explicit cleanup semantics. Neither the command nor these ports grant
 host authorization or install MCP in the daemon native catalogue.
+
+`execute_stdio_call` composes the internal approved stdio path. It consumes a
+fresh native MCP claim, reads a consistent launch context from `McpLaunchStore`,
+pins its checkout through a trusted callback, resolves only that host's vault
+references, rechecks the context after preparation, joins the registry owner,
+claims one dispatch and captures its receipt-backed output. The SQLite preflight
+checks the live Run/ToolCall and immutable proposal, derives all four lifecycle
+owners from the definition and approved scope, and requires a current matching
+local-instance snapshot. `pin_mcp_working_directory` reuses infrastructure's
+no-follow, root-identity and device-boundary directory traversal.
+
+Dispatch also rechecks the bound host revision, directory registration and scope
+transactionally; removing the host version from a supplied ready receipt cannot
+bypass this check. Preparation cancellation/deadline expiry sends no invocation,
+but may leave shared registry startup running. Once dispatch is claimed, its
+existing cancellation/uncertainty rules apply. No error permits replay. The trusted
+caller must persist completion and events; catalogue/schema validation and daemon
+coordinator installation remain prerequisites for advertising `mcp_call`.
+
+A real macOS fixture verifies one process reused across two approved Runs, exactly
+two sends, normal ToolCall completion, uninitialized local-host rejection,
+cancellation during preparation and root-change rejection before dispatch. These
+checks use no vault credentials and do not establish Linux/full conformance.
 
 The [internal daemon runtime](../../docs/operations/mcp-runtime.md) is opt-in with
 explicit instance-capacity and recovery-batch budgets. Its startup runs before

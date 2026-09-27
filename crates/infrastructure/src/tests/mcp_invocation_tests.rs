@@ -666,3 +666,256 @@ for line in sys.stdin:
         assert_eq!(state, expected.as_str(), "{mode}");
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mcp_broker_prepares_approved_scope_and_reuses_single_dispatch_owner() {
+    use kiln_mcp::{
+        StdioBrokerError, StdioBrokerLimits, StdioCallLimits, StdioRegistry, execute_stdio_call,
+    };
+    use std::{
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        sync::Arc,
+        time::Duration,
+    };
+    use tokio::{sync::oneshot, time::Instant};
+    struct NoSecrets;
+    impl McpSecretStore for NoSecrets {
+        async fn put_at(
+            &self,
+            _: &McpSecretBinding,
+            _: SecretValue,
+        ) -> Result<(), SecretStoreError> {
+            panic!("no vault writes")
+        }
+        async fn get(&self, _: &McpSecretBinding) -> Result<SecretValue, SecretStoreError> {
+            panic!("no credentials configured")
+        }
+        async fn delete(&self, _: &McpSecretBinding) -> Result<(), SecretStoreError> {
+            panic!("no vault deletion")
+        }
+    }
+    let (data, store, session) = seeded_session().await;
+    let path = std::fs::canonicalize(data.path()).unwrap();
+    let stat = std::fs::metadata(&path).unwrap();
+    let identity = FilesystemIdentity::new(format!("unix:{}:{}", stat.dev(), stat.ino())).unwrap();
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("UPDATE workspace_roots SET canonical_path = ?, git_common_directory_path = ?, filesystem_identity = ? WHERE workspace_root_id = ?")
+            .bind(path.to_str().unwrap()).bind(path.join(".git").to_str().unwrap())
+            .bind(identity.as_str()).bind(test_scope().workspace_root_id().as_str())
+            .execute(&mut *sql).await.unwrap();
+    }
+    let directory = WorkspaceCheckout::from_resolved_paths(
+        session.workspace_id().clone(),
+        test_scope().workspace_root_id().clone(),
+        "",
+        path.to_str().unwrap(),
+        path.join(".git").to_str().unwrap(),
+        identity,
+    )
+    .unwrap();
+    let key = register(
+        &store,
+        McpInstanceOwner::Core,
+        McpProtocolPolicy::Pinned(McpProtocolVersion::V20251125),
+    )
+    .await;
+    let initial = request(&store, &session, "broker-initial").await;
+    assert_eq!(
+        store.inspect_mcp_launch(&initial, limits()).await.err(),
+        Some(McpInvocationError::NotFound)
+    );
+    let executable = path.join("server");
+    std::fs::write(&executable, r#"#!/usr/bin/python3
+import json, os, sys
+with open('starts', 'a') as starts: starts.write(str(os.getpid())+'\n')
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get('method') == 'initialize':
+        result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
+    elif request.get('method') == 'tools/call':
+        with open('calls', 'a') as calls: calls.write(request['params']['name']+'\n')
+        result = {'content':[{'type':'text','text':'broker-result'}]}
+    else: continue
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let instance = KilnInstanceId::from_ulid(ulid::Ulid::generate());
+    let bindings = McpHostBindings::new(
+        key.clone(),
+        McpHostBindingInput {
+            instance_id: instance.clone(),
+            definition_version: 1,
+            runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),
+            executable: executable.to_str().unwrap().into(),
+            working_directory: Some((&directory).into()),
+            arguments: BTreeMap::new(),
+            environment: BTreeMap::new(),
+        },
+        limits(),
+    )
+    .unwrap();
+    store
+        .publish_mcp_host_bindings(&bindings, 0, limits())
+        .await
+        .unwrap();
+    // Metadata published for an uninitialized/different host is not launch authority.
+    assert_eq!(
+        store.inspect_mcp_launch(&initial, limits()).await.err(),
+        Some(McpInvocationError::DefinitionChanged)
+    );
+    store
+        .initialize_configuration_instance(instance)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .inspect_mcp_launch(&initial, limits())
+            .await
+            .unwrap()
+            .directory,
+        directory
+    );
+    let registry = StdioRegistry::new(Arc::new(store.clone()), NonZeroUsize::new(1).unwrap());
+    let budgets = || StdioBrokerLimits {
+        generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),
+        definition: limits(),
+        max_resolved_bytes: NonZeroUsize::new(4096).unwrap(),
+        max_frame_bytes: NonZeroUsize::new(1024).unwrap(),
+        shutdown_grace: Duration::ZERO,
+        startup_deadline: Instant::now() + Duration::from_secs(5),
+        call: StdioCallLimits {
+            deadline: Instant::now() + Duration::from_secs(5),
+            max_result_bytes: NonZeroUsize::new(1024).unwrap(),
+        },
+    };
+    let artifacts = super::super::FileArtifactStore::open(data.path()).unwrap();
+    let next_session =
+        SessionApplication::new(store.clone(), store.clone(), super::super::UlidIdGenerator)
+            .create_session(session.workspace_id().clone())
+            .await
+            .unwrap();
+    let second = request(&store, &next_session, "broker-reuse").await;
+    for request in [initial, second] {
+        let tool_id = request.tool_call().tool_call_id().clone();
+        let (_cancel, cancelled) = oneshot::channel();
+        let result = execute_stdio_call(
+            &registry,
+            request,
+            &NoSecrets,
+            budgets(),
+            cancelled,
+            |checkout| std::future::ready(super::super::pin_mcp_working_directory(&checkout)),
+            |bytes| std::future::ready(artifacts.store(&bytes, TOOL_OUTPUT_MEDIA_TYPE)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.state(), ToolCallState::Completed);
+        assert!(result.stdout().unwrap().contains("broker-result"));
+        ProviderApplication::new(store.clone(), super::super::UlidIdGenerator)
+            .finish_tool_call(&tool_id, &result)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(path.join("starts"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    let cancel_session =
+        SessionApplication::new(store.clone(), store.clone(), super::super::UlidIdGenerator)
+            .create_session(session.workspace_id().clone())
+            .await
+            .unwrap();
+    let cancelled_request = request(&store, &cancel_session, "cancel-during-preparation").await;
+    let run_id = cancelled_request.tool_call().run_id().clone();
+    let (_cancel, cancelled) = oneshot::channel();
+    let result = execute_stdio_call(
+        &registry,
+        cancelled_request,
+        &NoSecrets,
+        budgets(),
+        cancelled,
+        |checkout| {
+            let store = store.clone();
+            async move {
+                RunApplication::new(store, super::super::UlidIdGenerator)
+                    .request_cancellation(run_id)
+                    .await
+                    .unwrap();
+                super::super::pin_mcp_working_directory(&checkout)
+            }
+        },
+        |bytes| std::future::ready(artifacts.store(&bytes, TOOL_OUTPUT_MEDIA_TYPE)),
+    )
+    .await;
+    assert_eq!(
+        result.err(),
+        Some(StdioBrokerError::Preparation(
+            McpInvocationError::InvalidRequest
+        ))
+    );
+    let mismatch_session =
+        SessionApplication::new(store.clone(), store.clone(), super::super::UlidIdGenerator)
+            .create_session(session.workspace_id().clone())
+            .await
+            .unwrap();
+    let mismatch = request(&store, &mismatch_session, "mismatched-directory").await;
+    let target = store.get_mcp_instance(&key).await.unwrap().unwrap();
+    let mut unbound = target.clone();
+    unbound.host_binding_version = None;
+    assert_eq!(
+        store
+            .begin_mcp_invocation(&mismatch, &unbound, limits())
+            .await
+            .err(),
+        Some(McpInvocationError::GenerationChanged)
+    );
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("UPDATE workspace_roots SET filesystem_identity = 'replaced' WHERE workspace_root_id = ?")
+            .bind(test_scope().workspace_root_id().as_str()).execute(&mut *sql).await.unwrap();
+    }
+    assert_eq!(
+        store
+            .begin_mcp_invocation(&mismatch, &target, limits())
+            .await
+            .err(),
+        Some(McpInvocationError::ScopeMismatch)
+    );
+    let (_cancel, cancelled) = oneshot::channel();
+    let result = execute_stdio_call(
+        &registry,
+        mismatch,
+        &NoSecrets,
+        budgets(),
+        cancelled,
+        |_| async { panic!("preflight must reject before filesystem access") },
+        |bytes| std::future::ready(artifacts.store(&bytes, TOOL_OUTPUT_MEDIA_TYPE)),
+    )
+    .await;
+    assert_eq!(
+        result.err(),
+        Some(StdioBrokerError::Preparation(
+            McpInvocationError::ScopeMismatch
+        ))
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    assert!(registry.shutdown().await.into_iter().all(|r| r.is_ok()));
+}

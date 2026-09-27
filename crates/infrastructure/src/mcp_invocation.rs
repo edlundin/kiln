@@ -38,34 +38,13 @@ impl McpInvocationStore for SqliteStore {
             tx.commit().await.map_err(|_| Error::Unavailable)?;
             return Ok(McpInvocationMutation::Existing(prior));
         }
-        // Compare the live execution state and the exact immutable proposal that
-        // produced this non-cloneable native claim. A cancelled/stale claim fails.
-        let row = sqlx::query("SELECT s.session_id, s.workspace_id FROM tool_calls t
-            JOIN runs r ON r.run_id = t.run_id JOIN sessions s ON s.session_id = r.session_id
-            JOIN model_tool_adoptions a ON a.tool_call_id = t.tool_call_id
-            JOIN model_tool_requests q ON q.model_invocation_id = a.model_invocation_id AND q.provider_call_id = a.provider_call_id
-            WHERE t.tool_call_id = ? AND t.run_id = ? AND t.capability = ? AND t.state = 'running'
-              AND r.state = 'running' AND a.model_invocation_id = ? AND a.provider_call_id = ?
-              AND q.name = 'mcp_call' AND q.arguments_json = ?
-              AND t.effective_workspace_root_id = ? AND t.effective_relative_directory = ?")
-            .bind(tool.tool_call_id().as_str()).bind(tool.run_id().as_str()).bind(MCP_CALL_CAPABILITY)
-            .bind(request.invocation_id().as_str()).bind(request.provider_call_id())
-            .bind(command.canonical_json()).bind(request.scope().workspace_root_id().as_str())
-            .bind(request.scope().relative_directory()).fetch_optional(&mut *tx).await
-            .map_err(|_| Error::Unavailable)?.ok_or(Error::InvalidRequest)?;
-        let session: String = row
-            .try_get("session_id")
-            .map_err(|_| Error::IntegrityViolation)?;
-        let workspace: String = row
-            .try_get("workspace_id")
-            .map_err(|_| Error::IntegrityViolation)?;
+        let (session, workspace) = native_claim_owner(&mut tx, request).await?;
         let owner_matches = match target.key.owner() {
             McpInstanceOwner::Core => true,
-            McpInstanceOwner::Session(id) => id.as_str() == session,
-            McpInstanceOwner::Workspace(id) => id.as_str() == workspace,
+            McpInstanceOwner::Session(id) => id == &session,
+            McpInstanceOwner::Workspace(id) => id == &workspace,
             McpInstanceOwner::WorkspaceCheckout(checkout) => {
-                checkout.workspace_id().as_str() == workspace
-                    && checkout.scope() == *request.scope()
+                checkout.workspace_id() == &workspace && checkout.scope() == *request.scope()
             }
         };
         if !owner_matches {
@@ -101,18 +80,38 @@ impl McpInvocationStore for SqliteStore {
         if key.canonical_json() != target.key.canonical_json() {
             return Err(Error::ScopeMismatch);
         }
+        if let Some(expected) = &target.host_binding_version {
+            let host = current_host(&mut tx, &key, command.definition_version(), limits).await?;
+            if host.revision != expected.revision
+                || host.bindings.instance_id() != &expected.instance_id
+            {
+                return Err(Error::GenerationChanged);
+            }
+            let directory = host
+                .bindings
+                .working_directory()
+                .ok_or(Error::ScopeMismatch)?;
+            if directory.workspace_id() != &workspace || directory.scope() != *request.scope() {
+                return Err(Error::ScopeMismatch);
+            }
+            super::mcp_host_binding::validate_directory(&mut tx, &host.bindings)
+                .await
+                .map_err(|_| Error::ScopeMismatch)?;
+        }
         let ready: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM mcp_instances i
             JOIN mcp_instance_generations g ON g.generation_id = i.generation_id
             WHERE i.instance_key = ? AND g.generation_id = ? AND g.definition_version = ?
               AND g.state_version = ? AND g.observed = 'ready' AND g.desired = 'running'
-              AND g.negotiated_protocol = ?)",
+              AND g.negotiated_protocol = ? AND g.host_instance_id IS ? AND g.host_binding_revision IS ?)",
         )
         .bind(key.canonical_json())
         .bind(target.generation.as_str())
         .bind(version)
         .bind(i64::try_from(target.state_version).map_err(|_| Error::InvalidRequest)?)
         .bind(target.negotiated_protocol.map(|p| p.as_str()))
+        .bind(target.host_binding_version.as_ref().map(|v| v.instance_id.as_str()))
+        .bind(target.host_binding_version.as_ref().map(|v| v.revision.get() as i64))
         .fetch_one(&mut *tx)
         .await
         .map_err(|_| Error::Unavailable)?;
@@ -251,4 +250,166 @@ async fn append_event(
         .await
         .map_err(|_| Error::Unavailable)?;
     Ok(())
+}
+
+async fn native_claim_owner(
+    connection: &mut SqliteConnection,
+    request: &ModelToolExecutionRequest<McpCallCommand>,
+) -> Result<(kiln_core::SessionId, kiln_core::WorkspaceId), Error> {
+    if request.tool_call().capability() != MCP_CALL_CAPABILITY {
+        return Err(Error::InvalidRequest);
+    }
+    let tool = request.tool_call();
+    let command = request.command();
+    let row = sqlx::query("SELECT s.session_id, s.workspace_id FROM tool_calls t
+            JOIN runs r ON r.run_id = t.run_id JOIN sessions s ON s.session_id = r.session_id
+            JOIN model_tool_adoptions a ON a.tool_call_id = t.tool_call_id
+            JOIN model_tool_requests q ON q.model_invocation_id = a.model_invocation_id AND q.provider_call_id = a.provider_call_id
+            WHERE t.tool_call_id = ? AND t.run_id = ? AND t.capability = ? AND t.state = 'running'
+              AND r.state = 'running' AND a.model_invocation_id = ? AND a.provider_call_id = ?
+              AND q.name = 'mcp_call' AND q.arguments_json = ?
+              AND t.effective_workspace_root_id = ? AND t.effective_relative_directory = ?")
+            .bind(tool.tool_call_id().as_str()).bind(tool.run_id().as_str()).bind(MCP_CALL_CAPABILITY)
+            .bind(request.invocation_id().as_str()).bind(request.provider_call_id())
+            .bind(command.canonical_json()).bind(request.scope().workspace_root_id().as_str())
+            .bind(request.scope().relative_directory()).fetch_optional(&mut *connection).await
+            .map_err(|_| Error::Unavailable)?.ok_or(Error::InvalidRequest)?;
+    let session: String = row
+        .try_get("session_id")
+        .map_err(|_| Error::IntegrityViolation)?;
+    let workspace: String = row
+        .try_get("workspace_id")
+        .map_err(|_| Error::IntegrityViolation)?;
+    Ok((
+        kiln_core::SessionId::parse(session).map_err(|_| Error::IntegrityViolation)?,
+        kiln_core::WorkspaceId::parse(workspace).map_err(|_| Error::IntegrityViolation)?,
+    ))
+}
+
+impl kiln_core::McpLaunchStore for SqliteStore {
+    async fn inspect_mcp_launch(
+        &self,
+        request: &ModelToolExecutionRequest<McpCallCommand>,
+        limits: McpDefinitionLimits,
+    ) -> Result<kiln_core::McpLaunchContext, Error> {
+        limits.validate().map_err(|_| Error::InvalidRequest)?;
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
+        let (session, workspace) = native_claim_owner(&mut tx, request).await?;
+        if load(&mut tx, request.tool_call().tool_call_id())
+            .await?
+            .is_some()
+        {
+            return Err(Error::Conflict);
+        }
+        let version = i64::try_from(request.command().definition_version())
+            .map_err(|_| Error::InvalidRequest)?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT version FROM mcp_definitions WHERE definition_id = ?")
+                .bind(request.command().server_id().as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| Error::Unavailable)?;
+        if current != Some(version) {
+            return Err(Error::DefinitionChanged);
+        }
+        let definition = super::mcp_definition::load_version(
+            &mut tx,
+            request.command().server_id(),
+            version,
+            limits,
+        )
+        .await
+        .map_err(|_| Error::DefinitionChanged)?;
+        if !definition.definition.server().enabled
+            || !matches!(
+                definition.definition.server().transport,
+                kiln_core::SharedMcpTransport::Stdio { .. }
+            )
+        {
+            return Err(Error::DefinitionChanged);
+        }
+        let root = sqlx::query("SELECT canonical_path, git_common_directory_path, filesystem_identity FROM workspace_roots WHERE workspace_id = ? AND workspace_root_id = ? AND state = 'available'")
+            .bind(workspace.as_str()).bind(request.scope().workspace_root_id().as_str())
+            .fetch_optional(&mut *tx).await.map_err(|_| Error::Unavailable)?.ok_or(Error::ScopeMismatch)?;
+        let directory = kiln_core::WorkspaceCheckout::from_resolved_paths(
+            workspace.clone(),
+            request.scope().workspace_root_id().clone(),
+            request.scope().relative_directory(),
+            root.try_get::<String, _>("canonical_path")
+                .map_err(|_| Error::IntegrityViolation)?,
+            root.try_get::<String, _>("git_common_directory_path")
+                .map_err(|_| Error::IntegrityViolation)?,
+            kiln_core::FilesystemIdentity::new(
+                root.try_get::<String, _>("filesystem_identity")
+                    .map_err(|_| Error::IntegrityViolation)?,
+            )
+            .ok_or(Error::IntegrityViolation)?,
+        )
+        .map_err(|_| Error::ScopeMismatch)?;
+        let owner = match definition.definition.scope() {
+            kiln_core::McpLifecycleScope::Core => McpInstanceOwner::Core,
+            kiln_core::McpLifecycleScope::Session => McpInstanceOwner::Session(session),
+            kiln_core::McpLifecycleScope::Workspace => McpInstanceOwner::Workspace(workspace),
+            kiln_core::McpLifecycleScope::WorkspaceCheckout => {
+                McpInstanceOwner::WorkspaceCheckout(directory.clone())
+            }
+        };
+        let key = McpInstanceKey::new(&definition.definition, owner, limits.max_metadata_bytes)
+            .map_err(|_| Error::ScopeMismatch)?;
+        let host = current_host(
+            &mut tx,
+            &key,
+            request.command().definition_version(),
+            limits,
+        )
+        .await?;
+        if host.bindings.working_directory() != Some(&directory) {
+            return Err(Error::ScopeMismatch);
+        }
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(kiln_core::McpLaunchContext {
+            definition,
+            host,
+            directory,
+        })
+    }
+}
+
+async fn current_host(
+    connection: &mut SqliteConnection,
+    key: &McpInstanceKey,
+    definition_version: u64,
+    limits: McpDefinitionLimits,
+) -> Result<kiln_core::McpHostBindingRecord, Error> {
+    let revision: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM mcp_host_bindings WHERE instance_key = ?")
+            .bind(key.canonical_json())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+    let host = super::mcp_host_binding::load_version(
+        connection,
+        key,
+        revision.ok_or(Error::NotFound)?,
+        limits,
+    )
+    .await
+    .map_err(|e| match e {
+        kiln_core::McpHostBindingError::Unavailable => Error::Unavailable,
+        _ => Error::IntegrityViolation,
+    })?
+    .ok_or(Error::NotFound)?;
+    let local: Option<String> =
+        sqlx::query_scalar("SELECT instance_id FROM configuration_instance WHERE singleton = 1")
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+    if host.retired
+        || host.bindings.definition_version() != definition_version
+        || local.as_deref() != Some(host.bindings.instance_id().as_str())
+    {
+        return Err(Error::DefinitionChanged);
+    }
+    Ok(host)
 }

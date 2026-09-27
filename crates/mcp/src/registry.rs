@@ -69,6 +69,10 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
         }
     }
 
+    pub(crate) fn store(&self) -> &S {
+        &self.store
+    }
+
     /// Concurrent demand for one key joins startup or reuses its live owner.
     /// Cancelling a waiter does not stop a server shared by other Runs. Inputs
     /// must already be authorized, including when an existing owner is reused.

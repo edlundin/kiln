@@ -115,6 +115,34 @@ impl McpElicitationValidator {
     }
 }
 
+pub(crate) fn normalize_form(
+    request: rmcp::model::ElicitRequestParams,
+    limits: McpElicitationValidationLimits,
+) -> Result<(McpElicitationForm, McpElicitationValidator), McpElicitationError> {
+    let rmcp::model::ElicitRequestParams::FormElicitationParams {
+        message,
+        requested_schema,
+        ..
+    } = request
+    else {
+        return Err(McpElicitationError::UnsupportedSchema);
+    };
+    if message.len() > limits.form.max_message_bytes.get() {
+        return Err(McpElicitationError::LimitExceeded);
+    }
+    serde_json::to_writer(
+        &mut ResponseBudget(limits.form.max_schema_bytes.get()),
+        &requested_schema,
+    )
+    .map_err(|_| McpElicitationError::LimitExceeded)?;
+    let schema =
+        serde_json::to_string(&requested_schema).map_err(|_| McpElicitationError::InvalidSchema)?;
+    let form = McpElicitationForm::new(message, &schema, limits.form)
+        .map_err(|_| McpElicitationError::InvalidSchema)?;
+    let validator = McpElicitationValidator::new(&form, limits)?;
+    Ok((form, validator))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpElicitationDecisionError {
     Validation(McpElicitationError),

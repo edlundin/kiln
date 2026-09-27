@@ -402,7 +402,10 @@ mod tests {
                         };
                         if method == "initialize" {
                             assert_identity(&request["params"]["clientInfo"]);
-                            assert_eq!(request["params"]["capabilities"], json!({"roots":{}}));
+                            assert_eq!(
+                                request["params"]["capabilities"],
+                                json!({"roots":{},"elicitation":{"form":{"schemaValidation":true}}})
+                            );
                         }
                         if protocol == McpProtocolVersion::V20260728 {
                             assert_eq!(header("mcp-protocol-version"), Some("2026-07-28"));
@@ -417,7 +420,7 @@ mod tests {
                                 assert_identity(&meta["io.modelcontextprotocol/clientInfo"]);
                                 assert_eq!(
                                     meta["io.modelcontextprotocol/clientCapabilities"],
-                                    json!({"roots":{}})
+                                    json!({"roots":{},"elicitation":{"form":{"schemaValidation":true}}})
                                 );
                             }
                             if method == "tools/call" {
@@ -471,7 +474,7 @@ mod tests {
                             {
                                 assert!(pending_call.is_none());
                                 pending_call = Some(request.clone());
-                                json!({"resultType":"input_required","inputRequests":{"root-request":{"method":"roots/list"}},"requestState":"opaque-state"})
+                                json!({"resultType":"input_required","inputRequests":{"root-request":{"method":"roots/list"},"form-request":{"method":"elicitation/create","params":{"mode":"form","message":"Confirm fixture action","requestedSchema":{"type":"object","properties":{"proceed":{"type":"boolean"}},"required":["proceed"]}}}},"requestState":"opaque-state"})
                             }
                             "tools/call" => {
                                 if protocol == McpProtocolVersion::V20260728 {
@@ -482,6 +485,10 @@ mod tests {
                                         original["params"]["arguments"]
                                     );
                                     assert_eq!(request["params"]["requestState"], "opaque-state");
+                                    assert_eq!(
+                                        request["params"]["inputResponses"]["form-request"],
+                                        json!({"action":"accept","content":{"proceed":true}})
+                                    );
                                     assert_eq!(
                                         request["params"]["inputResponses"]["root-request"],
                                         json!({"roots":[{"uri":format!("file://{}/",path.display())}]})
@@ -599,6 +606,10 @@ for line in sys.stdin:
         roots = json.loads(sys.stdin.readline())
         assert roots['id'] == 'root-request'
         assert roots['result'] == {'roots':[{'uri':pathlib.Path.cwd().as_uri() + '/'}]}
+        print(json.dumps({'jsonrpc':'2.0','id':'form-request','method':'elicitation/create','params':{'mode':'form','message':'Confirm fixture action','requestedSchema':{'type':'object','properties':{'proceed':{'type':'boolean'}},'required':['proceed']}}}),flush=True)
+        form = json.loads(sys.stdin.readline())
+        assert form['id'] == 'form-request'
+        assert form['result'] == {'action':'accept','content':{'proceed':True}}
         with open('calls','a') as log: log.write('call\n')
         result = {'content':[{'type':'text','text':'remote output' * 500}]}
     else: continue
@@ -609,8 +620,8 @@ for line in sys.stdin:
         // This fixture's repeated output exercises artifact paging after completion.
         config.max_frame_bytes = NonZeroUsize::new(16384).unwrap();
         config.max_result_bytes = NonZeroUsize::new(16384).unwrap();
-        // The fixture asks for exactly one roots response per invocation.
-        config.max_input_requests = NonZeroUsize::new(1);
+        // The fixture asks for one roots and one form response per invocation.
+        config.max_input_requests = NonZeroUsize::new(2);
         if http_protocol.is_some() {
             config.http = Some(serde_json::from_value(http_limits_json()).unwrap());
         }
@@ -681,9 +692,19 @@ for line in sys.stdin:
             .publish_mcp_host_bindings(&bindings, 0, definitions)
             .await
             .unwrap();
-        let registry = Arc::new(kiln_mcp::StdioRegistry::new(
+        let form_limits = kiln_mcp::McpElicitationValidationLimits {
+            form: McpElicitationFormLimits {
+                max_message_bytes: NonZeroUsize::new(128).unwrap(),
+                max_schema_bytes: NonZeroUsize::new(1024).unwrap(),
+            },
+            max_response_bytes: NonZeroUsize::new(256).unwrap(),
+        };
+        // The fixture supplies its explicit decision below. Production daemon
+        // construction remains default-off until authenticated endpoints exist.
+        let registry = Arc::new(kiln_mcp::StdioRegistry::new_with_elicitation(
             Arc::new(store.clone()),
             NonZeroUsize::new(1).unwrap(),
+            form_limits,
         ));
         let runs = RunApplication::new(store.clone(), UlidIdGenerator);
         let service = RunService::new(
@@ -873,10 +894,77 @@ for line in sys.stdin:
                 }
             }
         };
+        let mut input_changes = store.subscribe_mcp_input_changes();
+        let interact = async {
+            if http_protocol == Some(McpProtocolVersion::V20251125) {
+                return;
+            }
+            loop {
+                input_changes.borrow_and_update();
+                let events = store
+                    .list_session_events(session.id(), EventCursor::zero())
+                    .await
+                    .unwrap();
+                let pending = events
+                    .events()
+                    .iter()
+                    .find_map(|event| match event.payload() {
+                        SessionEventPayload::McpInputStateChanged {
+                            tool_call_id,
+                            generation,
+                            ordinal,
+                            kind: McpInputKind::Elicitation,
+                            state: McpInputState::Required,
+                            ..
+                        } => Some(McpInputRecord {
+                            invocation: McpInvocationRecord {
+                                tool_call_id: tool_call_id.clone(),
+                                generation: generation.clone(),
+                                state: McpInvocationState::Dispatching,
+                            },
+                            ordinal: *ordinal,
+                            kind: McpInputKind::Elicitation,
+                            state: McpInputState::Required,
+                        }),
+                        _ => None,
+                    });
+                if let Some(input) = pending {
+                    assert_eq!(
+                        store.mcp_input_interaction_run(&input).await.unwrap(),
+                        run_id
+                    );
+                    let form = store
+                        .get_mcp_elicitation_form(&input, &run_id, form_limits.form)
+                        .await
+                        .unwrap();
+                    assert_eq!(form.form.message(), "Confirm fixture action");
+                    let decision = McpElicitationDecision::from_json(
+                        r#"{"action":"accept","content":{"proceed":true}}"#,
+                        form_limits.max_response_bytes,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        kiln_mcp::decide_elicitation_form(
+                            &store,
+                            &input,
+                            &run_id,
+                            &decision,
+                            form_limits
+                        )
+                        .await
+                        .unwrap(),
+                        McpElicitationDecisionMutation::Applied
+                    );
+                    return;
+                }
+                input_changes.changed().await.unwrap();
+            }
+        };
         let outcome = tokio::time::timeout(Duration::from_secs(5), async {
-            let (outcome, ()) = tokio::join!(
+            let (outcome, (), ()) = tokio::join!(
                 service.execute_native_tools(&invocation, &mut cancelled),
-                approve
+                approve,
+                interact,
             );
             outcome.unwrap()
         })
@@ -1125,6 +1213,8 @@ for line in sys.stdin:
             assert_eq!(
                 inputs,
                 [
+                    (ids[3].clone(), McpInputState::Required),
+                    (ids[3].clone(), McpInputState::Resolved),
                     (ids[3].clone(), McpInputState::Required),
                     (ids[3].clone(), McpInputState::Resolved)
                 ]

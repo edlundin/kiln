@@ -56,7 +56,9 @@ pub(crate) struct DispatchOutcome {
     pub result: Result<StdioCallResult, StdioCallError>,
 }
 
-pub(crate) async fn send_once<S: kiln_core::McpInputStore>(
+pub(crate) async fn send_once<
+    S: kiln_core::McpInputStore + kiln_core::McpElicitationDecisionStore,
+>(
     peer: &Peer<RoleClient>,
     command: &McpCommand,
     generation: &McpGenerationId,
@@ -208,20 +210,29 @@ pub(crate) async fn send_once<S: kiln_core::McpInputStore>(
         if requests.len() > limits.max_input_requests.map_or(0, |n| n.get())
             || requests
                 .values()
-                .any(|r| !matches!(r, InputRequest::ListRoots(_)))
+                .any(|r| !matches!(r, InputRequest::ListRoots(_) | InputRequest::Elicitation(_)))
         {
             return Err(StdioCallError::UnsupportedContinuation);
         }
         let mut responses = InputResponses::new();
-        for (id, _) in requests {
-            let roots = handler
-                .roots()
-                .await
-                .map_err(|_| StdioCallError::UnsupportedContinuation)?;
-            responses.insert(
-                id,
-                serde_json::to_value(roots).map_err(|_| StdioCallError::InvalidOutput)?,
-            );
+        for (id, input) in requests {
+            let response = match input {
+                InputRequest::ListRoots(_) => serde_json::to_value(
+                    handler
+                        .roots()
+                        .await
+                        .map_err(|_| StdioCallError::UnsupportedContinuation)?,
+                ),
+                InputRequest::Elicitation(request) => serde_json::to_value(
+                    handler
+                        .elicitation(request.params)
+                        .await
+                        .map_err(|_| StdioCallError::UnsupportedContinuation)?,
+                ),
+                _ => return Err(StdioCallError::UnsupportedContinuation),
+            }
+            .map_err(|_| StdioCallError::InvalidOutput)?;
+            responses.insert(id, response);
         }
         match &mut request {
             ClientRequest::CallToolRequest(r) => {

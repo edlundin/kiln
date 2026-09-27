@@ -10,7 +10,9 @@ launch command. Offline host-binding administration is described below.
 Runtime clients identify as `kiln` with the workspace package version, both in
 legacy initialization and modern per-request metadata. Host-bound runtime clients
 advertise roots; requests still require active invocation authority and an explicit
-budget. Sampling, elicitation and other client capabilities remain unadvertised.
+budget. The daemon keeps elicitation unadvertised. Rust hosts can explicitly
+enable form mediation as described below; sampling and URL elicitation remain
+unadvertised.
 
 `kiln-mcp` provides an internal `BoundedHttpClient` adapter for Streamable HTTP.
 The daemon uses it only through the explicitly enabled native path and a published
@@ -147,7 +149,8 @@ remain valid without this object.
 Both transports use the same local approval, exact registered directory and host
 revision checks, shared-owner capacity, serial dispatch receipts, result artifacts
 and paging. Streamable HTTP supports the 2025 revisions and 2026 stateless mode;
-2024 HTTP+SSE, OAuth, sampling and elicitation are not yet implemented. Use
+2024 HTTP+SSE, OAuth, sampling and daemon user-interaction endpoints are not yet
+implemented. Use
 `publish_http` below to select a host endpoint/credential snapshot. The local
 HTTP fixture covers modern and legacy approved search/describe/call, artifact
 paging and completed-batch no-replay; it does not establish remote TLS, actual
@@ -161,17 +164,17 @@ not authorize provider calls, responses or operation replay. New input and
 resolution require the original live native claim and ready generation at the
 current definition version. Bodies, server request IDs, responses and opaque
 request state are not stored in this journal. Input transitions now project into
-public session events. Roots mediation is connected; provider sampling and user
-interaction routing remain open.
+public session events. Roots and opt-in form mediation are connected; provider
+sampling and the daemon user-interaction surface remain open.
 
 Optional `max_input_requests` in `KILN_NATIVE_MCP_LIMITS` enables roots mediation
 with an explicit positive per-invocation total; absent/null disables responses.
-It counts legacy `roots/list` callbacks and roots requests across all modern MRTR
-rounds. Roots responses share the invocation deadline and result-byte allowance.
-Each supported modern round contains at least one roots request, so the request
-budget also bounds the number of continuation rounds. Sampling, elicitation,
-state-only rounds and external Tasks remain unsupported and do not authorize a
-continuation. Roots callbacks handled without an active invocation are refused;
+It counts legacy roots/form callbacks and roots/form requests across modern MRTR
+rounds. Responses share the invocation deadline and result-byte allowance.
+Each supported modern round contains at least one request, so the request budget
+also bounds continuation rounds. Sampling, URL elicitation, state-only rounds and
+external Tasks remain unsupported and do not authorize a continuation. Callbacks
+handled without an active invocation are refused;
 pre-startup mediation remains unsupported.
 The invocation guard revokes in-progress callbacks when dispatch ends or is
 cancelled. Current generation/claim state is rechecked at journal boundaries.
@@ -234,11 +237,37 @@ Deciding does not resolve the input or send a response. An attached form cannot
 resolve until a decision exists; both the store and database enforce this.
 Resolved/interrupted inputs and cancelled ancestry cannot return a decision for
 replay. Callers must authenticate user access to the interaction owner; the
-internal storage API does not establish user identity. Authenticated
-presentation/decision endpoints and runtime handlers remain to be connected
-before advertising elicitation. Form persistence itself neither
+internal storage API does not establish user identity. Authenticated daemon
+presentation/decision endpoints remain to be connected before the daemon can
+advertise elicitation. Form persistence itself neither
 publishes a prompt nor grants user approval, provider access or response/replay
 authority. Sampling integration remains unimplemented.
+
+A Rust host with an authenticated interaction surface can construct
+`McpRegistry::new_with_elicitation` using explicit form-message, schema and
+response byte allowances. The policy is immutable for all generations owned by
+that registry; ordinary `new`, direct generation spawns and the daemon remain
+default-off. Enabled generations advertise form elicitation with schema
+validation, never URL elicitation or sampling. The existing per-call input quota
+must also be enabled.
+
+Legacy `elicitation/create` callbacks and modern form MRTR use the same handler.
+It normalizes SDK-decoded form fields into private storage, validates the form,
+subscribes before publishing required input, and waits for its durable decision.
+It revalidates the response and journals fresh resolution before returning it.
+An existing receipt never authorizes a response. The shared quota lock retains
+serial mediation across roots and forms. Guard drop, request cancellation and
+the invocation deadline stop suspended waits without polling; invocation end
+interrupts any remaining pending record. SDK decoding precedes normalization, so
+this is not a raw-wire schema preservation guarantee. Raw metadata and opaque
+request state are not stored in form records.
+
+Real stdio and modern HTTP fixtures prove approved native calls requesting both
+roots and form input, explicit decision recording, same-invocation resolution,
+continuation state/arguments with a fresh wire ID, one external effect and no
+completed-batch replay. Focused tests cover guard drop, deadlines, invalid
+responses, existing receipts and the shared quota. They do not establish a
+finished authenticated UI, URL-mode support or official protocol conformance.
 
 
 Native file reading remains independently configurable. The daemon freezes one

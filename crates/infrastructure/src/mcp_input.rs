@@ -258,6 +258,10 @@ impl McpElicitationFormStore for SqliteStore {
 }
 
 impl McpElicitationDecisionStore for SqliteStore {
+    fn subscribe_mcp_input_changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.mcp_invocation_events.subscribe()
+    }
+
     async fn decide_mcp_elicitation_form(
         &self,
         expected: &McpElicitationFormRecord,

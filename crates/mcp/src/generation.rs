@@ -59,6 +59,7 @@ pub struct StdioGenerationLaunch {
 }
 
 struct GenerationLaunch {
+    elicitation: Option<crate::McpElicitationValidationLimits>,
     key: McpInstanceKey,
     definition_version: u64,
     host_binding_version: Option<kiln_core::McpHostBindingVersion>,
@@ -154,11 +155,29 @@ impl McpGeneration {
             + McpDefinitionStore
             + McpInvocationStore
             + kiln_core::McpInputStore
+            + kiln_core::McpElicitationDecisionStore
+            + 'static,
+    {
+        Self::spawn_with_elicitation(store, launch, None)
+    }
+
+    pub(crate) fn spawn_with_elicitation<S>(
+        store: Arc<S>,
+        launch: StdioGenerationLaunch,
+        elicitation: Option<crate::McpElicitationValidationLimits>,
+    ) -> Self
+    where
+        S: McpInstanceStore
+            + McpDefinitionStore
+            + McpInvocationStore
+            + kiln_core::McpInputStore
+            + kiln_core::McpElicitationDecisionStore
             + 'static,
     {
         Self::spawn_launch(
             store,
             GenerationLaunch {
+                elicitation,
                 key: launch.key,
                 definition_version: launch.definition_version,
                 host_binding_version: launch.host_binding_version,
@@ -178,11 +197,29 @@ impl McpGeneration {
             + McpDefinitionStore
             + McpInvocationStore
             + kiln_core::McpInputStore
+            + kiln_core::McpElicitationDecisionStore
+            + 'static,
+    {
+        Self::spawn_http_with_elicitation(store, launch, None)
+    }
+
+    pub(crate) fn spawn_http_with_elicitation<S>(
+        store: Arc<S>,
+        launch: crate::ResolvedHttpLaunch,
+        elicitation: Option<crate::McpElicitationValidationLimits>,
+    ) -> Self
+    where
+        S: McpInstanceStore
+            + McpDefinitionStore
+            + McpInvocationStore
+            + kiln_core::McpInputStore
+            + kiln_core::McpElicitationDecisionStore
             + 'static,
     {
         Self::spawn_launch(
             store,
             GenerationLaunch {
+                elicitation,
                 key: launch.key,
                 definition_version: launch.definition_version,
                 host_binding_version: Some(launch.host_binding_version),
@@ -200,6 +237,7 @@ impl McpGeneration {
             + McpDefinitionStore
             + McpInvocationStore
             + kiln_core::McpInputStore
+            + kiln_core::McpElicitationDecisionStore
             + 'static,
     {
         let (stop, stopped) = oneshot::channel();
@@ -211,6 +249,7 @@ impl McpGeneration {
                 store.clone(),
                 launch.definition_limits,
                 launch.host_binding_version.is_some(),
+                launch.elicitation,
             );
             let result = run(store.as_ref(), launch, stopped, requests, &status, handler).await;
             status.send_replace(Status::Finished(result.clone()));
@@ -313,7 +352,12 @@ async fn stopped<S: McpInstanceStore>(
 }
 
 async fn run<
-    S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + kiln_core::McpInputStore + 'static,
+    S: McpInstanceStore
+        + McpDefinitionStore
+        + McpInvocationStore
+        + kiln_core::McpInputStore
+        + kiln_core::McpElicitationDecisionStore
+        + 'static,
 >(
     store: &S,
     launch: GenerationLaunch,

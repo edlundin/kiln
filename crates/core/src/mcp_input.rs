@@ -263,6 +263,10 @@ pub enum McpElicitationDecisionMutation {
 }
 
 pub trait McpElicitationDecisionStore: McpElicitationFormStore {
+    /// Change hints only. Subscribe before reading pending decisions to avoid
+    /// lost wakeups; every wake must re-read and revalidate durable state.
+    fn subscribe_mcp_input_changes(&self) -> tokio::sync::watch::Receiver<()>;
+
     /// The caller authenticates the user and validates the decision against this
     /// exact immutable form. The write revalidates form, owner, pending input and
     /// live ancestry atomically. First decision wins; identical pending retries

@@ -66,18 +66,39 @@ struct State {
 pub struct McpRegistry<S> {
     store: Arc<S>,
     capacity: NonZeroUsize,
+    elicitation: Option<crate::McpElicitationValidationLimits>,
     state: Mutex<State>,
 }
 
 impl<
-    S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + kiln_core::McpInputStore + 'static,
+    S: McpInstanceStore
+        + McpDefinitionStore
+        + McpInvocationStore
+        + kiln_core::McpInputStore
+        + kiln_core::McpElicitationDecisionStore
+        + 'static,
 > McpRegistry<S>
 {
     pub fn new(store: Arc<S>, capacity: NonZeroUsize) -> Self {
         Self {
             store,
             capacity,
+            elicitation: None,
             state: Mutex::new(State::default()),
+        }
+    }
+
+    /// Opt in only when the host supplies an authenticated interaction surface.
+    /// This policy is immutable for every generation owned by the new registry.
+    /// Per-call input quotas/deadlines still apply; no sampling is enabled.
+    pub fn new_with_elicitation(
+        store: Arc<S>,
+        capacity: NonZeroUsize,
+        limits: crate::McpElicitationValidationLimits,
+    ) -> Self {
+        Self {
+            elicitation: Some(limits),
+            ..Self::new(store, capacity)
         }
     }
 
@@ -178,11 +199,17 @@ impl<
                 let directory = rustix::io::fcntl_dupfd_cloexec(pinned, 0)
                     .map_err(|_| McpRegistryError::InvalidDirectory)?;
                 let owner = match launch {
-                    RegistryLaunch::Stdio(launch) => {
-                        StdioGeneration::spawn(self.store.clone(), launch)
-                    }
+                    RegistryLaunch::Stdio(launch) => StdioGeneration::spawn_with_elicitation(
+                        self.store.clone(),
+                        launch,
+                        self.elicitation,
+                    ),
                     RegistryLaunch::Http(launch, _) => {
-                        crate::McpGeneration::spawn_http(self.store.clone(), launch)
+                        crate::McpGeneration::spawn_http_with_elicitation(
+                            self.store.clone(),
+                            launch,
+                            self.elicitation,
+                        )
                     }
                 };
                 let observer = owner.observer();

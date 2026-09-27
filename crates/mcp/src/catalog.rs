@@ -42,7 +42,7 @@ impl jsonschema::Retrieve for NoRetrieval {
     }
 }
 
-struct PageBudget {
+pub(crate) struct PageBudget {
     limits: McpCatalogLimits,
     pages: usize,
     entries: usize,
@@ -51,7 +51,7 @@ struct PageBudget {
 }
 
 impl PageBudget {
-    fn new(limits: McpCatalogLimits) -> Self {
+    pub(crate) fn new(limits: McpCatalogLimits) -> Self {
         Self {
             limits,
             pages: 0,
@@ -61,7 +61,7 @@ impl PageBudget {
         }
     }
 
-    fn record(
+    pub(crate) fn record(
         &mut self,
         page: &impl serde::Serialize,
         entries: usize,
@@ -144,7 +144,7 @@ pub(crate) async fn validate_prompt(
     Err(StdioCallError::Catalog(McpCatalogError::LimitExceeded))
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty() && !name.chars().any(char::is_control)
 }
 

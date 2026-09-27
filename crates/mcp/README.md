@@ -346,9 +346,23 @@ expands a template locally. Resource response URIs are validated too, while
 allowing valid sub-resource URIs different from the requested URI.
 [The MCP specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#resource-links)
 explicitly permits resource links absent from `resources/list`, so discovery is
-not used as an authorization allowlist. Resource/template discovery and
-provider-facing search/describe remain open. These validations do not install
+not used as an authorization allowlist. These validations do not install
 `mcp_call` in the daemon catalogue.
+
+`discover_catalog` now provides a low-level, fresh metadata adapter for tools,
+prompts, resources and resource templates on an already authorized peer. Each
+selected list must complete within explicit page, entry, encoded-byte and absolute
+deadline budgets; partial lists are never returned. Duplicate tool/prompt names,
+resource URIs or template identifiers fail. Resource names may repeat when their
+URIs differ. Resource URIs are syntax-checked and retained verbatim. Templates
+remain opaque untrusted descriptions: no RFC 6570 validation, expansion, content
+read or local URL/file access occurs. The adapter bypasses SDK cache fallback.
+
+The caller still owns generation identity, serial scheduling and the durable
+ToolCall boundary. Returned entries carry no authority or cache validity and must
+not be reused across calls as a current snapshot. Provider-facing search/describe,
+compact projections, generation-indexed caching/invalidation and daemon wiring
+remain open; this adapter does not expose a new model tool.
 
 Cancellation, deadline expiry during a possible send, unexpected response types,
 and connection loss record an interrupted/unknown outcome and retire the process

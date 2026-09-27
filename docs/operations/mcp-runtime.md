@@ -53,8 +53,11 @@ Prompts also require bounded discovery and valid declared arguments. Resource
 reads require the resource capability and a valid absolute RFC 3986 URI, forwarded
 unchanged to the MCP server; file/HTTP URIs are never dereferenced locally.
 Resource links need not appear in `resources/list` under the MCP specification,
-so the broker does not impose a catalogue membership requirement. Resource/template
-discovery and provider-facing search/describe remain open, and the daemon still
+so the broker does not impose a catalogue membership requirement. A low-level fresh catalogue adapter now lists tools, prompts, resources and
+resource templates with complete bounded traversal and an absolute deadline.
+Templates remain opaque metadata; no expansion or content read occurs. It grants
+no execution or cache authority. Provider-facing search/describe, generation-indexed
+caching/invalidation and daemon integration remain open, and the daemon still
 does not advertise `mcp_call`.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.

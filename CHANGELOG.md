@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add fresh, bounded discovery of tool, prompt, resource and template
+  metadata on an already authorized MCP peer.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/c7384ad)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Validate bounded MCP prompt catalogues and absolute resource URIs
   without treating resource discovery as an authorization allowlist.
 

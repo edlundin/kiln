@@ -16,7 +16,11 @@ pub use catalog::{McpCatalogError, McpCatalogLimits};
 pub use broker::{StdioBrokerError, StdioBrokerLimits, execute_stdio_call};
 
 #[cfg(unix)]
+mod discovery;
+#[cfg(unix)]
 mod dispatch;
+#[cfg(unix)]
+pub use discovery::{McpCatalogEntries, McpCatalogKind, discover_catalog};
 #[cfg(unix)]
 mod generation;
 mod negotiation;

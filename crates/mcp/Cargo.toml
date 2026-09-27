@@ -1,0 +1,13 @@
+[package]
+name = "kiln-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rmcp = { version = "=3.4.1", default-features = false, features = ["client"] }
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

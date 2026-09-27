@@ -11,7 +11,7 @@ use std::{
 
 const USAGE: &str = "Usage: kilnd mcp-host-admin --max-bytes N --stdin
 Stop kilnd first. Pipe canonical JSON containing key and action.
-Actions: inspect, pending, import_secret, publish, retire, reconcile.
+Actions: inspect, pending, import_secret, publish, publish_http, retire, reconcile.
 The positive byte budget bounds input and each stored snapshot plus its key.
 Import uses a fresh reference; ambiguous imports are never repeated at that reference.
 Reconcile deletes unpublished imports as well as retired values; publish wanted imports first.
@@ -46,6 +46,15 @@ enum Action {
         working_directory: Option<McpHostWorkingDirectory>,
         arguments: BTreeMap<String, String>,
         environment: BTreeMap<String, String>,
+    },
+    PublishHttp {
+        expected_revision: u64,
+        definition_version: u64,
+        endpoint: String,
+        endpoint_binding: Option<String>,
+        credential: Option<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_directory: Option<McpHostWorkingDirectory>,
     },
     Retire {
         expected_revision: std::num::NonZeroU64,
@@ -266,47 +275,46 @@ async fn execute<V: McpSecretStore>(
                 limits,
             )
             .map_err(binding_error)?;
-            if let Some(receipt) = store
-                .inspect_mcp_host_binding_publication(&bindings, expected_revision, limits)
-                .await
-                .map_err(binding_error)?
-            {
-                return Ok(serde_json::json!({"registered_revision":receipt.revision.get()}));
-            }
-            let identities = bindings
-                .arguments()
-                .iter()
-                .map(|(n, r)| (McpSecretPurpose::Argument, n, r))
-                .chain(
-                    bindings
-                        .environment()
-                        .iter()
-                        .map(|(n, r)| (McpSecretPurpose::Environment, n, r)),
-                )
-                .map(|(purpose, name, reference)| {
-                    McpSecretBinding::new(
-                        bindings.instance_id().clone(),
-                        bindings.key().clone(),
-                        name.clone(),
-                        purpose,
-                        reference.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            // Preflight checked all identities. Exclusive store ownership spans
-            // vault reads and publication; the store revalidates before commit.
-            for identity in &identities {
-                vault
-                    .get(identity)
-                    .await
-                    .map_err(|_| "snapshot secret is unavailable in the MCP vault")?;
-            }
-            let record = store
-                .publish_mcp_host_bindings(&bindings, expected_revision, limits)
-                .await
-                .map_err(binding_error)?;
-            Ok(serde_json::json!({"registered_revision":record.revision.get()}))
+            publish(store, vault, &bindings, expected_revision, limits).await
         }
+        Action::PublishHttp {
+            expected_revision,
+            definition_version,
+            endpoint,
+            endpoint_binding,
+            credential,
+            working_directory,
+        } => {
+            let bindings = McpHostBindings::new_http(
+                key,
+                McpHttpHostBindingInput {
+                    instance_id: instance,
+                    definition_version,
+                    endpoint,
+                    endpoint_binding: endpoint_binding
+                        .map(|name| {
+                            SharedConfigurationKey::parse(name, budget)
+                                .map_err(|_| "invalid endpoint binding")
+                        })
+                        .transpose()?,
+                    credential: credential
+                        .map(|(name, reference)| {
+                            Ok::<_, &'static str>((
+                                SharedConfigurationKey::parse(name, budget)
+                                    .map_err(|_| "invalid credential binding")?,
+                                SecretRef::parse(reference)
+                                    .map_err(|_| "invalid secret reference")?,
+                            ))
+                        })
+                        .transpose()?,
+                    working_directory,
+                },
+                limits,
+            )
+            .map_err(binding_error)?;
+            publish(store, vault, &bindings, expected_revision, limits).await
+        }
+
         Action::Retire { expected_revision } => {
             let record = store
                 .retire_mcp_host_bindings(&key, expected_revision, limits)
@@ -343,6 +351,47 @@ async fn execute<V: McpSecretStore>(
             Ok(serde_json::json!({"reconciled":count}))
         }
     }
+}
+
+async fn publish<V: McpSecretStore>(
+    store: &SqliteStore,
+    vault: &V,
+    bindings: &McpHostBindings,
+    expected_revision: u64,
+    limits: McpDefinitionLimits,
+) -> Result<serde_json::Value, &'static str> {
+    if let Some(receipt) = store
+        .inspect_mcp_host_binding_publication(bindings, expected_revision, limits)
+        .await
+        .map_err(binding_error)?
+    {
+        return Ok(serde_json::json!({"registered_revision":receipt.revision.get()}));
+    }
+    let identities = bindings
+        .references()
+        .map(|(purpose, name, reference)| {
+            McpSecretBinding::new(
+                bindings.instance_id().clone(),
+                bindings.key().clone(),
+                name.clone(),
+                purpose,
+                reference.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Preflight checked all identities. Exclusive store ownership spans
+    // vault reads and publication; the store revalidates before commit.
+    for identity in &identities {
+        vault
+            .get(identity)
+            .await
+            .map_err(|_| "snapshot secret is unavailable in the MCP vault")?;
+    }
+    let record = store
+        .publish_mcp_host_bindings(bindings, expected_revision, limits)
+        .await
+        .map_err(binding_error)?;
+    Ok(serde_json::json!({"registered_revision":record.revision.get()}))
 }
 
 fn binding_error(error: McpHostBindingError) -> &'static str {
@@ -428,6 +477,86 @@ mod tests {
     fn request(key: &McpInstanceKey, action: serde_json::Value) -> Request {
         let value = serde_json::json!({"key":serde_json::from_str::<serde_json::Value>(key.canonical_json()).unwrap(), "action":action});
         parse(value.to_string().as_bytes(), 4096).unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_publication_preflights_before_vault_and_retries_without_reads() {
+        let data = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(data.path()).await.unwrap();
+        let name = |s| SharedConfigurationKey::parse(s, 64).unwrap();
+        let definition = McpServerDefinition::new(
+            SharedMcpServerInput {
+                id: name("http"),
+                enabled: true,
+                transport: SharedMcpTransport::Https {
+                    endpoint: "https://example.com/mcp".into(),
+                    credential_binding: Some(name("token")),
+                },
+            },
+            McpProtocolPolicy::Auto,
+            McpLifecycleScope::Core,
+            None,
+            limits(4096),
+        )
+        .unwrap();
+        store
+            .register_mcp_definition(&definition, 0, "http", limits(4096))
+            .await
+            .unwrap();
+        let key = McpInstanceKey::new(&definition, McpInstanceOwner::Core, 4096).unwrap();
+        let vault = Vault::default();
+        let output = execute(&store, &vault, request(&key, serde_json::json!({"operation":"import_secret", "definition_version":1, "name":"token", "purpose":"http_credential", "value":"private fixture"})), 4096).await.unwrap();
+        let publish = serde_json::json!({"operation":"publish_http", "expected_revision":0, "definition_version":1, "endpoint":"https://example.com/mcp", "endpoint_binding":null, "credential":["token",output["secret_ref"]]});
+        let mut invalid = publish.clone();
+        invalid["endpoint"] = "https://other.example.com/mcp".into();
+        assert!(
+            execute(&store, &vault, request(&key, invalid), 4096)
+                .await
+                .is_err()
+        );
+        assert_eq!(*vault.calls.lock().unwrap(), ["put"]);
+        for _ in 0..2 {
+            assert_eq!(
+                execute(&store, &vault, request(&key, publish.clone()), 4096)
+                    .await
+                    .unwrap()["registered_revision"],
+                1
+            );
+        }
+        assert_eq!(*vault.calls.lock().unwrap(), ["put", "get"]);
+        execute(
+            &store,
+            &vault,
+            request(
+                &key,
+                serde_json::json!({"operation":"retire", "expected_revision":1}),
+            ),
+            4096,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            execute(
+                &store,
+                &vault,
+                request(
+                    &key,
+                    serde_json::json!({"operation":"reconcile", "batch_size":1})
+                ),
+                4096
+            )
+            .await
+            .unwrap()["reconciled"],
+            1
+        );
+        let calls = vault.calls.lock().unwrap().len();
+        assert_eq!(
+            execute(&store, &vault, request(&key, publish), 4096)
+                .await
+                .unwrap()["registered_revision"],
+            1
+        );
+        assert_eq!(vault.calls.lock().unwrap().len(), calls);
     }
 
     #[tokio::test]

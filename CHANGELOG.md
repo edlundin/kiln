@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add revision-fenced HTTP host snapshots and offline publication with
+  declared endpoint and credential checks while preserving stdio metadata. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Reserve HTTP credentials only for declared HTTPS credential bindings,
   preserving the isolated vault's single-write and cleanup receipts. ([pending])
 

@@ -66,6 +66,15 @@ pub async fn resolve_persisted_stdio_launch<S: McpSecretStore>(
     if bindings.working_directory() != Some(authorized_directory) {
         return Err(StdioBindingError::InvalidValue);
     }
+    let kiln_core::McpHostTransportBindings::Stdio {
+        runtime_binding,
+        executable,
+        arguments,
+        environment,
+    } = bindings.transport()
+    else {
+        return Err(StdioBindingError::UnsupportedTransport);
+    };
     let version = kiln_core::McpHostBindingVersion {
         instance_id: bindings.instance_id().clone(),
         revision: record.revision,
@@ -77,10 +86,10 @@ pub async fn resolve_persisted_stdio_launch<S: McpSecretStore>(
             key: bindings.key().clone(),
             definition_version: bindings.definition_version(),
             revision: record.revision,
-            runtime_binding: bindings.runtime_binding().clone(),
-            executable: bindings.executable().into(),
-            arguments: bindings.arguments().clone(),
-            environment: bindings.environment().clone(),
+            runtime_binding: runtime_binding.clone(),
+            executable: executable.into(),
+            arguments: arguments.clone(),
+            environment: environment.clone(),
         },
         resources,
         vault,

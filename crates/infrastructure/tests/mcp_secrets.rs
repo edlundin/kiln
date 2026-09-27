@@ -1102,3 +1102,331 @@ async fn http_credentials_require_declared_role_and_preserve_single_write_receip
         ));
     }
 }
+
+#[tokio::test]
+async fn http_snapshots_fence_credentials_rotation_and_generation_ownership() {
+    let data = tempfile::tempdir().unwrap();
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let definition = McpServerDefinition::new(
+        SharedMcpServerInput {
+            id: name("http"),
+            enabled: true,
+            transport: SharedMcpTransport::Https {
+                endpoint: "https://example.com/mcp".into(),
+                credential_binding: Some(name("token")),
+            },
+        },
+        McpProtocolPolicy::Auto,
+        McpLifecycleScope::Core,
+        None,
+        limits(),
+    )
+    .unwrap();
+    store
+        .register_mcp_definition(&definition, 0, "initial", limits())
+        .await
+        .unwrap();
+    let key = McpInstanceKey::new(&definition, McpInstanceOwner::Core, 2048).unwrap();
+    let instance = KilnInstanceId::from_ulid(Ulid::generate());
+    let old = SecretRef::from_ulid(Ulid::generate());
+    let next = SecretRef::from_ulid(Ulid::generate());
+    let make = |endpoint: &str, reference: &SecretRef| {
+        McpHostBindings::new_http(
+            key.clone(),
+            McpHttpHostBindingInput {
+                instance_id: instance.clone(),
+                definition_version: 1,
+                working_directory: None,
+                endpoint: endpoint.into(),
+                endpoint_binding: None,
+                credential: Some((name("token"), reference.clone())),
+            },
+            limits(),
+        )
+        .unwrap()
+    };
+    let first = make("https://example.com/mcp", &old);
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&first, 0, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::InvalidBinding)
+    );
+    for reference in [&old, &next] {
+        store
+            .reserve_mcp_secret(
+                &binding(
+                    &instance,
+                    &key,
+                    reference,
+                    McpSecretPurpose::HttpCredential,
+                    "token",
+                ),
+                1,
+                limits(),
+            )
+            .await
+            .unwrap();
+    }
+    let wrong_endpoint = make("https://other.example.com/mcp", &old);
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&wrong_endpoint, 0, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::InvalidBinding)
+    );
+    let record = store
+        .publish_mcp_host_bindings(&first, 0, limits())
+        .await
+        .unwrap();
+    let host = McpHostBindingVersion {
+        instance_id: instance.clone(),
+        revision: record.revision,
+    };
+    let McpInstanceClaim::Acquired(generation) = store
+        .claim_mcp_instance_with_host_bindings(
+            &key,
+            1,
+            &McpGenerationId::from_ulid(Ulid::generate()),
+            Some(&host),
+            limits(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("fresh generation")
+    };
+    let second = make("https://example.com/mcp", &next);
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&second, 1, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::ActiveGeneration)
+    );
+    let generation = store
+        .transition_mcp_instance(&generation, McpInstanceTransition::ConnectionLost)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .retire_mcp_host_bindings(&key, record.revision, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::ActiveGeneration)
+    );
+    store
+        .transition_mcp_instance(&generation, McpInstanceTransition::Stopped)
+        .await
+        .unwrap();
+    let current = store
+        .publish_mcp_host_bindings(&second, 1, limits())
+        .await
+        .unwrap();
+    assert_eq!(current.revision.get(), 2);
+    assert_eq!(
+        store
+            .claim_mcp_instance_with_host_bindings(
+                &key,
+                1,
+                &McpGenerationId::from_ulid(Ulid::generate()),
+                Some(&host),
+                limits()
+            )
+            .await
+            .err(),
+        Some(McpInstanceError::BindingChanged)
+    );
+    let pending = store
+        .pending_mcp_secret_reservations(&instance, &key, NonZeroUsize::new(4).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].0.secret_ref(), &old);
+    assert_eq!(pending[0].1, McpSecretReservationState::Retired);
+    assert_eq!(
+        store
+            .retire_mcp_secret_reservation(&binding(
+                &instance,
+                &key,
+                &next,
+                McpSecretPurpose::HttpCredential,
+                "token"
+            ))
+            .await
+            .err(),
+        Some(McpSecretJournalError::Conflict)
+    );
+    drop(store);
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let reloaded = store
+        .get_mcp_host_bindings(&key, limits())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reloaded.bindings.metadata_json(), second.metadata_json());
+    assert!(matches!(
+        reloaded.bindings.transport(),
+        McpHostTransportBindings::Http { .. }
+    ));
+    store
+        .retire_mcp_host_bindings(&key, reloaded.revision, limits())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&first, 0, limits())
+            .await
+            .unwrap()
+            .revision
+            .get(),
+        1
+    );
+    assert!(
+        store
+            .get_mcp_host_bindings(&key, limits())
+            .await
+            .unwrap()
+            .unwrap()
+            .retired
+    );
+}
+
+#[tokio::test]
+async fn host_http_endpoint_metadata_is_bounded_canonical_and_transport_specific() {
+    let data = tempfile::tempdir().unwrap();
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let definition = McpServerDefinition::new(
+        SharedMcpServerInput {
+            id: name("host"),
+            enabled: true,
+            transport: SharedMcpTransport::HostEndpoint {
+                endpoint_binding: name("local"),
+            },
+        },
+        McpProtocolPolicy::Auto,
+        McpLifecycleScope::Core,
+        None,
+        limits(),
+    )
+    .unwrap();
+    store
+        .register_mcp_definition(&definition, 0, "host", limits())
+        .await
+        .unwrap();
+    let key = McpInstanceKey::new(&definition, McpInstanceOwner::Core, 2048).unwrap();
+    let instance = KilnInstanceId::from_ulid(Ulid::generate());
+    let make = |endpoint: &str, endpoint_binding, credential, limits| {
+        McpHostBindings::new_http(
+            key.clone(),
+            McpHttpHostBindingInput {
+                instance_id: instance.clone(),
+                definition_version: 1,
+                working_directory: None,
+                endpoint: endpoint.into(),
+                endpoint_binding,
+                credential,
+            },
+            limits,
+        )
+    };
+    for endpoint in [
+        "http://example.com/mcp",
+        "https://user@example.com/mcp",
+        "https://example.com/#fragment",
+        "https://example.com/\n",
+        "file:///tmp/server",
+    ] {
+        assert!(make(endpoint, Some(name("local")), None, limits()).is_err());
+    }
+    for endpoint in [
+        "https://example.com/mcp",
+        "http://localhost/mcp",
+        "http://127.0.0.1/mcp",
+        "http://[::1]/mcp",
+    ] {
+        let bindings = make(endpoint, Some(name("local")), None, limits()).unwrap();
+        let decoded = McpHostBindings::from_metadata_json(
+            key.clone(),
+            bindings.metadata_json().as_bytes(),
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(decoded.metadata_json(), bindings.metadata_json());
+    }
+    let good = make("http://127.0.0.1/mcp", Some(name("local")), None, limits()).unwrap();
+    let mut small = limits();
+    small.max_metadata_bytes = good.metadata_json().len();
+    assert_eq!(
+        McpHostBindings::from_metadata_json(key.clone(), good.metadata_json().as_bytes(), small)
+            .err(),
+        Some(McpHostBindingError::LimitExceeded)
+    );
+    for (endpoint_binding, credential) in [
+        (None, None),
+        (Some(name("other")), None),
+        (
+            Some(name("local")),
+            Some((name("token"), SecretRef::from_ulid(Ulid::generate()))),
+        ),
+    ] {
+        let bad = make(
+            "http://127.0.0.1/mcp",
+            endpoint_binding,
+            credential,
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .publish_mcp_host_bindings(&bad, 0, limits())
+                .await
+                .err(),
+            Some(McpHostBindingError::InvalidBinding)
+        );
+    }
+    // A stdio snapshot cannot satisfy an HTTP definition.
+    let stdio = snapshot(
+        &instance,
+        &key,
+        &SecretRef::from_ulid(Ulid::generate()),
+        &SecretRef::from_ulid(Ulid::generate()),
+    );
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&stdio, 0, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::InvalidBinding)
+    );
+    let legacy = stdio.metadata_json();
+    assert!(!legacy.contains("transport"));
+    assert_eq!(
+        McpHostBindings::from_metadata_json(key.clone(), legacy.as_bytes(), limits())
+            .unwrap()
+            .metadata_json(),
+        legacy
+    );
+    let mut malformed: serde_json::Value = serde_json::from_str(good.metadata_json()).unwrap();
+    malformed["runtime_binding"] = "injected".into();
+    assert!(
+        McpHostBindings::from_metadata_json(
+            key.clone(),
+            malformed.to_string().as_bytes(),
+            limits()
+        )
+        .is_err()
+    );
+    store
+        .publish_mcp_host_bindings(&good, 0, limits())
+        .await
+        .unwrap();
+}

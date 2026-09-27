@@ -1,7 +1,8 @@
 use super::SqliteStore;
 use kiln_core::{
     McpDefinitionLimits, McpHostBindingError as Error, McpHostBindingRecord, McpHostBindingStore,
-    McpHostBindings, McpInstanceKey, McpSecretPurpose, SharedMcpArgument, SharedMcpTransport,
+    McpHostBindings, McpHostTransportBindings, McpInstanceKey, SharedMcpArgument,
+    SharedMcpTransport,
 };
 use sqlx::{Connection, Row, SqliteConnection};
 use std::num::NonZeroU64;
@@ -67,7 +68,7 @@ impl McpHostBindingStore for SqliteStore {
             .execute(&mut *tx)
             .await
             .map_err(|_| Error::Unavailable)?;
-        for (purpose, name, reference) in references(bindings) {
+        for (purpose, name, reference) in bindings.references() {
             sqlx::query("INSERT INTO mcp_host_binding_refs(instance_key, purpose, binding_name, secret_ref) VALUES (?, ?, ?, ?)")
                 .bind(bindings.key().canonical_json()).bind(purpose.as_str()).bind(name.as_str()).bind(reference.as_str())
                 .execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
@@ -187,32 +188,11 @@ async fn retire_unpublished_references(
     connection: &mut SqliteConnection,
     bindings: &McpHostBindings,
 ) -> Result<(), Error> {
-    for (_, _, reference) in references(bindings) {
+    for (_, _, reference) in bindings.references() {
         sqlx::query("UPDATE mcp_secret_reservations SET state = 'retired' WHERE secret_ref = ? AND state = 'reserved' AND NOT EXISTS(SELECT 1 FROM mcp_host_binding_refs WHERE secret_ref = ?)")
             .bind(reference.as_str()).bind(reference.as_str()).execute(&mut *connection).await.map_err(|_| Error::Unavailable)?;
     }
     Ok(())
-}
-
-fn references(
-    bindings: &McpHostBindings,
-) -> impl Iterator<
-    Item = (
-        McpSecretPurpose,
-        &kiln_core::SharedConfigurationKey,
-        &kiln_core::SecretRef,
-    ),
-> {
-    bindings
-        .arguments()
-        .iter()
-        .map(|(name, reference)| (McpSecretPurpose::Argument, name, reference))
-        .chain(
-            bindings
-                .environment()
-                .iter()
-                .map(|(name, reference)| (McpSecretPurpose::Environment, name, reference)),
-        )
 }
 
 pub(super) async fn load_version(
@@ -320,29 +300,61 @@ async fn validate_publication(
             _ => Error::InvalidBinding,
         })?;
     validate_directory(&mut *connection, bindings).await?;
-    let SharedMcpTransport::Stdio {
-        runtime_binding,
-        arguments,
-        environment,
-    } = &definition.server().transport
-    else {
-        return Err(Error::InvalidBinding);
+    let valid_transport = match (&definition.server().transport, bindings.transport()) {
+        (
+            SharedMcpTransport::Stdio {
+                runtime_binding,
+                arguments,
+                environment,
+            },
+            McpHostTransportBindings::Stdio {
+                runtime_binding: host_runtime,
+                arguments: host_arguments,
+                environment: host_environment,
+                ..
+            },
+        ) => {
+            let argument_names: std::collections::BTreeSet<_> = arguments
+                .iter()
+                .filter_map(|arg| match arg {
+                    SharedMcpArgument::HostBinding(name) => Some(name),
+                    _ => None,
+                })
+                .collect();
+            let environment_names: std::collections::BTreeSet<_> = environment.values().collect();
+            runtime_binding == host_runtime
+                && argument_names == host_arguments.keys().collect()
+                && environment_names == host_environment.keys().collect()
+        }
+        (
+            SharedMcpTransport::Https {
+                endpoint,
+                credential_binding,
+            },
+            McpHostTransportBindings::Http {
+                endpoint: host_endpoint,
+                endpoint_binding,
+                credential,
+            },
+        ) => {
+            endpoint == host_endpoint
+                && endpoint_binding.is_none()
+                && credential_binding.as_ref() == credential.as_ref().map(|(name, _)| name)
+        }
+        (
+            SharedMcpTransport::HostEndpoint { endpoint_binding },
+            McpHostTransportBindings::Http {
+                endpoint_binding: host_binding,
+                credential,
+                ..
+            },
+        ) => host_binding.as_ref() == Some(endpoint_binding) && credential.is_none(),
+        _ => false,
     };
-    let argument_names: std::collections::BTreeSet<_> = arguments
-        .iter()
-        .filter_map(|arg| match arg {
-            SharedMcpArgument::HostBinding(name) => Some(name),
-            _ => None,
-        })
-        .collect();
-    let environment_names: std::collections::BTreeSet<_> = environment.values().collect();
-    if runtime_binding != bindings.runtime_binding()
-        || argument_names != bindings.arguments().keys().collect()
-        || environment_names != bindings.environment().keys().collect()
-    {
+    if !valid_transport {
         return Err(Error::InvalidBinding);
     }
-    for (purpose, name, reference) in references(bindings) {
+    for (purpose, name, reference) in bindings.references() {
         let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mcp_secret_reservations WHERE secret_ref = ? AND kiln_instance_id = ? AND instance_key = ? AND binding_name = ? AND purpose = ? AND state = 'reserved')")
                 .bind(reference.as_str()).bind(bindings.instance_id().as_str()).bind(bindings.key().canonical_json())
                 .bind(name.as_str()).bind(purpose.as_str()).fetch_one(&mut *connection).await.map_err(|_| Error::Unavailable)?;

@@ -67,17 +67,67 @@ pub struct McpHostBindingInput {
     pub environment: BTreeMap<SharedConfigurationKey, SecretRef>,
 }
 
+/// Host endpoint selection and credential references only; never secret bytes.
+/// Plain HTTP is restricted to explicit loopback endpoints.
+pub struct McpHttpHostBindingInput {
+    pub instance_id: KilnInstanceId,
+    pub definition_version: u64,
+    pub working_directory: Option<McpHostWorkingDirectory>,
+    pub endpoint: String,
+    pub endpoint_binding: Option<SharedConfigurationKey>,
+    pub credential: Option<(SharedConfigurationKey, SecretRef)>,
+}
+
+#[derive(Clone)]
+pub enum McpHostTransportBindings {
+    Stdio {
+        runtime_binding: SharedConfigurationKey,
+        executable: String,
+        arguments: BTreeMap<SharedConfigurationKey, SecretRef>,
+        environment: BTreeMap<SharedConfigurationKey, SecretRef>,
+    },
+    Http {
+        endpoint: String,
+        endpoint_binding: Option<SharedConfigurationKey>,
+        credential: Option<(SharedConfigurationKey, SecretRef)>,
+    },
+}
+
 #[derive(Clone)]
 pub struct McpHostBindings {
     key: McpInstanceKey,
     instance_id: KilnInstanceId,
     definition_version: u64,
-    runtime_binding: SharedConfigurationKey,
-    executable: String,
+    transport: McpHostTransportBindings,
     working_directory: Option<crate::WorkspaceCheckout>,
-    arguments: BTreeMap<SharedConfigurationKey, SecretRef>,
-    environment: BTreeMap<SharedConfigurationKey, SecretRef>,
     metadata_json: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpMetadata {
+    transport: HttpTransportTag,
+    instance_id: String,
+    definition_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    working_directory: Option<McpHostWorkingDirectory>,
+    endpoint: String,
+    endpoint_binding: Option<String>,
+    credential: Option<(String, String)>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HttpTransportTag {
+    Http,
+}
+
+// Legacy stdio metadata has no discriminator and must remain byte-identical.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredMetadata {
+    Stdio(Metadata),
+    Http(HttpMetadata),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -126,21 +176,7 @@ impl McpHostBindings {
                 .map(|(key, value)| (key.as_str().to_owned(), value.as_str().to_owned()))
                 .collect()
         };
-        let working_directory = input
-            .working_directory
-            .map(McpHostWorkingDirectory::into_checkout)
-            .transpose()?;
-        if let Some(directory) = &working_directory {
-            let matches_owner = match key.owner() {
-                crate::McpInstanceOwner::WorkspaceCheckout(owner) => owner == directory,
-                crate::McpInstanceOwner::Workspace(id) => id == directory.workspace_id(),
-                // Session membership is checked against the store at publication.
-                crate::McpInstanceOwner::Session(_) | crate::McpInstanceOwner::Core => true,
-            };
-            if !matches_owner {
-                return Err(Error::InvalidBinding);
-            }
-        }
+        let working_directory = validate_directory(&key, input.working_directory)?;
         let metadata = Metadata {
             instance_id: input.instance_id.as_str().into(),
             definition_version: input.definition_version,
@@ -165,11 +201,99 @@ impl McpHostBindings {
             key,
             instance_id: input.instance_id,
             definition_version: input.definition_version,
-            runtime_binding: input.runtime_binding,
-            executable: input.executable,
+            transport: McpHostTransportBindings::Stdio {
+                runtime_binding: input.runtime_binding,
+                executable: input.executable,
+                arguments: input.arguments,
+                environment: input.environment,
+            },
             working_directory,
-            arguments: input.arguments,
-            environment: input.environment,
+            metadata_json,
+        })
+    }
+    pub fn new_http(
+        key: McpInstanceKey,
+        input: McpHttpHostBindingInput,
+        limits: McpDefinitionLimits,
+    ) -> Result<Self, McpHostBindingError> {
+        use McpHostBindingError as Error;
+        limits.validate().map_err(|_| Error::InvalidRequest)?;
+        if input.definition_version == 0 || input.definition_version > i64::MAX as u64 {
+            return Err(Error::InvalidRequest);
+        }
+        if input.endpoint.len() > limits.max_endpoint_bytes {
+            return Err(Error::LimitExceeded);
+        }
+        if input
+            .endpoint
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+        {
+            return Err(Error::InvalidRequest);
+        }
+        let endpoint = url::Url::parse(&input.endpoint).map_err(|_| Error::InvalidRequest)?;
+        let loopback = match endpoint.host() {
+            Some(url::Host::Domain("localhost")) => true,
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        if !(endpoint.scheme() == "https" || endpoint.scheme() == "http" && loopback)
+            || !endpoint.has_host()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(Error::InvalidRequest);
+        }
+        if endpoint.as_str().len() > limits.max_endpoint_bytes {
+            return Err(Error::LimitExceeded);
+        }
+        for name in input
+            .endpoint_binding
+            .iter()
+            .chain(input.credential.iter().map(|(name, _)| name))
+        {
+            SharedConfigurationKey::parse(name.as_str(), limits.max_key_bytes)
+                .map_err(|_| Error::LimitExceeded)?;
+        }
+        let working_directory = validate_directory(&key, input.working_directory)?;
+        let metadata = HttpMetadata {
+            transport: HttpTransportTag::Http,
+            instance_id: input.instance_id.as_str().into(),
+            definition_version: input.definition_version,
+            working_directory: working_directory.as_ref().map(Into::into),
+            endpoint: endpoint.to_string(),
+            endpoint_binding: input
+                .endpoint_binding
+                .as_ref()
+                .map(|key| key.as_str().into()),
+            credential: input
+                .credential
+                .as_ref()
+                .map(|(name, reference)| (name.as_str().into(), reference.as_str().into())),
+        };
+        let serde_json::Value::Object(object) =
+            serde_json::to_value(metadata).map_err(|_| Error::InvalidRequest)?
+        else {
+            unreachable!()
+        };
+        let budget = limits
+            .max_metadata_bytes
+            .checked_sub(key.canonical_json().len())
+            .ok_or(Error::LimitExceeded)?;
+        let metadata_json = crate::model_tool_request::canonical_object_json(object, budget)
+            .map_err(|_| Error::LimitExceeded)?;
+        Ok(Self {
+            key,
+            instance_id: input.instance_id,
+            definition_version: input.definition_version,
+            working_directory,
+            transport: McpHostTransportBindings::Http {
+                endpoint: endpoint.to_string(),
+                endpoint_binding: input.endpoint_binding,
+                credential: input.credential,
+            },
             metadata_json,
         })
     }
@@ -186,7 +310,8 @@ impl McpHostBindings {
         {
             return Err(Error::LimitExceeded);
         }
-        let raw: Metadata = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+        let raw: StoredMetadata =
+            serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
         let refs = |values: BTreeMap<String, String>| {
             values
                 .into_iter()
@@ -199,24 +324,54 @@ impl McpHostBindings {
                 })
                 .collect::<Result<BTreeMap<_, _>, Error>>()
         };
-        let value = Self::new(
-            key,
-            McpHostBindingInput {
-                instance_id: KilnInstanceId::parse(raw.instance_id)
+        let value = match raw {
+            StoredMetadata::Stdio(raw) => Self::new(
+                key,
+                McpHostBindingInput {
+                    instance_id: KilnInstanceId::parse(raw.instance_id)
+                        .map_err(|_| Error::InvalidRequest)?,
+                    definition_version: raw.definition_version,
+                    runtime_binding: SharedConfigurationKey::parse(
+                        raw.runtime_binding,
+                        limits.max_key_bytes,
+                    )
                     .map_err(|_| Error::InvalidRequest)?,
-                definition_version: raw.definition_version,
-                runtime_binding: SharedConfigurationKey::parse(
-                    raw.runtime_binding,
-                    limits.max_key_bytes,
-                )
-                .map_err(|_| Error::InvalidRequest)?,
-                executable: raw.executable,
-                working_directory: raw.working_directory,
-                arguments: refs(raw.arguments)?,
-                environment: refs(raw.environment)?,
-            },
-            limits,
-        )?;
+                    executable: raw.executable,
+                    working_directory: raw.working_directory,
+                    arguments: refs(raw.arguments)?,
+                    environment: refs(raw.environment)?,
+                },
+                limits,
+            )?,
+            StoredMetadata::Http(raw) => Self::new_http(
+                key,
+                McpHttpHostBindingInput {
+                    instance_id: KilnInstanceId::parse(raw.instance_id)
+                        .map_err(|_| Error::InvalidRequest)?,
+                    definition_version: raw.definition_version,
+                    working_directory: raw.working_directory,
+                    endpoint: raw.endpoint,
+                    endpoint_binding: raw
+                        .endpoint_binding
+                        .map(|name| {
+                            SharedConfigurationKey::parse(name, limits.max_key_bytes)
+                                .map_err(|_| Error::InvalidRequest)
+                        })
+                        .transpose()?,
+                    credential: raw
+                        .credential
+                        .map(|(name, reference)| {
+                            Ok::<_, Error>((
+                                SharedConfigurationKey::parse(name, limits.max_key_bytes)
+                                    .map_err(|_| Error::InvalidRequest)?,
+                                SecretRef::parse(reference).map_err(|_| Error::InvalidRequest)?,
+                            ))
+                        })
+                        .transpose()?,
+                },
+                limits,
+            )?,
+        };
         if value.metadata_json.as_bytes() != bytes {
             return Err(Error::InvalidRequest);
         }
@@ -231,24 +386,64 @@ impl McpHostBindings {
     pub fn definition_version(&self) -> u64 {
         self.definition_version
     }
-    pub fn runtime_binding(&self) -> &SharedConfigurationKey {
-        &self.runtime_binding
-    }
-    pub fn executable(&self) -> &str {
-        &self.executable
+    pub fn transport(&self) -> &McpHostTransportBindings {
+        &self.transport
     }
     pub fn working_directory(&self) -> Option<&crate::WorkspaceCheckout> {
         self.working_directory.as_ref()
     }
-    pub fn arguments(&self) -> &BTreeMap<SharedConfigurationKey, SecretRef> {
-        &self.arguments
-    }
-    pub fn environment(&self) -> &BTreeMap<SharedConfigurationKey, SecretRef> {
-        &self.environment
+    pub fn references(
+        &self,
+    ) -> impl Iterator<Item = (crate::McpSecretPurpose, &SharedConfigurationKey, &SecretRef)> {
+        use crate::McpSecretPurpose as Purpose;
+        let (arguments, environment, credential) = match &self.transport {
+            McpHostTransportBindings::Stdio {
+                arguments,
+                environment,
+                ..
+            } => (Some(arguments), Some(environment), None),
+            McpHostTransportBindings::Http { credential, .. } => (None, None, credential.as_ref()),
+        };
+        arguments
+            .into_iter()
+            .flat_map(|m| m.iter())
+            .map(|(n, r)| (Purpose::Argument, n, r))
+            .chain(
+                environment
+                    .into_iter()
+                    .flat_map(|m| m.iter())
+                    .map(|(n, r)| (Purpose::Environment, n, r)),
+            )
+            .chain(
+                credential
+                    .into_iter()
+                    .map(|(n, r)| (Purpose::HttpCredential, n, r)),
+            )
     }
     pub fn metadata_json(&self) -> &str {
         &self.metadata_json
     }
+}
+
+fn validate_directory(
+    key: &McpInstanceKey,
+    input: Option<McpHostWorkingDirectory>,
+) -> Result<Option<crate::WorkspaceCheckout>, McpHostBindingError> {
+    let directory = input
+        .map(McpHostWorkingDirectory::into_checkout)
+        .transpose()?;
+    if let Some(directory) = &directory {
+        let matches_owner = match key.owner() {
+            crate::McpInstanceOwner::WorkspaceCheckout(owner) => owner == directory,
+            crate::McpInstanceOwner::Workspace(id) => id == directory.workspace_id(),
+            // Session membership is checked against the store at publication.
+            crate::McpInstanceOwner::Session(_) | crate::McpInstanceOwner::Core => true,
+        };
+        if !matches_owner {
+            return Err(McpHostBindingError::InvalidBinding);
+        }
+    }
+    Ok(directory)
 }
 
 #[derive(Clone)]

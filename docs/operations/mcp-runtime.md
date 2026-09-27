@@ -407,15 +407,29 @@ piped input, never command arguments, shell history, portable definitions or log
 | `pending` | Positive `batch_size` | Bounded unpublished/retired reference list; no secret values |
 | `import_secret` | `definition_version`, `name`, `purpose` (`argument`, `environment` or `http_credential`), `value` | Fresh `secret_ref` after a successful MCP-vault write |
 | `publish` | `expected_revision`, `definition_version`, `runtime_binding`, absolute UTF-8 `executable`, `arguments` and `environment` maps of binding names to returned secret refs, optional `working_directory` object below | Immutable `registered_revision` receipt |
+| `publish_http` | `expected_revision`, `definition_version`, `endpoint`, nullable `endpoint_binding`, nullable `credential` pair `[binding_name, secret_ref]`, optional `working_directory` | Immutable `registered_revision` receipt in the same host revision history |
 | `retire` | Positive `expected_revision` | Immutable `retired_revision` receipt; vault deletion is separate |
 | `reconcile` | Positive `batch_size` | `reconciled` count after retiring pending refs, deleting their vault values, and retaining deletion receipts |
 
 `http_credential` imports require the exact `credential_binding` declared by an
 enabled HTTPS definition at the requested version and scoped identity. They use
 the isolated MCP vault and the same single-write reservation and cleanup receipts
-as stdio values. HostEndpoint names do not authorize credential imports. HTTP
-snapshot publication and daemon activation remain unimplemented; these imports
-remain pending and are eligible for explicit reconciliation.
+as stdio values. HostEndpoint names do not authorize credential imports.
+
+For an HTTPS definition, `publish_http` requires the exact canonical shared
+endpoint, null `endpoint_binding`, and the declared credential name/reference
+(or null `credential` when none is declared). For a HostEndpoint definition,
+`endpoint_binding` must match its declared name and `credential` must be null.
+Host endpoints accept HTTPS or explicit localhost/loopback-IP HTTP; userinfo,
+fragments and whitespace/control characters are rejected. URLs are canonicalized
+before storage. Endpoint metadata is host-local; do not place credentials in URLs.
+
+HTTP and stdio snapshots share revision checks, active/uncertain-generation
+replacement fences, credential retirement, and exact historical retry receipts.
+Publication preflights all references before vault reads and revalidates before
+commit. Existing stdio metadata remains readable without rewriting history.
+HTTP daemon activation is still unimplemented; publication grants no execution
+authority. Unpublished HTTP imports remain eligible for explicit reconciliation.
 
 Import validates the current definition and exact binding role before reserving
 and writing a fresh reference. A failed/ambiguous write leaves its reservation for

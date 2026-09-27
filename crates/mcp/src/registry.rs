@@ -18,7 +18,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StdioRegistryError {
+pub enum McpRegistryError {
     Generation(StdioGenerationError),
     Closed,
     Capacity,
@@ -28,10 +28,19 @@ pub enum StdioRegistryError {
     DirectoryChanged,
 }
 
-impl From<StdioGenerationError> for StdioRegistryError {
+impl From<StdioGenerationError> for McpRegistryError {
     fn from(error: StdioGenerationError) -> Self {
         Self::Generation(error)
     }
+}
+
+/// Compatibility names for existing stdio callers.
+pub type StdioRegistry<S> = McpRegistry<S>;
+pub type StdioRegistryError = McpRegistryError;
+
+enum RegistryLaunch {
+    Stdio(StdioGenerationLaunch),
+    Http(crate::ResolvedHttpLaunch, rustix::fd::OwnedFd),
 }
 
 struct Entry {
@@ -54,13 +63,13 @@ struct State {
 /// reconciliation. The caller supplies a capacity from its resource budget.
 /// Local binding revisions must change when resolved executable, environment,
 /// credentials, directory authorization or other launch policy changes.
-pub struct StdioRegistry<S> {
+pub struct McpRegistry<S> {
     store: Arc<S>,
     capacity: NonZeroUsize,
     state: Mutex<State>,
 }
 
-impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> StdioRegistry<S> {
+impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> McpRegistry<S> {
     pub fn new(store: Arc<S>, capacity: NonZeroUsize) -> Self {
         Self {
             store,
@@ -80,29 +89,62 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
         &self,
         launch: StdioGenerationLaunch,
         binding_revision: NonZeroU64,
-    ) -> Result<McpInstanceRecord, StdioRegistryError> {
-        let key = launch.key.clone();
-        let definition_version = launch.definition_version;
-        let host_binding_version = launch.host_binding_version.clone();
-        let directory = rustix::fs::fstat(&launch.process.working_directory)
-            .map_err(|_| StdioRegistryError::InvalidDirectory)?;
+    ) -> Result<McpInstanceRecord, McpRegistryError> {
+        self.ensure_launch(RegistryLaunch::Stdio(launch), binding_revision)
+            .await
+    }
+
+    /// HTTP reuse retains the approved directory's filesystem identity just as
+    /// stdio does; remote transport does not widen a native ToolCall's scope.
+    pub async fn ensure_http_ready(
+        &self,
+        launch: crate::ResolvedHttpLaunch,
+        directory: rustix::fd::OwnedFd,
+    ) -> Result<McpInstanceRecord, McpRegistryError> {
+        let revision = launch.host_binding_version.revision;
+        self.ensure_launch(RegistryLaunch::Http(launch, directory), revision)
+            .await
+    }
+
+    async fn ensure_launch(
+        &self,
+        launch: RegistryLaunch,
+        binding_revision: NonZeroU64,
+    ) -> Result<McpInstanceRecord, McpRegistryError> {
+        let (key, definition_version, host_binding_version, limits, pinned) = match &launch {
+            RegistryLaunch::Stdio(launch) => (
+                launch.key.clone(),
+                launch.definition_version,
+                launch.host_binding_version.clone(),
+                launch.definition_limits,
+                &launch.process.working_directory,
+            ),
+            RegistryLaunch::Http(launch, directory) => (
+                launch.key.clone(),
+                launch.definition_version,
+                Some(launch.host_binding_version.clone()),
+                launch.definition_limits,
+                directory,
+            ),
+        };
+        let directory =
+            rustix::fs::fstat(pinned).map_err(|_| McpRegistryError::InvalidDirectory)?;
         if rustix::fs::FileType::from_raw_mode(directory.st_mode) != rustix::fs::FileType::Directory
         {
-            return Err(StdioRegistryError::InvalidDirectory);
+            return Err(McpRegistryError::InvalidDirectory);
         }
         if host_binding_version
             .as_ref()
             .is_some_and(|v| v.revision != binding_revision)
         {
-            return Err(StdioRegistryError::BindingChanged);
+            return Err(McpRegistryError::BindingChanged);
         }
-        let limits = launch.definition_limits;
         let mut observer = {
             let mut state = self.state.lock().await;
             if state.closed {
-                return Err(StdioRegistryError::Closed);
+                return Err(McpRegistryError::Closed);
             }
-            // Only workers with known process cleanup may release slots. Retain
+            // Only workers with known local transport cleanup may release slots. Retain
             // failed cleanup/lost workers for shutdown reporting; durable claims
             // also fence replacement when journal state remains uncertain.
             state
@@ -110,7 +152,7 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
                 .retain(|_, entry| !entry.owner.observer().can_release());
             if let Some(entry) = state.entries.get(key.canonical_json()) {
                 if entry.stopping {
-                    return Err(StdioRegistryError::Stopping);
+                    return Err(McpRegistryError::Stopping);
                 }
                 if entry.definition_version != definition_version {
                     return Err(
@@ -118,22 +160,28 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
                     );
                 }
                 if entry.binding_revision != binding_revision {
-                    return Err(StdioRegistryError::BindingChanged);
+                    return Err(McpRegistryError::BindingChanged);
                 }
                 let existing = rustix::fs::fstat(&entry.directory)
-                    .map_err(|_| StdioRegistryError::InvalidDirectory)?;
+                    .map_err(|_| McpRegistryError::InvalidDirectory)?;
                 if existing.st_dev != directory.st_dev || existing.st_ino != directory.st_ino {
-                    return Err(StdioRegistryError::DirectoryChanged);
+                    return Err(McpRegistryError::DirectoryChanged);
                 }
                 entry.owner.observer()
             } else {
                 if state.entries.len() >= self.capacity.get() {
-                    return Err(StdioRegistryError::Capacity);
+                    return Err(McpRegistryError::Capacity);
                 }
-                let directory =
-                    rustix::io::fcntl_dupfd_cloexec(&launch.process.working_directory, 0)
-                        .map_err(|_| StdioRegistryError::InvalidDirectory)?;
-                let owner = StdioGeneration::spawn(self.store.clone(), launch);
+                let directory = rustix::io::fcntl_dupfd_cloexec(pinned, 0)
+                    .map_err(|_| McpRegistryError::InvalidDirectory)?;
+                let owner = match launch {
+                    RegistryLaunch::Stdio(launch) => {
+                        StdioGeneration::spawn(self.store.clone(), launch)
+                    }
+                    RegistryLaunch::Http(launch, _) => {
+                        crate::McpGeneration::spawn_http(self.store.clone(), launch)
+                    }
+                };
                 let observer = owner.observer();
                 state.entries.insert(
                     key.canonical_json().to_owned(),
@@ -181,7 +229,7 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
         }
         let state = self.state.lock().await;
         if state.closed {
-            return Err(StdioRegistryError::Closed);
+            return Err(McpRegistryError::Closed);
         }
         if state
             .entries
@@ -189,7 +237,7 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
             .is_none_or(|entry| entry.stopping)
             || observer.is_finished()
         {
-            return Err(StdioRegistryError::Stopping);
+            return Err(McpRegistryError::Stopping);
         }
         Ok(current)
     }
@@ -260,7 +308,7 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
     pub async fn stop(
         &self,
         key: &McpInstanceKey,
-    ) -> Result<Option<McpInstanceRecord>, StdioRegistryError> {
+    ) -> Result<Option<McpInstanceRecord>, McpRegistryError> {
         let mut observer = {
             let mut state = self.state.lock().await;
             let Some(entry) = state.entries.get_mut(key.canonical_json()) else {

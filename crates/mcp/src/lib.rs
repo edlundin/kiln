@@ -17,7 +17,10 @@ mod catalog_state;
 pub use catalog::{McpCatalogError, McpCatalogLimits};
 
 #[cfg(unix)]
-pub use broker::{StdioBrokerError, StdioBrokerLimits, execute_stdio_call};
+pub use broker::{
+    HttpBrokerLimits, McpBrokerError, McpBrokerLimits, StdioBrokerError, StdioBrokerLimits,
+    execute_mcp_call, execute_stdio_call,
+};
 
 #[cfg(unix)]
 mod discovery;
@@ -66,5 +69,5 @@ pub use negotiation::{ProtocolPolicy, ProtocolVersion, start_stdio_client};
 #[cfg(unix)]
 pub use process::{ManagedStdioProcess, StdioProcess, StdioProcessCleanup, StdioProcessConfig};
 #[cfg(unix)]
-pub use registry::{StdioRegistry, StdioRegistryError};
+pub use registry::{McpRegistry, McpRegistryError, StdioRegistry, StdioRegistryError};
 pub use stdio::StdioTransport;

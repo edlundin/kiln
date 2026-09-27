@@ -1,6 +1,6 @@
 # Internal MCP runtime
 
-On Unix, `kilnd` can retain scoped MCP stdio process owners and drain them during
+On Unix, `kilnd` can retain scoped MCP stdio and HTTP owners and drain them during
 shutdown. Native model Runs can opt into `mcp_search`, `mcp_describe` and `mcp_call`
 through the separate limits configuration below. There is no public direct server
 launch command. Offline host-binding administration is described below.
@@ -85,11 +85,12 @@ cleanup before reporting terminal lifecycle state. Dropping the owner requests
 stop while its task retains cleanup and journaling responsibility. Legacy fallback
 stays inside one durable startup owner; existing active/uncertain instances cannot
 be replaced. `StdioGeneration` remains a compatibility name for the shared owner.
-The daemon still admits only stdio launches; HTTP registry/broker activation and
-end-to-end approved HTTP dispatch remain follow-up work.
+The daemon now routes explicitly enabled HTTP launches through the same registry
+and approved broker path. Every reuse rechecks definition/readiness and pinned
+directory identity; vault resolution is followed by a fresh metadata/revision
+inspection before generation admission and single-dispatch claim.
 
-HTTP registry and daemon broker integration, OAuth, live credential
-administration and official HTTP conformance remain open. Tests use local HTTP
+OAuth, live credential administration and official HTTP conformance remain open. Tests use local HTTP
 socket fixtures and the real SDK worker, not remote services or real credentials.
 
 ### Stdio lifecycle settings
@@ -124,6 +125,28 @@ latency; there are no product defaults.
 | `max_regex_bytes`, `max_regex_backtracks` | Positive per-pattern compiled/DFA size and backtracking allowances. These do not isolate total validator CPU/memory. |
 | `startup_timeout_ms`, `call_timeout_ms` | Positive relative startup and whole broker-call deadlines, in milliseconds. |
 | `shutdown_grace_ms` | Nonnegative process shutdown grace, in milliseconds. |
+
+HTTP is disabled unless `KILN_NATIVE_MCP_LIMITS` also contains a non-null `http`
+object. Its required positive fields are `max_request_bytes`, `max_response_bytes`,
+`max_stream_bytes`, `max_event_bytes`, `max_header_bytes`, `request_timeout_ms`,
+`channel_capacity`, `max_exchanges` and `max_catalog_lifetime_bytes`. Choose them
+for the allowed request/result sizes, retained catalogue workload and permitted
+network latency. They are independent from the outer native-proposal and result
+budgets. `legacy_resume_delay_ms` is optional/null to disable legacy SSE reconnect;
+when supplied it must be positive. It is invalid for an exact modern pin and
+applies only to a permitted legacy fallback under Auto. Unknown fields, zero
+allowances or missing required fields reject startup. Existing stdio settings
+remain valid without this object.
+
+Both transports use the same local approval, exact registered directory and host
+revision checks, shared-owner capacity, serial dispatch receipts, result artifacts
+and paging. Streamable HTTP supports the 2025 revisions and 2026 stateless mode;
+2024 HTTP+SSE, OAuth and server-request mediation are not yet implemented. Use
+`publish_http` below to select a host endpoint/credential snapshot. The local
+HTTP fixture covers modern and legacy approved search/describe/call, artifact
+paging and completed-batch no-replay; it does not establish remote TLS, actual
+OS-vault or full protocol conformance acceptance.
+
 
 Native file reading remains independently configurable. The daemon freezes one
 combined native catalogue and routes each approved command through a consuming
@@ -270,16 +293,17 @@ waiter can await those same owners again. The daemon retains another reference t
 drain the registry if its HTTP listener exits before the graceful-shutdown future
 finishes. Cleanup or journal failure is reported rather than treated as a verified
 terminal generation. Destroying the Tokio runtime without awaiting this drain
-provides only best-effort process cleanup.
+provides only best-effort transport cleanup.
 
-The local tests use synthetic definitions, temporary SQLite stores and real macOS
-shell processes. They verify batched interruption without reacquisition and
+The local tests use synthetic definitions, temporary SQLite stores, real macOS
+shell processes and loopback HTTP servers. They verify batched interruption without reacquisition and
 Run-service shutdown reaping before the stopped journal record. Linux process
-execution, orphan cleanup, HTTP/OAuth and full MCP conformance remain unverified
+execution, orphan cleanup, remote TLS/OAuth and full MCP conformance remain unverified
 or unimplemented. A real macOS fixture now exercises the daemon mixed native
 coordinator with file read, search, describe and call: approval before launch,
-normal completion persistence, one reused process and no replay of a completed
-batch. This is not full provider/network or MCP conformance evidence.
+normal completion persistence, one reused scoped owner and no replay of a completed
+batch over stdio and modern/legacy HTTP. This is not full provider/network or MCP
+conformance evidence.
 
 The internal `dispatch_tool_call` API requires the generation worker's committed
 invocation receipt before constructing a normal ToolCall result. It keeps small
@@ -445,8 +469,8 @@ HTTP and stdio snapshots share revision checks, active/uncertain-generation
 replacement fences, credential retirement, and exact historical retry receipts.
 Publication preflights all references before vault reads and revalidates before
 commit. Existing stdio metadata remains readable without rewriting history.
-HTTP daemon activation is still unimplemented; publication grants no execution
-authority. Unpublished HTTP imports remain eligible for explicit reconciliation.
+HTTP daemon activation requires the explicit HTTP limits described above;
+publication grants no execution authority. Unpublished HTTP imports remain eligible for explicit reconciliation.
 
 The internal `resolve_persisted_http_launch` boundary checks an independently
 authorized local instance, scoped key and optional directory against that exact
@@ -457,7 +481,7 @@ budget; vault reads consume the startup deadline. HTTP credentials must satisfy
 the RFC 6750 bearer-token syntax. No ambient headers, provider credentials or
 credential refresh are used. Auto begins with modern discovery; unsupported 2024
 HTTP+SSE pins fail before vault access. This resolver performs no network I/O and
-does not yet connect HTTP execution to the daemon.
+is consumed by the daemon broker only after approval and directory pinning.
 
 Import validates the current definition and exact binding role before reserving
 and writing a fresh reference. A failed/ambiguous write leaves its reservation for

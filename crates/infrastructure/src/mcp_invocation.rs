@@ -369,12 +369,7 @@ impl kiln_core::McpLaunchStore for SqliteStore {
         )
         .await
         .map_err(|_| Error::DefinitionChanged)?;
-        if !definition.definition.server().enabled
-            || !matches!(
-                definition.definition.server().transport,
-                kiln_core::SharedMcpTransport::Stdio { .. }
-            )
-        {
+        if !definition.definition.server().enabled {
             return Err(Error::DefinitionChanged);
         }
         let root = sqlx::query("SELECT canonical_path, git_common_directory_path, filesystem_identity FROM workspace_roots WHERE workspace_id = ? AND workspace_root_id = ? AND state = 'available'")

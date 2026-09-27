@@ -6,7 +6,7 @@ use std::{
 use kiln_core::{McpDefinitionLimits, McpGenerationId, McpTools, ModelToolCatalogLimits};
 use kiln_infrastructure::{OsMcpSecretStore, pin_mcp_working_directory};
 use kiln_mcp::{
-    McpCatalogLimits, StdioBrokerError, StdioBrokerLimits, StdioCallLimits, execute_stdio_call,
+    McpCatalogLimits, StdioBrokerError, StdioBrokerLimits, StdioCallLimits, execute_mcp_call,
 };
 use serde::Deserialize;
 use tokio::time::Instant;
@@ -35,6 +35,52 @@ pub(crate) struct NativeMcpLimits {
     pub startup_timeout_ms: NonZeroU64,
     pub call_timeout_ms: NonZeroU64,
     pub shutdown_grace_ms: u64,
+    #[serde(default)]
+    pub http: Option<NativeMcpHttpLimits>,
+}
+
+/// Every HTTP allowance is explicit; omitting the object disables HTTP startup.
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeMcpHttpLimits {
+    pub max_request_bytes: NonZeroUsize,
+    pub max_response_bytes: NonZeroUsize,
+    pub max_stream_bytes: NonZeroUsize,
+    pub max_event_bytes: NonZeroUsize,
+    pub max_header_bytes: NonZeroUsize,
+    pub request_timeout_ms: NonZeroU64,
+    pub channel_capacity: NonZeroUsize,
+    pub max_exchanges: NonZeroUsize,
+    pub max_catalog_lifetime_bytes: NonZeroUsize,
+    pub legacy_resume_delay_ms: Option<NonZeroU64>,
+}
+impl NativeMcpHttpLimits {
+    fn broker_limits(self) -> Result<kiln_mcp::HttpBrokerLimits, RunError> {
+        let request_timeout = Duration::from_millis(self.request_timeout_ms.get());
+        let legacy_resume_delay = self
+            .legacy_resume_delay_ms
+            .map(|ms| Duration::from_millis(ms.get()));
+        let now = Instant::now();
+        now.checked_add(request_timeout)
+            .ok_or(RunError::InvalidTransition)?;
+        if let Some(delay) = legacy_resume_delay {
+            now.checked_add(delay).ok_or(RunError::InvalidTransition)?;
+        }
+        Ok(kiln_mcp::HttpBrokerLimits {
+            io: kiln_mcp::McpHttpLimits {
+                max_request_bytes: self.max_request_bytes,
+                max_response_bytes: self.max_response_bytes,
+                max_stream_bytes: self.max_stream_bytes,
+                max_event_bytes: self.max_event_bytes,
+                max_header_bytes: self.max_header_bytes,
+                request_timeout,
+            },
+            channel_capacity: self.channel_capacity,
+            max_exchanges: self.max_exchanges,
+            max_catalog_lifetime_bytes: self.max_catalog_lifetime_bytes,
+            legacy_resume_delay,
+        })
+    }
 }
 
 pub(crate) struct NativeMcp {
@@ -47,6 +93,11 @@ impl NativeMcp {
     pub(crate) fn new(limits: NativeMcpLimits) -> Result<Self, &'static str> {
         let invalid = "invalid native MCP limits";
         limits.broker_limits().map_err(|_| invalid)?;
+        limits
+            .http
+            .map(NativeMcpHttpLimits::broker_limits)
+            .transpose()
+            .map_err(|_| invalid)?;
         let tools = McpTools::new(
             limits.max_request_bytes,
             ModelToolCatalogLimits {
@@ -144,11 +195,15 @@ impl RunService {
             .as_ref()
             .ok_or(RunError::InvalidTransition)?;
         let (cancel, cancelled) = oneshot::channel();
-        let operation = execute_stdio_call(
+        let operation = execute_mcp_call(
             registry,
             request,
             &mcp.vault,
             mcp.limits.broker_limits()?,
+            mcp.limits
+                .http
+                .map(NativeMcpHttpLimits::broker_limits)
+                .transpose()?,
             cancelled,
             |directory| async move {
                 tokio::task::spawn_blocking(move || pin_mcp_working_directory(&directory))
@@ -240,8 +295,175 @@ mod tests {
         assert!(serde_json::from_value::<NativeMcpLimits>(value).is_err());
     }
 
+    fn http_limits_json() -> serde_json::Value {
+        json!({"max_request_bytes":16384,"max_response_bytes":16384,"max_stream_bytes":16384,"max_event_bytes":16384,"max_header_bytes":4096,"request_timeout_ms":5000,"channel_capacity":1,"max_exchanges":16,"max_catalog_lifetime_bytes":16384,"legacy_resume_delay_ms":null})
+    }
+
+    #[test]
+    fn http_configuration_requires_explicit_positive_allowances() {
+        assert!(
+            serde_json::from_value::<NativeMcpLimits>(limits_json())
+                .unwrap()
+                .http
+                .is_none()
+        );
+        let mut value = limits_json();
+        value["http"] = http_limits_json();
+        assert!(NativeMcp::new(serde_json::from_value(value.clone()).unwrap()).is_ok());
+        for field in http_limits_json()
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|field| field.as_str() != "legacy_resume_delay_ms")
+        {
+            let mut missing = value.clone();
+            missing["http"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<NativeMcpLimits>(missing).is_err());
+            let mut zero = value.clone();
+            zero["http"][field] = json!(0);
+            assert!(serde_json::from_value::<NativeMcpLimits>(zero).is_err());
+        }
+        value["http"]["unexpected"] = json!(1);
+        assert!(serde_json::from_value::<NativeMcpLimits>(value).is_err());
+    }
+
+    struct HttpFixture {
+        endpoint: String,
+        task: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for HttpFixture {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+    impl HttpFixture {
+        async fn new(path: std::path::PathBuf) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut headers = Vec::new();
+                    let mut byte = [0];
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        socket.read_exact(&mut byte).await.unwrap();
+                        headers.push(byte[0]);
+                        assert!(headers.len() < 8192);
+                    }
+                    let headers = String::from_utf8(headers).unwrap();
+                    let method = headers.split_whitespace().next().unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(|n| n.parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    assert!(length < 16384);
+                    let mut bytes = vec![0; length];
+                    socket.read_exact(&mut bytes).await.unwrap();
+                    let mut status = "200 OK";
+                    let mut extra = "";
+                    let response = if method == "GET" {
+                        status = "405 Method Not Allowed";
+                        String::new()
+                    } else if method == "DELETE" {
+                        String::new()
+                    } else {
+                        let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let method = request["method"].as_str().unwrap();
+                        let result = match method {
+                            "server/discover" => {
+                                use std::io::Write;
+                                writeln!(
+                                    std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(path.join("starts"))
+                                        .unwrap(),
+                                    "start"
+                                )
+                                .unwrap();
+                                json!({"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private"})
+                            }
+                            "initialize" => {
+                                use std::io::Write;
+                                writeln!(
+                                    std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(path.join("starts"))
+                                        .unwrap(),
+                                    "start"
+                                )
+                                .unwrap();
+                                extra = "Mcp-Session-Id: fixture\r\n";
+                                json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
+                            }
+                            "tools/list" => {
+                                use std::io::Write;
+                                writeln!(
+                                    std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(path.join("lists"))
+                                        .unwrap(),
+                                    "list"
+                                )
+                                .unwrap();
+                                json!({"tools":[{"name":"write","inputSchema":{"type":"object"}}]})
+                            }
+                            "tools/call" => {
+                                use std::io::Write;
+                                writeln!(
+                                    std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(path.join("calls"))
+                                        .unwrap(),
+                                    "call"
+                                )
+                                .unwrap();
+                                json!({"content":[{"type":"text","text":"remote output".repeat(500)}]})
+                            }
+                            "notifications/initialized" | "notifications/cancelled" => {
+                                status = "202 Accepted";
+                                serde_json::Value::Null
+                            }
+                            other => panic!("unexpected method {other}"),
+                        };
+                        if request.get("id").is_some() {
+                            json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string()
+                        } else {
+                            String::new()
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{response}",
+                        response.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                }
+            });
+            Self { endpoint, task }
+        }
+    }
+
     #[tokio::test]
     async fn mixed_native_batch_waits_for_approval_completes_and_never_replays() {
+        mixed_native_batch(None).await;
+    }
+
+    #[tokio::test]
+    async fn http_native_batches_use_approval_artifacts_paging_and_never_replay() {
+        mixed_native_batch(Some(McpProtocolVersion::V20260728)).await;
+        mixed_native_batch(Some(McpProtocolVersion::V20251125)).await;
+    }
+
+    async fn mixed_native_batch(http_protocol: Option<McpProtocolVersion>) {
         let data = tempfile::tempdir().unwrap();
         let path = std::fs::canonicalize(data.path()).unwrap();
         let stat = std::fs::metadata(&path).unwrap();
@@ -284,6 +506,11 @@ mod tests {
             identity,
         )
         .unwrap();
+        let http_fixture = if http_protocol.is_some() {
+            Some(HttpFixture::new(path.clone()).await)
+        } else {
+            None
+        };
         let executable = path.join("server");
         std::fs::write(path.join("note.txt"), "local file output").unwrap();
         std::fs::write(&executable,r#"#!/usr/bin/python3
@@ -307,18 +534,27 @@ for line in sys.stdin:
         // This fixture's repeated output exercises artifact paging after completion.
         config.max_frame_bytes = NonZeroUsize::new(16384).unwrap();
         config.max_result_bytes = NonZeroUsize::new(16384).unwrap();
+        if http_protocol.is_some() {
+            config.http = Some(serde_json::from_value(http_limits_json()).unwrap());
+        }
         let definitions = config.broker_limits().unwrap().definition;
         let definition = McpServerDefinition::new(
             SharedMcpServerInput {
                 id: SharedConfigurationKey::parse("fixture", 64).unwrap(),
                 enabled: true,
-                transport: SharedMcpTransport::Stdio {
-                    runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),
-                    arguments: vec![],
-                    environment: BTreeMap::new(),
+                transport: if http_protocol.is_some() {
+                    SharedMcpTransport::HostEndpoint {
+                        endpoint_binding: SharedConfigurationKey::parse("local", 64).unwrap(),
+                    }
+                } else {
+                    SharedMcpTransport::Stdio {
+                        runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),
+                        arguments: vec![],
+                        environment: BTreeMap::new(),
+                    }
                 },
             },
-            McpProtocolPolicy::Pinned(McpProtocolVersion::V20251125),
+            McpProtocolPolicy::Pinned(http_protocol.unwrap_or(McpProtocolVersion::V20251125)),
             McpLifecycleScope::Core,
             None,
             definitions,
@@ -334,20 +570,36 @@ for line in sys.stdin:
             .initialize_configuration_instance(instance.clone())
             .await
             .unwrap();
-        let bindings = McpHostBindings::new(
-            key,
-            McpHostBindingInput {
-                instance_id: instance,
-                definition_version: 1,
-                runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),
-                executable: executable.to_str().unwrap().into(),
-                working_directory: Some((&directory).into()),
-                arguments: BTreeMap::new(),
-                environment: BTreeMap::new(),
-            },
-            definitions,
-        )
-        .unwrap();
+        let bindings = if let Some(fixture) = &http_fixture {
+            McpHostBindings::new_http(
+                key,
+                McpHttpHostBindingInput {
+                    instance_id: instance,
+                    definition_version: 1,
+                    working_directory: Some((&directory).into()),
+                    endpoint: fixture.endpoint.clone(),
+                    endpoint_binding: Some(SharedConfigurationKey::parse("local", 64).unwrap()),
+                    credential: None,
+                },
+                definitions,
+            )
+            .unwrap()
+        } else {
+            McpHostBindings::new(
+                key,
+                McpHostBindingInput {
+                    instance_id: instance,
+                    definition_version: 1,
+                    runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),
+                    executable: executable.to_str().unwrap().into(),
+                    working_directory: Some((&directory).into()),
+                    arguments: BTreeMap::new(),
+                    environment: BTreeMap::new(),
+                },
+                definitions,
+            )
+            .unwrap()
+        };
         store
             .publish_mcp_host_bindings(&bindings, 0, definitions)
             .await

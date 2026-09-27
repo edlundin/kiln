@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// Explicit host budgets; no model-supplied launch resources or product defaults.
-pub struct StdioBrokerLimits {
+pub struct McpBrokerLimits {
     pub generation: McpGenerationId,
     pub definition: McpDefinitionLimits,
     pub max_resolved_bytes: NonZeroUsize,
@@ -26,11 +26,31 @@ pub struct StdioBrokerLimits {
     pub call: StdioCallLimits,
 }
 
+/// Explicit HTTP allowances; absence disables HTTP broker startup.
+#[derive(Clone, Copy)]
+pub struct HttpBrokerLimits {
+    pub io: crate::McpHttpLimits,
+    pub channel_capacity: NonZeroUsize,
+    pub max_exchanges: NonZeroUsize,
+    pub max_catalog_lifetime_bytes: NonZeroUsize,
+    pub legacy_resume_delay: Option<Duration>,
+}
+
+pub type StdioBrokerLimits = McpBrokerLimits;
+pub type StdioBrokerError = McpBrokerError;
+
+enum PreparedTransport {
+    Stdio(crate::ResolvedStdioLaunch),
+    Http(crate::ResolvedHttpLaunch, rustix::fd::OwnedFd),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StdioBrokerError {
+pub enum McpBrokerError {
     Preparation(McpInvocationError),
     Directory,
     Binding(StdioBindingError),
+    HttpBinding(crate::HttpBindingError),
+    UnsupportedTransport,
     Registry(StdioRegistryError),
     DispatchClaim(McpInvocationError),
     Completion(RunError),
@@ -46,15 +66,16 @@ pub enum StdioBrokerError {
 /// Preparation cancellation can leave shared startup running, but never sends an
 /// invocation. Once claimed, dispatch owns cancellation and uncertain outcomes.
 /// No error or dropped future is permission to replay this request.
-pub async fn execute_stdio_call<S, V, P, PF, A, AF, E>(
+pub async fn execute_mcp_call<S, V, P, PF, A, AF, E>(
     registry: &StdioRegistry<S>,
     request: ModelToolExecutionRequest<McpCommand>,
     vault: &V,
-    limits: StdioBrokerLimits,
+    limits: McpBrokerLimits,
+    http: Option<HttpBrokerLimits>,
     mut cancellation: oneshot::Receiver<()>,
     pin: P,
     archive: A,
-) -> Result<ToolCallResult, StdioBrokerError>
+) -> Result<ToolCallResult, McpBrokerError>
 where
     S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + McpLaunchStore + 'static,
     V: McpSecretStore,
@@ -68,64 +89,141 @@ where
         let context = store
             .inspect_mcp_launch(&request, limits.definition)
             .await
-            .map_err(StdioBrokerError::Preparation)?;
+            .map_err(McpBrokerError::Preparation)?;
         let directory = pin(context.directory.clone())
             .await
-            .map_err(|_| StdioBrokerError::Directory)?;
+            .map_err(|_| McpBrokerError::Directory)?;
         let revision = context.host.revision;
         let metadata = context.host.bindings.metadata_json().to_owned();
-        let resolved = resolve_persisted_stdio_launch(
-            &context.definition,
-            context.host,
-            &context.directory,
-            StdioLaunchResources {
-                generation: limits.generation,
-                working_directory: directory,
-                definition_limits: limits.definition,
-                max_resolved_bytes: limits.max_resolved_bytes,
-                max_frame_bytes: limits.max_frame_bytes,
-                shutdown_grace: limits.shutdown_grace,
-                startup_deadline: limits.startup_deadline,
-            },
-            vault,
-        )
-        .await
-        .map_err(StdioBrokerError::Binding)?;
+        let prepared = if matches!(
+            context.definition.definition.server().transport,
+            kiln_core::SharedMcpTransport::Stdio { .. }
+        ) {
+            PreparedTransport::Stdio(
+                resolve_persisted_stdio_launch(
+                    &context.definition,
+                    context.host,
+                    &context.directory,
+                    StdioLaunchResources {
+                        generation: limits.generation,
+                        working_directory: directory,
+                        definition_limits: limits.definition,
+                        max_resolved_bytes: limits.max_resolved_bytes,
+                        max_frame_bytes: limits.max_frame_bytes,
+                        shutdown_grace: limits.shutdown_grace,
+                        startup_deadline: limits.startup_deadline,
+                    },
+                    vault,
+                )
+                .await
+                .map_err(McpBrokerError::Binding)?,
+            )
+        } else {
+            let http = http.ok_or(McpBrokerError::UnsupportedTransport)?;
+            let instance = context.host.bindings.instance_id().clone();
+            let key = context.host.bindings.key().clone();
+            let resolved = crate::resolve_persisted_http_launch(
+                &context.definition,
+                context.host,
+                crate::HttpLaunchAuthorization {
+                    instance_id: &instance,
+                    key: &key,
+                    directory: Some(&context.directory),
+                },
+                crate::HttpLaunchResources {
+                    generation: limits.generation,
+                    definition_limits: limits.definition,
+                    max_resolved_bytes: limits.max_resolved_bytes,
+                    io: http.io,
+                    channel_capacity: http.channel_capacity,
+                    max_exchanges: http.max_exchanges,
+                    max_catalog_lifetime_bytes: http.max_catalog_lifetime_bytes,
+                    legacy_resume_delay: http.legacy_resume_delay,
+                    startup_deadline: limits.startup_deadline,
+                },
+                vault,
+            )
+            .await
+            .map_err(McpBrokerError::HttpBinding)?;
+            PreparedTransport::Http(resolved, directory)
+        };
         // Vault reads and filesystem work can suspend. A previously valid
         // snapshot must not bypass a cancellation or rotation during that work.
         let current = store
             .inspect_mcp_launch(&request, limits.definition)
             .await
-            .map_err(StdioBrokerError::Preparation)?;
+            .map_err(McpBrokerError::Preparation)?;
         if current.host.revision != revision || current.host.bindings.metadata_json() != metadata {
-            return Err(StdioBrokerError::Preparation(McpInvocationError::Conflict));
+            return Err(McpBrokerError::Preparation(McpInvocationError::Conflict));
         }
-        let key = resolved.launch.key.clone();
-        let ready = registry
-            .ensure_ready(resolved.launch, resolved.binding_revision)
-            .await
-            .map_err(StdioBrokerError::Registry)?;
+        let (key, ready) = match prepared {
+            PreparedTransport::Stdio(resolved) => {
+                let key = resolved.launch.key.clone();
+                let ready = registry
+                    .ensure_ready(resolved.launch, resolved.binding_revision)
+                    .await
+                    .map_err(McpBrokerError::Registry)?;
+                (key, ready)
+            }
+            PreparedTransport::Http(resolved, directory) => {
+                let key = resolved.key.clone();
+                let ready = registry
+                    .ensure_http_ready(resolved, directory)
+                    .await
+                    .map_err(McpBrokerError::Registry)?;
+                (key, ready)
+            }
+        };
         Ok((key, ready))
     };
     let (key, ready) = tokio::select! {
         biased;
-        _ = &mut cancellation => return Err(StdioBrokerError::CancelledBeforeDispatch),
-        _ = tokio::time::sleep_until(limits.call.deadline) => return Err(StdioBrokerError::DeadlineBeforeDispatch),
+        _ = &mut cancellation => return Err(McpBrokerError::CancelledBeforeDispatch),
+        _ = tokio::time::sleep_until(limits.call.deadline) => return Err(McpBrokerError::DeadlineBeforeDispatch),
         result = prepare => result?,
     };
     let permit = match claim_mcp_dispatch(store, request, &ready, limits.definition)
         .await
-        .map_err(StdioBrokerError::DispatchClaim)?
+        .map_err(McpBrokerError::DispatchClaim)?
     {
         McpDispatchClaim::Acquired(permit) => permit,
         McpDispatchClaim::Existing(_) => {
-            return Err(StdioBrokerError::DispatchClaim(
-                McpInvocationError::Conflict,
-            ));
+            return Err(McpBrokerError::DispatchClaim(McpInvocationError::Conflict));
         }
     };
     registry
         .dispatch_tool_call(&key, permit, limits.call, cancellation, archive)
         .await
-        .map_err(StdioBrokerError::Completion)
+        .map_err(McpBrokerError::Completion)
+}
+
+/// Compatibility entry point: HTTP remains disabled for stdio-only callers.
+pub async fn execute_stdio_call<S, V, P, PF, A, AF, E>(
+    registry: &StdioRegistry<S>,
+    request: ModelToolExecutionRequest<McpCommand>,
+    vault: &V,
+    limits: StdioBrokerLimits,
+    cancellation: oneshot::Receiver<()>,
+    pin: P,
+    archive: A,
+) -> Result<ToolCallResult, StdioBrokerError>
+where
+    S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + McpLaunchStore + 'static,
+    V: McpSecretStore,
+    P: FnOnce(WorkspaceCheckout) -> PF,
+    PF: Future<Output = Result<rustix::fd::OwnedFd, RunError>>,
+    A: FnOnce(Vec<u8>) -> AF,
+    AF: Future<Output = Result<Artifact, E>>,
+{
+    execute_mcp_call(
+        registry,
+        request,
+        vault,
+        limits,
+        None,
+        cancellation,
+        pin,
+        archive,
+    )
+    .await
 }

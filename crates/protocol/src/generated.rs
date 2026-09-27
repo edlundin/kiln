@@ -42,6 +42,7 @@ use crate::{
 };
 use crate::{
     CONFIGURATION_IDENTITY_STATUS_PATH, ConfigurationIdentityPhase,
+    CONFIGURATION_IDENTITY_CERTIFICATE_PATH, GET_CONFIGURATION_IDENTITY_CERTIFICATE_OPERATION_ID,
     ConfigurationIdentityStatusResponse, ConfigurationIdentitySummaryResponse,
     GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID,
 };
@@ -816,6 +817,10 @@ fn catalogue() -> String {
             "method": "GET",
             "path": CONFIGURATION_IDENTITY_STATUS_PATH,
             "operation": GET_CONFIGURATION_IDENTITY_STATUS_OPERATION_ID
+        }, {
+            "method": "GET",
+            "path": CONFIGURATION_IDENTITY_CERTIFICATE_PATH,
+            "operation": GET_CONFIGURATION_IDENTITY_CERTIFICATE_OPERATION_ID
         }, {
             "method": "POST",
             "path": CONFIGURATION_IDENTITY_STATUS_PATH,
@@ -1824,6 +1829,28 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConfigurationIdentityStatusResponse'
+        '503':
+          $ref: '#/components/responses/Problem'
+  {CONFIGURATION_IDENTITY_CERTIFICATE_PATH}:
+    get:
+      operationId: {GET_CONFIGURATION_IDENTITY_CERTIFICATE_OPERATION_ID}
+      description: Export only public CA DER for the exact active identity of the current master authority. No vault access, trust installation, or current certificate validity/serving claim. Stored length is checked before materialization; transfer is capped at 2 MiB.
+      parameters:
+        - name: identity_id
+          in: path
+          required: true
+          schema: {{type: string, pattern: '^cmi_[0-9a-f]{{32}}$'}}
+      responses:
+        '200':
+          description: Public CA certificate DER. Compare SHA-256 with explicitly selected identity metadata before sharing or trusting it.
+          headers:
+            Cache-Control:
+              schema: {{type: string, const: no-store}}
+          content:
+            application/pkix-cert:
+              schema: {{type: string, format: binary}}
+        '404':
+          $ref: '#/components/responses/Problem'
         '503':
           $ref: '#/components/responses/Problem'
   {CONFIGURATION_FOLLOWER_ENROLLMENTS_PATH}:

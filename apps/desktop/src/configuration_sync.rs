@@ -26,6 +26,7 @@ use kiln_protocol::{
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 use ulid::Ulid;
+use sha2::{Digest, Sha256};
 
 use crate::{
     configuration_bundle::{self, BundleSummary},
@@ -88,6 +89,8 @@ enum Update {
     Imported(Result<PublicationDraft, String>),
     Published(Result<kiln_protocol::ConfigurationPublicationResponse, kiln_client::Error>),
     ExportReady(Result<(PathBuf, SharedConfigurationBundle), String>),
+    CertificateReady(Result<(PathBuf, Vec<u8>), String>),
+    CertificateSaved(Result<(), String>),
     Saved(Result<(), String>),
 }
 
@@ -844,6 +847,19 @@ impl ConfigurationSyncSettings {
                 };
             }
             Update::Imported(Ok(draft)) => self.draft = Some(draft),
+            Update::CertificateReady(Ok((path, bytes))) => {
+                let request = Ulid::generate();
+                self.request = Some(request);
+                let updates = self.updates.clone();
+                self.task = Some(self.runtime.spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        configuration_bundle::save_public_certificate(&path, &bytes)
+                    }).await.unwrap_or_else(|_| Err("Could not save the public certificate.".into()));
+                    let _ = updates.send((request, Update::CertificateSaved(result)));
+                }));
+            }
+            Update::CertificateReady(Err(error)) | Update::CertificateSaved(Err(error)) => self.error = Some(error),
+            Update::CertificateSaved(Ok(())) => self.notice = Some("Public CA certificate exported. Share it with the authority IDs and compare its fingerprint through a trusted channel. No private key was exported.".into()),
             Update::Imported(Err(error))
             | Update::Saved(Err(error))
             | Update::ExportReady(Err(error)) => self.error = Some(error),
@@ -1139,6 +1155,61 @@ impl ConfigurationSyncSettings {
             let result = client.publish_configuration_snapshot(&key, &command).await;
             let _ = updates.send((request, Update::Published(result)));
         }));
+        cx.notify();
+    }
+
+    fn pick_certificate_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.online || self.request.is_some() {
+            return;
+        }
+        let Some(status) = &self.identity_status else {
+            return;
+        };
+        if status.role != ConfigurationSyncRole::Master {
+            return;
+        }
+        let Some(identity) = &status.identity else {
+            return;
+        };
+        if identity.phase != kiln_protocol::ConfigurationIdentityPhase::Active {
+            return;
+        }
+        let identity_id = identity.identity_id.clone();
+        let expected_fingerprint = identity.certificate_authority_fingerprint.clone();
+        let request = Ulid::generate();
+        self.request = Some(request);
+        self.error = None;
+        self.notice = None;
+        let directory = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let picker = cx.prompt_for_new_path(&directory, Some("kiln-master-ca.der"));
+        cx.spawn_in(window, async move |this, cx| {
+            let selection = picker.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                if !this.online || this.request != Some(request) { return; }
+                let path = match selection {
+                    Ok(Ok(Some(path))) => path,
+                    Ok(Ok(None)) => { this.request = None; cx.notify(); return; }
+                    _ => { this.request = None; this.error = Some("Could not choose a certificate destination.".into()); cx.notify(); return; }
+                };
+                let client = this.client.clone();
+                let updates = this.updates.clone();
+                this.task = Some(this.runtime.spawn(async move {
+                    let result = client.get_configuration_identity_certificate(&identity_id).await
+                        .map_err(|error| connection::error_message("Export public CA certificate", &error))
+                        .and_then(|bytes| {
+                            let fingerprint: String = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+                            if fingerprint != expected_fingerprint {
+                                return Err("Certificate does not match the selected identity fingerprint. Refresh identity status.".into());
+                            }
+                            Ok((path, bytes))
+                        });
+                    let _ = updates.send((request, Update::CertificateReady(result)));
+                }));
+            });
+        }).detach();
         cx.notify();
     }
 
@@ -1964,6 +2035,12 @@ impl Render for ConfigurationSyncSettings {
                                     identity.not_before_unix_seconds
                                 ),
                             )));
+                        if identity.phase == kiln_protocol::ConfigurationIdentityPhase::Active {
+                            content = content.child(Button::new("export-master-ca")
+                                .label("Export public CA certificate…")
+                                .disabled(!self.online || self.request.is_some() || self.identity_retirement_confirmation.is_some() || self.pending_identity_retirement.is_some())
+                                .on_click(cx.listener(|this, _, window, cx| this.pick_certificate_export(window, cx))));
+                        }
                         if self.identity_retirement_confirmation.is_some() {
                             content = content
                                 .child(

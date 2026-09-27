@@ -187,6 +187,25 @@ reuse is `idempotency_conflict`; stale state/wrong master is
 An approved follower can fetch and apply it explicitly through the separate
 one-shot method below; ongoing distribution and runtime consumers are not wired.
 
+## Public master CA export
+
+Protocol `0.42.0` adds `get_configuration_identity_certificate(identity_id)` for
+`GET /v1/configuration-sync/identity/{identity_id}/certificate`. It returns only
+the public CA DER with `application/pkix-cert` and `Cache-Control: no-store`.
+The current master must own the exact active identity; missing, historical,
+pending or retired identities return HTTP 404
+`configuration_identity_certificate_not_found`. Storage/integrity failures return
+503. The store preflights the certificate length in the same transaction as the
+authority/phase check, then selects only `ca_der`. It never accesses the vault.
+
+Both the service and client bound certificate bytes by the existing 2 MiB
+enrollment ceiling. The client also bounds streamed error bodies, requires HTTP
+200 and the certificate media type, and rejects empty bodies. Compare the DER’s
+SHA-256 with the explicitly selected identity metadata before exporting or using
+it as a trust anchor. The desktop does this comparison before a no-overwrite file
+export. No trust is installed, no follower is enrolled, and certificate validity
+or live serving readiness is not asserted by this read.
+
 ## Host-local model account bindings
 
 Protocol `0.40.0` adds `list_model_account_bindings`,

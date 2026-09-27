@@ -1,7 +1,11 @@
 //! Explicit user-selected bundle I/O. No directory traversal or skill extraction.
 
 use kiln_protocol::{CONFIGURATION_PUBLICATION_MAX_BYTES, SharedConfigurationBundle};
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::File,
+    io::{Read, Write},
+    path::Path,
+};
 
 pub struct BundleSummary {
     pub mcp_servers: usize,
@@ -96,6 +100,29 @@ pub fn save_bundle(path: &Path, bundle: &SharedConfigurationBundle) -> Result<()
             "A file already exists there. Choose a new export filename."
         } else {
             "Could not save the configuration bundle."
+        }
+    })?;
+    Ok(())
+}
+
+pub fn save_public_certificate(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or("Choose a certificate destination folder.")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|_| "Could not create the public certificate export.")?;
+    temporary
+        .write_all(bytes)
+        .map_err(|_| "Could not write the public certificate.")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|_| "Could not finish the public certificate export.")?;
+    temporary.persist_noclobber(path).map_err(|error| {
+        if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+            "A file already exists there. Choose a new certificate filename."
+        } else {
+            "Could not save the public certificate."
         }
     })?;
     Ok(())

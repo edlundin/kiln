@@ -107,6 +107,17 @@ validity, then asks for confirmation before creating either private key. Kiln
 stores both keys in the daemon host's OS vault. Setup does not start a listener,
 enroll followers or enable remote synchronization.
 
+For an active identity, **Export public CA certificate…** downloads the public DER
+for that exact identity and verifies its SHA-256 against the displayed fingerprint
+before writing a new user-selected filename. Existing files are never overwritten.
+The authenticated local endpoint checks that the identity still belongs to the
+current master and is active. Export reads no vault entry and includes no private
+key. Share the DER file, group/master IDs and server name through a trusted channel;
+compare the full fingerprint again on the follower before preparing enrollment.
+Export is a public trust artifact, not proof of current certificate validity or
+an enabled TLS listener. Disconnect before saving rejects stale picker/download
+responses; a file write already started may finish.
+
 An uncertain setup offers **Retry identity setup**, which reuses its exact
 request and idempotency key. If recovery reports an incomplete reservation,
 **Retry identity cleanup** uses that original setup key to retry both deletions.
@@ -185,8 +196,8 @@ On an unassigned instance, **Prepare a new follower** accepts the master’s gro
 ID, instance ID and exact server name. **Choose public CA certificate…** reads an
 explicitly selected regular DER file off the UI thread, rejecting links/special
 files on Unix and limiting both file bytes and the encoded request to the existing
-2 MiB budget. Obtain the public certificate through a trusted channel; do not
-select a private key. The desktop does not yet export the master’s public CA.
+2 MiB budget. Use **Export public CA certificate…** on the master and obtain that
+public file through a trusted channel; do not select a private key.
 
 Compare the preview’s full SHA-256 fingerprint, authority and server name against
 the master before **Fingerprint verified — prepare**. The frozen request includes

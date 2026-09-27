@@ -120,6 +120,8 @@ pub enum Error {
     InvalidConfigurationFollowerEnrollmentDecision,
     #[error("configuration snapshot response exceeds the transfer budget")]
     ConfigurationSnapshotTooLarge,
+    #[error("configuration identity certificate exceeds the protocol transfer budget")]
+    ConfigurationIdentityCertificateTooLarge,
     #[error("model account binding key is invalid or exceeds the protocol byte limit")]
     InvalidModelAccountBindingKey,
     #[error("model account binding page limit must be between 1 and 100")]
@@ -716,6 +718,71 @@ impl Client {
                 .get(self.http_url(kiln_protocol::CONFIGURATION_IDENTITY_STATUS_PATH)),
         )
         .await
+    }
+
+    /// Read only the public CA DER for this exact current active master identity.
+    /// Never returns private keys and never installs trust. The caller must compare
+    /// the digest with the explicitly selected identity before exporting or using it.
+    pub async fn get_configuration_identity_certificate(
+        &self,
+        identity_id: &str,
+    ) -> Result<Vec<u8>, Error> {
+        if !valid_public_configuration_id(identity_id, "cmi_") {
+            return Err(Error::InvalidPathSegment {
+                name: "configuration identity ID",
+            });
+        }
+        let operation = kiln_protocol::GET_CONFIGURATION_IDENTITY_CERTIFICATE_OPERATION_ID;
+        let cap = kiln_protocol::CONFIGURATION_IDENTITY_CERTIFICATE_MAX_BYTES;
+        let path = path_with_segment(
+            kiln_protocol::CONFIGURATION_IDENTITY_CERTIFICATE_PATH,
+            "{identity_id}",
+            "configuration identity ID",
+            identity_id,
+        )?;
+        let response = self
+            .http
+            .get(self.http_url(&path))
+            .send()
+            .await
+            .map_err(|source| Error::HttpTransport { operation, source })?;
+        let status = response.status();
+        let certificate_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .is_some_and(|value| value == "application/pkix-cert");
+        if response
+            .content_length()
+            .is_some_and(|length| length > cap as u64)
+        {
+            return Err(Error::ConfigurationIdentityCertificateTooLarge);
+        }
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|source| Error::HttpTransport { operation, source })?;
+            if chunk.len() > cap.saturating_sub(bytes.len()) {
+                return Err(Error::ConfigurationIdentityCertificateTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return match serde_json::from_slice(&bytes) {
+                Ok(problem) => Err(Error::Api {
+                    status: status.as_u16(),
+                    problem,
+                }),
+                Err(_) => Err(Error::UnexpectedResponse {
+                    status: status.as_u16(),
+                }),
+            };
+        }
+        if status != reqwest::StatusCode::OK || !certificate_type || bytes.is_empty() {
+            return Err(Error::UnexpectedResponse {
+                status: status.as_u16(),
+            });
+        }
+        Ok(bytes)
     }
 
     /// Explicitly create a managed master identity. Preserve the exact key and

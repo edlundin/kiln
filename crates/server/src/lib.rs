@@ -984,6 +984,10 @@ where
             get(configuration_identity::get_status).post(configuration_identity::configure),
         )
         .route(
+            kiln_protocol::CONFIGURATION_IDENTITY_CERTIFICATE_PATH,
+            get(configuration_identity::get_certificate),
+        )
+        .route(
             kiln_protocol::CONFIGURATION_IDENTITY_RETIRE_PATH,
             post(configuration_identity::retire),
         )
@@ -3317,6 +3321,8 @@ enum PublicError {
     ConfigurationPublication(kiln_core::ConfigurationSnapshotError),
     #[error("no snapshot is stored for the active configuration group")]
     ConfigurationSnapshotNotFound,
+    #[error("the active configuration identity certificate was not found")]
+    ConfigurationIdentityCertificateNotFound,
     #[error("stored configuration exceeds the local transfer budget")]
     ConfigurationSnapshotTooLarge,
     #[error("daemon is shutting down")]
@@ -3613,6 +3619,11 @@ impl PublicError {
                 StatusCode::NOT_FOUND,
                 error_code::CONFIGURATION_SNAPSHOT_NOT_FOUND,
                 "Configuration snapshot not found",
+            ),
+            Self::ConfigurationIdentityCertificateNotFound => (
+                StatusCode::NOT_FOUND,
+                error_code::CONFIGURATION_IDENTITY_CERTIFICATE_NOT_FOUND,
+                "Active configuration identity certificate not found",
             ),
             Self::ConfigurationSnapshotTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,

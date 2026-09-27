@@ -227,6 +227,10 @@ where
 }
 
 pub(super) trait ConfigurationIdentityStatusOperations: Send + Sync {
+    fn certificate(
+        &self,
+        identity_id: kiln_core::ConfigurationMasterIdentityId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, ConfigurationStateError>> + Send + '_>>;
     fn status(
         &self,
     ) -> Pin<
@@ -241,6 +245,16 @@ pub(super) struct ConfigurationIdentityStatusAdapter<T>(pub T);
 impl<T: ConfigurationIdentityStatusStore> ConfigurationIdentityStatusOperations
     for ConfigurationIdentityStatusAdapter<T>
 {
+    fn certificate(
+        &self,
+        identity_id: kiln_core::ConfigurationMasterIdentityId,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, ConfigurationStateError>> + Send + '_>> {
+        Box::pin(async move {
+            self.0.get_configuration_identity_certificate(
+                &identity_id, kiln_protocol::CONFIGURATION_IDENTITY_CERTIFICATE_MAX_BYTES,
+            ).await
+        })
+    }
     fn status(
         &self,
     ) -> Pin<
@@ -252,6 +266,43 @@ impl<T: ConfigurationIdentityStatusStore> ConfigurationIdentityStatusOperations
     > {
         Box::pin(self.0.get_configuration_identity_status())
     }
+}
+
+pub(super) async fn get_certificate<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    axum::extract::Path(identity_id): axum::extract::Path<String>,
+) -> axum::response::Response
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let result = async {
+        let identity_id = kiln_core::ConfigurationMasterIdentityId::parse(identity_id)
+            .map_err(|_| PublicError::ConfigurationIdentityCertificateNotFound)?;
+        let operations = state
+            .configuration_identity_status_operations
+            .as_ref()
+            .ok_or(PublicError::ConfigurationSyncUnavailable)?;
+        let bytes = operations
+            .certificate(identity_id)
+            .await
+            .map_err(|_| PublicError::ConfigurationSyncUnavailable)?
+            .ok_or(PublicError::ConfigurationIdentityCertificateNotFound)?;
+        if bytes.is_empty()
+            || bytes.len() > kiln_protocol::CONFIGURATION_IDENTITY_CERTIFICATE_MAX_BYTES
+        {
+            return Err(PublicError::ConfigurationSyncUnavailable);
+        }
+        Ok(([(header::CONTENT_TYPE, "application/pkix-cert")], bytes))
+    }
+    .await;
+    let mut response = result.into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 pub(super) async fn get_status<W, S, R>(

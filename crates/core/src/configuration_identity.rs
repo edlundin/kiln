@@ -68,6 +68,15 @@ pub trait ConfigurationIdentityStatusStore: Send + Sync {
     fn get_configuration_identity_status(
         &self,
     ) -> impl Future<Output = Result<ConfigurationMasterIdentityStatus, ConfigurationStateError>> + Send;
+
+    /// Export only the public CA of this exact active identity under the current
+    /// master authority. Preflight the stored byte length before materializing it.
+    /// This reads no vault entry and makes no certificate-validity/readiness claim.
+    fn get_configuration_identity_certificate(
+        &self,
+        identity_id: &ConfigurationMasterIdentityId,
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, ConfigurationStateError>> + Send;
 }
 
 /// Caller-selected validity in UTC Unix seconds. Both certificates start at

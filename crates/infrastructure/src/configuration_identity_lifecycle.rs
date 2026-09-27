@@ -16,6 +16,57 @@ use kiln_core::{
 use sqlx::{Connection, Row, SqliteConnection};
 
 impl kiln_core::ConfigurationIdentityStatusStore for SqliteStore {
+    async fn get_configuration_identity_certificate(
+        &self,
+        identity_id: &ConfigurationMasterIdentityId,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, kiln_core::ConfigurationStateError> {
+        use kiln_core::ConfigurationStateError as StateError;
+        let mut connection = self.connection.lock().await;
+        let mut transaction = connection
+            .begin()
+            .await
+            .map_err(|_| StateError::Unavailable)?;
+        let state = configuration_sync::load(&mut transaction)
+            .await?
+            .ok_or(StateError::Uninitialized)?;
+        let ConfigurationRole::Master(authority) = state.role() else {
+            return Ok(None);
+        };
+        let length: Option<i64> = sqlx::query_scalar(
+            "SELECT length(ca_der) FROM configuration_master_identities WHERE identity_id = ? AND group_id = ? AND master_instance_id = ? AND status = 'active'",
+        ).bind(identity_id.as_str()).bind(authority.group_id().as_str())
+            .bind(authority.master_id().as_str()).fetch_optional(&mut *transaction).await
+            .map_err(|_| StateError::Unavailable)?;
+        let Some(length) = length else {
+            return Ok(None);
+        };
+        if length <= 0
+            || usize::try_from(length)
+                .ok()
+                .is_none_or(|length| length > max_bytes)
+        {
+            return Err(StateError::IntegrityViolation);
+        }
+        // Same read transaction as the authority/status/size check. Deliberately
+        // select only the public certificate, never vault references or envelopes.
+        let bytes: Vec<u8> = sqlx::query_scalar(
+            "SELECT ca_der FROM configuration_master_identities WHERE identity_id = ?",
+        )
+        .bind(identity_id.as_str())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| StateError::Unavailable)?;
+        if bytes.len() != length as usize {
+            return Err(StateError::IntegrityViolation);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StateError::Unavailable)?;
+        Ok(Some(bytes))
+    }
+
     async fn get_configuration_identity_status(
         &self,
     ) -> Result<kiln_core::ConfigurationMasterIdentityStatus, kiln_core::ConfigurationStateError>

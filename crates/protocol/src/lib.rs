@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.41.0";
+pub const PROTOCOL_VERSION: &str = "0.42.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -23,6 +23,13 @@ pub const WORKSPACE_PATH: &str = "/v1/workspaces/{workspace_id}";
 pub const CONFIGURATION_SYNC_STATUS_PATH: &str = "/v1/configuration-sync";
 pub const CONFIGURATION_MASTER_PATH: &str = "/v1/configuration-sync/master";
 pub const CONFIGURATION_IDENTITY_STATUS_PATH: &str = "/v1/configuration-sync/identity";
+pub const CONFIGURATION_IDENTITY_CERTIFICATE_PATH: &str =
+    "/v1/configuration-sync/identity/{identity_id}/certificate";
+/// Reuse the follower-enrollment transfer ceiling for public certificate export.
+pub const CONFIGURATION_IDENTITY_CERTIFICATE_MAX_BYTES: usize =
+    CONFIGURATION_FOLLOWER_ENROLLMENT_MAX_BYTES;
+pub const GET_CONFIGURATION_IDENTITY_CERTIFICATE_OPERATION_ID: &str =
+    "get_configuration_identity_certificate";
 pub const CONFIGURATION_IDENTITY_RETIRE_PATH: &str = "/v1/configuration-sync/identity/retire";
 pub const CONFIGURATION_IDENTITY_RETIRE_BY_ID_PATH: &str =
     "/v1/configuration-sync/identity/retire/by-id";
@@ -283,6 +290,8 @@ pub mod error_code {
         "configuration_follower_enrollment_request_capacity_reached";
     pub const CONFIGURATION_IDENTITY_RECOVERY_REQUIRED: &str =
         "configuration_identity_recovery_required";
+    pub const CONFIGURATION_IDENTITY_CERTIFICATE_NOT_FOUND: &str =
+        "configuration_identity_certificate_not_found";
     pub const CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND: &str =
         "configuration_follower_enrollment_not_found";
     pub const CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRED: &str =
@@ -384,6 +393,7 @@ pub mod error_code {
         CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_NOT_FOUND,
         CONFIGURATION_FOLLOWER_ENROLLMENT_REQUEST_CAPACITY_REACHED,
         CONFIGURATION_IDENTITY_RECOVERY_REQUIRED,
+        CONFIGURATION_IDENTITY_CERTIFICATE_NOT_FOUND,
         CONFIGURATION_FOLLOWER_ENROLLMENT_NOT_FOUND,
         CONFIGURATION_FOLLOWER_ENROLLMENT_RETIRED,
         CONFIGURATION_FOLLOWER_ENROLLMENT_RECOVERY_REQUIRED,

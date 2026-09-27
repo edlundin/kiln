@@ -905,6 +905,25 @@ replace or promote an assigned instance. Snapshot fetching and runtime consumers
 remain open. Shutdown rejects new designations through the existing command
 gate.
 
+## Public master certificate export
+
+Protocol `0.42.0` adds an authenticated local read of the public CA DER for one
+explicit `cmi_` identity at
+`GET /v1/configuration-sync/identity/{identity_id}/certificate`. A transaction
+requires that exact identity to be active under the current master authority,
+preflights the stored length, and selects only the public certificate column.
+The response and client stream are bounded by the existing 2 MiB enrollment
+ceiling. No vault reference, key envelope, private key or follower credential is
+returned; there is no vault operation or mutation.
+
+The desktop verifies the downloaded SHA-256 against the selected identity’s
+fingerprint and writes a new file without overwriting existing content. This
+completes public trust-material transfer for the follower preparation picker;
+users must compare the full fingerprint and authority/server binding through a
+trusted channel before confirming enrollment. Export does not establish current
+certificate validity, listener availability, or peer identity. Missing, pending,
+retired, or historical identities return 404, not another identity’s certificate.
+
 ## Explicit local snapshot publication
 
 Protocol `0.28.0` adds authenticated `POST /v1/configuration-sync/publications`,

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `feat`
+
+- EDL-322: Export the public CA for the exact active master identity and verify
+  its fingerprint before saving a new certificate file without overwriting.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
 ## 2026-09-27 — `fix`
 
 - EDL-322: Keep the master enrollment request journal separate from the local

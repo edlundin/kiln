@@ -518,8 +518,40 @@ async fn durable_host_revision_is_checked_before_process_spawn() {
     );
     registry.stop(&key).await.unwrap();
     assert_eq!(test_kill_process(process), Err(Errno::SRCH));
-    store
+    let third = store
         .publish_mcp_host_bindings(&bindings, 2, limits())
         .await
         .unwrap();
+    let retired = store
+        .retire_mcp_host_bindings(&key, third.revision, limits())
+        .await
+        .unwrap();
+    std::fs::remove_file(directory.path().join("pid")).unwrap();
+    for version in [
+        None,
+        Some(McpHostBindingVersion {
+            instance_id: bindings.instance_id().clone(),
+            revision: retired.revision,
+        }),
+    ] {
+        let mut request = launch(key.clone(), directory.path(), READY);
+        request.host_binding_version = version;
+        let mut owner = StdioGeneration::spawn(store.clone(), request);
+        assert_eq!(
+            owner.wait_ready().await.err(),
+            Some(StdioGenerationError::Store(
+                McpInstanceError::BindingChanged
+            ))
+        );
+        assert!(!directory.path().join("pid").exists());
+        assert_eq!(
+            store
+                .get_mcp_instance(&key)
+                .await
+                .unwrap()
+                .unwrap()
+                .generation,
+            record.generation
+        );
+    }
 }

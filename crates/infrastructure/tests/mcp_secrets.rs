@@ -72,6 +72,246 @@ fn snapshot(
 }
 
 #[tokio::test]
+async fn removal_is_atomic_idempotent_and_retains_the_launch_fence() {
+    let data = tempfile::tempdir().unwrap();
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let definition = definition(true);
+    store
+        .register_mcp_definition(&definition, 0, "initial", limits())
+        .await
+        .unwrap();
+    let key = McpInstanceKey::new(&definition, McpInstanceOwner::Core, 2048).unwrap();
+    let instance = KilnInstanceId::from_ulid(Ulid::generate());
+    let argument = SecretRef::from_ulid(Ulid::generate());
+    let token = SecretRef::from_ulid(Ulid::generate());
+    for (reference, purpose, field) in [
+        (&argument, McpSecretPurpose::Argument, "argument"),
+        (&token, McpSecretPurpose::Environment, "token"),
+    ] {
+        store
+            .reserve_mcp_secret(
+                &binding(&instance, &key, reference, purpose, field),
+                1,
+                limits(),
+            )
+            .await
+            .unwrap();
+    }
+    let original = snapshot(&instance, &key, &argument, &token);
+    let first = store
+        .publish_mcp_host_bindings(&original, 0, limits())
+        .await
+        .unwrap();
+    let host = McpHostBindingVersion {
+        instance_id: instance.clone(),
+        revision: first.revision,
+    };
+    let McpInstanceClaim::Acquired(generation) = store
+        .claim_mcp_instance_with_host_bindings(
+            &key,
+            1,
+            &McpGenerationId::from_ulid(Ulid::generate()),
+            Some(&host),
+            limits(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("fresh generation")
+    };
+    assert_eq!(
+        store
+            .retire_mcp_host_bindings(&key, first.revision, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::ActiveGeneration)
+    );
+    let generation = store
+        .transition_mcp_instance(&generation, McpInstanceTransition::ConnectionLost)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .retire_mcp_host_bindings(&key, first.revision, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::ActiveGeneration)
+    );
+    store
+        .transition_mcp_instance(&generation, McpInstanceTransition::Stopped)
+        .await
+        .unwrap();
+    store
+        .register_mcp_definition(&self::definition(false), 1, "disable", limits())
+        .await
+        .unwrap();
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(data.path().join("kiln.sqlite3")),
+    )
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER fixture_reject_retirement BEFORE UPDATE OF state ON mcp_secret_reservations BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END")
+        .execute(&mut connection).await.unwrap();
+    assert_eq!(
+        store
+            .retire_mcp_host_bindings(&key, first.revision, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::Unavailable)
+    );
+    assert_eq!(
+        store
+            .get_mcp_host_bindings(&key, limits())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        first.revision
+    );
+    assert!(
+        store
+            .pending_mcp_secret_reservations(&instance, &key, NonZeroUsize::new(4).unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("DROP TRIGGER fixture_reject_retirement")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let retired = store
+        .retire_mcp_host_bindings(&key, first.revision, limits())
+        .await
+        .unwrap();
+    assert!(retired.retired);
+    assert_eq!(retired.revision.get(), 2);
+    assert!(
+        sqlx::query("DELETE FROM mcp_host_bindings")
+            .execute(&mut connection)
+            .await
+            .is_err()
+    );
+    drop(connection);
+    drop(store);
+    let store = kiln_infrastructure::SqliteStore::open(data.path())
+        .await
+        .unwrap();
+    let current = store
+        .get_mcp_host_bindings(&key, limits())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(current.retired);
+    assert!(
+        store
+            .retire_mcp_host_bindings(&key, first.revision, limits())
+            .await
+            .unwrap()
+            .retired
+    );
+    assert_eq!(
+        store
+            .publish_mcp_host_bindings(&original, 1, limits())
+            .await
+            .err(),
+        Some(McpHostBindingError::Conflict)
+    );
+    let pending = store
+        .pending_mcp_secret_reservations(&instance, &key, NonZeroUsize::new(4).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(
+        pending
+            .iter()
+            .all(|(_, state)| *state == McpSecretReservationState::Retired)
+    );
+    for (secret, _) in pending {
+        store.finish_mcp_secret_deletion(&secret).await.unwrap();
+    }
+    store
+        .register_mcp_definition(&definition, 2, "enable", limits())
+        .await
+        .unwrap();
+    for version in [
+        None,
+        Some(host),
+        Some(McpHostBindingVersion {
+            instance_id: instance.clone(),
+            revision: retired.revision,
+        }),
+    ] {
+        assert_eq!(
+            store
+                .claim_mcp_instance_with_host_bindings(
+                    &key,
+                    3,
+                    &McpGenerationId::from_ulid(Ulid::generate()),
+                    version.as_ref(),
+                    limits()
+                )
+                .await
+                .err(),
+            Some(McpInstanceError::BindingChanged)
+        );
+    }
+    // Explicit republication uses the tombstone revision and fresh references.
+    let new_argument = SecretRef::from_ulid(Ulid::generate());
+    let new_token = SecretRef::from_ulid(Ulid::generate());
+    for (reference, purpose, field) in [
+        (&new_argument, McpSecretPurpose::Argument, "argument"),
+        (&new_token, McpSecretPurpose::Environment, "token"),
+    ] {
+        store
+            .reserve_mcp_secret(
+                &binding(&instance, &key, reference, purpose, field),
+                3,
+                limits(),
+            )
+            .await
+            .unwrap();
+    }
+    let replacement = McpHostBindings::new(
+        key.clone(),
+        McpHostBindingInput {
+            instance_id: instance,
+            definition_version: 3,
+            runtime_binding: name("python"),
+            executable: "/usr/bin/python3".into(),
+            arguments: BTreeMap::from([(name("argument"), new_argument)]),
+            environment: BTreeMap::from([(name("token"), new_token)]),
+        },
+        limits(),
+    )
+    .unwrap();
+    let active = store
+        .publish_mcp_host_bindings(&replacement, retired.revision.get(), limits())
+        .await
+        .unwrap();
+    assert_eq!(active.revision.get(), 3);
+    assert!(!active.retired);
+    assert_eq!(
+        store
+            .retire_mcp_host_bindings(&key, first.revision, limits())
+            .await
+            .unwrap()
+            .revision,
+        retired.revision
+    );
+    assert_eq!(
+        store
+            .get_mcp_host_bindings(&key, limits())
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        active.revision
+    );
+}
+
+#[tokio::test]
 async fn publication_and_generation_claims_fence_rotation_and_preserve_secret_ownership() {
     let data = tempfile::tempdir().unwrap();
     let store = kiln_infrastructure::SqliteStore::open(data.path())

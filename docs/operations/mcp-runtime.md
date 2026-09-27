@@ -124,7 +124,17 @@ until stopped/reaped. Interrupted generations also block publication. A key with
 a persisted snapshot rejects a launch lacking its revision. Resolution and a
 successful claim still require independent host/process authorization.
 
-These are internal ports; offline host-binding/credential administration, snapshot
-removal, automated cleanup, and daemon ToolCall launch wiring remain open. The
+Migration 56 adds explicit snapshot retirement. It requires the expected current
+revision and the same process cleanup boundary as publication, but still works
+after a definition is disabled or its owner disappears. Retirement advances the
+revision, releases all published references into pending cleanup, and retains a
+current tombstone. That tombstone blocks bound and unbound generation claims;
+removal cannot silently restore the legacy materialized launch path. Resolvers
+reject retired records before any vault access. Re-enabling requires explicit
+publication against the tombstone revision and live reserved references. Exact
+retirement retries return their original receipt without retiring a later update.
+
+These are internal ports; offline host-binding/credential administration,
+automated cleanup, and daemon ToolCall launch wiring remain open. The
 targeted tests use fake vault values and real macOS process fixtures; actual MCP
 OS-vault integration and Linux runtime behavior remain unverified.

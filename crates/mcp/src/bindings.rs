@@ -55,6 +55,9 @@ pub async fn resolve_persisted_stdio_launch<S: McpSecretStore>(
     resources: StdioLaunchResources,
     vault: &S,
 ) -> Result<ResolvedStdioLaunch, StdioBindingError> {
+    if record.retired {
+        return Err(StdioBindingError::Disabled);
+    }
     let bindings = record.bindings;
     let version = kiln_core::McpHostBindingVersion {
         instance_id: bindings.instance_id().clone(),

@@ -233,8 +233,12 @@ keys without a persisted snapshot. Published references are excluded from pendin
 cleanup; replacing them retires the old references atomically. Exact publication
 retries return immutable receipts without rolling the current snapshot back.
 Snapshots currently persist absolute UTF-8 Unix executable paths and reference
-maps. Snapshot removal and public administration remain open, and none of these
-ports grant host authorization or install MCP in the daemon native catalogue.
+maps. `retire_mcp_host_bindings` advances the revision and retires its references
+atomically after process cleanup. A retained removal tombstone blocks all launch
+claims until explicit republication; retired records fail resolution before vault
+reads. Exact retirement retries never remove a newer publication. Public
+administration remains open, and none of these ports grant host authorization or
+install MCP in the daemon native catalogue.
 
 The [internal daemon runtime](../../docs/operations/mcp-runtime.md) is opt-in with
 explicit instance-capacity and recovery-batch budgets. Its startup runs before

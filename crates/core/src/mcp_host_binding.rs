@@ -181,6 +181,8 @@ impl McpHostBindings {
 pub struct McpHostBindingRecord {
     pub bindings: McpHostBindings,
     pub revision: std::num::NonZeroU64,
+    /// Retained removal receipt, never a usable launch snapshot.
+    pub retired: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -197,6 +199,7 @@ pub enum McpHostBindingError {
     InvalidBinding,
     ActiveGeneration,
     Conflict,
+    NotFound,
     IntegrityViolation,
     Unavailable,
 }
@@ -217,4 +220,14 @@ pub trait McpHostBindingStore: Send + Sync {
         key: &McpInstanceKey,
         limits: McpDefinitionLimits,
     ) -> impl Future<Output = Result<Option<McpHostBindingRecord>, McpHostBindingError>> + Send;
+    /// Retains a new revision tombstone and retires all published references
+    /// atomically. Active/uncertain generations must be cleaned up first. This
+    /// remains possible after definition disablement or owner removal. An exact
+    /// retry returns the original receipt, even after explicit republication.
+    fn retire_mcp_host_bindings(
+        &self,
+        key: &McpInstanceKey,
+        expected_revision: std::num::NonZeroU64,
+        limits: McpDefinitionLimits,
+    ) -> impl Future<Output = Result<McpHostBindingRecord, McpHostBindingError>> + Send;
 }

@@ -142,11 +142,29 @@ async fn vault_resolution_is_scoped_role_specific_and_reads_only_needed_referenc
         limits(),
     )
     .unwrap();
+    let (_, _, retired_resources) = fixture(directory.path());
+    assert_eq!(
+        resolve_persisted_stdio_launch(
+            &definition,
+            McpHostBindingRecord {
+                bindings: snapshot.clone(),
+                revision,
+                retired: true,
+            },
+            retired_resources,
+            &vault
+        )
+        .await
+        .err(),
+        Some(StdioBindingError::Disabled)
+    );
+    assert!(vault.reads.lock().unwrap().is_empty());
     let resolved = resolve_persisted_stdio_launch(
         &definition,
         McpHostBindingRecord {
             bindings: snapshot,
             revision,
+            retired: false,
         },
         resources,
         &vault,

@@ -56,7 +56,7 @@ impl McpInstanceStore for SqliteStore {
             return Err(Error::OwnerMismatch);
         }
         validate_owner(&mut tx, key.owner()).await?;
-        let host = sqlx::query("SELECT h.revision, json_extract(v.metadata_json, '$.instance_id') AS instance_id, json_extract(v.metadata_json, '$.definition_version') AS definition_version FROM mcp_host_bindings h JOIN mcp_host_binding_versions v USING(instance_key, revision) WHERE h.instance_key = ?")
+        let host = sqlx::query("SELECT h.revision, v.retired, json_extract(v.metadata_json, '$.instance_id') AS instance_id, json_extract(v.metadata_json, '$.definition_version') AS definition_version FROM mcp_host_bindings h JOIN mcp_host_binding_versions v USING(instance_key, revision) WHERE h.instance_key = ?")
             .bind(key.canonical_json()).fetch_optional(&mut *tx).await.map_err(|_| Error::Unavailable)?;
         match (host, host_binding_version) {
             (None, None) => {}
@@ -70,7 +70,11 @@ impl McpInstanceStore for SqliteStore {
                 let version: i64 = row
                     .try_get("definition_version")
                     .map_err(|_| Error::IntegrityViolation)?;
-                if revision != positive(expected.revision.get())?
+                let retired: bool = row
+                    .try_get("retired")
+                    .map_err(|_| Error::IntegrityViolation)?;
+                if retired
+                    || revision != positive(expected.revision.get())?
                     || instance != expected.instance_id.as_str()
                     || version != definition_version
                 {

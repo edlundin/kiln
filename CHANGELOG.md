@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Retire MCP host snapshots with revision-checked tombstones that fence
+  launch claims and atomically release published secret references.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/6fce6a1)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Publish immutable, reference-backed MCP host snapshots with CAS,
   rotation fencing and atomic generation binding claims.
 

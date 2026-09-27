@@ -28,7 +28,7 @@ impl McpHostBindingStore for SqliteStore {
             .await
             .map_err(|_| Error::Unavailable)?;
         if let Some(record) = load_version(&mut tx, bindings.key(), next, limits).await? {
-            if record.bindings.metadata_json() != bindings.metadata_json() {
+            if record.retired || record.bindings.metadata_json() != bindings.metadata_json() {
                 return Err(Error::Conflict);
             }
             return Ok(record);
@@ -42,13 +42,7 @@ impl McpHostBindingStore for SqliteStore {
         if current.unwrap_or(0) != next - 1 {
             return Err(Error::Conflict);
         }
-        // The same IMMEDIATE transaction as generation claims closes the gap
-        // between resolving a snapshot and reserving its process generation.
-        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mcp_instances i JOIN mcp_instance_generations g USING(instance_key, generation_id) WHERE i.instance_key = ? AND g.observed IN ('starting','ready','stopping','interrupted'))")
-            .bind(bindings.key().canonical_json()).fetch_one(&mut *tx).await.map_err(|_| Error::Unavailable)?;
-        if active {
-            return Err(Error::ActiveGeneration);
-        }
+        ensure_inactive(&mut tx, bindings.key()).await?;
         let version: Option<i64> =
             sqlx::query_scalar("SELECT version FROM mcp_definitions WHERE definition_id = ?")
                 .bind(bindings.key().definition_id().as_str())
@@ -142,15 +136,76 @@ impl McpHostBindingStore for SqliteStore {
                 .execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
         }
         if let Some(old) = old {
-            for (_, _, reference) in references(&old.bindings) {
-                sqlx::query("UPDATE mcp_secret_reservations SET state = 'retired' WHERE secret_ref = ? AND state = 'reserved' AND NOT EXISTS(SELECT 1 FROM mcp_host_binding_refs WHERE secret_ref = ?)")
-                    .bind(reference.as_str()).bind(reference.as_str()).execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
-            }
+            retire_unpublished_references(&mut tx, &old.bindings).await?;
         }
         tx.commit().await.map_err(|_| Error::Unavailable)?;
         Ok(McpHostBindingRecord {
             bindings: validated,
             revision: NonZeroU64::new(next as u64).expect("positive revision"),
+            retired: false,
+        })
+    }
+
+    async fn retire_mcp_host_bindings(
+        &self,
+        key: &McpInstanceKey,
+        expected_revision: NonZeroU64,
+        limits: McpDefinitionLimits,
+    ) -> Result<McpHostBindingRecord, Error> {
+        limits.validate().map_err(|_| Error::InvalidRequest)?;
+        let next = expected_revision
+            .get()
+            .checked_add(1)
+            .and_then(|v| i64::try_from(v).ok())
+            .ok_or(Error::InvalidRequest)?;
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        if let Some(receipt) = load_version(&mut tx, key, next, limits).await? {
+            return if receipt.retired {
+                Ok(receipt)
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM mcp_host_bindings WHERE instance_key = ?")
+                .bind(key.canonical_json())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| Error::Unavailable)?;
+        if current.ok_or(Error::NotFound)? != next - 1 {
+            return Err(Error::Conflict);
+        }
+        let old = load_version(&mut tx, key, next - 1, limits)
+            .await?
+            .ok_or(Error::IntegrityViolation)?;
+        if old.retired {
+            return Err(Error::Conflict);
+        }
+        ensure_inactive(&mut tx, key).await?;
+        sqlx::query("INSERT INTO mcp_host_binding_versions(instance_key, revision, metadata_json, retired) VALUES (?, ?, ?, 1)")
+            .bind(key.canonical_json()).bind(next).bind(old.bindings.metadata_json())
+            .execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
+        sqlx::query("UPDATE mcp_host_bindings SET revision = ? WHERE instance_key = ?")
+            .bind(next)
+            .bind(key.canonical_json())
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        sqlx::query("DELETE FROM mcp_host_binding_refs WHERE instance_key = ?")
+            .bind(key.canonical_json())
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        retire_unpublished_references(&mut tx, &old.bindings).await?;
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(McpHostBindingRecord {
+            bindings: old.bindings,
+            revision: NonZeroU64::new(next as u64).expect("positive revision"),
+            retired: true,
         })
     }
 
@@ -174,6 +229,32 @@ impl McpHostBindingStore for SqliteStore {
             None => Ok(None),
         }
     }
+}
+
+/// The caller holds the same IMMEDIATE transaction used by generation claims;
+/// checking outside it would race resolved credentials against reconfiguration.
+async fn ensure_inactive(
+    connection: &mut SqliteConnection,
+    key: &McpInstanceKey,
+) -> Result<(), Error> {
+    let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mcp_instances i JOIN mcp_instance_generations g USING(instance_key, generation_id) WHERE i.instance_key = ? AND g.observed IN ('starting','ready','stopping','interrupted'))")
+        .bind(key.canonical_json()).fetch_one(connection).await.map_err(|_| Error::Unavailable)?;
+    if active {
+        Err(Error::ActiveGeneration)
+    } else {
+        Ok(())
+    }
+}
+
+async fn retire_unpublished_references(
+    connection: &mut SqliteConnection,
+    bindings: &McpHostBindings,
+) -> Result<(), Error> {
+    for (_, _, reference) in references(bindings) {
+        sqlx::query("UPDATE mcp_secret_reservations SET state = 'retired' WHERE secret_ref = ? AND state = 'reserved' AND NOT EXISTS(SELECT 1 FROM mcp_host_binding_refs WHERE secret_ref = ?)")
+            .bind(reference.as_str()).bind(reference.as_str()).execute(&mut *connection).await.map_err(|_| Error::Unavailable)?;
+    }
+    Ok(())
 }
 
 fn references(
@@ -208,7 +289,7 @@ async fn load_version(
         .checked_sub(key.canonical_json().len())
         .ok_or(Error::LimitExceeded)?;
     // Check the stored byte count before materializing private snapshot metadata.
-    let row = sqlx::query("SELECT length(CAST(metadata_json AS BLOB)) AS bytes, CASE WHEN length(CAST(metadata_json AS BLOB)) <= ? THEN metadata_json END AS metadata FROM mcp_host_binding_versions WHERE instance_key = ? AND revision = ?")
+    let row = sqlx::query("SELECT retired, CASE WHEN length(CAST(metadata_json AS BLOB)) <= ? THEN metadata_json END AS metadata FROM mcp_host_binding_versions WHERE instance_key = ? AND revision = ?")
         .bind(i64::try_from(budget).map_err(|_| Error::InvalidRequest)?).bind(key.canonical_json()).bind(revision)
         .fetch_optional(connection).await.map_err(|_| Error::Unavailable)?;
     row.map(|row| {
@@ -227,7 +308,14 @@ async fn load_version(
             .ok()
             .and_then(NonZeroU64::new)
             .ok_or(Error::IntegrityViolation)?;
-        Ok(McpHostBindingRecord { bindings, revision })
+        let retired: bool = row
+            .try_get("retired")
+            .map_err(|_| Error::IntegrityViolation)?;
+        Ok(McpHostBindingRecord {
+            bindings,
+            revision,
+            retired,
+        })
     })
     .transpose()
 }

@@ -196,6 +196,9 @@ the complete live ancestry in the same Session. Cancelled/terminal ancestors,
 cycles, cross-Session links and resolved input reject the lookup. The result is
 a read-only ownership snapshot, not permission to publish a prompt, approve an
 action or execute a provider request; those writers must revalidate ownership.
+Fresh sampling/elicitation resolution rechecks this ancestry in its write
+transaction, so cancellation after a lookup cannot resolve the pending input.
+Rejected resolution leaves its journal and event stream unchanged.
 Sampling/elicitation runtime handlers and the user interaction surface are still
 unimplemented.
 

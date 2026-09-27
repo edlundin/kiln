@@ -30,24 +30,7 @@ impl McpInputStore for SqliteStore {
             return Err(Error::Conflict);
         }
         validate_live(&mut tx, &current.invocation).await?;
-        // UNION, rather than UNION ALL, makes corrupt cycles terminate without
-        // an arbitrary ancestry-depth limit. Any broken chain fails closed.
-        let owner: Option<String> = sqlx::query_scalar("WITH RECURSIVE
-            source AS (SELECT r.* FROM runs r JOIN tool_calls t ON t.run_id = r.run_id WHERE t.tool_call_id = ?),
-            lineage(run_id,parent_run_id,session_id,user_input_mode,state) AS (
-                SELECT run_id,parent_run_id,session_id,user_input_mode,state FROM source
-                UNION
-                SELECT r.run_id,r.parent_run_id,r.session_id,r.user_input_mode,r.state
-                FROM runs r JOIN lineage c ON r.run_id = c.parent_run_id
-            )
-            SELECT CASE WHEN source.user_input_mode = 'interactive' THEN source.run_id ELSE root.run_id END
-            FROM source JOIN lineage root ON root.parent_run_id IS NULL
-            WHERE root.user_input_mode = 'interactive'
-              AND NOT EXISTS (SELECT 1 FROM lineage a WHERE a.session_id != source.session_id
-                OR a.state NOT IN ('queued','running','waiting_for_approval'))")
-            .bind(current.invocation.tool_call_id.as_str()).fetch_optional(&mut *tx).await.map_err(|_| Error::Unavailable)?;
-        let owner = kiln_core::RunId::parse(owner.ok_or(Error::Conflict)?)
-            .map_err(|_| Error::IntegrityViolation)?;
+        let owner = interaction_owner(&mut tx, &current.invocation).await?;
         tx.commit().await.map_err(|_| Error::Unavailable)?;
         Ok(owner)
     }
@@ -196,6 +179,12 @@ impl McpInputStore for SqliteStore {
             return Err(Error::Conflict);
         }
         validate_live(&mut tx, &current.invocation).await?;
+        if matches!(
+            current.kind,
+            McpInputKind::Sampling | McpInputKind::Elicitation
+        ) {
+            interaction_owner(&mut tx, &current.invocation).await?;
+        }
         sqlx::query(
             "UPDATE mcp_inputs SET state = 'resolved' WHERE tool_call_id = ? AND ordinal = ?",
         )
@@ -210,6 +199,33 @@ impl McpInputStore for SqliteStore {
         current.state = McpInputState::Resolved;
         Ok(McpInputMutation::Applied(current))
     }
+}
+
+// Keep ancestry validation inside the caller's transaction so a cancelled
+// ancestor cannot race a fresh resolution after an earlier ownership lookup.
+async fn interaction_owner(
+    connection: &mut SqliteConnection,
+    invocation: &McpInvocationRecord,
+) -> Result<kiln_core::RunId, Error> {
+    // UNION, rather than UNION ALL, makes corrupt cycles terminate without
+    // an arbitrary ancestry-depth limit. Any broken chain fails closed.
+    let owner: Option<String> = sqlx::query_scalar("WITH RECURSIVE
+        source AS (SELECT r.* FROM runs r JOIN tool_calls t ON t.run_id = r.run_id WHERE t.tool_call_id = ?),
+        lineage(run_id,parent_run_id,session_id,user_input_mode,state) AS (
+            SELECT run_id,parent_run_id,session_id,user_input_mode,state FROM source
+            UNION
+            SELECT r.run_id,r.parent_run_id,r.session_id,r.user_input_mode,r.state
+            FROM runs r JOIN lineage c ON r.run_id = c.parent_run_id
+        )
+        SELECT CASE WHEN source.user_input_mode = 'interactive' THEN source.run_id ELSE root.run_id END
+        FROM source JOIN lineage root ON root.parent_run_id IS NULL
+        WHERE root.user_input_mode = 'interactive'
+          AND NOT EXISTS (SELECT 1 FROM lineage a WHERE a.session_id != source.session_id
+            OR a.state NOT IN ('queued','running','waiting_for_approval'))")
+        .bind(invocation.tool_call_id.as_str()).fetch_optional(connection).await.map_err(|_| Error::Unavailable)?;
+    let owner = kiln_core::RunId::parse(owner.ok_or(Error::Conflict)?)
+        .map_err(|_| Error::IntegrityViolation)?;
+    Ok(owner)
 }
 
 async fn current_invocation(

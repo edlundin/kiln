@@ -91,7 +91,9 @@ pub trait McpInputStore: Send + Sync {
     ) -> impl Future<Output = Result<McpInputMutation, McpInvocationError>> + Send;
 
     /// Journal mediation before sending its response. The same live invocation
-    /// must still own dispatch. Restart/termination interrupts pending inputs.
+    /// must still own dispatch. Sampling/elicitation also require live same-Session
+    /// interaction ancestry in the resolution transaction. This does not approve
+    /// provider or user interaction. Restart/termination interrupts pending inputs.
     fn resolve_mcp_input(
         &self,
         expected: &McpInputRecord,

@@ -93,6 +93,11 @@ async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
             store.mcp_input_interaction_run(&input).await.err(),
             Some(McpInvocationError::Conflict)
         );
+        assert_eq!(
+            store.resolve_mcp_input(&input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert!(!wake.has_changed().unwrap());
         {
             let mut sql = store.connection.lock().await;
             sqlx::query("UPDATE runs SET parent_run_id=? WHERE run_id=?")
@@ -129,6 +134,11 @@ async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
             store.mcp_input_interaction_run(&input).await.err(),
             Some(McpInvocationError::Conflict)
         );
+        assert_eq!(
+            store.resolve_mcp_input(&input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert!(!wake.has_changed().unwrap());
         {
             let mut sql = store.connection.lock().await;
             sqlx::query("UPDATE runs SET parent_run_id=? WHERE run_id=?")
@@ -160,6 +170,29 @@ async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
             store.mcp_input_interaction_run(&sampling).await.err(),
             Some(McpInvocationError::Conflict)
         );
+        let wake = store.subscribe_mcp_invocation_events();
+        assert_eq!(
+            store.resolve_mcp_input(&sampling).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert!(!wake.has_changed().unwrap());
+        let mut sql = store.connection.lock().await;
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM mcp_inputs WHERE tool_call_id = ? AND ordinal = 2",
+        )
+        .bind(sampling.invocation.tool_call_id.as_str())
+        .fetch_one(&mut *sql)
+        .await
+        .unwrap();
+        assert_eq!(state, "required");
+        let resolutions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mcp_input_events WHERE tool_call_id = ? AND ordinal = 2 AND state = 'resolved'",
+        )
+        .bind(sampling.invocation.tool_call_id.as_str())
+        .fetch_one(&mut *sql)
+        .await
+        .unwrap();
+        assert_eq!(resolutions, 0);
     }
 }
 

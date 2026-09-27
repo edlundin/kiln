@@ -1,7 +1,7 @@
 -- Incoming follower IDs and endpoint trust are claims, not peer identity.
 -- Do not impose one-pending-request-per-follower uniqueness: an unauthenticated
 -- claimant must not be able to reserve another instance's identity.
-CREATE TABLE configuration_follower_enrollment_requests (
+CREATE TABLE configuration_master_enrollment_requests (
     request_id TEXT PRIMARY KEY NOT NULL CHECK (
         length(request_id) = 36
         AND substr(request_id, 1, 4) = 'cfr_'
@@ -31,20 +31,20 @@ CREATE TABLE configuration_follower_enrollment_requests (
 
 CREATE TABLE configuration_follower_enrollment_request_lifecycle (
     request_id TEXT PRIMARY KEY NOT NULL
-        REFERENCES configuration_follower_enrollment_requests(request_id),
+        REFERENCES configuration_master_enrollment_requests(request_id),
     phase TEXT NOT NULL CHECK (phase IN ('pending', 'approved', 'rejected')),
     grant_id TEXT UNIQUE REFERENCES configuration_read_grants(grant_id),
     CHECK ((phase = 'approved') = (grant_id IS NOT NULL))
 );
 
-CREATE TRIGGER configuration_follower_enrollment_request_immutable
-BEFORE UPDATE ON configuration_follower_enrollment_requests
+CREATE TRIGGER configuration_master_enrollment_request_immutable
+BEFORE UPDATE ON configuration_master_enrollment_requests
 BEGIN
     SELECT RAISE(ABORT, 'configuration follower enrollment request is immutable');
 END;
 
-CREATE TRIGGER configuration_follower_enrollment_request_retained
-BEFORE DELETE ON configuration_follower_enrollment_requests
+CREATE TRIGGER configuration_master_enrollment_request_retained
+BEFORE DELETE ON configuration_master_enrollment_requests
 BEGIN
     SELECT RAISE(ABORT, 'configuration follower enrollment request is retained');
 END;

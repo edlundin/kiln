@@ -18,7 +18,7 @@ const MAX_ENROLLMENT_REQUEST_PAGE_SIZE: usize = 101;
 macro_rules! enrollment_request_select {
     ($suffix:literal) => {
         concat!(
-            "SELECT r.request_id, r.attempt_id, r.follower_instance_id, r.follower_state_version, r.group_id, r.master_instance_id, r.server_name, r.master_ca_fingerprint, r.credential_digest, r.received_master_state_version, l.phase AS request_phase, l.grant_id AS request_grant_id, g.grant_id AS issued_grant_id, g.credential_digest AS issued_credential_digest, g.issuance_attempt_id AS issued_attempt_id, g.group_id AS issued_group_id, g.master_instance_id AS issued_master_instance_id, g.follower_instance_id AS issued_follower_instance_id, g.issued_state_version AS issued_state_version, g.revoked AS issued_revoked FROM configuration_follower_enrollment_requests r JOIN configuration_follower_enrollment_request_lifecycle l USING (request_id) LEFT JOIN configuration_read_grants g ON g.grant_id = l.grant_id",
+            "SELECT r.request_id, r.attempt_id, r.follower_instance_id, r.follower_state_version, r.group_id, r.master_instance_id, r.server_name, r.master_ca_fingerprint, r.credential_digest, r.received_master_state_version, l.phase AS request_phase, l.grant_id AS request_grant_id, g.grant_id AS issued_grant_id, g.credential_digest AS issued_credential_digest, g.issuance_attempt_id AS issued_attempt_id, g.group_id AS issued_group_id, g.master_instance_id AS issued_master_instance_id, g.follower_instance_id AS issued_follower_instance_id, g.issued_state_version AS issued_state_version, g.revoked AS issued_revoked FROM configuration_master_enrollment_requests r JOIN configuration_follower_enrollment_request_lifecycle l USING (request_id) LEFT JOIN configuration_read_grants g ON g.grant_id = l.grant_id",
             $suffix
         )
     };
@@ -79,7 +79,7 @@ impl ConfigurationAccessStore for SqliteStore {
         }
 
         let retained_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM configuration_follower_enrollment_requests WHERE group_id = ? AND master_instance_id = ?",
+            "SELECT count(*) FROM configuration_master_enrollment_requests WHERE group_id = ? AND master_instance_id = ?",
         )
         .bind(serving_identity.authority.group_id().as_str())
         .bind(serving_identity.authority.master_id().as_str())
@@ -91,7 +91,7 @@ impl ConfigurationAccessStore for SqliteStore {
         }
 
         sqlx::query(
-            "INSERT INTO configuration_follower_enrollment_requests (request_id, attempt_id, follower_instance_id, follower_state_version, group_id, master_instance_id, server_name, master_ca_fingerprint, credential_digest, received_master_state_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO configuration_master_enrollment_requests (request_id, attempt_id, follower_instance_id, follower_state_version, group_id, master_instance_id, server_name, master_ca_fingerprint, credential_digest, received_master_state_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(proposed_request_id.as_str())
         .bind(submission.attempt_id.as_str())

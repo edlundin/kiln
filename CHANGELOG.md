@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `fix`
 
+- EDL-322: Keep the master enrollment request journal separate from the local
+  follower journal so fresh and upgraded SQLite databases retain both schemas.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
+## 2026-09-27 — `fix`
+
 - EDL-322: Generate follower enrollment attempt IDs in the canonical lowercase
   hexadecimal format accepted by the client and daemon.
 

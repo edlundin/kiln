@@ -1,6 +1,7 @@
 use kiln_core::{
     ConfigurationSecretBinding, ConfigurationSecretPurpose, ConfigurationSecretStore,
-    ProviderAccountId, ProviderType, SecretRef, SecretStore, SecretStoreError, SecretValue,
+    McpSecretBinding, McpSecretStore, ProviderAccountId, ProviderType, SecretRef, SecretStore,
+    SecretStoreError, SecretValue,
 };
 use std::{
     collections::HashMap,
@@ -15,6 +16,184 @@ use tokio::task::spawn_blocking;
 
 const DEFAULT_SERVICE: &str = "dev.kiln.provider-account";
 const CONFIGURATION_SERVICE: &str = "dev.kiln.configuration-sync";
+const MCP_SERVICE: &str = "dev.kiln.mcp";
+
+#[cfg(test)]
+mod mcp_namespace_tests {
+    use super::*;
+    use kiln_core::*;
+    use std::collections::{BTreeMap, HashSet};
+
+    #[test]
+    fn mcp_vault_identity_isolates_every_lookup_dimension_and_service() {
+        let instance = KilnInstanceId::from_ulid(ulid::Ulid::generate());
+        let secret_ref = SecretRef::from_ulid(ulid::Ulid::generate());
+        let name = SharedConfigurationKey::parse("private-binding", 64).unwrap();
+        let session = SessionId::from_ulid(ulid::Ulid::generate());
+        let make_key = |server: &str, profile: &str, session: SessionId| {
+            let definition = McpServerDefinition::new(
+                SharedMcpServerInput {
+                    id: SharedConfigurationKey::parse(server, 64).unwrap(),
+                    enabled: true,
+                    transport: SharedMcpTransport::Stdio {
+                        runtime_binding: name.clone(),
+                        arguments: vec![],
+                        environment: BTreeMap::new(),
+                    },
+                },
+                McpProtocolPolicy::Auto,
+                McpLifecycleScope::Session,
+                Some(SharedConfigurationKey::parse(profile, 64).unwrap()),
+                McpDefinitionLimits {
+                    max_key_bytes: 64,
+                    max_metadata_bytes: 4096,
+                    max_arguments: 1,
+                    max_argument_bytes: 64,
+                    max_environment: 1,
+                    max_endpoint_bytes: 128,
+                },
+            )
+            .unwrap();
+            McpInstanceKey::new(&definition, McpInstanceOwner::Session(session), 4096).unwrap()
+        };
+        let key = make_key("server", "profile", session.clone());
+        let bindings = [
+            McpSecretBinding::new(
+                instance.clone(),
+                key.clone(),
+                name.clone(),
+                McpSecretPurpose::Argument,
+                secret_ref.clone(),
+            ),
+            McpSecretBinding::new(
+                KilnInstanceId::from_ulid(ulid::Ulid::generate()),
+                key.clone(),
+                name.clone(),
+                McpSecretPurpose::Argument,
+                secret_ref.clone(),
+            ),
+            McpSecretBinding::new(
+                instance.clone(),
+                make_key("other-server", "profile", session.clone()),
+                name.clone(),
+                McpSecretPurpose::Argument,
+                secret_ref.clone(),
+            ),
+            McpSecretBinding::new(
+                instance.clone(),
+                make_key("server", "other-profile", session.clone()),
+                name.clone(),
+                McpSecretPurpose::Argument,
+                secret_ref.clone(),
+            ),
+            McpSecretBinding::new(
+                instance.clone(),
+                make_key(
+                    "server",
+                    "profile",
+                    SessionId::from_ulid(ulid::Ulid::generate()),
+                ),
+                name.clone(),
+                McpSecretPurpose::Argument,
+                secret_ref.clone(),
+            ),
+            McpSecretBinding::new(
+                instance.clone(),
+                key.clone(),
+                SharedConfigurationKey::parse("other-binding", 64).unwrap(),
+                McpSecretPurpose::Argument,
+                secret_ref.clone(),
+            ),
+            McpSecretBinding::new(
+                instance.clone(),
+                key.clone(),
+                name.clone(),
+                McpSecretPurpose::Environment,
+                secret_ref.clone(),
+            ),
+            McpSecretBinding::new(
+                instance,
+                key,
+                name,
+                McpSecretPurpose::Argument,
+                SecretRef::from_ulid(ulid::Ulid::generate()),
+            ),
+        ];
+        let keys = bindings
+            .iter()
+            .map(OsMcpSecretStore::key)
+            .collect::<HashSet<_>>();
+        assert_eq!(keys.len(), bindings.len());
+        assert_eq!(
+            OsMcpSecretStore::key(&bindings[0]),
+            OsMcpSecretStore::key(&bindings[0].clone())
+        );
+        assert!(
+            keys.iter()
+                .all(|key| key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()))
+        );
+        assert_ne!(MCP_SERVICE, DEFAULT_SERVICE);
+        assert_ne!(MCP_SERVICE, CONFIGURATION_SERVICE);
+        assert_eq!(OsMcpSecretStore::open_default().0.service, MCP_SERVICE);
+    }
+}
+
+/// Host-local MCP values. Provider and configuration-sync credentials cannot be
+/// addressed through this service. Construction performs no vault operation.
+#[derive(Clone)]
+pub struct OsMcpSecretStore(OsSecretStore);
+impl OsMcpSecretStore {
+    pub fn open_default() -> Self {
+        Self(OsSecretStore {
+            service: MCP_SERVICE.to_owned(),
+            entry_locks: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+    fn key(binding: &McpSecretBinding) -> String {
+        use sha2::{Digest, Sha256};
+        // Length framing avoids delimiter ambiguity. Hashing also keeps scoped
+        // checkout paths and binding names out of OS-vault account metadata.
+        let mut hash = Sha256::new();
+        hash.update(b"kiln.mcp-vault.v1");
+        for field in [
+            binding.instance_id().as_str(),
+            binding.key().canonical_json(),
+            binding.name().as_str(),
+            binding.purpose().as_str(),
+            binding.secret_ref().as_str(),
+        ] {
+            hash.update((field.len() as u64).to_be_bytes());
+            hash.update(field.as_bytes());
+        }
+        let mut encoded = String::with_capacity(64);
+        for byte in hash.finalize() {
+            encoded.push(b"0123456789abcdef"[(byte >> 4) as usize] as char);
+            encoded.push(b"0123456789abcdef"[(byte & 0x0f) as usize] as char);
+        }
+        encoded
+    }
+}
+impl Default for OsMcpSecretStore {
+    fn default() -> Self {
+        Self::open_default()
+    }
+}
+impl McpSecretStore for OsMcpSecretStore {
+    async fn put_at(
+        &self,
+        binding: &McpSecretBinding,
+        value: SecretValue,
+    ) -> Result<(), SecretStoreError> {
+        self.0.put_key(Self::key(binding), value).await
+    }
+    async fn get(&self, binding: &McpSecretBinding) -> Result<SecretValue, SecretStoreError> {
+        SecretValue::new(self.0.read_value(&Self::key(binding)).await?)
+            .map_err(|_| SecretStoreError::InvalidSecret)
+    }
+    async fn delete(&self, binding: &McpSecretBinding) -> Result<(), SecretStoreError> {
+        self.0.delete_key(Self::key(binding)).await
+    }
+}
 
 /// Host-local configuration credentials in a distinct OS vault service. Clones
 /// share per-entry write/delete locks; construction performs no vault operation.

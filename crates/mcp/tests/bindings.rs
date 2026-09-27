@@ -64,6 +64,129 @@ fn fixture(path: &Path) -> (McpDefinitionRecord, StdioHostBindings, StdioLaunchR
     )
 }
 
+struct FixtureVault {
+    instance: KilnInstanceId,
+    key: String,
+    reference: SecretRef,
+    reads: std::sync::Mutex<Vec<McpSecretPurpose>>,
+}
+impl McpSecretStore for FixtureVault {
+    async fn put_at(&self, _: &McpSecretBinding, _: SecretValue) -> Result<(), SecretStoreError> {
+        panic!("resolution must never write credentials")
+    }
+    async fn delete(&self, _: &McpSecretBinding) -> Result<(), SecretStoreError> {
+        panic!("resolution must never delete credentials")
+    }
+    async fn get(&self, binding: &McpSecretBinding) -> Result<SecretValue, SecretStoreError> {
+        assert_eq!(binding.instance_id(), &self.instance);
+        assert_eq!(binding.key().canonical_json(), self.key);
+        self.reads.lock().unwrap().push(binding.purpose());
+        if binding.secret_ref() != &self.reference {
+            return Err(SecretStoreError::NotFound);
+        }
+        let value = match (binding.purpose(), binding.name().as_str()) {
+            (McpSecretPurpose::Argument, "argument") => "$(touch surprise)",
+            (McpSecretPurpose::Environment, "environment") => "private fixture",
+            _ => return Err(SecretStoreError::NotFound),
+        };
+        Ok(SecretValue::new(value.as_bytes()).unwrap())
+    }
+}
+
+fn references(bindings: StdioHostBindings) -> (StdioHostBindingReferences, FixtureVault) {
+    let instance = KilnInstanceId::from_ulid(ulid::Ulid::generate());
+    // Reusing this synthetic reference in both roles must still produce two
+    // different lookups; no real OS vault is accessed by this test.
+    let reference = SecretRef::from_ulid(ulid::Ulid::generate());
+    let vault = FixtureVault {
+        instance: instance.clone(),
+        key: bindings.key.canonical_json().into(),
+        reference: reference.clone(),
+        reads: Default::default(),
+    };
+    (
+        StdioHostBindingReferences {
+            instance_id: instance,
+            key: bindings.key,
+            definition_version: bindings.definition_version,
+            revision: bindings.revision,
+            runtime_binding: bindings.runtime_binding,
+            executable: bindings.executable,
+            arguments: BTreeMap::from([
+                (key("argument"), reference.clone()),
+                (key("unused"), reference.clone()),
+            ]),
+            environment: BTreeMap::from([(key("environment"), reference)]),
+        },
+        vault,
+    )
+}
+
+#[tokio::test]
+async fn vault_resolution_is_scoped_role_specific_and_reads_only_needed_references() {
+    let directory = tempfile::tempdir().unwrap();
+    let (definition, bindings, resources) = fixture(directory.path());
+    let (refs, vault) = references(bindings);
+    let resolved = resolve_stdio_launch_from_vault(&definition, refs, resources, &vault)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved.launch.process.arguments.last().unwrap(),
+        "$(touch surprise)"
+    );
+    assert_eq!(
+        resolved.launch.process.environment[&OsString::from("BINDING")],
+        "private fixture"
+    );
+    assert_eq!(
+        *vault.reads.lock().unwrap(),
+        [McpSecretPurpose::Argument, McpSecretPurpose::Environment]
+    );
+    for mode in ["version", "missing", "budget", "wrong-reference"] {
+        let (definition, bindings, mut resources) = fixture(directory.path());
+        let (mut refs, vault) = references(bindings);
+        let expected = match mode {
+            "version" => {
+                refs.definition_version += 1;
+                StdioBindingError::DefinitionChanged
+            }
+            "missing" => {
+                refs.environment.clear();
+                StdioBindingError::MissingEnvironment
+            }
+            "budget" => {
+                resources.max_resolved_bytes = NonZeroUsize::new(1).unwrap();
+                StdioBindingError::LimitExceeded
+            }
+            _ => {
+                refs.arguments.insert(
+                    key("argument"),
+                    SecretRef::from_ulid(ulid::Ulid::generate()),
+                );
+                StdioBindingError::Secret(SecretStoreError::NotFound)
+            }
+        };
+        assert_eq!(
+            resolve_stdio_launch_from_vault(&definition, refs, resources, &vault)
+                .await
+                .err(),
+            Some(expected)
+        );
+        if mode == "wrong-reference" {
+            assert_eq!(
+                *vault.reads.lock().unwrap(),
+                [McpSecretPurpose::Argument],
+                "a missing secret must not fall back or continue to other reads"
+            );
+        } else {
+            assert!(
+                vault.reads.lock().unwrap().is_empty(),
+                "{mode} must fail before vault access"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn resolved_values_are_literal_explicit_and_pinned_to_the_supplied_directory() {
     let directory = tempfile::tempdir().unwrap();

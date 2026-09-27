@@ -178,9 +178,9 @@ the daemon must await shutdown before destroying its Tokio runtime.
 
 Real-process registry fixtures verify concurrent reuse, binding/definition change
 guards, cancellation of a startup waiter, repeated shutdown after cancellation,
-capacity admission and slot release. Registry operations still expose lifecycle
-metadata only; invocation remains unavailable until the durable ToolCall path is
-connected. No Run is made the owner of a shared server.
+capacity admission and slot release. The registry also routes durable dispatch
+permits to the scoped owner, as described below. No Run is made the owner of a
+shared server.
 
 `resolve_stdio_launch` substitutes a materialized `StdioHostBindings` snapshot into
 one exact definition version and instance key. Runtime, argument and environment
@@ -196,10 +196,32 @@ contain private local paths or credentials supplied by a separate authorized
 credential boundary; provider credentials must never be passed to an MCP server.
 Resolution itself neither reads a vault nor grants launch permission. Its caller
 must authorize all inputs and supply a directory descriptor pinned against the
-owner scope before using the result. Persistence, secret-reference lookup and
-administration of these snapshots remain open. Real-process and validation
+owner scope before using the result. Persistence and administration of these
+snapshots remain open. Real-process and validation
 fixtures cover explicit literal substitution, version/profile/runtime/role
 mismatch, NUL rejection and the exact resolved-byte boundary.
+
+`resolve_stdio_launch_from_vault` is the reference-backed companion. It accepts
+an already authorized `StdioHostBindingReferences` snapshot and reads only the
+argument/environment references used by the exact definition. Invalid versions,
+roles, runtime keys, missing mappings or an executable that cannot fit fail before
+vault access. Each unique reference name is fetched once per role. Missing vault
+entries fail without fallback or further reads. The retained-value budget and
+final encoded launch budget are both enforced; one OS read can still allocate up
+to SecretValue's existing per-value ceiling. The vault envelope is nonempty and
+single-line; it does not replace the materialized resolver for other host values.
+
+Core `McpSecretStore` is separate from provider and configuration-sync secret ports.
+`OsMcpSecretStore` uses the `dev.kiln.mcp` OS service. Its hashed, length-framed lookup
+identity includes local Kiln instance, canonical scoped server/auth-profile key,
+binding name, argument/environment purpose and immutable SecretRef. Paths and
+binding names are not exposed in vault account metadata. Writes/deletes reuse the
+existing cancellation-safe per-entry serialization; clones share those locks.
+Callers must reserve fresh references durably before writes and change binding
+revision when values or authorization change. That reservation/administration
+flow is not implemented yet, and this change does not access a user's vault at
+startup. Tests verify namespace partitioning and reference resolution with a fake
+vault; actual MCP OS-vault read/write integration remains unverified.
 
 The [internal daemon runtime](../../docs/operations/mcp-runtime.md) is opt-in with
 explicit instance-capacity and recovery-batch budgets. Its startup runs before

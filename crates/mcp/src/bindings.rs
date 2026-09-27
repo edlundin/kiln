@@ -9,7 +9,8 @@ use std::{
 };
 
 use kiln_core::{
-    McpDefinitionRecord, McpGenerationId, McpInstanceKey, SharedConfigurationKey,
+    KilnInstanceId, McpDefinitionRecord, McpGenerationId, McpInstanceKey, McpSecretBinding,
+    McpSecretPurpose, McpSecretStore, SecretRef, SecretStoreError, SharedConfigurationKey,
     SharedMcpArgument, SharedMcpTransport,
 };
 use rustix::fd::OwnedFd;
@@ -29,6 +30,115 @@ pub struct StdioHostBindings {
     pub executable: PathBuf,
     pub arguments: BTreeMap<SharedConfigurationKey, OsString>,
     pub environment: BTreeMap<SharedConfigurationKey, OsString>,
+}
+
+/// Authorized host snapshot containing references only. Durable reservation and
+/// administration of these references belongs to the caller, not the resolver.
+/// Secrets never become part of portable server definitions or process Events.
+pub struct StdioHostBindingReferences {
+    pub instance_id: KilnInstanceId,
+    pub key: McpInstanceKey,
+    pub definition_version: u64,
+    pub revision: NonZeroU64,
+    pub runtime_binding: SharedConfigurationKey,
+    pub executable: PathBuf,
+    pub arguments: BTreeMap<SharedConfigurationKey, SecretRef>,
+    pub environment: BTreeMap<SharedConfigurationKey, SecretRef>,
+}
+
+/// Resolve only references used by this exact definition. There is no fallback
+/// to provider/configuration credentials, ambient environment or another scope.
+/// The OS read still uses SecretValue's per-value ceiling; the caller budget
+/// bounds retained values and the final encoded launch, not transient OS memory.
+pub async fn resolve_stdio_launch_from_vault<S: McpSecretStore>(
+    definition: &McpDefinitionRecord,
+    refs: StdioHostBindingReferences,
+    resources: StdioLaunchResources,
+    vault: &S,
+) -> Result<ResolvedStdioLaunch, StdioBindingError> {
+    use StdioBindingError as Error;
+    use std::os::unix::ffi::OsStringExt;
+    validate_identity(
+        definition,
+        &refs.key,
+        refs.definition_version,
+        &refs.runtime_binding,
+    )?;
+    if !refs.executable.is_absolute() {
+        return Err(Error::InvalidValue);
+    }
+    let mut remaining = resources.max_resolved_bytes.get();
+    consume(&mut remaining, refs.executable.as_os_str(), 1)?;
+    let SharedMcpTransport::Stdio {
+        arguments,
+        environment,
+        ..
+    } = &definition.definition.server().transport
+    else {
+        return Err(Error::UnsupportedTransport);
+    };
+    // Missing references are rejected before any vault access, including when
+    // another field happens to have a matching name in the wrong role.
+    for argument in arguments {
+        if let SharedMcpArgument::HostBinding(name) = argument {
+            if !refs.arguments.contains_key(name) {
+                return Err(Error::MissingArgument);
+            }
+        }
+    }
+    if environment
+        .values()
+        .any(|name| !refs.environment.contains_key(name))
+    {
+        return Err(Error::MissingEnvironment);
+    }
+    let mut resolved_arguments = BTreeMap::new();
+    let mut resolved_environment = BTreeMap::new();
+    let names = arguments
+        .iter()
+        .filter_map(|arg| match arg {
+            SharedMcpArgument::HostBinding(name) => Some((McpSecretPurpose::Argument, name)),
+            _ => None,
+        })
+        .chain(
+            environment
+                .values()
+                .map(|name| (McpSecretPurpose::Environment, name)),
+        );
+    for (purpose, name) in names {
+        let (references, resolved) = match purpose {
+            McpSecretPurpose::Argument => (&refs.arguments, &mut resolved_arguments),
+            McpSecretPurpose::Environment => (&refs.environment, &mut resolved_environment),
+        };
+        if resolved.contains_key(name) {
+            continue;
+        }
+        let binding = McpSecretBinding::new(
+            refs.instance_id.clone(),
+            refs.key.clone(),
+            name.clone(),
+            purpose,
+            references.get(name).expect("preflighted reference").clone(),
+        );
+        let value = vault.get(&binding).await.map_err(Error::Secret)?;
+        remaining = remaining
+            .checked_sub(value.as_bytes().len())
+            .ok_or(Error::LimitExceeded)?;
+        resolved.insert(name.clone(), OsString::from_vec(value.as_bytes().to_vec()));
+    }
+    resolve_stdio_launch(
+        definition,
+        StdioHostBindings {
+            key: refs.key,
+            definition_version: refs.definition_version,
+            revision: refs.revision,
+            runtime_binding: refs.runtime_binding,
+            executable: refs.executable,
+            arguments: resolved_arguments,
+            environment: resolved_environment,
+        },
+        resources,
+    )
 }
 
 /// Execution resources chosen by the trusted caller, never a portable server.
@@ -61,6 +171,7 @@ pub enum StdioBindingError {
     MissingEnvironment,
     InvalidValue,
     LimitExceeded,
+    Secret(SecretStoreError),
 }
 
 /// This is reference substitution, not shell evaluation, installation, vault
@@ -72,30 +183,20 @@ pub fn resolve_stdio_launch(
     resources: StdioLaunchResources,
 ) -> Result<ResolvedStdioLaunch, StdioBindingError> {
     use StdioBindingError as Error;
-    let server = &definition.definition;
-    if definition.version != bindings.definition_version {
-        return Err(Error::DefinitionChanged);
-    }
-    if !server.server().enabled {
-        return Err(Error::Disabled);
-    }
-    if bindings.key.definition_id() != server.id()
-        || bindings.key.owner().scope() != server.scope()
-        || bindings.key.auth_profile() != server.auth_profile()
-    {
-        return Err(Error::ScopeMismatch);
-    }
+    validate_identity(
+        definition,
+        &bindings.key,
+        bindings.definition_version,
+        &bindings.runtime_binding,
+    )?;
     let SharedMcpTransport::Stdio {
-        runtime_binding,
         arguments,
         environment,
-    } = &server.server().transport
+        ..
+    } = &definition.definition.server().transport
     else {
         return Err(Error::UnsupportedTransport);
     };
-    if runtime_binding != &bindings.runtime_binding {
-        return Err(Error::RuntimeMismatch);
-    }
     if !bindings.executable.is_absolute() {
         return Err(Error::InvalidValue);
     }
@@ -157,5 +258,37 @@ fn consume(
         .checked_sub(bytes.len())
         .and_then(|left| left.checked_sub(separators))
         .ok_or(StdioBindingError::LimitExceeded)?;
+    Ok(())
+}
+
+fn validate_identity(
+    definition: &McpDefinitionRecord,
+    key: &McpInstanceKey,
+    version: u64,
+    runtime: &SharedConfigurationKey,
+) -> Result<(), StdioBindingError> {
+    use StdioBindingError as Error;
+    let server = &definition.definition;
+    if definition.version != version {
+        return Err(Error::DefinitionChanged);
+    }
+    if !server.server().enabled {
+        return Err(Error::Disabled);
+    }
+    if key.definition_id() != server.id()
+        || key.owner().scope() != server.scope()
+        || key.auth_profile() != server.auth_profile()
+    {
+        return Err(Error::ScopeMismatch);
+    }
+    let SharedMcpTransport::Stdio {
+        runtime_binding, ..
+    } = &server.server().transport
+    else {
+        return Err(Error::UnsupportedTransport);
+    };
+    if runtime_binding != runtime {
+        return Err(Error::RuntimeMismatch);
+    }
     Ok(())
 }

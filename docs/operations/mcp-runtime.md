@@ -29,7 +29,10 @@ resolved launch inputs or authorization change; a revision change requires an
 explicit stop before replacement. The internal resolver accepts already authorized,
 materialized host values and a pinned directory; it substitutes only explicit
 runtime/argument/environment references within a caller byte budget. Persistent
-binding/revision administration and vault lookup remain to be implemented.
+binding/revision administration remains to be implemented. A reference-backed
+resolver can read scoped argument/environment values through the separate MCP
+vault port; it is not installed at daemon startup and does not authorize launch.
+Durable reference reservation and credential import/removal remain open.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown

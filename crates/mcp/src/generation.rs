@@ -14,7 +14,7 @@ use tokio::{
     time::Instant,
 };
 
-use crate::dispatch::{DispatchRequest, send_once};
+use crate::dispatch::{DispatchOutcome, DispatchRequest, send_once};
 use crate::{
     ProtocolVersion, StdioCallError, StdioCallLimits, StdioCallResult, StdioProcess,
     StdioProcessConfig, start_stdio_client,
@@ -141,7 +141,29 @@ impl StdioGeneration {
         limits: StdioCallLimits,
         cancellation: oneshot::Receiver<()>,
     ) -> Result<StdioCallResult, StdioCallError> {
-        dispatch_to(self.calls.clone(), permit, limits, cancellation).await
+        dispatch_to(self.calls.clone(), permit, limits, cancellation)
+            .await?
+            .result
+    }
+
+    /// Capture the committed response using ordinary ToolCall inline/artifact
+    /// boundaries. The archive callback stores the exact bytes as
+    /// TOOL_OUTPUT_MEDIA_TYPE; this method never retries external work.
+    pub async fn dispatch_tool_call<F, Fut, E>(
+        &self,
+        permit: McpDispatchPermit,
+        limits: StdioCallLimits,
+        cancellation: oneshot::Receiver<()>,
+        archive: F,
+    ) -> Result<kiln_core::ToolCallResult, kiln_core::RunError>
+    where
+        F: FnOnce(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = Result<kiln_core::Artifact, E>>,
+    {
+        let outcome = dispatch_to(self.calls.clone(), permit, limits, cancellation)
+            .await
+            .map_err(|_| kiln_core::RunError::RunStoreUnavailable)?;
+        crate::output::capture(outcome, archive).await
     }
 
     pub(crate) fn dispatch_sender(&self) -> mpsc::Sender<DispatchRequest> {
@@ -386,7 +408,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
             .finish_mcp_invocation(call.permit.record(), state)
             .await
         {
-            Ok(_) => result,
+            Ok(receipt) => Ok(DispatchOutcome { receipt, result }),
             Err(error) => {
                 exit.get_or_insert(true);
                 Err(StdioCallError::Store(error))
@@ -443,7 +465,7 @@ pub(crate) async fn dispatch_to(
     permit: McpDispatchPermit,
     limits: StdioCallLimits,
     cancellation: oneshot::Receiver<()>,
-) -> Result<StdioCallResult, StdioCallError> {
+) -> Result<DispatchOutcome, StdioCallError> {
     let (reply, result) = oneshot::channel();
     sender
         .send(DispatchRequest {

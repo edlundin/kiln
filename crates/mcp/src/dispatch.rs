@@ -40,7 +40,14 @@ pub(crate) struct DispatchRequest {
     pub permit: McpDispatchPermit,
     pub limits: StdioCallLimits,
     pub cancellation: oneshot::Receiver<()>,
-    pub reply: oneshot::Sender<Result<StdioCallResult, StdioCallError>>,
+    pub reply: oneshot::Sender<Result<DispatchOutcome, StdioCallError>>,
+}
+
+/// Constructed only after the generation commits the invocation outcome. A
+/// missing receipt must not be turned into a terminal native ToolCall result.
+pub(crate) struct DispatchOutcome {
+    pub receipt: kiln_core::McpInvocationRecord,
+    pub result: Result<StdioCallResult, StdioCallError>,
 }
 
 pub(crate) async fn send_once(

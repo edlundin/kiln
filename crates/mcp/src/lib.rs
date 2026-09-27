@@ -9,6 +9,8 @@ mod dispatch;
 mod generation;
 mod negotiation;
 #[cfg(unix)]
+mod output;
+#[cfg(unix)]
 mod process;
 #[cfg(unix)]
 mod registry;

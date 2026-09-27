@@ -179,6 +179,41 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
         limits: StdioCallLimits,
         cancellation: tokio::sync::oneshot::Receiver<()>,
     ) -> Result<StdioCallResult, StdioCallError> {
+        let sender = self.dispatch_sender(key).await?;
+        crate::generation::dispatch_to(sender, permit, limits, cancellation)
+            .await?
+            .result
+    }
+
+    /// Like dispatch, but requires a durable outcome receipt and captures output
+    /// for the normal native completion store. Archive exact bytes as
+    /// TOOL_OUTPUT_MEDIA_TYPE; a storage failure never authorizes redispatch.
+    pub async fn dispatch_tool_call<F, Fut, E>(
+        &self,
+        key: &McpInstanceKey,
+        permit: McpDispatchPermit,
+        limits: StdioCallLimits,
+        cancellation: tokio::sync::oneshot::Receiver<()>,
+        archive: F,
+    ) -> Result<kiln_core::ToolCallResult, kiln_core::RunError>
+    where
+        F: FnOnce(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = Result<kiln_core::Artifact, E>>,
+    {
+        let sender = self
+            .dispatch_sender(key)
+            .await
+            .map_err(|_| kiln_core::RunError::RunStoreUnavailable)?;
+        let outcome = crate::generation::dispatch_to(sender, permit, limits, cancellation)
+            .await
+            .map_err(|_| kiln_core::RunError::RunStoreUnavailable)?;
+        crate::output::capture(outcome, archive).await
+    }
+
+    async fn dispatch_sender(
+        &self,
+        key: &McpInstanceKey,
+    ) -> Result<tokio::sync::mpsc::Sender<crate::dispatch::DispatchRequest>, StdioCallError> {
         let sender = {
             let state = self.state.lock().await;
             if state.closed {
@@ -193,7 +228,7 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
             }
             entry.owner.dispatch_sender()
         };
-        crate::generation::dispatch_to(sender, permit, limits, cancellation).await
+        Ok(sender)
     }
 
     /// Stop a scope before reconfiguration/retirement. Cancellation leaves the

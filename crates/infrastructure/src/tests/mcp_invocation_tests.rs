@@ -455,13 +455,15 @@ for line in sys.stdin:
         if mode == 'server_error':
             print(json.dumps({'jsonrpc':'2.0','id':request['id'],'error':{'code':-32602,'message':'fixture error'}}), flush=True)
             continue
-        result = {'content':[{'type':'text','text':'private-result'}]}
+        text = 'private-result' * (400 if mode == 'capture' else 1)
+        result = {'content':[{'type':'text','text':text}]}
     else:
         continue
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
 "#;
     for mode in [
         "complete",
+        "capture",
         "server_error",
         "oversize",
         "disconnect",
@@ -478,7 +480,7 @@ for line in sys.stdin:
         let mut owner = StdioGeneration::spawn(
             Arc::new(store.clone()),
             StdioGenerationLaunch {
-            host_binding_version: None,
+                host_binding_version: None,
                 key,
                 definition_version: 1,
                 generation: McpGenerationId::from_ulid(ulid::Ulid::generate()),
@@ -489,7 +491,7 @@ for line in sys.stdin:
                     arguments: vec!["-c".into(), script.into(), mode.into()],
                     working_directory: std::fs::File::open(data.path()).unwrap().into(),
                     environment: BTreeMap::new(),
-                    max_frame_bytes: NonZeroUsize::new(4096).unwrap(),
+                    max_frame_bytes: NonZeroUsize::new(8192).unwrap(),
                     shutdown_grace: Duration::ZERO,
                 },
             },
@@ -510,7 +512,7 @@ for line in sys.stdin:
                 permit,
                 StdioCallLimits {
                     deadline: Instant::now() + allowance,
-                    max_result_bytes: NonZeroUsize::new(if mode == "oversize" { 1 } else { 4096 })
+                    max_result_bytes: NonZeroUsize::new(if mode == "oversize" { 1 } else { 8192 })
                         .unwrap(),
                 },
                 cancelled,
@@ -538,7 +540,7 @@ for line in sys.stdin:
             }
         };
         let expected = match mode {
-            "complete" => {
+            "complete" | "capture" => {
                 assert!(
                     String::from_utf8(result.unwrap().json)
                         .unwrap()
@@ -579,7 +581,7 @@ for line in sys.stdin:
                 "retirement must precede releasing the interrupted invocation slot"
             );
         }
-        if mode == "complete" {
+        if matches!(mode, "complete" | "capture") {
             let next_session = SessionApplication::new(
                 store.clone(),
                 store.clone(),
@@ -596,19 +598,43 @@ for line in sys.stdin:
             else {
                 panic!()
             };
+            let tool_call_id = permit.record().tool_call_id.clone();
+            let artifacts = super::super::FileArtifactStore::open(data.path()).unwrap();
             let (_cancel, cancelled) = oneshot::channel();
             let next = owner
-                .dispatch(
+                .dispatch_tool_call(
                     permit,
                     StdioCallLimits {
                         deadline: Instant::now() + allowance,
-                        max_result_bytes: NonZeroUsize::new(4096).unwrap(),
+                        max_result_bytes: NonZeroUsize::new(8192).unwrap(),
                     },
                     cancelled,
+                    |bytes| std::future::ready(artifacts.store(&bytes, TOOL_OUTPUT_MEDIA_TYPE)),
                 )
                 .await
                 .unwrap();
-            assert!(!next.is_error);
+            assert_eq!(next.state(), ToolCallState::Completed);
+            if mode == "capture" {
+                assert!(next.stdout().is_none());
+                let artifact = next.stdout_artifact().unwrap();
+                assert!(artifact.size() > INLINE_TOOL_OUTPUT_LIMIT as u64);
+                let stored = artifacts.read(artifact.content_hash()).unwrap().unwrap();
+                assert!(
+                    String::from_utf8(stored)
+                        .unwrap()
+                        .contains("private-result")
+                );
+            } else {
+                assert!(next.stdout().unwrap().contains("private-result"));
+            }
+            let mutation = ProviderApplication::new(store.clone(), super::super::UlidIdGenerator)
+                .finish_tool_call(&tool_call_id, &next)
+                .await
+                .unwrap();
+            assert!(!mutation.events.is_empty());
+            let (_, stored) = store.get_tool_call(&tool_call_id).await.unwrap().unwrap();
+            assert_eq!(stored.state(), ToolCallState::Completed);
+            assert_eq!(stored.stdout_artifact(), next.stdout_artifact());
             assert_eq!(
                 std::fs::read_to_string(data.path().join("calls"))
                     .unwrap()

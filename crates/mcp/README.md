@@ -287,13 +287,31 @@ mediation is still open. Ordinary successful calls reuse the generation across
 Runs; caller abandonment never replays the operation. Journal failure still
 triggers process cleanup and is reported as a store error.
 
+`dispatch_tool_call` on the generation or registry adds normal ToolCall output
+capture. The worker supplies its committed invocation receipt with the response;
+missing or inconsistent receipts leave completion unresolved instead of inventing
+a terminal ToolCall result. Exact UTF-8 response bytes stay inline up to the common
+4-KiB tool-output allowance. Larger responses go through a caller-supplied archive
+callback using `TOOL_OUTPUT_MEDIA_TYPE`, with returned size/media type checked.
+Tool `isError` responses retain their output while producing Failed results.
+Capture/storage failure produces a Failed result without reissuing external work.
+
+Only proven pre-send cancellation produces Cancelled. Interrupted operations and
+unsupported continuations produce Failed diagnostics explicitly preserving an
+unknown external outcome; they do not claim effects were undone or process cleanup
+has already finished. A lost worker or invocation-journal failure supplies no
+normal completion result. The trusted caller must persist returned results through
+the ordinary native completion store and publish its events.
+
 These remain internal APIs: the daemon does not advertise `mcp_call` yet.
-Catalogue/schema validation, effective host authorization and pinning, result
-artifact capture, and normal ToolCall finalization still need to be connected
+Catalogue/schema validation, effective host authorization and pinning, and daemon
+coordinator wiring for captured results and normal ToolCall finalization still need to be connected
 before enabling the operation. Invocation audit rows are not yet in public Event
 replay. A real Python stdio fixture on macOS verifies single sends for success,
 server error, oversize output, disconnect, cancellation and deadline expiry;
-successive claims from distinct Runs reuse the same process. It requires
+successive claims from distinct Runs reuse the same process. Inline and large
+artifact results also pass through the native ToolCall completion store in that
+fixture, preserving output bytes and single-send counts. It requires
 `/usr/bin/python3`. Resource/prompt wire execution, modern MRTR and external Tasks
 are not covered by that fixture.
 

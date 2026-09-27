@@ -52,6 +52,16 @@ MCP conformance remain unverified or unimplemented. Internal claimed stdio dispa
 now has a real macOS process fixture, including interruption without replay; this
 is not acceptance of the end-to-end daemon broker.
 
+The internal `dispatch_tool_call` API requires the generation worker's committed
+invocation receipt before constructing a normal ToolCall result. It keeps small
+UTF-8 responses inline and archives larger responses through the existing 4-KiB
+output boundary and artifact metadata. Server `isError` output remains available
+on Failed ToolCalls. Archive failure never causes a second send; interrupted
+responses report an unknown external outcome rather than successful cancellation.
+The real-process fixture verifies capture followed by normal native completion
+storage. The daemon's native coordinator still needs to call this path before MCP
+can be offered to models.
+
 ## Local definition administration
 
 Stop the daemon before using `register-mcp-definition` or

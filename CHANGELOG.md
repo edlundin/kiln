@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Capture MCP dispatch responses as normal ToolCall results, keeping
+  small output inline and archiving larger output without redispatch.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/59d9379)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add offline MCP host administration for importing, publishing,
   retiring, inspecting and explicitly reconciling reference-backed snapshots.
 

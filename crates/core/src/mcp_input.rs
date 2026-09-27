@@ -204,9 +204,126 @@ pub trait McpElicitationFormStore: Send + Sync {
     ) -> impl Future<Output = Result<McpElicitationFormRecord, McpInvocationError>> + Send;
 }
 
+/// A normalized private user decision, not transport metadata or send authority.
+/// Construction checks the response envelope and size, not the form's schema.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpElicitationDecision {
+    json: String,
+}
+
+impl std::fmt::Debug for McpElicitationDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpElicitationDecision")
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpElicitationDecision {
+    pub fn from_json(
+        json: &str,
+        max_bytes: std::num::NonZeroUsize,
+    ) -> Result<Self, McpInvocationError> {
+        if json.len() > max_bytes.get() {
+            return Err(McpInvocationError::InvalidRequest);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|_| McpInvocationError::InvalidRequest)?;
+        let fields = value
+            .as_object()
+            .ok_or(McpInvocationError::InvalidRequest)?;
+        match fields.get("action").and_then(|action| action.as_str()) {
+            Some("accept")
+                if fields.len() == 2 && fields.get("content").is_some_and(|v| v.is_object()) => {}
+            Some("decline" | "cancel") if fields.len() == 1 => {}
+            _ => return Err(McpInvocationError::InvalidRequest),
+        }
+        let decision = Self {
+            json: serde_json::to_string(&value).map_err(|_| McpInvocationError::InvalidRequest)?,
+        };
+        decision.validate(max_bytes)?;
+        Ok(decision)
+    }
+
+    pub fn validate(&self, max_bytes: std::num::NonZeroUsize) -> Result<(), McpInvocationError> {
+        if self.json.len() > max_bytes.get() {
+            return Err(McpInvocationError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    pub fn as_json(&self) -> &str {
+        &self.json
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpElicitationDecisionMutation {
+    Applied,
+    Existing,
+}
+
+pub trait McpElicitationDecisionStore: McpElicitationFormStore {
+    /// The caller authenticates the user and validates the decision against this
+    /// exact immutable form. The write revalidates form, owner, pending input and
+    /// live ancestry atomically. First decision wins; identical pending retries
+    /// are receipts. No input resolution or response send occurs here.
+    fn decide_mcp_elicitation_form(
+        &self,
+        expected: &McpElicitationFormRecord,
+        decision: &McpElicitationDecision,
+        form_limits: McpElicitationFormLimits,
+        max_response_bytes: std::num::NonZeroUsize,
+    ) -> impl Future<Output = Result<McpElicitationDecisionMutation, McpInvocationError>> + Send;
+
+    /// Read a private decision only while this exact form/input/owner remains
+    /// live and pending. Terminal input cannot yield a response for replay.
+    fn get_mcp_elicitation_decision(
+        &self,
+        expected: &McpElicitationFormRecord,
+        form_limits: McpElicitationFormLimits,
+        max_response_bytes: std::num::NonZeroUsize,
+    ) -> impl Future<Output = Result<Option<McpElicitationDecision>, McpInvocationError>> + Send;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_decisions_require_explicit_bounded_action_and_redact_content() {
+        let cap = std::num::NonZeroUsize::new(128).unwrap();
+        let decision = McpElicitationDecision::from_json(
+            r#"{ "content": {"answer":"private"}, "action": "accept" }"#,
+            cap,
+        )
+        .unwrap();
+        assert_eq!(
+            decision.as_json(),
+            r#"{"action":"accept","content":{"answer":"private"}}"#
+        );
+        assert!(!format!("{decision:?}").contains("private"));
+        let exact = std::num::NonZeroUsize::new(decision.as_json().len()).unwrap();
+        assert!(decision.validate(exact).is_ok());
+        assert!(
+            decision
+                .validate(std::num::NonZeroUsize::new(exact.get() - 1).unwrap())
+                .is_err()
+        );
+        for valid in [r#"{"action":"decline"}"#, r#"{"action":"cancel"}"#] {
+            assert!(McpElicitationDecision::from_json(valid, cap).is_ok());
+        }
+        for invalid in [
+            r#"{"action":"accept"}"#,
+            r#"{"action":"accept","content":null}"#,
+            r#"{"action":"decline","content":{}}"#,
+            r#"{"action":"cancel","content":null}"#,
+            r#"{"action":"accept","content":{},"_meta":{}}"#,
+            r#"{"action":"unknown"}"#,
+            "[]",
+        ] {
+            assert!(McpElicitationDecision::from_json(invalid, cap).is_err());
+        }
+    }
 
     #[test]
     fn private_form_checks_byte_budgets_and_canonical_shape_without_logging_body() {

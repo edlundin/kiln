@@ -115,6 +115,42 @@ impl McpElicitationValidator {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpElicitationDecisionError {
+    Validation(McpElicitationError),
+    Store(kiln_core::McpInvocationError),
+}
+
+/// Validate and persist an explicit user decision against one immutable form.
+/// The caller must authenticate user access to interaction_run. This does not
+/// resolve the input, dispatch a response, or authorize provider work.
+pub async fn decide_elicitation_form<S: kiln_core::McpElicitationDecisionStore>(
+    store: &S,
+    input: &kiln_core::McpInputRecord,
+    interaction_run: &kiln_core::RunId,
+    decision: &kiln_core::McpElicitationDecision,
+    limits: McpElicitationValidationLimits,
+) -> Result<kiln_core::McpElicitationDecisionMutation, McpElicitationDecisionError> {
+    use McpElicitationDecisionError as Error;
+    decision
+        .validate(limits.max_response_bytes)
+        .map_err(Error::Store)?;
+    let form = store
+        .get_mcp_elicitation_form(input, interaction_run, limits.form)
+        .await
+        .map_err(Error::Store)?;
+    let validator = McpElicitationValidator::new(&form.form, limits).map_err(Error::Validation)?;
+    let result: ElicitResult = serde_json::from_str(decision.as_json())
+        .map_err(|_| Error::Validation(McpElicitationError::InvalidResponse))?;
+    validator
+        .response(result.action, result.content)
+        .map_err(Error::Validation)?;
+    store
+        .decide_mcp_elicitation_form(&form, decision, limits.form, limits.max_response_bytes)
+        .await
+        .map_err(Error::Store)
+}
+
 // Numeric bounds may serialize as floats in the SDK. Accept exact changes of
 // representation (1 to 1.0), but reject rounding. All other values, field names
 // and nesting must survive. This also rejects ignored extension keywords.

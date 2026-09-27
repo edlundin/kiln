@@ -222,9 +222,21 @@ must match the schema and contain only requested fields; decline/cancel must
 carry no data. Validation never fills server defaults, and bounds the complete
 encoded result including its action and JSON escaping.
 
-Validation is a pure helper, not a user decision or send permit. Authenticated
-presentation/decision endpoints, response journaling and runtime handlers remain
-to be connected before advertising elicitation. Form persistence itself neither
+Validation is a pure helper, not a user decision or send permit. A separate
+internal decision application validates an explicit response against the stored
+form before recording it. The private decision write atomically rechecks that
+exact form, its owner and live pending input. First decision wins; identical
+pending repeats are receipts and conflicts reject. A fresh commit wakes waiters
+without putting the response body in public Events. Stored decisions are bounded
+before copying out of SQLite, immutable and omitted from Debug output.
+
+Deciding does not resolve the input or send a response. An attached form cannot
+resolve until a decision exists; both the store and database enforce this.
+Resolved/interrupted inputs and cancelled ancestry cannot return a decision for
+replay. Callers must authenticate user access to the interaction owner; the
+internal storage API does not establish user identity. Authenticated
+presentation/decision endpoints and runtime handlers remain to be connected
+before advertising elicitation. Form persistence itself neither
 publishes a prompt nor grants user approval, provider access or response/replay
 authority. Sampling integration remains unimplemented.
 

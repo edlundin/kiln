@@ -20,6 +20,258 @@ fn private_form() -> McpElicitationForm {
 }
 
 #[tokio::test]
+async fn mcp_input_decisions_validate_and_journal_without_resolving() {
+    use kiln_mcp::{
+        McpElicitationDecisionError as DecisionError, McpElicitationError,
+        McpElicitationValidationLimits, decide_elicitation_form,
+    };
+    for terminal in ["resolved", "interrupted", "cancelled"] {
+        let (_data, store, session) = seeded_session().await;
+        let target = ready(&store, McpInstanceOwner::Core).await;
+        let request = request(&store, &session, "decision").await;
+        let McpDispatchClaim::Acquired(permit) =
+            claim_mcp_dispatch(&store, request, &target, limits())
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let cap = NonZeroUsize::new(256).unwrap();
+        let validation = McpElicitationValidationLimits {
+            form: form_limits(),
+            max_response_bytes: cap,
+        };
+        let McpElicitationFormMutation::Applied(record) = store
+            .require_mcp_elicitation_form(
+                permit.record(),
+                std::num::NonZeroU64::new(1).unwrap(),
+                &private_form(),
+                form_limits(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        let mut wake = store.subscribe_mcp_invocation_events();
+        assert_eq!(
+            store
+                .get_mcp_elicitation_decision(&record, form_limits(), cap)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store.resolve_mcp_input(&record.input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        {
+            let mut sql = store.connection.lock().await;
+            assert!(
+                sqlx::query("UPDATE mcp_inputs SET state='resolved'")
+                    .execute(&mut *sql)
+                    .await
+                    .is_err()
+            );
+        }
+        let invalid = McpElicitationDecision::from_json(
+            r#"{"action":"accept","content":{"private-form-field":42}}"#,
+            cap,
+        )
+        .unwrap();
+        assert_eq!(
+            decide_elicitation_form(
+                &store,
+                &record.input,
+                &record.interaction_run,
+                &invalid,
+                validation
+            )
+            .await
+            .err(),
+            Some(DecisionError::Validation(
+                McpElicitationError::InvalidResponse
+            ))
+        );
+        let decision = McpElicitationDecision::from_json(
+            r#"{"action":"accept","content":{"private-form-field":"private-decision-content"}}"#,
+            cap,
+        )
+        .unwrap();
+        let mut stale = record.clone();
+        stale.form = McpElicitationForm::new(
+            "different form".into(),
+            record.form.schema_json(),
+            form_limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_form(&stale, &decision, form_limits(), cap)
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("CREATE TRIGGER reject_test_decision BEFORE INSERT ON mcp_elicitation_decisions BEGIN SELECT RAISE(ABORT, 'test'); END").execute(&mut *sql).await.unwrap();
+        }
+        assert_eq!(
+            decide_elicitation_form(
+                &store,
+                &record.input,
+                &record.interaction_run,
+                &decision,
+                validation
+            )
+            .await
+            .err(),
+            Some(DecisionError::Store(McpInvocationError::Unavailable))
+        );
+        assert_eq!(
+            store
+                .get_mcp_elicitation_decision(&record, form_limits(), cap)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(!wake.has_changed().unwrap());
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("DROP TRIGGER reject_test_decision")
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            decide_elicitation_form(
+                &store,
+                &record.input,
+                &record.interaction_run,
+                &decision,
+                validation
+            )
+            .await
+            .unwrap(),
+            McpElicitationDecisionMutation::Applied
+        );
+        assert!(wake.has_changed().unwrap());
+        wake.borrow_and_update();
+        assert_eq!(
+            store
+                .get_mcp_elicitation_decision(&record, form_limits(), cap)
+                .await
+                .unwrap(),
+            Some(decision.clone())
+        );
+        assert!(!format!("{decision:?}").contains("private-decision-content"));
+        assert_eq!(
+            decide_elicitation_form(
+                &store,
+                &record.input,
+                &record.interaction_run,
+                &decision,
+                validation
+            )
+            .await
+            .unwrap(),
+            McpElicitationDecisionMutation::Existing
+        );
+        let conflict = McpElicitationDecision::from_json(r#"{"action":"decline"}"#, cap).unwrap();
+        assert_eq!(
+            decide_elicitation_form(
+                &store,
+                &record.input,
+                &record.interaction_run,
+                &conflict,
+                validation
+            )
+            .await
+            .err(),
+            Some(DecisionError::Store(McpInvocationError::Conflict))
+        );
+        assert_eq!(
+            store
+                .get_mcp_elicitation_decision(&record, form_limits(), NonZeroUsize::new(1).unwrap())
+                .await
+                .err(),
+            Some(McpInvocationError::InvalidRequest)
+        );
+        assert!(!wake.has_changed().unwrap());
+        {
+            let mut sql = store.connection.lock().await;
+            let state: String = sqlx::query_scalar("SELECT state FROM mcp_inputs")
+                .fetch_one(&mut *sql)
+                .await
+                .unwrap();
+            assert_eq!(state, "required");
+            assert!(
+                sqlx::query("UPDATE mcp_elicitation_decisions SET decision_json='{}'")
+                    .execute(&mut *sql)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                sqlx::query("DELETE FROM mcp_elicitation_decisions")
+                    .execute(&mut *sql)
+                    .await
+                    .is_err()
+            );
+        }
+        match terminal {
+            "resolved" => {
+                assert!(matches!(
+                    store.resolve_mcp_input(&record.input).await.unwrap(),
+                    McpInputMutation::Applied(_)
+                ));
+            }
+            "interrupted" => {
+                store
+                    .interrupt_mcp_invocations(
+                        Some(&target.generation),
+                        NonZeroUsize::new(1).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            "cancelled" => {
+                RunApplication::new(store.clone(), super::super::UlidIdGenerator)
+                    .request_cancellation(record.interaction_run.clone())
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            store
+                .get_mcp_elicitation_decision(&record, form_limits(), cap)
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_form(&record, &decision, form_limits(), cap)
+                .await
+                .err(),
+            Some(McpInvocationError::Conflict)
+        );
+        let page = store
+            .list_session_events(session.id(), EventCursor::zero())
+            .await
+            .unwrap();
+        assert!(!format!("{:?}", page.events()).contains("private-decision-content"));
+        let mut sql = store.connection.lock().await;
+        let stored: String =
+            sqlx::query_scalar("SELECT decision_json FROM mcp_elicitation_decisions")
+                .fetch_one(&mut *sql)
+                .await
+                .unwrap();
+        assert_eq!(stored, decision.as_json());
+    }
+}
+
+#[tokio::test]
 async fn mcp_input_form_is_atomic_private_and_not_replayable() {
     let (data, store, session) = seeded_session().await;
     let target = ready(&store, McpInstanceOwner::Core).await;
@@ -364,6 +616,23 @@ async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
                 .await
                 .unwrap();
         }
+        let decline = McpElicitationDecision::from_json(
+            r#"{"action":"decline"}"#,
+            NonZeroUsize::new(64).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .decide_mcp_elicitation_form(
+                    &record,
+                    &decline,
+                    form_limits(),
+                    NonZeroUsize::new(64).unwrap()
+                )
+                .await
+                .unwrap(),
+            McpElicitationDecisionMutation::Applied
+        );
         store.resolve_mcp_input(&input).await.unwrap();
         assert_eq!(
             store

@@ -1,6 +1,7 @@
 use std::num::NonZeroU64;
 
 use kiln_core::{
+    McpElicitationDecision, McpElicitationDecisionMutation, McpElicitationDecisionStore,
     McpElicitationForm, McpElicitationFormLimits, McpElicitationFormMutation,
     McpElicitationFormRecord, McpElicitationFormStore, McpInputKind, McpInputMutation,
     McpInputRecord, McpInputState, McpInputStore, McpInvocationError as Error, McpInvocationRecord,
@@ -164,6 +165,21 @@ impl McpInputStore for SqliteStore {
         ) {
             interaction_owner(&mut tx, &current.invocation).await?;
         }
+        if current.kind == McpInputKind::Elicitation {
+            let awaiting_decision: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM mcp_elicitation_forms f
+                LEFT JOIN mcp_elicitation_decisions d USING (tool_call_id, ordinal)
+                WHERE f.tool_call_id = ? AND f.ordinal = ? AND d.tool_call_id IS NULL)",
+            )
+            .bind(current.invocation.tool_call_id.as_str())
+            .bind(number)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+            if awaiting_decision {
+                return Err(Error::Conflict);
+            }
+        }
         sqlx::query(
             "UPDATE mcp_inputs SET state = 'resolved' WHERE tool_call_id = ? AND ordinal = ?",
         )
@@ -233,31 +249,125 @@ impl McpElicitationFormStore for SqliteStore {
         interaction_run: &kiln_core::RunId,
         limits: McpElicitationFormLimits,
     ) -> Result<McpElicitationFormRecord, Error> {
-        if expected.kind != McpInputKind::Elicitation || expected.state != McpInputState::Required {
-            return Err(Error::InvalidRequest);
-        }
         let mut connection = self.connection.lock().await;
         let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
-        let invocation = current_invocation(&mut tx, &expected.invocation).await?;
-        let input = load(&mut tx, invocation, expected.ordinal)
-            .await?
-            .ok_or(Error::NotFound)?;
-        if input.kind != McpInputKind::Elicitation || input.state != McpInputState::Required {
-            return Err(Error::Conflict);
-        }
-        validate_live(&mut tx, &input.invocation).await?;
-        if interaction_owner(&mut tx, &input.invocation).await? != *interaction_run {
-            return Err(Error::Conflict);
-        }
-        let record = load_form(&mut tx, input, limits)
-            .await?
-            .ok_or(Error::NotFound)?;
-        if record.interaction_run != *interaction_run {
-            return Err(Error::Conflict);
-        }
+        let record = pending_form(&mut tx, expected, interaction_run, limits).await?;
         tx.commit().await.map_err(|_| Error::Unavailable)?;
         Ok(record)
     }
+}
+
+impl McpElicitationDecisionStore for SqliteStore {
+    async fn decide_mcp_elicitation_form(
+        &self,
+        expected: &McpElicitationFormRecord,
+        decision: &McpElicitationDecision,
+        form_limits: McpElicitationFormLimits,
+        max_response_bytes: std::num::NonZeroUsize,
+    ) -> Result<McpElicitationDecisionMutation, Error> {
+        decision.validate(max_response_bytes)?;
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let current = pending_form(
+            &mut tx,
+            &expected.input,
+            &expected.interaction_run,
+            form_limits,
+        )
+        .await?;
+        if current != *expected {
+            return Err(Error::Conflict);
+        }
+        if let Some(existing) = load_decision(&mut tx, &current.input, max_response_bytes).await? {
+            if existing != *decision {
+                return Err(Error::Conflict);
+            }
+            tx.commit().await.map_err(|_| Error::Unavailable)?;
+            return Ok(McpElicitationDecisionMutation::Existing);
+        }
+        sqlx::query("INSERT INTO mcp_elicitation_decisions (tool_call_id, ordinal, decision_json) VALUES (?, ?, ?)")
+            .bind(current.input.invocation.tool_call_id.as_str())
+            .bind(i64::try_from(current.input.ordinal.get()).map_err(|_| Error::InvalidRequest)?)
+            .bind(decision.as_json()).execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        self.mcp_invocation_events.send_replace(());
+        Ok(McpElicitationDecisionMutation::Applied)
+    }
+
+    async fn get_mcp_elicitation_decision(
+        &self,
+        expected: &McpElicitationFormRecord,
+        form_limits: McpElicitationFormLimits,
+        max_response_bytes: std::num::NonZeroUsize,
+    ) -> Result<Option<McpElicitationDecision>, Error> {
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
+        let current = pending_form(
+            &mut tx,
+            &expected.input,
+            &expected.interaction_run,
+            form_limits,
+        )
+        .await?;
+        if current != *expected {
+            return Err(Error::Conflict);
+        }
+        let decision = load_decision(&mut tx, &current.input, max_response_bytes).await?;
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(decision)
+    }
+}
+
+async fn pending_form(
+    connection: &mut SqliteConnection,
+    expected: &McpInputRecord,
+    interaction_run: &kiln_core::RunId,
+    limits: McpElicitationFormLimits,
+) -> Result<McpElicitationFormRecord, Error> {
+    if expected.kind != McpInputKind::Elicitation || expected.state != McpInputState::Required {
+        return Err(Error::InvalidRequest);
+    }
+    let invocation = current_invocation(connection, &expected.invocation).await?;
+    let input = load(connection, invocation, expected.ordinal)
+        .await?
+        .ok_or(Error::NotFound)?;
+    if input.kind != McpInputKind::Elicitation || input.state != McpInputState::Required {
+        return Err(Error::Conflict);
+    }
+    validate_live(connection, &input.invocation).await?;
+    if interaction_owner(connection, &input.invocation).await? != *interaction_run {
+        return Err(Error::Conflict);
+    }
+    let record = load_form(connection, input, limits)
+        .await?
+        .ok_or(Error::NotFound)?;
+    if record.interaction_run != *interaction_run {
+        return Err(Error::Conflict);
+    }
+    Ok(record)
+}
+
+async fn load_decision(
+    connection: &mut SqliteConnection,
+    input: &McpInputRecord,
+    max_bytes: std::num::NonZeroUsize,
+) -> Result<Option<McpElicitationDecision>, Error> {
+    let row = sqlx::query("SELECT CASE WHEN length(CAST(decision_json AS BLOB)) <= ? THEN decision_json END AS decision_json
+        FROM mcp_elicitation_decisions WHERE tool_call_id = ? AND ordinal = ?")
+        .bind(i64::try_from(max_bytes.get()).unwrap_or(i64::MAX))
+        .bind(input.invocation.tool_call_id.as_str())
+        .bind(i64::try_from(input.ordinal.get()).map_err(|_| Error::InvalidRequest)?)
+        .fetch_optional(connection).await.map_err(|_| Error::Unavailable)?;
+    row.map(|row| {
+        let json: Option<String> = row
+            .try_get("decision_json")
+            .map_err(|_| Error::IntegrityViolation)?;
+        McpElicitationDecision::from_json(&json.ok_or(Error::InvalidRequest)?, max_bytes)
+    })
+    .transpose()
 }
 
 async fn load_form(

@@ -40,7 +40,8 @@ mod mediation;
 mod negotiation;
 mod schema;
 pub use elicitation::{
-    McpElicitationError, McpElicitationValidationLimits, McpElicitationValidator,
+    McpElicitationDecisionError, McpElicitationError, McpElicitationValidationLimits,
+    McpElicitationValidator, decide_elicitation_form,
 };
 pub use http_bindings::{
     HttpBindingError, HttpLaunchAuthorization, HttpLaunchResources, ResolvedHttpLaunch,

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `test`
+
+- EDL-314: Keep daemon black-box event classification and Run ownership checks
+  exhaustive for MCP invocation state events. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
 ## 2026-09-27 — `feat`
 
 - EDL-314: Add revision-fenced HTTP host snapshots and offline publication with

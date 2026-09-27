@@ -279,6 +279,9 @@ impl RunSession {
 
 fn event_kind(event: &SessionEventResponse) -> &'static str {
     match &event.event {
+        SessionEventDataResponse::McpInvocationStateChanged { .. } => {
+            "mcp.invocation_state_changed"
+        }
         SessionEventDataResponse::ModelOutputRecorded(_) => "model_invocation.output",
         SessionEventDataResponse::UsageObserved(_) => "usage.observed",
         SessionEventDataResponse::ContextManifestCreated(_) => "context.manifest_created",
@@ -323,7 +326,8 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
         SessionEventDataResponse::ContextManifestCreated(manifest) => {
             manifest.run_id == expected_run_id
         }
-        SessionEventDataResponse::RunCreated { run_id, .. }
+        SessionEventDataResponse::McpInvocationStateChanged { run_id, .. }
+        | SessionEventDataResponse::RunCreated { run_id, .. }
         | SessionEventDataResponse::RunQueued { run_id }
         | SessionEventDataResponse::RunStateChanged { run_id, .. }
         | SessionEventDataResponse::RunCancellationRequested { run_id }

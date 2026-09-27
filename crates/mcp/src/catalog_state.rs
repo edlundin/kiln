@@ -1,7 +1,11 @@
 //! Generation-local invalidation. Notifications never grant execution authority.
 
 use kiln_core::McpCatalogKind;
-use rmcp::{ClientHandler, RoleClient, service::NotificationContext};
+use rmcp::{
+    ClientHandler, RoleClient,
+    model::{ClientCapabilities, ClientConfig, Implementation},
+    service::NotificationContext,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -39,6 +43,14 @@ impl CatalogEpochs {
 }
 
 impl ClientHandler for CatalogEpochs {
+    fn get_info(&self) -> ClientConfig {
+        // Advertise only capabilities mediated by this handler.
+        ClientConfig::new(
+            ClientCapabilities::default(),
+            Implementation::new("kiln", env!("CARGO_PKG_VERSION")),
+        )
+    }
+
     fn on_tool_list_changed(
         &self,
         _: NotificationContext<RoleClient>,

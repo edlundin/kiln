@@ -337,7 +337,7 @@ mod tests {
         }
     }
     impl HttpFixture {
-        async fn new(path: std::path::PathBuf) -> Self {
+        async fn new(path: std::path::PathBuf, protocol: McpProtocolVersion) -> Self {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -374,6 +374,40 @@ mod tests {
                     } else {
                         let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                         let method = request["method"].as_str().unwrap();
+                        let header = |name: &str| {
+                            headers.lines().find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case(name).then(|| value.trim())
+                            })
+                        };
+                        let assert_identity = |identity: &serde_json::Value| {
+                            assert_eq!(identity["name"], "kiln");
+                            assert_eq!(identity["version"], env!("CARGO_PKG_VERSION"));
+                        };
+                        if method == "initialize" {
+                            assert_identity(&request["params"]["clientInfo"]);
+                            assert_eq!(request["params"]["capabilities"], json!({}));
+                        }
+                        if protocol == McpProtocolVersion::V20260728 {
+                            assert_eq!(header("mcp-protocol-version"), Some("2026-07-28"));
+                            assert_eq!(header("mcp-method"), Some(method));
+                            assert_eq!(header("mcp-session-id"), None);
+                            if request.get("id").is_some() {
+                                let meta = &request["params"]["_meta"];
+                                assert_eq!(
+                                    meta["io.modelcontextprotocol/protocolVersion"],
+                                    "2026-07-28"
+                                );
+                                assert_identity(&meta["io.modelcontextprotocol/clientInfo"]);
+                                assert_eq!(
+                                    meta["io.modelcontextprotocol/clientCapabilities"],
+                                    json!({})
+                                );
+                            }
+                            if method == "tools/call" {
+                                assert_eq!(header("mcp-name"), Some("write"));
+                            }
+                        }
                         let result = match method {
                             "server/discover" => {
                                 use std::io::Write;
@@ -506,8 +540,8 @@ mod tests {
             identity,
         )
         .unwrap();
-        let http_fixture = if http_protocol.is_some() {
-            Some(HttpFixture::new(path.clone()).await)
+        let http_fixture = if let Some(protocol) = http_protocol {
+            Some(HttpFixture::new(path.clone(), protocol).await)
         } else {
             None
         };

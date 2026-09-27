@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `fix`
+
+- EDL-314: Advertise the Kiln client identity and only mediated capabilities
+  in legacy and modern MCP startup. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
 ## 2026-09-27 — `feat`
 
 - EDL-314: Route explicitly enabled HTTP MCP requests through the durable

@@ -7,10 +7,16 @@ launch command. Offline host-binding administration is described below.
 
 ### HTTP transport preparation
 
+Runtime clients identify as `kiln` with the workspace package version, both in
+legacy initialization and modern per-request metadata. Sampling, elicitation,
+roots and other client capabilities remain unadvertised until mediated support
+is implemented.
+
 `kiln-mcp` provides an internal `BoundedHttpClient` adapter for Streamable HTTP.
-It is not connected to daemon execution or host bindings yet. It requires explicit
-request, JSON response, whole SSE stream, per-event and header byte allowances plus
-a whole-request timeout. Per-event accounting treats CRLF as one terminator;
+The daemon uses it only through the explicitly enabled native path and a published
+host snapshot. It requires explicit request, JSON response, whole SSE stream,
+per-event and header byte allowances plus a whole-request timeout. Per-event
+accounting treats CRLF as one terminator;
 whole-stream accounting counts every wire body byte. HTTP stack buffers, parsed
 response headers and decoded values have additional memory costs; these limits
 are not a process-wide memory or CPU sandbox.

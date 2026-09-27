@@ -17,6 +17,7 @@ kiln-infrastructure = { path = "../infrastructure" }
 kiln-server = { path = "../server" }
 kiln-protocol = { path = "../protocol" }
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
 ulid.workspace = true
 

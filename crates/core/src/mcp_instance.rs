@@ -58,6 +58,20 @@ impl McpInstanceKey {
         if definition.scope() != owner.scope() {
             return Err(McpInstanceError::OwnerMismatch);
         }
+        Self::from_parts(
+            definition.id().clone(),
+            owner,
+            definition.auth_profile().cloned(),
+            max_bytes,
+        )
+    }
+
+    fn from_parts(
+        definition_id: SharedConfigurationKey,
+        owner: McpInstanceOwner,
+        auth_profile: Option<SharedConfigurationKey>,
+        max_bytes: usize,
+    ) -> Result<Self, McpInstanceError> {
         let owner_json = match &owner {
             McpInstanceOwner::WorkspaceCheckout(checkout) => json!({
                 "kind":"workspace_checkout", "workspace_id":checkout.workspace_id().as_str(),
@@ -71,19 +85,98 @@ impl McpInstanceKey {
             McpInstanceOwner::Session(id) => json!({"kind":"session", "session_id":id.as_str()}),
             McpInstanceOwner::Core => json!({"kind":"core"}),
         };
-        let serde_json::Value::Object(value) = json!({"definition_id":definition.id().as_str(),"owner":owner_json,
-            "auth_profile":definition.auth_profile().map(SharedConfigurationKey::as_str)})
+        let serde_json::Value::Object(value) = json!({"definition_id":definition_id.as_str(),"owner":owner_json,
+            "auth_profile":auth_profile.as_ref().map(SharedConfigurationKey::as_str)})
         else {
             unreachable!()
         };
         let canonical_json = crate::model_tool_request::canonical_object_json(value, max_bytes)
             .map_err(|_| McpInstanceError::LimitExceeded)?;
         Ok(Self {
-            definition_id: definition.id().clone(),
+            definition_id,
             owner,
-            auth_profile: definition.auth_profile().cloned(),
+            auth_profile,
             canonical_json,
         })
+    }
+    /// Structural decoding only; this does not prove owner existence, current
+    /// definition identity, filesystem access or launch authorization. Historical
+    /// keys remain decodable so reconfiguration cannot strand cleanup records.
+    pub fn from_canonical_json(bytes: &[u8], max_bytes: usize) -> Result<Self, McpInstanceError> {
+        use McpInstanceError as Error;
+        if max_bytes == 0 || bytes.len() > max_bytes {
+            return Err(Error::LimitExceeded);
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Key {
+            definition_id: String,
+            auth_profile: Option<String>,
+            owner: Owner,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Owner {
+            Core,
+            Session {
+                session_id: String,
+            },
+            Workspace {
+                workspace_id: String,
+            },
+            WorkspaceCheckout {
+                workspace_id: String,
+                workspace_root_id: String,
+                relative_directory: String,
+                root_path: String,
+                git_common_directory_path: String,
+                filesystem_identity: String,
+            },
+        }
+        let raw: Key = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+        let owner = match raw.owner {
+            Owner::Core => McpInstanceOwner::Core,
+            Owner::Session { session_id } => McpInstanceOwner::Session(
+                SessionId::parse(session_id).map_err(|_| Error::InvalidRequest)?,
+            ),
+            Owner::Workspace { workspace_id } => McpInstanceOwner::Workspace(
+                WorkspaceId::parse(workspace_id).map_err(|_| Error::InvalidRequest)?,
+            ),
+            Owner::WorkspaceCheckout {
+                workspace_id,
+                workspace_root_id,
+                relative_directory,
+                root_path,
+                git_common_directory_path,
+                filesystem_identity,
+            } => McpInstanceOwner::WorkspaceCheckout(
+                WorkspaceCheckout::from_resolved_paths(
+                    WorkspaceId::parse(workspace_id).map_err(|_| Error::InvalidRequest)?,
+                    crate::WorkspaceRootId::parse(workspace_root_id)
+                        .map_err(|_| Error::InvalidRequest)?,
+                    relative_directory,
+                    root_path,
+                    git_common_directory_path,
+                    crate::FilesystemIdentity::new(filesystem_identity)
+                        .ok_or(Error::InvalidRequest)?,
+                )
+                .map_err(|_| Error::InvalidRequest)?,
+            ),
+        };
+        let key = Self::from_parts(
+            SharedConfigurationKey::parse(raw.definition_id, max_bytes)
+                .map_err(|_| Error::InvalidRequest)?,
+            owner,
+            raw.auth_profile
+                .map(|p| SharedConfigurationKey::parse(p, max_bytes))
+                .transpose()
+                .map_err(|_| Error::InvalidRequest)?,
+            max_bytes,
+        )?;
+        if key.canonical_json.as_bytes() != bytes {
+            return Err(Error::InvalidRequest);
+        }
+        Ok(key)
     }
     pub fn definition_id(&self) -> &SharedConfigurationKey {
         &self.definition_id

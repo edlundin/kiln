@@ -205,6 +205,15 @@ pub enum McpHostBindingError {
 }
 
 pub trait McpHostBindingStore: Send + Sync {
+    /// Read-only publication preflight before vault access. Some is an exact
+    /// existing receipt; None means the metadata is currently admissible, not a
+    /// permission or lease. Publication must revalidate after external work.
+    fn inspect_mcp_host_binding_publication(
+        &self,
+        bindings: &McpHostBindings,
+        expected_revision: u64,
+        limits: McpDefinitionLimits,
+    ) -> impl Future<Output = Result<Option<McpHostBindingRecord>, McpHostBindingError>> + Send;
     /// Caller has successfully written each new reserved reference to the MCP
     /// vault and serializes publication with its own writes/cleanup. Publication
     /// retires replaced references atomically. Active or uncertain generations

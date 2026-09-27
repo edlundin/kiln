@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add offline MCP host administration for importing, publishing,
+  retiring, inspecting and explicitly reconciling reference-backed snapshots.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/54f7908)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Retire MCP host snapshots with revision-checked tombstones that fence
   launch claims and atomically release published secret references.
 

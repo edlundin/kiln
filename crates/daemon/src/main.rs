@@ -51,6 +51,7 @@ mod account_import;
 mod configuration_enrollment;
 mod configuration_refresh;
 mod mcp_definition_admin;
+mod mcp_host_admin;
 #[cfg(unix)]
 mod mcp_runtime;
 mod native_model;
@@ -112,6 +113,9 @@ async fn main() -> ExitCode {
         arg == "register-mcp-definition" || arg == "inspect-mcp-definition"
     }) {
         return mcp_definition_admin::run().await;
+    }
+    if env::args_os().nth(1).is_some_and(|arg| arg == "mcp-host-admin") {
+        return mcp_host_admin::run().await;
     }
 
     let (native_selection, public_api_config) = match env::var("KILN_RUN_EXECUTOR") {

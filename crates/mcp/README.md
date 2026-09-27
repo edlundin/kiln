@@ -196,8 +196,8 @@ contain private local paths or credentials supplied by a separate authorized
 credential boundary; provider credentials must never be passed to an MCP server.
 Resolution itself neither reads a vault nor grants launch permission. Its caller
 must authorize all inputs and supply a directory descriptor pinned against the
-owner scope before using the result. Persistence and administration of these
-snapshots remain open. Real-process and validation
+owner scope before using the result. Durable administration stores reference
+snapshots rather than these materialized values. Real-process and validation
 fixtures cover explicit literal substitution, version/profile/runtime/role
 mismatch, NUL rejection and the exact resolved-byte boundary.
 
@@ -219,8 +219,8 @@ binding names are not exposed in vault account metadata. Writes/deletes reuse th
 existing cancellation-safe per-entry serialization; clones share those locks.
 Callers must reserve fresh references durably before writes and change binding
 revision when values or authorization change. Durable reservation and snapshot
-publication now have internal store ports, while administration commands remain
-open. This code does not access a user's vault at
+publication have internal store ports and an offline administration command.
+This code does not access a user's vault at
 startup. Tests verify namespace partitioning and reference resolution with a fake
 vault; actual MCP OS-vault read/write integration remains unverified.
 
@@ -237,8 +237,10 @@ maps. `retire_mcp_host_bindings` advances the revision and retires its reference
 atomically after process cleanup. A retained removal tombstone blocks all launch
 claims until explicit republication; retired records fail resolution before vault
 reads. Exact retirement retries never remove a newer publication. Public
-administration remains open, and none of these ports grant host authorization or
-install MCP in the daemon native catalogue.
+administration is available through the offline `kilnd mcp-host-admin` command;
+see `docs/operations/mcp-runtime.md` for its pipe-only schema, import/publication
+ordering and explicit cleanup semantics. Neither the command nor these ports grant
+host authorization or install MCP in the daemon native catalogue.
 
 The [internal daemon runtime](../../docs/operations/mcp-runtime.md) is opt-in with
 explicit instance-capacity and recovery-batch budgets. Its startup runs before
@@ -295,7 +297,7 @@ successive claims from distinct Runs reuse the same process. It requires
 `/usr/bin/python3`. Resource/prompt wire execution, modern MRTR and external Tasks
 are not covered by that fixture.
 
-Remaining broker work includes process recovery, online registration and persistent
+Remaining broker work includes process recovery, online registration and online
 host-binding/credential administration, daemon installation of the claimed
 dispatch path, catalogue/result paging, HTTP/OAuth, mediated server requests,
 and full conformance. No MCP operation

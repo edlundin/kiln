@@ -2,7 +2,8 @@
 
 On Unix, `kilnd` can retain scoped MCP stdio process owners and drain them during
 shutdown. This is an internal implementation boundary. There is no public server
-launch command, host-binding administration, or model-visible MCP tool yet.
+launch command or model-visible MCP tool yet. Offline host-binding administration
+is available as described below.
 
 Both settings below are required to enable the runtime. If neither is set, it is
 disabled. Missing, zero, invalid or overflowing values prevent startup when either
@@ -29,11 +30,11 @@ resolved launch inputs or authorization change; a revision change requires an
 explicit stop before replacement. The internal resolver accepts already authorized,
 materialized host values and a pinned directory; it substitutes only explicit
 runtime/argument/environment references within a caller byte budget. Persistent
-binding/revision administration remains to be implemented. A reference-backed
+bindings have an offline administration command below. A reference-backed
 resolver can read scoped argument/environment values through the separate MCP
 vault port; it is not installed at daemon startup and does not authorize launch.
 Durable reference reservation and snapshot publication are available internally;
-credential import/removal commands remain open.
+credential import/removal uses the offline administration command below.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
@@ -93,7 +94,7 @@ Inspection returns `version` and `definition`, including literal arguments;
 resolved credentials are never included. Errors omit supplied metadata.
 
 Online registration, common-format import, shared-source ingestion, public audit
-replay, and host-binding/credential administration remain open.
+replay, and online host-binding/credential administration remain open.
 
 The internal MCP secret reservation journal (migration 54) records vault identity
 and write ownership without secret values. A fresh reservation is the only result
@@ -134,7 +135,74 @@ reject retired records before any vault access. Re-enabling requires explicit
 publication against the tombstone revision and live reserved references. Exact
 retirement retries return their original receipt without retiring a later update.
 
-These are internal ports; offline host-binding/credential administration,
-automated cleanup, and daemon ToolCall launch wiring remain open. The
+Automated cleanup and daemon ToolCall launch wiring remain open. The
 targeted tests use fake vault values and real macOS process fixtures; actual MCP
 OS-vault integration and Linux runtime behavior remain unverified.
+
+## Offline host administration
+
+`kilnd mcp-host-admin --max-bytes N --stdin` accepts one canonical JSON request
+from a pipe, with one optional LF/CRLF. It holds the exclusive daemon data-directory
+lock through metadata changes and vault operations; stop `kilnd` first. The command
+uses `KILN_DATA_DIR` and the same durable local instance ID as daemon startup,
+initializing an unassigned ID if necessary. It never enrolls configuration sync,
+grants execution authority, resolves PATH, or launches an MCP server.
+
+The envelope has exactly `action` and `key`. `key` is the canonical scoped identity:
+`auth_profile`, `definition_id`, and `owner`. Owner fields are:
+
+| Owner kind | Additional fields |
+| --- | --- |
+| `core` | None |
+| `session` | `session_id` |
+| `workspace` | `workspace_id` |
+| `workspace_checkout` | `workspace_id`, `workspace_root_id`, `relative_directory`, `root_path`, `git_common_directory_path`, `filesystem_identity` |
+
+Use the definition's scope/auth profile and the exact registered owner identity.
+Checkout paths/identity must match the stored available root. Decoding a historical
+key does not grant access; it permits retirement/reconciliation after a definition
+or owner changes. This example inspects a **Core-scoped** definition named `example`:
+
+```json
+{"action":{"operation":"inspect"},"key":{"auth_profile":null,"definition_id":"example","owner":{"kind":"core"}}}
+```
+
+Save a canonical request as `host-request.json` and run it with a byte allowance
+large enough for both the input and the stored snapshot plus scoped key:
+
+```nu
+open --raw host-request.json | rtk cargo run -p kiln-daemon --bin kilnd -- mcp-host-admin --max-bytes 4096 --stdin
+```
+
+Here 4096 is an example allowance for a small request, not a product default.
+Object keys must be sorted with no insignificant whitespace; duplicate and unknown
+fields are rejected. Errors omit supplied values. Secret values belong only in
+piped input, never command arguments, shell history, portable definitions or logs.
+
+| `action.operation` | Other action fields | Result |
+| --- | --- | --- |
+| `inspect` | None | Local `instance_id` and nullable snapshot with revision, retired flag and reference metadata; no vault reads |
+| `pending` | Positive `batch_size` | Bounded unpublished/retired reference list; no secret values |
+| `import_secret` | `definition_version`, `name`, `purpose` (`argument` or `environment`), `value` | Fresh `secret_ref` after a successful MCP-vault write |
+| `publish` | `expected_revision`, `definition_version`, `runtime_binding`, absolute UTF-8 `executable`, `arguments` and `environment` maps of binding names to returned secret refs | Immutable `registered_revision` receipt |
+| `retire` | Positive `expected_revision` | Immutable `retired_revision` receipt; vault deletion is separate |
+| `reconcile` | Positive `batch_size` | `reconciled` count after retiring pending refs, deleting their vault values, and retaining deletion receipts |
+
+Import validates the current definition and exact binding role before reserving
+and writing a fresh reference. A failed/ambiguous write leaves its reservation for
+explicit reconciliation. Retrying import creates a **new** reference; it never
+rewrites an ambiguous reference. Only a successful import response supplies a
+reference for publication. Values use SecretValue's existing nonempty, single-line,
+NUL-free, at-most-1-MiB envelope in the separate `dev.kiln.mcp` vault namespace.
+
+Publication preflight rejects stale/invalid metadata and references before vault
+reads, then verifies that the referenced values exist and revalidates in the
+publication transaction. Exact old receipts are returned without vault reads,
+even if their old values have since been deleted. Inspect separately for current
+state. A changed binding revision requires process cleanup first.
+
+**Publish wanted imports before reconciliation.** Reconciliation deletes all
+unpublished values in its selected batch, including successful imports that have
+not yet been published. Published refs are excluded. If deletion fails, the retired
+reference remains pending for retry; completed deletions retain tombstones. Repeat
+batches until `pending` is empty. No automatic reconciliation runs at startup.

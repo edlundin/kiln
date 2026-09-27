@@ -109,12 +109,16 @@ async fn main() -> ExitCode {
         return account_import::run().await;
     }
 
-    if env::args_os().nth(1).is_some_and(|arg| {
-        arg == "register-mcp-definition" || arg == "inspect-mcp-definition"
-    }) {
+    if env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "register-mcp-definition" || arg == "inspect-mcp-definition")
+    {
         return mcp_definition_admin::run().await;
     }
-    if env::args_os().nth(1).is_some_and(|arg| arg == "mcp-host-admin") {
+    if env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "mcp-host-admin")
+    {
         return mcp_host_admin::run().await;
     }
 
@@ -341,7 +345,25 @@ async fn main() -> ExitCode {
     .with_native_file_read(native_file_read)
     .with_provider_registry(provider_registry);
     #[cfg(unix)]
-    let runs = runs.with_mcp_registry(mcp_registry.clone());
+    let runs = {
+        let mcp = match run_service::configured_native_mcp() {
+            Ok(mcp) => mcp,
+            Err(error) => {
+                eprintln!("kilnd: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match runs
+            .with_mcp_registry(mcp_registry.clone())
+            .with_native_mcp(mcp)
+        {
+            Ok(runs) => runs,
+            Err(error) => {
+                eprintln!("kilnd: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
 
     if let Err(error) = runs.reconcile_deterministic_model_runs().await {
         eprintln!("kilnd: cannot reconcile deterministic native Runs: {error:?}");

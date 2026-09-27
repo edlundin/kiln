@@ -1,5 +1,4 @@
-//! Internal approved-call composition. Catalogue validation remains a prerequisite
-//! for advertising this operation through the daemon's native tool catalogue.
+//! Approved-call composition used by the opt-in daemon native MCP coordinator.
 
 use std::{num::NonZeroUsize, time::Duration};
 

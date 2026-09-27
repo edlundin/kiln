@@ -22,7 +22,11 @@ use kiln_server::{
 use tokio::sync::{Mutex, Notify, oneshot, watch};
 
 mod native;
+#[cfg(unix)]
+mod native_mcp;
 mod native_tools;
+#[cfg(unix)]
+pub(crate) use native_mcp::{NativeMcp, configured_native_mcp};
 pub(crate) use native_tools::configured_file_read;
 
 fn legacy_subprocess_is_proven(snapshot: &RunSnapshot) -> bool {
@@ -58,6 +62,8 @@ pub(crate) struct RunService {
     native_file_read: Option<Arc<kiln_core::WorkspaceFileReadTool>>,
     #[cfg(unix)]
     mcp_registry: Option<Arc<kiln_mcp::StdioRegistry<SqliteStore>>>,
+    #[cfg(unix)]
+    native_mcp: Option<Arc<NativeMcp>>,
     events: EventBroadcaster,
     commit_sequence: Arc<Mutex<()>>,
     active: Arc<ActiveRuns>,
@@ -82,6 +88,8 @@ impl RunService {
             native_file_read: None,
             #[cfg(unix)]
             mcp_registry: None,
+            #[cfg(unix)]
+            native_mcp: None,
             events,
             commit_sequence: Arc::new(Mutex::new(())),
             active: Arc::new(ActiveRuns::default()),
@@ -155,7 +163,10 @@ impl RunService {
             return RunModelStartPolicy::new(None, None);
         };
         let mut local_capabilities = selection.capabilities.clone();
-        if self.native_file_read.is_none() {
+        if self
+            .native_tools()
+            .map_or(true, |tools| tools.catalog().definitions().is_empty())
+        {
             local_capabilities = kiln_core::ModelCapabilitySnapshot::new(
                 selection.capabilities.version(),
                 kiln_core::CapabilitySupport::Unsupported,

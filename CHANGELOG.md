@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add opt-in daemon execution for native MCP search, describe and call
+  through the existing approval, receipt and ToolCall completion path. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add distinct internal MCP search and describe contracts with bounded,
   receipt-backed metadata results.
 

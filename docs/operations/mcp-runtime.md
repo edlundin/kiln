@@ -1,9 +1,9 @@
 # Internal MCP runtime
 
 On Unix, `kilnd` can retain scoped MCP stdio process owners and drain them during
-shutdown. This is an internal implementation boundary. There is no public server
-launch command or model-visible MCP tool yet. Offline host-binding administration
-is available as described below.
+shutdown. Native model Runs can opt into `mcp_search`, `mcp_describe` and `mcp_call`
+through the separate limits configuration below. There is no public direct server
+launch command. Offline host-binding administration is described below.
 
 Both settings below are required to enable the runtime. If neither is set, it is
 disabled. Missing, zero, invalid or overflowing values prevent startup when either
@@ -13,6 +13,38 @@ setting is supplied. There are no product defaults.
 | --- | --- |
 | `KILN_MCP_MAX_INSTANCES` | Positive maximum scoped owners retained by the daemon registry, including uncertain cleanup. Choose from the host's process and memory budget. |
 | `KILN_MCP_RECOVERY_BATCH_SIZE` | Positive maximum generation rows interrupted per startup transaction. Choose for the store's transaction and startup budget. |
+
+### Native tool opt-in
+
+`KILN_NATIVE_MCP_LIMITS` enables the three compact MCP tools for native providers
+that support tool calls. It requires the lifecycle registry settings above.
+Unset means disabled. Its value is one UTF-8 JSON object with every field below;
+missing, unknown, duplicate, zero (except shutdown grace), invalid or overflowing
+values fail startup. This is host configuration, never model-supplied input.
+Choose allowances for actual server metadata, process/memory budgets and permitted
+latency; there are no product defaults.
+
+| JSON fields | Meaning |
+| --- | --- |
+| `max_request_bytes` | Positive canonical native proposal byte ceiling. |
+| `max_definition_key_bytes`, `max_definition_bytes` | Positive server/host metadata key and total metadata ceilings. |
+| `max_arguments`, `max_argument_bytes`, `max_environment`, `max_endpoint_bytes` | Positive definition argument/environment count and string allowances. |
+| `max_resolved_bytes` | Positive total resolved launch-value byte budget. |
+| `max_frame_bytes`, `max_result_bytes` | Positive MCP wire-frame and encoded response ceilings. |
+| `max_catalog_pages`, `max_catalog_entries`, `max_catalog_bytes` | Positive complete-discovery traversal budgets. |
+| `max_regex_bytes`, `max_regex_backtracks` | Positive per-pattern compiled/DFA size and backtracking allowances. These do not isolate total validator CPU/memory. |
+| `startup_timeout_ms`, `call_timeout_ms` | Positive relative startup and whole broker-call deadlines, in milliseconds. |
+| `shutdown_grace_ms` | Nonnegative process shutdown grace, in milliseconds. |
+
+Native file reading remains independently configurable. The daemon freezes one
+combined native catalogue and routes each approved command through a consuming
+core-owned split that retains its original ToolCall, source and scope. MCP uses
+the current local-instance host snapshot, pinned authorized checkout and isolated
+`dev.kiln.mcp` vault; enabling tools grants no new credential or filesystem scope.
+Directory pinning and output artifact writes run off the async executor. Run
+cancellation is forwarded to the broker and awaited through its receipt/cleanup
+path. Missing dispatch/journal evidence remains unresolved rather than being
+converted into an invented terminal result or replay.
 
 Startup runs recovery after acquiring the daemon's exclusive store lock and
 before serving requests. It marks active generations interrupted in batches,
@@ -32,7 +64,8 @@ materialized host values and a pinned directory; it substitutes only explicit
 runtime/argument/environment references within a caller byte budget. Persistent
 bindings have an offline administration command below. A reference-backed
 resolver can read scoped argument/environment values through the separate MCP
-vault port; it is not installed at daemon startup and does not authorize launch.
+vault port; the native opt-in installs this path behind durable approval and current
+host-snapshot checks. Credential resolution alone does not authorize launch.
 Durable reference reservation and snapshot publication are available internally;
 credential import/removal uses the offline administration command below.
 
@@ -41,8 +74,8 @@ before reuse, including for session, workspace and core owners. A different
 directory requires an explicit stop; an unchanged binding revision cannot bypass
 this check. This is a runtime consistency guard, not launch authorization or a
 filesystem sandbox. The internal approved-call composition now connects durable
-scope checks, directory pinning, host resolution and single dispatch. Daemon
-coordinator/catalogue installation remains open.
+scope checks, directory pinning, host resolution and single dispatch. The native
+opt-in connects this path to the daemon coordinator and ordinary ToolCall completion.
 
 Internal tool dispatch now fetches a bounded `tools/list` catalogue and validates
 the selected tool's input schema before sending `tools/call`. Hosts must supply
@@ -75,8 +108,8 @@ The corresponding `mcp_describe` arguments replace query/offset/limit with
 `resource_template`; their identifiers are exact URI, prompt name and template
 string respectively. Neither operation executes the selected item. Search pages
 are fresh traversals, not stable snapshots across requests. Generation-indexed
-caching/invalidation, stable paging and daemon coordinator installation remain
-open. The daemon does not yet advertise any of these MCP contracts.
+caching/invalidation and stable paging remain open. The daemon advertises these
+contracts only with the explicit native opt-in above.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
@@ -89,10 +122,11 @@ provides only best-effort process cleanup.
 The local tests use synthetic definitions, temporary SQLite stores and real macOS
 shell processes. They verify batched interruption without reacquisition and
 Run-service shutdown reaping before the stopped journal record. Linux process
-execution, orphan cleanup, installed model-visible MCP tools, HTTP/OAuth and full
-MCP conformance remain unverified or unimplemented. Internal claimed stdio dispatch
-now has a real macOS process fixture, including interruption without replay; this
-is not acceptance of the end-to-end daemon broker.
+execution, orphan cleanup, HTTP/OAuth and full MCP conformance remain unverified
+or unimplemented. A real macOS fixture now exercises the daemon mixed native
+coordinator with file read, search, describe and call: approval before launch,
+normal completion persistence, one reused process and no replay of a completed
+batch. This is not full provider/network or MCP conformance evidence.
 
 The internal `dispatch_tool_call` API requires the generation worker's committed
 invocation receipt before constructing a normal ToolCall result. It keeps small
@@ -187,7 +221,7 @@ reject retired records before any vault access. Re-enabling requires explicit
 publication against the tombstone revision and live reserved references. Exact
 retirement retries return their original receipt without retiring a later update.
 
-Automated cleanup and daemon ToolCall launch wiring remain open. The
+Automated orphan/secret cleanup remains open. The
 targeted tests use fake vault values and real macOS process fixtures; actual MCP
 OS-vault integration and Linux runtime behavior remain unverified.
 

@@ -73,6 +73,36 @@ impl fmt::Debug for ModelToolCatalog {
 }
 
 impl ModelToolCatalog {
+    /// Combine already validated local catalogues without changing their frozen
+    /// definitions. The aggregate still obeys the host's catalogue budgets.
+    pub(crate) fn combine<'a>(
+        catalogs: impl Iterator<Item = &'a Self>,
+        limits: ModelToolCatalogLimits,
+    ) -> Result<Self, ModelToolCatalogError> {
+        if limits.max_tools == 0
+            || limits.max_definition_bytes == 0
+            || limits.max_total_definition_bytes == 0
+        {
+            return Err(ModelToolCatalogError::InvalidLimits);
+        }
+        let mut definitions = Vec::new();
+        let mut names = HashSet::new();
+        let mut remaining = limits.max_total_definition_bytes;
+        for definition in catalogs.flat_map(|catalog| &catalog.definitions) {
+            if definitions.len() >= limits.max_tools
+                || definition.definition_json.len() > remaining.min(limits.max_definition_bytes)
+            {
+                return Err(ModelToolCatalogError::LimitExceeded);
+            }
+            if !names.insert(definition.name.as_str()) {
+                return Err(ModelToolCatalogError::DuplicateName);
+            }
+            remaining -= definition.definition_json.len();
+            definitions.push(definition.clone());
+        }
+        Ok(Self { definitions })
+    }
+
     pub fn empty() -> Self {
         Self {
             definitions: Vec::new(),

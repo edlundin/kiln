@@ -107,7 +107,7 @@ impl McpCommand {
 
 /// A Kiln-owned syntax contract. The broker must still validate the selected
 /// catalogue schema, current definition, scope and generation before dispatch.
-/// These tools are deliberately not installed in the daemon's native catalogue yet.
+/// The daemon installs these tools only with explicit native MCP configuration.
 pub struct McpTools {
     catalog: ModelToolCatalog,
     max_request_bytes: NonZeroUsize,

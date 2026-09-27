@@ -233,15 +233,14 @@ impl RunService {
                     self.events.publish(invocation.events);
                     if invocation.value.capabilities().tool_calls() == CapabilitySupport::Supported
                     {
-                        if let Some(tool) = &self.native_file_read {
-                            self.store
-                                .attach_model_tool_catalog(
-                                    invocation.value.invocation_id(),
-                                    tool.catalog(),
-                                )
-                                .await
-                                .map_err(|_| RunError::RunStoreUnavailable)?;
-                        }
+                        let tools = self.native_tools()?;
+                        self.store
+                            .attach_model_tool_catalog(
+                                invocation.value.invocation_id(),
+                                tools.catalog(),
+                            )
+                            .await
+                            .map_err(|_| RunError::RunStoreUnavailable)?;
                     }
                     let claim = ProviderApplication::new(self.store.clone(), UlidIdGenerator)
                         .claim(invocation.value.invocation_id().clone())

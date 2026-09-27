@@ -1,8 +1,9 @@
 # MCP broker boundary
 
 This crate begins EDL-314 with a guarded stdio negotiation adapter over the
-official `rmcp` SDK, pinned to 3.4.1. It is not yet connected to daemon tool
-execution or synchronized MCP definitions. Its Unix process adapter accepts
+official `rmcp` SDK, pinned to 3.4.1. The daemon can opt into stdio native tool
+execution through explicit host budgets; synchronized MCP definition ingestion
+remains open. Its Unix process adapter accepts
 explicit locally authorized launch inputs; it does not grant permission to
 launch synchronized definitions, invoke tools, read resources, or request prompts.
 
@@ -99,7 +100,7 @@ preconditions conflicts. Reads preflight stored metadata size in SQLite using
 caller-provided definition budgets. There is no default definition size limit.
 The offline `kilnd register-mcp-definition` and `inspect-mcp-definition` commands
 expose this store under the exclusive daemon lock; see [local administration](../../docs/operations/mcp-runtime.md#local-definition-administration). Online registration,
-shared-source ingestion and process launch remain open. Audit rows are not yet
+shared-source ingestion remain open. Native stdio launch is opt-in. Audit rows are not yet
 exposed through client event replay.
 
 Core `McpInstanceKey` separates instances by definition, concrete owner, and auth
@@ -128,7 +129,7 @@ Focused SQLite fixtures prove independent-connection competing claims, scoped
 checkout/profile separation, stale/pinned readiness rejection, historical retry
 behavior, restart interruption and transaction rollback. The daemon's opt-in
 internal runtime consumes the restart and shutdown paths; complete process
-recovery and tool execution are not yet claimed.
+orphan recovery remains open; approved stdio tool execution is opt-in.
 
 On Unix, `StdioGeneration` composes the store ports with the process and SDK
 adapters. Its trusted caller supplies separately authorized host-resolved inputs,
@@ -153,9 +154,9 @@ during negotiation, disconnect, and cleanup despite a failed stop-journal write.
 The latter retains the uncertain active record and blocks replacement rather
 than reporting a terminal state. These are macOS observations. Daemon startup
 records interrupted generations under exclusive store ownership, and shutdown
-drains the registry. Orphan process reconciliation remains open. No public launch API or invocation
-method is exposed. Readiness snapshots do not authorize execution; future calls
-must revalidate current definitions and pass normal durable ToolCall approval.
+drains the registry. Orphan process reconciliation remains open. Readiness snapshots
+do not authorize execution; the opt-in native coordinator revalidates current
+definitions and passes normal durable ToolCall approval.
 
 `StdioRegistry` retains those owners across Run waiters, keyed by the canonical
 definition/owner/auth-profile identity. Concurrent demand joins one startup;
@@ -176,7 +177,7 @@ compares device/inode identity on every demand. A different directory is rejecte
 even with an unchanged revision; a non-directory descriptor is rejected before
 startup or reuse. This protects broader lifecycle scopes from silently inheriting
 another caller's cwd. It does not establish scope authorization or constrain a
-server that changes its own cwd. Daemon coordinator installation remains open.
+server that changes its own cwd. The opt-in daemon coordinator enforces the durable approval boundary.
 Scope stop retains its owner until cleanup completes. Shutdown seals the registry,
 signals every owner before waiting, and can be awaited again after caller
 cancellation. Dropping the registry requests stop but cannot prove completion;
@@ -271,8 +272,8 @@ transactionally; removing the host version from a supplied ready receipt cannot
 bypass this check. Preparation cancellation/deadline expiry sends no invocation,
 but may leave shared registry startup running. Once dispatch is claimed, its
 existing cancellation/uncertainty rules apply. No error permits replay. The trusted
-caller must persist completion and events; catalogue/schema validation and daemon
-coordinator installation remain prerequisites for advertising `mcp_call`.
+caller must persist completion and events. The opt-in daemon coordinator now does
+so after catalogue/schema validation and receipt-backed output capture.
 
 A real macOS fixture verifies one process reused across two approved Runs, exactly
 two sends, normal ToolCall completion, uninitialized local-host rejection,
@@ -283,7 +284,8 @@ The [internal daemon runtime](../../docs/operations/mcp-runtime.md) is opt-in wi
 explicit instance-capacity and recovery-batch budgets. Its startup runs before
 dispatch under the store lock; its Run-service shutdown drains registry owners.
 An additional listener-exit drain covers a dropped graceful-shutdown future.
-This lifecycle wiring does not yet expose an MCP launch or invocation endpoint.
+A separate `KILN_NATIVE_MCP_LIMITS` opt-in installs the compact native tools;
+lifecycle settings alone do not advertise them.
 
 Core now defines the compact `mcp_call` native proposal contract for tool calls,
 resource reads and prompt retrieval. Each proposal pins a server definition ID and
@@ -369,8 +371,8 @@ server/version/arguments. Launch preflight and dispatch recheck that exact name,
 capability and canonical proposal against the live approved native claim. Search
 and describe therefore share the normal serial invocation journal, no-replay rule,
 receipt-backed output capture and ToolCall completion path; discovery is not an
-approval bypass. The internal broker executes all three, but the daemon does not
-yet install or advertise them.
+approval bypass. The daemon installs all three only with explicit native MCP
+limits and its lifecycle registry enabled.
 
 Search takes `server_id`, `definition_version`, `kind`, `query`, `offset` and
 positive `limit`. Kind is `tool`, `prompt`, `resource` or `resource_template`.
@@ -417,11 +419,11 @@ has already finished. A lost worker or invocation-journal failure supplies no
 normal completion result. The trusted caller must persist returned results through
 the ordinary native completion store and publish its events.
 
-These remain internal APIs: the daemon does not advertise `mcp_call` yet.
-Catalogue/schema validation, effective host authorization and pinning, and daemon
-coordinator wiring for captured results and normal ToolCall finalization still need to be connected
-before enabling the operation. Invocation audit rows are not yet in public Event
-replay. A real Python stdio fixture on macOS verifies single sends for success,
+The daemon's explicit native MCP opt-in connects these APIs through a combined
+file-read/MCP catalogue, normal approval, fresh claims, host pinning and receipt-backed
+ToolCall completion. A core-owned consuming split retains the original command,
+source and scope; it exposes no arbitrary request transformation. Invocation audit
+rows are not yet in public Event replay. A real Python stdio fixture on macOS verifies single sends for success,
 server error, oversize output, disconnect, cancellation and deadline expiry;
 successive claims from distinct Runs reuse the same process. Inline and large
 artifact results also pass through the native ToolCall completion store in that
@@ -430,7 +432,6 @@ fixture, preserving output bytes and single-send counts. It requires
 are not covered by that fixture.
 
 Remaining broker work includes process recovery, online registration and online
-host-binding/credential administration, daemon installation of the claimed
-dispatch path, catalogue/result paging, HTTP/OAuth, mediated server requests,
-and full conformance. No MCP operation
-is offered to models until it is connected to the normal durable ToolCall boundary.
+host-binding/credential administration, catalogue caching/invalidation and stable
+result paging, HTTP/OAuth, mediated server requests, and full conformance. Native
+MCP remains disabled unless the host supplies all explicit runtime limits.

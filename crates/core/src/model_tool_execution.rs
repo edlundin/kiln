@@ -93,3 +93,38 @@ pub trait ModelToolExecutionStore: Send + Sync {
         event_id: EventId,
     ) -> impl Future<Output = Result<ModelToolExecutionMutation, ModelToolAdoptionError>> + Send;
 }
+
+impl ModelToolExecutionRequest<crate::NativeToolCommand> {
+    /// Consume the original fresh claim and unwrap only its registered command
+    /// variant. No caller-supplied mapping can replace the parsed command or any
+    /// durable source/scope field, and no second execution request is retained.
+    pub fn into_native(self) -> crate::NativeToolExecutionRequest {
+        let Self {
+            invocation_id,
+            provider_call_id,
+            tool_call,
+            scope,
+            command,
+        } = self;
+        match command {
+            crate::NativeToolCommand::FileRead(command) => {
+                crate::NativeToolExecutionRequest::FileRead(ModelToolExecutionRequest {
+                    invocation_id,
+                    provider_call_id,
+                    tool_call,
+                    scope,
+                    command,
+                })
+            }
+            crate::NativeToolCommand::Mcp(command) => {
+                crate::NativeToolExecutionRequest::Mcp(ModelToolExecutionRequest {
+                    invocation_id,
+                    provider_call_id,
+                    tool_call,
+                    scope,
+                    command,
+                })
+            }
+        }
+    }
+}

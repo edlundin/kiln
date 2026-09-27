@@ -13,21 +13,40 @@ pub(super) enum NativeToolBatchOutcome {
 }
 
 impl RunService {
+    pub(super) fn native_tools(&self) -> Result<kiln_core::NativeTools<'_>, RunError> {
+        #[cfg(unix)]
+        let mcp = self.native_mcp.as_ref().map(|mcp| &mcp.tools);
+        #[cfg(not(unix))]
+        let mcp = None;
+        kiln_core::NativeTools::new(
+            self.native_file_read.as_deref(),
+            mcp,
+            kiln_core::ModelToolCatalogLimits {
+                // Four locally constructed fixed definitions, no server schemas.
+                max_tools: 4,
+                max_definition_bytes: usize::MAX,
+                max_total_definition_bytes: usize::MAX,
+            },
+        )
+        .map_err(|_| RunError::InvalidTransition)
+    }
+
     pub(super) async fn execute_native_tools(
         &self,
         invocation: &ModelInvocation,
         cancellation: &mut oneshot::Receiver<()>,
     ) -> Result<NativeToolBatchOutcome, RunError> {
-        let Some(resolver) = self.native_file_read.as_deref() else {
+        let resolver = self.native_tools()?;
+        if resolver.catalog().definitions().is_empty() {
             return Ok(NativeToolBatchOutcome::Rejected);
-        };
+        }
         let application = ProviderApplication::new(self.store.clone(), UlidIdGenerator);
         let mut completed = Vec::new();
         loop {
             // Claims consume the resolved command. Reload the immutable batch
             // for each sequential call; never retain an executable retry token.
             let batch = match application
-                .resolve_tool_requests(invocation.invocation_id().clone(), resolver)
+                .resolve_tool_requests(invocation.invocation_id().clone(), &resolver)
                 .await
             {
                 Ok(batch) => batch,
@@ -145,14 +164,28 @@ impl RunService {
                 }
             };
             if let Some((request, root)) = request {
-                // Only Run cancellation stops a claimed file read. Interrupt
+                // Only Run cancellation stops a claimed native operation. Interrupt
                 // input is delivered at the next generation boundary, after
                 // this accepted sequential batch has terminal results.
-                let result =
-                    execute_workspace_file_read(request, &root, self.artifacts.clone(), async {
-                        let _ = (&mut *cancellation).await;
-                    })
-                    .await?;
+                let result = match request.into_native() {
+                    kiln_core::NativeToolExecutionRequest::FileRead(request) => {
+                        execute_workspace_file_read(request, &root, self.artifacts.clone(), async {
+                            let _ = (&mut *cancellation).await;
+                        })
+                        .await?
+                    }
+                    kiln_core::NativeToolExecutionRequest::Mcp(request) => {
+                        #[cfg(unix)]
+                        {
+                            self.execute_mcp_native(request, cancellation).await?
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = request;
+                            return Err(RunError::InvalidTransition);
+                        }
+                    }
+                };
                 let _sequence = self.commit_sequence.lock().await;
                 let mutation = application
                     .finish_tool_call(&tool_call_id, &result)

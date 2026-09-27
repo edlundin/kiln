@@ -371,7 +371,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
                     _ = &mut call.cancellation => Err(StdioCallError::Interrupted),
                     _ = call.reply.closed() => Err(StdioCallError::Interrupted),
                     _ = tokio::time::sleep_until(call.limits.deadline) => Err(StdioCallError::Interrupted),
-                    result = send_once(&peer, call.permit.request().command().operation(), call.limits.max_result_bytes) => result,
+                    result = send_once(&peer, call.permit.request().command().operation(), &call.limits) => result,
                 }
             }
         };

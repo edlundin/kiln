@@ -1,0 +1,290 @@
+//! Bounded, untrusted server tool metadata. Schemas validate input, never policy.
+
+use std::{collections::HashSet, num::NonZeroUsize};
+
+use rmcp::{RoleClient, model::*, service::Peer};
+
+use crate::StdioCallError;
+
+#[derive(Clone, Copy)]
+pub struct ToolCatalogLimits {
+    pub max_pages: NonZeroUsize,
+    pub max_tools: NonZeroUsize,
+    /// Cumulative encoded tools/list result bytes, in addition to frame limits.
+    pub max_bytes: NonZeroUsize,
+    /// Per-pattern compiled/DFA size allowance, not total validator memory.
+    pub max_regex_bytes: NonZeroUsize,
+    pub max_regex_backtracks: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCatalogError {
+    Unsupported,
+    LimitExceeded,
+    InvalidCatalog,
+    UnknownTool,
+    InvalidSchema,
+    InvalidArguments,
+}
+
+struct NoRetrieval;
+impl jsonschema::Retrieve for NoRetrieval {
+    fn retrieve(
+        &self,
+        _: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(std::io::Error::other("external schema retrieval is disabled").into())
+    }
+}
+
+/// Re-list before each call; never treat cached metadata as authorization. A
+/// complete bounded traversal is required so ambiguous duplicate names fail.
+pub(crate) async fn validate_tool(
+    peer: &Peer<RoleClient>,
+    name: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    limits: ToolCatalogLimits,
+) -> Result<Option<jsonschema::Validator>, StdioCallError> {
+    if peer
+        .peer_info()
+        .is_none_or(|info| info.capabilities.tools.is_none())
+    {
+        return Err(StdioCallError::Catalog(ToolCatalogError::Unsupported));
+    }
+    let mut catalog = Catalog::new(limits);
+    let mut cursor = None;
+    for _ in 0..limits.max_pages.get() {
+        let response = peer
+            .send_request(ClientRequest::ListToolsRequest(
+                ListToolsRequest::with_param(PaginatedRequestParams::default().with_cursor(cursor)),
+            ))
+            .await
+            .map_err(|error| match error {
+                rmcp::service::ServiceError::McpError(_) => {
+                    StdioCallError::Catalog(ToolCatalogError::InvalidCatalog)
+                }
+                _ => StdioCallError::Interrupted,
+            })?;
+        let ServerResult::ListToolsResult(page) = response else {
+            return Err(StdioCallError::Catalog(ToolCatalogError::InvalidCatalog));
+        };
+        cursor = catalog.push(page).map_err(StdioCallError::Catalog)?;
+        if cursor.is_none() {
+            return catalog
+                .validate(name, arguments)
+                .map_err(StdioCallError::Catalog);
+        }
+    }
+    Err(StdioCallError::Catalog(ToolCatalogError::LimitExceeded))
+}
+
+struct Catalog {
+    limits: ToolCatalogLimits,
+    tools: Vec<Tool>,
+    names: HashSet<String>,
+    cursors: HashSet<String>,
+    bytes: usize,
+}
+
+impl Catalog {
+    fn new(limits: ToolCatalogLimits) -> Self {
+        Self {
+            limits,
+            tools: Vec::new(),
+            names: HashSet::new(),
+            cursors: HashSet::new(),
+            bytes: 0,
+        }
+    }
+
+    fn push(&mut self, page: ListToolsResult) -> Result<Option<String>, ToolCatalogError> {
+        use ToolCatalogError as Error;
+        // A transport frame already bounds this page. Count re-encoded metadata
+        // without retaining a second serialized copy across catalogue pages.
+        let mut counter = ByteBudget {
+            remaining: self.limits.max_bytes.get() - self.bytes,
+        };
+        serde_json::to_writer(&mut counter, &page).map_err(|_| Error::LimitExceeded)?;
+        self.bytes = self.limits.max_bytes.get() - counter.remaining;
+        if page.tools.len() > self.limits.max_tools.get() - self.tools.len() {
+            return Err(Error::LimitExceeded);
+        }
+        if let Some(cursor) = &page.next_cursor {
+            if !self.cursors.insert(cursor.clone()) {
+                return Err(Error::InvalidCatalog);
+            }
+        }
+        for tool in &page.tools {
+            if tool.name.is_empty()
+                || tool.name.chars().any(char::is_control)
+                || !self.names.insert(tool.name.to_string())
+            {
+                return Err(Error::InvalidCatalog);
+            }
+        }
+        self.tools.extend(page.tools);
+        Ok(page.next_cursor)
+    }
+
+    fn validate(
+        &self,
+        name: &str,
+        arguments: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<jsonschema::Validator>, ToolCatalogError> {
+        use ToolCatalogError as Error;
+        let tool = self
+            .tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .ok_or(Error::UnknownTool)?;
+        let validator = compile_schema(&tool.input_schema, self.limits)?;
+        if !validator.is_valid(&serde_json::Value::Object(arguments.clone())) {
+            return Err(Error::InvalidArguments);
+        }
+        tool.output_schema
+            .as_ref()
+            .map(|schema| compile_schema(schema, self.limits))
+            .transpose()
+    }
+}
+
+fn compile_schema(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    limits: ToolCatalogLimits,
+) -> Result<jsonschema::Validator, ToolCatalogError> {
+    use ToolCatalogError as Error;
+    // MCP input/output schemas describe objects. Draft detection honors declared
+    // standard dialects; the library defaults to 2020-12 when absent. Inline
+    // references remain supported, but no URL or file is ever retrieved.
+    if schema.get("type").and_then(|v| v.as_str()) != Some("object") {
+        return Err(Error::InvalidSchema);
+    }
+    jsonschema::options()
+        .with_retriever(NoRetrieval)
+        .with_pattern_options(
+            jsonschema::PatternOptions::fancy_regex()
+                .backtrack_limit(limits.max_regex_backtracks.get())
+                .size_limit(limits.max_regex_bytes.get())
+                .dfa_size_limit(limits.max_regex_bytes.get()),
+        )
+        .build(&serde_json::Value::Object(schema.clone()))
+        .map_err(|_| Error::InvalidSchema)
+}
+
+struct ByteBudget {
+    remaining: usize,
+}
+impl std::io::Write for ByteBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes.len())
+            .ok_or_else(|| std::io::Error::other("catalogue exceeds byte budget"))?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn limits() -> ToolCatalogLimits {
+        ToolCatalogLimits {
+            max_pages: NonZeroUsize::new(2).unwrap(),
+            max_tools: NonZeroUsize::new(2).unwrap(),
+            max_bytes: NonZeroUsize::new(4096).unwrap(),
+            max_regex_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+            max_regex_backtracks: NonZeroUsize::new(10_000).unwrap(),
+        }
+    }
+    fn page(schema: serde_json::Value) -> ListToolsResult {
+        serde_json::from_value(json!({"tools":[{"name":"write","inputSchema":schema}]})).unwrap()
+    }
+
+    #[test]
+    fn selected_schema_validates_arguments_and_never_retrieves_external_references() {
+        let mut catalog = Catalog::new(limits());
+        catalog
+            .push(page(json!({
+                "type":"object", "$defs":{"text":{"type":"string","minLength":1}},
+                "properties":{"text":{"$ref":"#/$defs/text"}},
+                "required":["text"], "additionalProperties":false
+            })))
+            .unwrap();
+        assert!(
+            catalog
+                .validate("write", json!({"text":"hello"}).as_object().unwrap())
+                .is_ok()
+        );
+        for args in [
+            json!({}),
+            json!({"text":2}),
+            json!({"text":""}),
+            json!({"text":"ok","extra":true}),
+        ] {
+            assert_eq!(
+                catalog.validate("write", args.as_object().unwrap()).err(),
+                Some(ToolCatalogError::InvalidArguments)
+            );
+        }
+        assert_eq!(
+            catalog.validate("unknown", &Default::default()).err(),
+            Some(ToolCatalogError::UnknownTool)
+        );
+        for schema in [
+            json!({"type":"object","properties":{"text":{"$ref":"https://example.invalid/schema"}}}),
+            json!({"type":"object","properties":{"text":{"$ref":"file:///etc/passwd"}}}),
+            json!({"type":"object","$schema":"https://example.invalid/dialect"}),
+            json!({"type":"object","required":"invalid"}),
+        ] {
+            let mut catalog = Catalog::new(limits());
+            catalog.push(page(schema)).unwrap();
+            assert_eq!(
+                catalog
+                    .validate("write", json!({"text":"hello"}).as_object().unwrap())
+                    .err(),
+                Some(ToolCatalogError::InvalidSchema)
+            );
+        }
+    }
+
+    #[test]
+    fn pagination_rejects_ambiguous_names_cycles_and_excess_metadata() {
+        let mut catalog = Catalog::new(limits());
+        let mut first = page(json!({"type":"object"}));
+        first.next_cursor = Some("next".into());
+        assert_eq!(
+            catalog.push(first.clone()).unwrap().as_deref(),
+            Some("next")
+        );
+        let mut second = page(json!({"type":"object"}));
+        assert_eq!(
+            catalog.push(second.clone()),
+            Err(ToolCatalogError::InvalidCatalog)
+        );
+        let mut catalog = Catalog::new(limits());
+        catalog.push(first).unwrap();
+        second.tools.clear();
+        second.next_cursor = Some("next".into());
+        assert_eq!(catalog.push(second), Err(ToolCatalogError::InvalidCatalog));
+        let page = page(json!({"type":"object"}));
+        let size = serde_json::to_vec(&page).unwrap().len();
+        let mut exact = limits();
+        exact.max_bytes = NonZeroUsize::new(size).unwrap();
+        assert!(Catalog::new(exact).push(page.clone()).is_ok());
+        exact.max_bytes = NonZeroUsize::new(size - 1).unwrap();
+        assert_eq!(
+            Catalog::new(exact).push(page.clone()),
+            Err(ToolCatalogError::LimitExceeded)
+        );
+        let mut count = limits();
+        count.max_tools = NonZeroUsize::new(1).unwrap();
+        let mut catalog = Catalog::new(count);
+        catalog.push(page.clone()).unwrap();
+        assert_eq!(catalog.push(page), Err(ToolCatalogError::LimitExceeded));
+    }
+}

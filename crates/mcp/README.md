@@ -305,13 +305,35 @@ interrupting generations. `dispatching` means a send may have occurred, not proo
 that a server accepted or completed it. Dropping a permit grants no replay.
 
 The generation-owned SDK worker consumes a permit through `StdioGeneration::dispatch`
-or the registry dispatch route. It sends exactly one raw SDK request, avoiding
+or the registry dispatch route. It sends at most one raw operation request, avoiding
 SDK resource-cache fallback and automatic MRTR rounds. Results are serialized
 within an explicit caller byte ceiling in addition to the transport frame ceiling;
 no partial result is returned. Tool `isError` and structured protocol errors record
 failure. The worker returns typed errors without including raw server error text. Every call also has an explicit
 absolute deadline and cancellation receiver; dropping its sender requests
 cancellation, as does abandoning the reply waiter.
+
+Before a tool invocation, the worker traverses `tools/list` with explicit positive
+page, tool-count and cumulative encoded-byte budgets from `ToolCatalogLimits`.
+It requires advertised tool support and rejects duplicate names, repeated cursors,
+incomplete traversal and unknown selections. Metadata is fetched afresh for each
+call, including reuse of an existing process; annotations confer no permission.
+
+The selected tool's object input schema is validated by `jsonschema` 0.58.1, with
+default HTTP/file retrieval features disabled and a retriever that denies all
+external schema access. Inline references and declared standard drafts are
+supported; absent a dialect, the validator uses draft 2020-12. Caller budgets also
+bound regex backtracking and per-pattern compiled/DFA sizes. These are resource
+allowances, not a hard wall-clock or total validator-memory guarantee; synchronous
+schema compilation/validation cannot be preempted by the async deadline.
+
+Invalid metadata/schema/arguments fail before `tools/call`. A declared output
+schema is compiled before sending and checked against successful structured
+content afterward. Missing or invalid structured output produces a Failed outcome
+that explicitly preserves possible external effects and never retries the call.
+Tool error results need not satisfy the success output schema. Prompt/resource
+catalogue validation and provider-facing search/describe remain open; this tool
+validation does not install `mcp_call` in the daemon catalogue.
 
 Cancellation, deadline expiry during a possible send, unexpected response types,
 and connection loss record an interrupted/unknown outcome and retire the process

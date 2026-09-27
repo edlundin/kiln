@@ -14,6 +14,7 @@ pub struct StdioCallLimits {
     pub deadline: Instant,
     /// Encoded result ceiling, in addition to the generation's frame ceiling.
     pub max_result_bytes: NonZeroUsize,
+    pub tool_catalog: crate::ToolCatalogLimits,
 }
 
 /// Untrusted server output. No Debug; the broker must apply ordinary output and
@@ -25,6 +26,8 @@ pub struct StdioCallResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioCallError {
+    Catalog(crate::ToolCatalogError),
+    InvalidOutput,
     Rejected,
     CancelledBeforeSend,
     DeadlineBeforeSend,
@@ -53,8 +56,19 @@ pub(crate) struct DispatchOutcome {
 pub(crate) async fn send_once(
     peer: &Peer<RoleClient>,
     operation: &McpCallOperation,
-    max_bytes: NonZeroUsize,
+    limits: &StdioCallLimits,
 ) -> Result<StdioCallResult, StdioCallError> {
+    let output_validator = if let McpCallOperation::Tool { name, arguments } = operation {
+        crate::catalog::validate_tool(peer, name, arguments, limits.tool_catalog).await?
+    } else {
+        None
+    };
+    // Schema compilation is synchronous. Let the owner's biased cancellation
+    // select run again, then recheck time before sending any operation request.
+    tokio::task::yield_now().await;
+    if Instant::now() >= limits.deadline {
+        return Err(StdioCallError::DeadlineBeforeSend);
+    }
     let request = match operation {
         McpCallOperation::Tool { name, arguments } => {
             ClientRequest::CallToolRequest(CallToolRequest::new(
@@ -86,6 +100,18 @@ pub(crate) async fn send_once(
         })?;
     let is_error = match (&result, operation) {
         (ServerResult::CallToolResult(result), McpCallOperation::Tool { .. }) => {
+            // An error result need not satisfy the success output contract.
+            // Invalid success output follows a send; it never permits a retry.
+            if !result.is_error.unwrap_or(false)
+                && output_validator.as_ref().is_some_and(|validator| {
+                    result
+                        .structured_content
+                        .as_ref()
+                        .is_none_or(|value| !validator.is_valid(value))
+                })
+            {
+                return Err(StdioCallError::InvalidOutput);
+            }
             result.is_error.unwrap_or(false)
         }
         (ServerResult::ReadResourceResult(_), McpCallOperation::Resource { .. })
@@ -97,7 +123,7 @@ pub(crate) async fn send_once(
     };
     let mut writer = BoundedResult {
         bytes: Vec::new(),
-        limit: max_bytes.get(),
+        limit: limits.max_result_bytes.get(),
     };
     serde_json::to_writer(&mut writer, &result).map_err(|_| StdioCallError::ResultTooLarge)?;
     Ok(StdioCallResult {

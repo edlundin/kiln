@@ -13,6 +13,18 @@ fn limits() -> McpDefinitionLimits {
     }
 }
 
+#[cfg(unix)]
+fn catalog_limits() -> kiln_mcp::ToolCatalogLimits {
+    // Fixture catalogue is one short page with one simple object schema.
+    kiln_mcp::ToolCatalogLimits {
+        max_pages: NonZeroUsize::new(1).unwrap(),
+        max_tools: NonZeroUsize::new(1).unwrap(),
+        max_bytes: NonZeroUsize::new(1024).unwrap(),
+        max_regex_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+        max_regex_backtracks: NonZeroUsize::new(10_000).unwrap(),
+    }
+}
+
 async fn request(
     store: &super::super::SqliteStore,
     session: &Session,
@@ -448,6 +460,13 @@ for line in sys.stdin:
     method = request.get('method')
     if method == 'initialize':
         result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
+    elif method == 'tools/list':
+        with open('lists', 'a') as lists: lists.write('list\n')
+        result = {'tools':[{'name':'write','inputSchema':{'type':'object','properties':{'text':{'type':'string'}},'required':['text'],'additionalProperties':False}}]}
+        if mode == 'invalid_arguments': result['tools'][0]['inputSchema']['properties']['text']['type'] = 'integer'
+        if mode == 'unknown_tool': result['tools'] = []
+        if mode == 'catalog_limit': result['nextCursor'] = 'more'
+        if mode in ('invalid_output', 'valid_output'): result['tools'][0]['outputSchema'] = {'type':'object','required':['text'],'properties':{'text':{'type':'string'}}}
     elif method == 'tools/call':
         with open('calls', 'a') as calls: calls.write(json.dumps(request['params'])+'\n')
         if mode == 'disconnect': sys.exit(0)
@@ -457,6 +476,8 @@ for line in sys.stdin:
             continue
         text = 'private-result' * (400 if mode == 'capture' else 1)
         result = {'content':[{'type':'text','text':text}]}
+        if mode == 'invalid_output': result['structuredContent'] = {'text':42}
+        if mode == 'valid_output': result['structuredContent'] = {'text':'valid'}
     else:
         continue
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
@@ -465,6 +486,11 @@ for line in sys.stdin:
         "complete",
         "capture",
         "server_error",
+        "invalid_arguments",
+        "unknown_tool",
+        "catalog_limit",
+        "invalid_output",
+        "valid_output",
         "oversize",
         "disconnect",
         "cancel",
@@ -511,6 +537,7 @@ for line in sys.stdin:
             let call = owner.dispatch(
                 permit,
                 StdioCallLimits {
+                    tool_catalog: catalog_limits(),
                     deadline: Instant::now() + allowance,
                     max_result_bytes: NonZeroUsize::new(if mode == "oversize" { 1 } else { 8192 })
                         .unwrap(),
@@ -540,13 +567,26 @@ for line in sys.stdin:
             }
         };
         let expected = match mode {
-            "complete" | "capture" => {
+            "complete" | "capture" | "valid_output" => {
                 assert!(
                     String::from_utf8(result.unwrap().json)
                         .unwrap()
                         .contains("private-result")
                 );
                 McpInvocationState::Completed
+            }
+            "invalid_arguments" | "unknown_tool" | "catalog_limit" => {
+                let error = match mode {
+                    "invalid_arguments" => kiln_mcp::ToolCatalogError::InvalidArguments,
+                    "unknown_tool" => kiln_mcp::ToolCatalogError::UnknownTool,
+                    _ => kiln_mcp::ToolCatalogError::LimitExceeded,
+                };
+                assert_eq!(result.err(), Some(StdioCallError::Catalog(error)));
+                McpInvocationState::Failed
+            }
+            "invalid_output" => {
+                assert_eq!(result.err(), Some(StdioCallError::InvalidOutput));
+                McpInvocationState::Failed
             }
             "server_error" => {
                 assert_eq!(result.err(), Some(StdioCallError::Server));
@@ -563,11 +603,15 @@ for line in sys.stdin:
         };
         assert_eq!(
             std::fs::read_to_string(data.path().join("calls"))
-                .unwrap()
+                .unwrap_or_default()
                 .lines()
                 .count(),
-            1,
-            "{mode} must never replay"
+            if matches!(mode, "invalid_arguments" | "unknown_tool" | "catalog_limit") {
+                0
+            } else {
+                1
+            },
+            "{mode} must never replay or send rejected input"
         );
         if expected == McpInvocationState::Interrupted {
             assert_ne!(
@@ -605,6 +649,7 @@ for line in sys.stdin:
                 .dispatch_tool_call(
                     permit,
                     StdioCallLimits {
+                        tool_catalog: catalog_limits(),
                         deadline: Instant::now() + allowance,
                         max_result_bytes: NonZeroUsize::new(8192).unwrap(),
                     },
@@ -734,6 +779,8 @@ for line in sys.stdin:
     request = json.loads(line)
     if request.get('method') == 'initialize':
         result = {'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
+    elif request.get('method') == 'tools/list':
+        result = {'tools':[{'name':'write','inputSchema':{'type':'object','properties':{'text':{'type':'string'}},'required':['text'],'additionalProperties':False}}]}
     elif request.get('method') == 'tools/call':
         with open('calls', 'a') as calls: calls.write(request['params']['name']+'\n')
         result = {'content':[{'type':'text','text':'broker-result'}]}
@@ -786,6 +833,7 @@ for line in sys.stdin:
         shutdown_grace: Duration::ZERO,
         startup_deadline: Instant::now() + Duration::from_secs(5),
         call: StdioCallLimits {
+            tool_catalog: catalog_limits(),
             deadline: Instant::now() + Duration::from_secs(5),
             max_result_bytes: NonZeroUsize::new(1024).unwrap(),
         },

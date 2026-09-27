@@ -44,6 +44,14 @@ filesystem sandbox. The internal approved-call composition now connects durable
 scope checks, directory pinning, host resolution and single dispatch. Daemon
 coordinator/catalogue installation remains open.
 
+Internal tool dispatch now fetches a bounded `tools/list` catalogue and validates
+the selected tool's input schema before sending `tools/call`. Hosts must supply
+page/count/byte and regex budgets; there are no defaults. External schema URL/file
+retrieval is disabled. Successful structured output is checked against any declared
+output schema; a failure after sending does not imply effects were undone.
+Prompt/resource catalogue validation and provider-facing search/describe remain
+open, so the daemon still does not advertise `mcp_call`.
+
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
 waiter can await those same owners again. The daemon retains another reference to

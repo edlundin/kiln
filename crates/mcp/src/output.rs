@@ -34,6 +34,12 @@ where
         Err(error) => {
             return failed(match error {
                 Error::Rejected => "MCP dispatch was rejected before sending the request.",
+                Error::Catalog(_) => {
+                    "The MCP tool catalogue or arguments failed validation. No tool invocation was sent."
+                }
+                Error::InvalidOutput => {
+                    "The MCP tool responded with output that failed its declared schema. External effects may have occurred; the request was not retried."
+                }
                 Error::DeadlineBeforeSend => "The MCP deadline elapsed before sending the request.",
                 Error::Server => {
                     "The MCP server returned a protocol error. The request was not retried."
@@ -176,6 +182,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cancelled.state(), ToolCallState::Cancelled);
+        for (error, diagnostic) in [
+            (
+                StdioCallError::Catalog(crate::ToolCatalogError::InvalidArguments),
+                "No tool invocation was sent",
+            ),
+            (
+                StdioCallError::InvalidOutput,
+                "External effects may have occurred",
+            ),
+        ] {
+            let result = capture(outcome(Err(error), McpInvocationState::Failed), no_archive)
+                .await
+                .unwrap();
+            assert_eq!(result.state(), ToolCallState::Failed);
+            assert!(result.stderr().unwrap().contains(diagnostic));
+        }
         let interrupted = capture(
             outcome(
                 Err(StdioCallError::Interrupted),

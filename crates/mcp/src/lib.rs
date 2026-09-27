@@ -7,6 +7,12 @@ mod bindings;
 mod broker;
 
 #[cfg(unix)]
+mod catalog;
+
+#[cfg(unix)]
+pub use catalog::{ToolCatalogError, ToolCatalogLimits};
+
+#[cfg(unix)]
 pub use broker::{StdioBrokerError, StdioBrokerLimits, execute_stdio_call};
 
 #[cfg(unix)]

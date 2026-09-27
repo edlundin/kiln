@@ -259,6 +259,7 @@ async fn mcp_dispatch_requires_approved_claim_and_never_reacquires_after_interru
     let (data, store, session) = seeded_session().await;
     let target = ready(&store, McpInstanceOwner::Core).await;
     let first = request(&store, &session, "first").await;
+    let failed_wake = store.subscribe_mcp_invocation_events();
     let mut stale = target.clone();
     stale.state_version += 1;
     assert_eq!(
@@ -270,7 +271,7 @@ async fn mcp_dispatch_requires_approved_claim_and_never_reacquires_after_interru
     );
     {
         let mut sql = store.connection.lock().await;
-        sqlx::query("CREATE TRIGGER fixture_mcp_invocation_failure BEFORE INSERT ON mcp_invocation_events BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END")
+        sqlx::query("CREATE TRIGGER fixture_mcp_invocation_failure BEFORE INSERT ON session_events WHEN NEW.event_type = 'mcp.invocation_state_changed' BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END")
             .execute(&mut *sql).await.unwrap();
     }
     assert_eq!(
@@ -287,6 +288,12 @@ async fn mcp_dispatch_requires_approved_claim_and_never_reacquires_after_interru
             .await
             .unwrap();
         assert_eq!(count, 0);
+        let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mcp_invocation_events")
+            .fetch_one(&mut *sql)
+            .await
+            .unwrap();
+        assert_eq!(audit_count, 0);
+        assert!(!failed_wake.has_changed().unwrap());
         sqlx::query("DROP TRIGGER fixture_mcp_invocation_failure")
             .execute(&mut *sql)
             .await
@@ -319,8 +326,25 @@ async fn mcp_dispatch_requires_approved_claim_and_never_reacquires_after_interru
         Some(McpInvocationError::Busy)
     );
     let original = permit.record().clone();
+    let original_run = permit.request().tool_call().run_id().clone();
+    let before_restart = store
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    let dispatched = before_restart
+        .events()
+        .iter()
+        .find(|event| {
+            matches!(
+                event.payload(),
+                SessionEventPayload::McpInvocationStateChanged { .. }
+            )
+        })
+        .unwrap()
+        .clone();
     drop(store);
     let store = super::super::SqliteStore::open(data.path()).await.unwrap();
+    let mut wake = store.subscribe_mcp_invocation_events();
     store
         .interrupt_mcp_instances_after_restart(NonZeroUsize::new(1).unwrap())
         .await
@@ -376,11 +400,50 @@ async fn mcp_dispatch_requires_approved_claim_and_never_reacquires_after_interru
         .await
         .unwrap();
     assert_eq!(rows, 1);
+    drop(sql);
+    assert!(wake.has_changed().unwrap());
+    wake.borrow_and_update();
+    let replay = store
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    let receipts: Vec<_> = replay
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.payload(),
+                SessionEventPayload::McpInvocationStateChanged { .. }
+            )
+        })
+        .collect();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(*receipts[0], dispatched);
+    let SessionEventPayload::McpInvocationStateChanged { run_id, invocation } =
+        receipts[1].payload()
+    else {
+        unreachable!()
+    };
+    assert_eq!(run_id, &original_run);
+    assert_eq!(invocation.state, McpInvocationState::Interrupted);
+    assert_eq!(invocation.tool_call_id, original.tool_call_id);
+    assert_eq!(invocation.generation, original.generation);
+    assert!(receipts[1].cursor() > dispatched.cursor());
+    assert!(!format!("{:?}", receipts).contains("private-payload"));
+    assert_eq!(
+        store
+            .interrupt_mcp_invocations(None, NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(!wake.has_changed().unwrap());
 }
 
 #[tokio::test]
 async fn mcp_dispatch_rechecks_definition_and_journals_terminal_retry_once() {
     let (_data, store, session) = seeded_session().await;
+    let mut wake = store.subscribe_mcp_invocation_events();
     let target = ready(&store, McpInstanceOwner::Core).await;
     let request = request(&store, &session, "finish").await;
     let McpDispatchClaim::Acquired(permit) = claim_mcp_dispatch(&store, request, &target, limits())
@@ -393,6 +456,8 @@ async fn mcp_dispatch_rechecks_definition_and_journals_terminal_retry_once() {
         .finish_mcp_invocation(permit.record(), McpInvocationState::Completed)
         .await
         .unwrap();
+    assert!(wake.has_changed().unwrap());
+    wake.borrow_and_update();
     assert_eq!(
         store
             .finish_mcp_invocation(permit.record(), McpInvocationState::Completed)
@@ -414,6 +479,30 @@ async fn mcp_dispatch_rechecks_definition_and_journals_terminal_retry_once() {
             .unwrap(),
         McpInvocationMutation::Existing(_)
     ));
+    assert!(!wake.has_changed().unwrap());
+    let page = store
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    let states: Vec<_> = page
+        .events()
+        .iter()
+        .filter_map(|event| match event.payload() {
+            SessionEventPayload::McpInvocationStateChanged { run_id, invocation } => {
+                assert_eq!(run_id, permit.request().tool_call().run_id());
+                assert_eq!(invocation.tool_call_id, permit.record().tool_call_id);
+                Some(invocation.state)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [
+            McpInvocationState::Dispatching,
+            McpInvocationState::Completed
+        ]
+    );
     let second_session =
         SessionApplication::new(store.clone(), store.clone(), super::super::UlidIdGenerator)
             .create_session(session.workspace_id().clone())

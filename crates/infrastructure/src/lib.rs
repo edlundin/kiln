@@ -1,7 +1,7 @@
 //! SQLite, Git, filesystem, and identifier adapters for Kiln core.
 
-mod assistant_message;
 mod artifact_page;
+mod assistant_message;
 pub use artifact_page::ArtifactPageError;
 mod configuration_access;
 mod configuration_credential;
@@ -531,6 +531,7 @@ pub struct SqliteStore {
     configuration_identity_operations: Arc<Mutex<()>>,
     configuration_enrollment_operations: Arc<Mutex<()>>,
     configuration_serving_changes: watch::Sender<u64>,
+    mcp_invocation_events: watch::Sender<()>,
 }
 
 pub const DETERMINISTIC_SUBPROCESS_ARGUMENT: &str = "--kiln-deterministic-subprocess";
@@ -874,11 +875,13 @@ impl SqliteStore {
             .await
             .map_err(InfrastructureError::Database)?;
         let (configuration_serving_changes, _) = watch::channel(0);
+        let (mcp_invocation_events, _) = watch::channel(());
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             configuration_identity_operations: Arc::new(Mutex::new(())),
             configuration_enrollment_operations: Arc::new(Mutex::new(())),
             configuration_serving_changes,
+            mcp_invocation_events,
         })
     }
 
@@ -887,6 +890,12 @@ impl SqliteStore {
     /// events about historical identities can be unrelated to the active one.
     pub fn subscribe_configuration_serving_changes(&self) -> watch::Receiver<u64> {
         self.configuration_serving_changes.subscribe()
+    }
+
+    /// Coalesced wakeups after MCP receipt and Session Event commits. Durable
+    /// cursors, rather than this notification, carry replay data and ordering.
+    pub fn subscribe_mcp_invocation_events(&self) -> watch::Receiver<()> {
+        self.mcp_invocation_events.subscribe()
     }
 
     pub(crate) fn notify_configuration_serving_change(&self) {
@@ -1679,7 +1688,7 @@ macro_rules! event_select {
        e.model_capability_vision, e.model_capability_structured_output,
        e.model_purpose, e.model_retry_of, e.model_invocation_state,
        e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
-       e.output_chunk_id,
+       e.output_chunk_id, e.mcp_invocation_sequence,
        cm.session_id AS manifest_session_id,
        cm.run_id AS manifest_run_id,
        cm.content_hash AS manifest_content_hash,
@@ -2526,6 +2535,33 @@ async fn parse_event_rows(
         .map_err(|_| StoreError::Unavailable)?;
 
         let event = match event_type.as_str() {
+            "mcp.invocation_state_changed" => {
+                let sequence = row
+                    .try_get::<i64, _>("mcp_invocation_sequence")
+                    .map_err(|_| StoreError::Unavailable)?;
+                let (owner_session, owner_run, invocation) =
+                    mcp_invocation::load_event(transaction, sequence).await?;
+                if owner_session != stored_session_id
+                    || run_id.as_deref() != Some(owner_run.as_str())
+                    || row
+                        .try_get::<Option<String>, _>("tool_call_id")
+                        .map_err(|_| StoreError::Unavailable)?
+                        .as_deref()
+                        != Some(invocation.tool_call_id.as_str())
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                StoredSessionEvent::from_parts(
+                    event_id,
+                    stored_session_id,
+                    cursor,
+                    SessionEventPayload::McpInvocationStateChanged {
+                        run_id: owner_run,
+                        invocation,
+                    },
+                )
+                .map_err(|_| StoreError::Unavailable)?
+            }
             "model_invocation.output" => {
                 let output_chunk_id = row
                     .try_get::<String, _>("output_chunk_id")
@@ -4844,7 +4880,7 @@ async fn validate_child_activity(
                     ) THEN e.assigned_run_id
                     WHEN e.event_type = 'run.child_added' THEN e.child_run_id
                     WHEN e.event_type IN (
-                        'model_invocation.output', 'usage.observed',
+                        'model_invocation.output', 'usage.observed', 'mcp.invocation_state_changed',
                         'model_invocation.created', 'model_invocation.state_changed',
                         'context.manifest_created', 'run.created', 'run.queued',
                         'run.state_changed', 'run.cancellation_requested',
@@ -7388,6 +7424,7 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
         | SessionEventPayload::ModelInvocationStateChanged { .. }
         | SessionEventPayload::UsageObserved { .. }
         | SessionEventPayload::ModelOutputRecorded { .. }
+        | SessionEventPayload::McpInvocationStateChanged { .. }
         | SessionEventPayload::TaskCreated { .. }
         | SessionEventPayload::TaskUpdated { .. }
         | SessionEventPayload::TaskAssigned { .. }

@@ -310,79 +310,35 @@ fn catalogue_and_error_fixture_use_protocol_metadata() {
             .expect("catalogue is valid JSON");
 
     assert_eq!(catalogue["protocol_version"], PROTOCOL_VERSION);
-    assert_eq!(catalogue["http"][0]["path"], NEGOTIATE_PATH);
-    assert_eq!(catalogue["http"][0]["operation"], NEGOTIATE_OPERATION_ID);
-    assert_eq!(catalogue["http"][1]["path"], WORKSPACES_PATH);
-    assert_eq!(
-        catalogue["http"][1]["operation"],
-        CREATE_WORKSPACE_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][2]["path"], WORKSPACES_PATH);
-    assert_eq!(
-        catalogue["http"][2]["operation"],
-        LIST_WORKSPACES_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][3]["path"], WORKSPACE_PATH);
-    assert_eq!(
-        catalogue["http"][3]["operation"],
-        GET_WORKSPACE_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][4]["path"], WORKSPACE_SESSIONS_PATH);
-    assert_eq!(
-        catalogue["http"][4]["operation"],
-        CREATE_SESSION_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][5]["path"], WORKSPACE_SESSIONS_PATH);
-    assert_eq!(
-        catalogue["http"][5]["operation"],
-        LIST_SESSIONS_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][6]["path"], SESSION_PATH);
-    assert_eq!(catalogue["http"][6]["operation"], GET_SESSION_OPERATION_ID);
-    assert_eq!(catalogue["http"][7]["path"], SESSION_MESSAGES_PATH);
-    assert_eq!(
-        catalogue["http"][7]["operation"],
-        APPEND_MESSAGE_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][8]["path"], SESSION_EVENTS_PATH);
-    assert_eq!(
-        catalogue["http"][8]["operation"],
-        LIST_SESSION_EVENTS_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][9]["path"], SESSION_TASKS_PATH);
-    assert_eq!(catalogue["http"][9]["operation"], CREATE_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][10]["path"], TASK_PATH);
-    assert_eq!(catalogue["http"][10]["operation"], GET_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][11]["path"], TASK_PATH);
-    assert_eq!(catalogue["http"][11]["operation"], UPDATE_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][12]["path"], TASK_ASSIGNMENT_PATH);
-    assert_eq!(catalogue["http"][12]["operation"], ASSIGN_TASK_OPERATION_ID);
-    assert_eq!(catalogue["http"][13]["path"], TASK_TRANSITION_PATH);
-    assert_eq!(
-        catalogue["http"][13]["operation"],
-        TRANSITION_TASK_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][14]["path"], SESSION_RUNS_PATH);
-    assert_eq!(catalogue["http"][14]["operation"], START_RUN_OPERATION_ID);
-    assert_eq!(catalogue["http"][15]["path"], SESSION_RUNS_PATH);
-    assert_eq!(
-        catalogue["http"][15]["operation"],
-        LIST_SESSION_RUNS_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][16]["path"], RUN_CHILDREN_PATH);
-    assert_eq!(
-        catalogue["http"][16]["operation"],
-        START_CHILD_RUN_OPERATION_ID
-    );
-    assert_eq!(catalogue["http"][17]["path"], RUN_PATH);
-    assert_eq!(catalogue["http"][17]["operation"], GET_RUN_OPERATION_ID);
-    let artifact = catalogue["http"]
-        .as_array()
-        .expect("HTTP operations")
-        .iter()
-        .find(|operation| operation["operation"] == GET_ARTIFACT_OPERATION_ID)
-        .expect("artifact operation");
-    assert_eq!(artifact["path"], ARTIFACT_PATH);
+    let operations = catalogue["http"].as_array().expect("HTTP operations");
+    for (id, path) in [
+        (NEGOTIATE_OPERATION_ID, NEGOTIATE_PATH),
+        (CREATE_WORKSPACE_OPERATION_ID, WORKSPACES_PATH),
+        (LIST_WORKSPACES_OPERATION_ID, WORKSPACES_PATH),
+        (GET_WORKSPACE_OPERATION_ID, WORKSPACE_PATH),
+        (CREATE_SESSION_OPERATION_ID, WORKSPACE_SESSIONS_PATH),
+        (LIST_SESSIONS_OPERATION_ID, WORKSPACE_SESSIONS_PATH),
+        (GET_SESSION_OPERATION_ID, SESSION_PATH),
+        (APPEND_MESSAGE_OPERATION_ID, SESSION_MESSAGES_PATH),
+        (LIST_SESSION_EVENTS_OPERATION_ID, SESSION_EVENTS_PATH),
+        (CREATE_TASK_OPERATION_ID, SESSION_TASKS_PATH),
+        (GET_TASK_OPERATION_ID, TASK_PATH),
+        (UPDATE_TASK_OPERATION_ID, TASK_PATH),
+        (ASSIGN_TASK_OPERATION_ID, TASK_ASSIGNMENT_PATH),
+        (TRANSITION_TASK_OPERATION_ID, TASK_TRANSITION_PATH),
+        (START_RUN_OPERATION_ID, SESSION_RUNS_PATH),
+        (LIST_SESSION_RUNS_OPERATION_ID, SESSION_RUNS_PATH),
+        (START_CHILD_RUN_OPERATION_ID, RUN_CHILDREN_PATH),
+        (GET_RUN_OPERATION_ID, RUN_PATH),
+        (GET_ARTIFACT_OPERATION_ID, ARTIFACT_PATH),
+    ] {
+        let matches: Vec<_> = operations
+            .iter()
+            .filter(|operation| operation["operation"] == id)
+            .collect();
+        assert_eq!(matches.len(), 1, "exactly one {id} operation");
+        assert_eq!(matches[0]["path"], path);
+    }
     assert!(
         catalogue["http"]
             .as_array()

@@ -14,6 +14,9 @@ pub fn project_child_activity(
         event_id: event.event_id().clone(),
     };
     let content = match event.payload() {
+        SessionEventPayload::McpInvocationStateChanged { invocation, .. } => {
+            format!("Child MCP invocation {}.", invocation.state.as_str())
+        }
         SessionEventPayload::SessionCreated { .. } => return None,
         SessionEventPayload::MessageAppended { message } => format!(
             "Child message ({}, {}):\n{}",

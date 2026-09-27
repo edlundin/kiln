@@ -75,6 +75,31 @@ pub(crate) struct RunService {
     approval_changed: watch::Sender<u64>,
 }
 
+async fn relay_mcp_invocation_events(mut changes: watch::Receiver<()>, events: EventBroadcaster) {
+    // The receiver owns no store reference: it stops when all stores close.
+    // Wakeups coalesce; clients replay every committed row by durable cursor.
+    while changes.changed().await.is_ok() {
+        events.wake();
+    }
+}
+
+#[cfg(test)]
+mod mcp_event_relay_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn committed_notification_wakes_clients_and_store_close_stops_relay() {
+        let (sender, receiver) = watch::channel(());
+        let events = EventBroadcaster::default();
+        let mut wake = events.subscribe_wake();
+        let relay = tokio::spawn(relay_mcp_invocation_events(receiver, events));
+        sender.send_replace(());
+        assert_eq!(wake.recv().await, Some(()));
+        drop(sender);
+        relay.await.unwrap();
+    }
+}
+
 impl RunService {
     pub(crate) fn new(
         runs: RunApplication<SqliteStore, UlidIdGenerator>,
@@ -83,6 +108,10 @@ impl RunService {
         store: SqliteStore,
         artifacts: FileArtifactStore,
     ) -> Self {
+        tokio::spawn(relay_mcp_invocation_events(
+            store.subscribe_mcp_invocation_events(),
+            events.clone(),
+        ));
         Self {
             runs: Arc::new(runs),
             executor,

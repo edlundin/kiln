@@ -132,6 +132,7 @@ impl McpInvocationStore for SqliteStore {
         };
         append_event(&mut tx, &record).await?;
         tx.commit().await.map_err(|_| Error::Unavailable)?;
+        self.mcp_invocation_events.send_replace(());
         Ok(McpInvocationMutation::Applied(record))
     }
 
@@ -174,6 +175,7 @@ impl McpInvocationStore for SqliteStore {
         current.state = state;
         append_event(&mut tx, &current).await?;
         tx.commit().await.map_err(|_| Error::Unavailable)?;
+        self.mcp_invocation_events.send_replace(());
         Ok(current)
     }
 
@@ -198,15 +200,18 @@ impl McpInvocationStore for SqliteStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(|_| Error::Unavailable)?;
-            sqlx::query(
-                "INSERT INTO mcp_invocation_events (tool_call_id, state) VALUES (?, 'interrupted')",
+            let record = load(
+                &mut tx,
+                &ToolCallId::parse(id).map_err(|_| Error::IntegrityViolation)?,
             )
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| Error::Unavailable)?;
+            .await?
+            .ok_or(Error::IntegrityViolation)?;
+            append_event(&mut tx, &record).await?;
         }
         tx.commit().await.map_err(|_| Error::Unavailable)?;
+        if !ids.is_empty() {
+            self.mcp_invocation_events.send_replace(());
+        }
         Ok(ids.len())
     }
 }
@@ -242,13 +247,57 @@ async fn append_event(
     connection: &mut SqliteConnection,
     record: &McpInvocationRecord,
 ) -> Result<(), Error> {
-    sqlx::query("INSERT INTO mcp_invocation_events (tool_call_id, state) VALUES (?, ?)")
-        .bind(record.tool_call_id.as_str())
-        .bind(record.state.as_str())
-        .execute(connection)
-        .await
-        .map_err(|_| Error::Unavailable)?;
+    let sequence: i64 = sqlx::query_scalar(
+        "INSERT INTO mcp_invocation_events (tool_call_id, state) VALUES (?, ?) RETURNING sequence",
+    )
+    .bind(record.tool_call_id.as_str())
+    .bind(record.state.as_str())
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|_| Error::Unavailable)?;
+    let event_id = kiln_core::EventId::from_ulid(ulid::Ulid::generate());
+    let inserted = sqlx::query("INSERT INTO session_events (event_id, session_id, event_type, run_id, tool_call_id, mcp_invocation_sequence)
+        SELECT ?, r.session_id, 'mcp.invocation_state_changed', r.run_id, t.tool_call_id, ?
+        FROM tool_calls t JOIN runs r ON r.run_id = t.run_id WHERE t.tool_call_id = ?")
+        .bind(event_id.as_str()).bind(sequence).bind(record.tool_call_id.as_str())
+        .execute(connection).await.map_err(|_| Error::Unavailable)?;
+    if inserted.rows_affected() != 1 {
+        return Err(Error::IntegrityViolation);
+    }
     Ok(())
+}
+
+pub(super) async fn load_event(
+    connection: &mut SqliteConnection,
+    sequence: i64,
+) -> Result<(kiln_core::SessionId, kiln_core::RunId, McpInvocationRecord), kiln_core::StoreError> {
+    use kiln_core::StoreError;
+    let row = sqlx::query(
+        "SELECT r.session_id, r.run_id, e.tool_call_id, i.generation_id, e.state
+        FROM mcp_invocation_events e JOIN mcp_invocations i ON i.tool_call_id = e.tool_call_id
+        JOIN tool_calls t ON t.tool_call_id = i.tool_call_id JOIN runs r ON r.run_id = t.run_id
+        WHERE e.sequence = ?",
+    )
+    .bind(sequence)
+    .fetch_one(connection)
+    .await
+    .map_err(|_| StoreError::Unavailable)?;
+    let string = |name| {
+        row.try_get::<String, _>(name)
+            .map_err(|_| StoreError::Unavailable)
+    };
+    Ok((
+        kiln_core::SessionId::parse(string("session_id")?).map_err(|_| StoreError::Unavailable)?,
+        kiln_core::RunId::parse(string("run_id")?).map_err(|_| StoreError::Unavailable)?,
+        McpInvocationRecord {
+            tool_call_id: ToolCallId::parse(string("tool_call_id")?)
+                .map_err(|_| StoreError::Unavailable)?,
+            generation: McpGenerationId::parse(string("generation_id")?)
+                .map_err(|_| StoreError::Unavailable)?,
+            state: McpInvocationState::parse(&string("state")?)
+                .map_err(|_| StoreError::Unavailable)?,
+        },
+    ))
 }
 
 async fn native_claim_owner(

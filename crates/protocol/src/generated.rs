@@ -623,6 +623,7 @@ fn schema() -> String {
             "ModelInvocationFailureReason",
             schema_for!(ModelInvocationFailureReason),
         ),
+        ("McpInvocationState", schema_for!(crate::McpInvocationState)),
         ("ModelOutputStream", schema_for!(ModelOutputStream)),
         (
             "ModelOutputRecordedResponse",
@@ -779,6 +780,7 @@ fn typescript() -> String {
         ModelInvocationPurpose::decl(&config),
         ModelInvocationCompletionKind::decl(&config),
         ModelInvocationFailureReason::decl(&config),
+        crate::McpInvocationState::decl(&config),
         ModelOutputStream::decl(&config),
         ModelOutputRecordedResponse::decl(&config),
         UsageCompleteness::decl(&config),
@@ -3634,6 +3636,10 @@ components:
         (
             "ModelInvocationFailureReason",
             openapi_schema::<ModelInvocationFailureReason>(),
+        ),
+        (
+            "McpInvocationState",
+            openapi_schema::<crate::McpInvocationState>(),
         ),
         ("ModelOutputStream", openapi_schema::<ModelOutputStream>()),
         (

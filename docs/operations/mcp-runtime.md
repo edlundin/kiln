@@ -130,6 +130,20 @@ notifications only, not silent server changes or a stable snapshot ID. Retained
 snapshots are checked against their own epoch before reuse and before output.
 Server cache hints and durable invalidation Event replay remain open.
 
+Protocol `0.44.0` adds `mcp.invocation_state_changed` to ordinary Session Event
+queries and WebSocket replay. Each new dispatch receipt and terminal transition
+is committed atomically with its event, including interruption during recovery.
+The payload contains only `run_id`, `tool_call_id`, Kiln's `generation_id`, and
+`state` (`dispatching`, `completed`, `failed`, `cancelled`, or `interrupted`). It
+contains no MCP frame, result body, credential or live server session ID.
+Duplicate receipt transitions create no extra event or wakeup. Clients use normal
+durable cursors and event IDs; notifications only wake the replay reader.
+
+The migration preserves existing event identities, cursors, cursor high-water
+marks and incoming references. Older private MCP audit rows are not retroactively
+inserted into the public timeline. Definition, instance, negotiation, authentication,
+catalogue and server-request lifecycle events remain separate follow-up work.
+
 The artifact store has a bounded byte-page primitive for result paging.
 It scans and hashes the complete file on every read, retaining only the requested
 page plus fixed scratch space. A caller-supplied total artifact-size limit bounds

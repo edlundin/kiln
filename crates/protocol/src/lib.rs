@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.43.0";
+pub const PROTOCOL_VERSION: &str = "0.44.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -1815,6 +1815,13 @@ pub struct ModelOutputRecordedResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum SessionEventDataResponse {
+    #[serde(rename = "mcp.invocation_state_changed")]
+    McpInvocationStateChanged {
+        run_id: String,
+        tool_call_id: String,
+        generation_id: String,
+        state: McpInvocationState,
+    },
     #[serde(rename = "model_invocation.output")]
     ModelOutputRecorded(ModelOutputRecordedResponse),
     #[serde(rename = "usage.observed")]
@@ -1896,6 +1903,16 @@ pub enum SessionEventDataResponse {
         stream: ToolOutputStream,
         artifact: ArtifactResponse,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpInvocationState {
+    Dispatching,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]

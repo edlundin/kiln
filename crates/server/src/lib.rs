@@ -2940,6 +2940,30 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
             }),
             requested_scope: requested_scope.as_ref().map(scope_response),
         },
+        SessionEventPayload::McpInvocationStateChanged { run_id, invocation } => {
+            SessionEventDataResponse::McpInvocationStateChanged {
+                run_id: run_id.as_str().to_owned(),
+                tool_call_id: invocation.tool_call_id.as_str().to_owned(),
+                generation_id: invocation.generation.as_str().to_owned(),
+                state: match invocation.state {
+                    kiln_core::McpInvocationState::Dispatching => {
+                        kiln_protocol::McpInvocationState::Dispatching
+                    }
+                    kiln_core::McpInvocationState::Completed => {
+                        kiln_protocol::McpInvocationState::Completed
+                    }
+                    kiln_core::McpInvocationState::Failed => {
+                        kiln_protocol::McpInvocationState::Failed
+                    }
+                    kiln_core::McpInvocationState::Cancelled => {
+                        kiln_protocol::McpInvocationState::Cancelled
+                    }
+                    kiln_core::McpInvocationState::Interrupted => {
+                        kiln_protocol::McpInvocationState::Interrupted
+                    }
+                },
+            }
+        }
         SessionEventPayload::RunQueued { run_id } => SessionEventDataResponse::RunQueued {
             run_id: run_id.as_str().to_owned(),
         },
@@ -4371,6 +4395,44 @@ mod tests {
         assert_eq!(response.tool_calls[0].stdout.as_deref(), Some("stdout"));
         assert_eq!(response.tool_calls[0].stderr.as_deref(), Some("stderr"));
         assert_eq!(response.tool_calls[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn mcp_receipt_events_expose_only_kiln_provenance_and_outcome() {
+        for state in [
+            kiln_core::McpInvocationState::Dispatching,
+            kiln_core::McpInvocationState::Completed,
+            kiln_core::McpInvocationState::Failed,
+            kiln_core::McpInvocationState::Cancelled,
+            kiln_core::McpInvocationState::Interrupted,
+        ] {
+            let event = stored_event(
+                1,
+                SessionEventPayload::McpInvocationStateChanged {
+                    run_id: run_id(),
+                    invocation: kiln_core::McpInvocationRecord {
+                        tool_call_id: tool_call_id(),
+                        generation: kiln_core::McpGenerationId::parse(
+                            "mcg_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                        )
+                        .unwrap(),
+                        state,
+                    },
+                },
+            );
+            let response = session_event_response(&event);
+            let value = serde_json::to_value(&response.event).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({"type":"mcp.invocation_state_changed",
+                "run_id":RUN_ID,"tool_call_id":TOOL_CALL_ID,
+                "generation_id":"mcg_01ARZ3NDEKTSV4RRFFQ69G5FAV","state":state.as_str()})
+            );
+            assert_eq!(
+                serde_json::from_value::<SessionEventDataResponse>(value).unwrap(),
+                response.event
+            );
+        }
     }
 
     #[test]

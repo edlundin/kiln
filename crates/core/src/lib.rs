@@ -3727,6 +3727,11 @@ pub trait SubprocessExecutor: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEventPayload {
+    /// Kiln receipt provenance only, never raw MCP frames or live session IDs.
+    McpInvocationStateChanged {
+        run_id: RunId,
+        invocation: McpInvocationRecord,
+    },
     ModelOutputRecorded {
         chunk: ModelOutputChunk,
     },
@@ -4279,6 +4284,7 @@ impl StoredSessionEvent {
             SessionEventPayload::ApprovalRequested { approval }
             | SessionEventPayload::ApprovalDecided { approval } => Some(approval.run_id()),
             SessionEventPayload::ContextManifestCreated { run_id, .. }
+            | SessionEventPayload::McpInvocationStateChanged { run_id, .. }
             | SessionEventPayload::RunCreated { run_id, .. }
             | SessionEventPayload::RunQueued { run_id }
             | SessionEventPayload::RunStateChanged { run_id, .. }

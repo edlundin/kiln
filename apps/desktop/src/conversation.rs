@@ -32,6 +32,7 @@ pub struct Conversation {
     pub transcript: Vec<TranscriptItem>,
     pub artifacts: BTreeMap<String, ArtifactResponse>,
     pub approvals: BTreeMap<String, ApprovalResponse>,
+    pub elicitation_inputs: BTreeMap<crate::mcp_elicitation::InputId, String>,
     pub root_run_id: Option<String>,
     pub runs: BTreeMap<String, RunItem>,
     pub tasks: BTreeMap<String, TaskResponse>,
@@ -40,6 +41,36 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// Match the daemon's interaction routing without treating this UI snapshot
+    /// as authority. Every ancestor must still be live; the API rechecks it.
+    pub fn interaction_owner(&self, source: &str) -> Option<&str> {
+        let source = self.run(source)?;
+        let mut current = source;
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(current.run_id.as_str())
+                || !matches!(
+                    current.state,
+                    RunState::Queued | RunState::Running | RunState::WaitingForApproval
+                )
+            {
+                return None;
+            }
+            match current.parent_run_id.as_deref() {
+                Some(parent) => current = self.run(parent)?,
+                None => break,
+            }
+        }
+        if current.user_input_mode != RunInputMode::Interactive {
+            return None;
+        }
+        Some(if source.user_input_mode == RunInputMode::Interactive {
+            &source.run_id
+        } else {
+            &current.run_id
+        })
+    }
+
     pub fn root_state(&self) -> Option<RunState> {
         self.root_run_id
             .as_ref()
@@ -178,6 +209,28 @@ impl Conversation {
         }
         let source_event_id = event.event_id;
         match event.event {
+            Event::McpInputStateChanged {
+                run_id,
+                tool_call_id,
+                generation_id,
+                ordinal,
+                kind: kiln_protocol::McpInputKind::Elicitation,
+                state,
+            } => {
+                let Ok(ordinal) = ordinal.parse() else {
+                    return;
+                };
+                let id = crate::mcp_elicitation::InputId {
+                    tool_call_id,
+                    generation: generation_id,
+                    ordinal,
+                };
+                if state == kiln_protocol::McpInputState::Required {
+                    self.elicitation_inputs.insert(id, run_id);
+                } else {
+                    self.elicitation_inputs.remove(&id);
+                }
+            }
             Event::MessageAppended { message } => {
                 let key = message.model_invocation_id.as_ref().map_or_else(
                     || format!("message:{}", message.message_id),
@@ -362,5 +415,73 @@ impl Conversation {
             self.entries.insert(item.id.clone(), self.transcript.len());
             self.transcript.push(item);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_pending_forms_route_and_revoke_from_replayed_events() {
+        let mut conversation = Conversation::default();
+        for (id, parent, mode) in [
+            ("root", None, RunInputMode::Interactive),
+            ("child", Some("root"), RunInputMode::ReadOnly),
+            ("interactive", Some("child"), RunInputMode::Interactive),
+        ] {
+            conversation.runs.insert(
+                id.into(),
+                RunItem {
+                    run_id: id.into(),
+                    parent_run_id: parent.map(str::to_owned),
+                    task_id: None,
+                    user_input_mode: mode,
+                    state: RunState::Running,
+                    requested_scope: None,
+                },
+            );
+        }
+        let required = SessionEventResponse {
+            event_id: "required".into(),
+            cursor: "1".into(),
+            session_id: "session".into(),
+            event: Event::McpInputStateChanged {
+                run_id: "child".into(),
+                tool_call_id: "tool".into(),
+                generation_id: "generation".into(),
+                ordinal: "9007199254740993".into(),
+                kind: kiln_protocol::McpInputKind::Elicitation,
+                state: kiln_protocol::McpInputState::Required,
+            },
+        };
+        conversation.apply(required.clone());
+        conversation.apply(required);
+        assert_eq!(conversation.elicitation_inputs.len(), 1);
+        assert_eq!(conversation.interaction_owner("child"), Some("root"));
+        assert_eq!(
+            conversation.interaction_owner("interactive"),
+            Some("interactive")
+        );
+        conversation.runs.get_mut("root").unwrap().state = RunState::Cancelling;
+        assert_eq!(conversation.interaction_owner("child"), None);
+        assert_eq!(conversation.interaction_owner("interactive"), None);
+        conversation.runs.get_mut("root").unwrap().state = RunState::Running;
+        conversation.runs.get_mut("root").unwrap().parent_run_id = Some("child".into());
+        assert_eq!(conversation.interaction_owner("child"), None);
+        conversation.apply(SessionEventResponse {
+            event_id: "resolved".into(),
+            cursor: "2".into(),
+            session_id: "session".into(),
+            event: Event::McpInputStateChanged {
+                run_id: "child".into(),
+                tool_call_id: "tool".into(),
+                generation_id: "generation".into(),
+                ordinal: "9007199254740993".into(),
+                kind: kiln_protocol::McpInputKind::Elicitation,
+                state: kiln_protocol::McpInputState::Resolved,
+            },
+        });
+        assert!(conversation.elicitation_inputs.is_empty());
     }
 }

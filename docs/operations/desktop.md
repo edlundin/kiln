@@ -536,3 +536,39 @@ and exposes observation metadata without calculating totals or valuation.
 The desktop does not yet provide the secondary Run graph. The Run drawer
 supervises the current root's descendants. EDL-249 is
 complete; remaining work is tracked by the current Linear progression.
+
+## MCP form requests
+
+When an explicitly enabled MCP server asks for a form, the conversation shows a
+private **Server requests information** card. It identifies the requesting server
+from the frozen ToolCall source and shows the source Run. Read-only child requests
+route to their live interactive root; interactive children own their requests.
+Forms disappear when the input resolves, is interrupted, or its ancestry stops
+accepting interaction. Replay reconstructs pending identities, not form contents.
+
+The card supports text, integer/number, boolean, labelled or unlabelled single
+choices and multiple choices. Fields have visible labels and constraint hints.
+Optional fields are omitted unless explicitly included; server defaults are never
+filled. Empty strings remain strings, and whole numbers retain their exact JSON
+integer representation. Local schema validation checks required fields, formats
+and constraints without fetching external schemas. The daemon remains authoritative
+and revalidates every decision.
+
+**Send response**, **Decline** and **Cancel request** submit distinct MCP decisions;
+Cancel request does not cancel the entire Run. Form content is rendered as plain
+text, never executable markup. It is not appended to the conversation transcript
+or public Events. Successful submission disables the card until the input-state
+Event arrives. An uncertain result offers **Retry same decision**, preserving the
+exact response and locking edits; a definitive invalid response permits editing,
+while stale/conflicting requests stop offering decisions.
+
+Disconnecting, changing daemon/Session, or invalidating the input drops private
+drafts and disables old views. Already accepted writes may still complete; the
+client never automatically resubmits after reconnect. Form inspection uses the
+existing desktop 64 KiB frozen-source preview allowance to identify the server;
+if that source cannot be inspected completely, sending a response remains disabled.
+
+The daemon must enable form mediation and per-call input quotas as described in
+[MCP runtime](mcp-runtime.md). URL-mode elicitation and sampling have no UI yet.
+Native form layout, keyboard/screen-reader behavior and live reconnect interaction
+remain unverified; compilation and focused model tests alone do not establish them.

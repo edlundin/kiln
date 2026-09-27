@@ -270,7 +270,7 @@ a pending exact repeat returns `{"applied":false}`. Changed decisions, stale
 generations, wrong owners, cancelled ancestry and terminal input reject. There
 is no replay permit and no separate idempotency key. Clients must reconcile via
 input-state Events after an uncertain response rather than replaying an MCP call.
-The typed Rust client supports both operations. A graphical form UI remains open.
+The typed Rust client supports both operations. The desktop conversation provides native form cards; see [desktop interaction](desktop.md#mcp-form-requests). Native visual and interaction acceptance remains open.
 
 Legacy `elicitation/create` callbacks and modern form MRTR use the same handler.
 It normalizes SDK-decoded form fields into private storage, validates the form,

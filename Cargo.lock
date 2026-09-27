@@ -3916,6 +3916,7 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
+ "jsonschema",
  "kiln-client",
  "kiln-protocol",
  "rustix",

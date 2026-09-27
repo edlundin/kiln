@@ -296,6 +296,10 @@ pub struct Desktop {
     connection: Option<Connected>,
     conversation: Conversation,
     approval_inspections: BTreeMap<String, ApprovalInspection>,
+    elicitations: BTreeMap<
+        (crate::mcp_elicitation::InputId, String),
+        Entity<crate::mcp_elicitation::ElicitationPanel>,
+    >,
     runtime: Arc<Runtime>,
     updates: mpsc::UnboundedSender<Update>,
     stream: Option<JoinHandle<()>>,
@@ -416,6 +420,7 @@ impl Desktop {
             connection: None,
             conversation: Conversation::default(),
             approval_inspections: BTreeMap::new(),
+            elicitations: BTreeMap::new(),
             runtime,
             updates,
             stream: None,
@@ -481,6 +486,7 @@ impl Desktop {
         // A settings entity belongs to one authenticated daemon connection. In-flight
         // responses cannot populate a replacement daemon's account view.
         self.account_settings = None;
+        self.clear_elicitations(cx);
         self.event_generation = self.event_generation.wrapping_add(1);
         self.usage.invalidate_request();
         self.usage.error = None;
@@ -1280,6 +1286,61 @@ impl Desktop {
         cx.notify();
     }
 
+    fn clear_elicitations(&mut self, cx: &mut Context<Self>) {
+        for (_, panel) in std::mem::take(&mut self.elicitations) {
+            panel.update(cx, |panel, cx| panel.invalidate(cx));
+        }
+    }
+
+    fn ensure_elicitations(&mut self, cx: &mut Context<Self>) {
+        if !self.online || self.switching_session.is_some() || self.connection.is_none() {
+            self.clear_elicitations(cx);
+            return;
+        }
+        let pending = self
+            .conversation
+            .elicitation_inputs
+            .iter()
+            .filter_map(|(id, source)| {
+                let owner = self.conversation.interaction_owner(source)?.to_owned();
+                Some(((id.clone(), owner), source.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.elicitations.retain(|key, panel| {
+            if pending.contains_key(key) {
+                true
+            } else {
+                panel.update(cx, |panel, cx| panel.invalidate(cx));
+                false
+            }
+        });
+        for ((id, owner), source) in pending {
+            let key = (id.clone(), owner.clone());
+            if self.elicitations.contains_key(&key) {
+                continue;
+            }
+            let client = self.connection.as_ref().unwrap().client.clone();
+            let runtime = self.runtime.clone();
+            let provenance = format!(
+                "{} · Tool {}",
+                self.conversation.run_label(&source),
+                id.tool_call_id
+            );
+            let panel = cx.new(|cx| {
+                crate::mcp_elicitation::ElicitationPanel::new(
+                    client,
+                    runtime,
+                    id,
+                    owner,
+                    provenance,
+                    std::num::NonZeroUsize::new(ARTIFACT_PREVIEW_LIMIT).unwrap(),
+                    cx,
+                )
+            });
+            self.elicitations.insert(key, panel);
+        }
+    }
+
     fn ensure_approval_inspections(&mut self) {
         if !self.online || self.switching_session.is_some() {
             return;
@@ -1709,6 +1770,7 @@ impl Desktop {
         self.selected_session_id = Some(session_id.clone());
         self.conversation = Conversation::default();
         self.approval_inspections.clear();
+        self.clear_elicitations(cx);
         for run in connected.initial_runs.runs.iter().cloned() {
             self.conversation.apply_run(run);
         }
@@ -2085,6 +2147,7 @@ impl Desktop {
                         self.connection = None;
                         self.conversation = Conversation::default();
                         self.approval_inspections.clear();
+                        self.clear_elicitations(cx);
                         self.online = true;
                         self.show_connection = false;
                         self.selected_run = None;
@@ -2160,6 +2223,7 @@ impl Desktop {
             }
             Update::Disconnected { generation, error } => {
                 if generation == self.event_generation {
+                    self.clear_elicitations(cx);
                     if let Some(settings) = &self.account_settings {
                         settings.update(cx, |settings, cx| settings.set_online(false, cx));
                     }
@@ -3862,6 +3926,7 @@ impl Desktop {
 impl Render for Desktop {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_approval_inspections();
+        self.ensure_elicitations(cx);
         let title = self.connection.as_ref().map_or_else(
             || {
                 self.selected_workspace_id
@@ -4061,6 +4126,16 @@ impl Render for Desktop {
                         .disabled(self.busy || !self.online),
                     ),
             );
+        }
+        for ((id, owner), panel) in &self.elicitations {
+            let source = self.conversation.elicitation_inputs.get(id);
+            if self
+                .focused_run
+                .as_ref()
+                .is_none_or(|focused| focused == owner || source == Some(focused))
+            {
+                transcript = transcript.child(panel.clone());
+            }
         }
         if self.show_settings {
             self.ensure_account_settings(cx);

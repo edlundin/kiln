@@ -8,6 +8,7 @@ mod conversation;
 mod enrollment_requests;
 mod follower_enrollment;
 mod follower_prepare;
+mod mcp_elicitation;
 mod model_bindings;
 mod theme;
 

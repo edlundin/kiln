@@ -2,6 +2,17 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add native desktop form cards for authenticated MCP elicitation,
+  with private drafts and explicit decisions. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+
+[Commit](../../commit/pending)
+
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Expose authenticated MCP elicitation form inspection and private
   decision endpoints with no-store responses. ([pending])
 

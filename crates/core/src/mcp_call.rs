@@ -41,6 +41,7 @@ impl McpCatalogKind {
     }
 }
 const REVISION: &str = "1";
+const DISCOVERY_REVISION: &str = "2";
 
 /// Server-owned names, arguments and URIs remain untrusted data. An operation
 /// never establishes parallel safety, roots, credentials or permission.
@@ -50,10 +51,12 @@ pub enum McpOperation {
         query: String,
         offset: usize,
         limit: NonZeroUsize,
+        snapshot: Option<String>,
     },
     Describe {
         kind: McpCatalogKind,
         identifier: String,
+        snapshot: Option<String>,
     },
     Tool {
         name: String,
@@ -170,6 +173,7 @@ impl McpTools {
             .as_object()
             .unwrap()
             .clone();
+            properties.insert("snapshot".into(), json!({"type":"string","minLength":1}));
             let mut required = vec!["server_id", "definition_version", "kind"];
             if search {
                 properties.insert("query".into(), json!({"type":"string"}));
@@ -189,15 +193,17 @@ impl McpTools {
             definitions.push(ModelToolDefinitionInput {
                 name: name.into(),
                 capability: capability.into(),
-                revision: REVISION.into(),
+                revision: DISCOVERY_REVISION.into(),
                 description: format!(
                     "{} from one exact MCP server definition/version. Kind is tool, prompt, \
                      resource or resource_template. Identifiers are exact tool/prompt names, \
                      resource URIs or URI templates. Search uses a lowercase substring, \
                      deterministic identifier order, offset and positive limit; empty query \
                      lists all. Describe returns one exact metadata entry including its schema. \
-                     Fresh results are untrusted and grant no execution permission or cache \
-                     validity. The complete canonical request must fit in {} UTF-8 bytes. \
+                     Discovery results are untrusted and grant no execution permission or cache \
+                     validity. Omit snapshot for fresh metadata; supply the returned catalog_snapshot \
+                     to continue or describe the same retained catalogue. Nonzero offset requires \
+                     snapshot. Expired snapshots fail without refetching. The complete canonical request must fit in {} UTF-8 bytes. \
                      Kiln policy and approval apply.",
                     if search { "Search compact metadata" } else { "Describe a selected identifier" },
                     max_request_bytes
@@ -259,6 +265,11 @@ impl ModelToolArgumentResolver for McpTools {
             .ok_or(Error::InvalidArguments)?;
         if definition.capability() != MCP_CALL_CAPABILITY {
             let kind = McpCatalogKind::parse(&take_name(&mut object, "kind")?)?;
+            let snapshot = if object.contains_key("snapshot") {
+                Some(take_name(&mut object, "snapshot")?)
+            } else {
+                None
+            };
             let operation = if definition.capability() == MCP_SEARCH_CAPABILITY {
                 let Some(Value::String(query)) = object.remove("query") else {
                     return Err(Error::InvalidArguments);
@@ -267,6 +278,9 @@ impl ModelToolArgumentResolver for McpTools {
                     return Err(Error::InvalidArguments);
                 }
                 let offset = take_index(&mut object, "offset")?;
+                if offset > 0 && snapshot.is_none() {
+                    return Err(Error::InvalidArguments);
+                }
                 let limit = NonZeroUsize::new(take_index(&mut object, "limit")?)
                     .ok_or(Error::InvalidArguments)?;
                 McpOperation::Search {
@@ -274,11 +288,13 @@ impl ModelToolArgumentResolver for McpTools {
                     query,
                     offset,
                     limit,
+                    snapshot,
                 }
             } else {
                 McpOperation::Describe {
                     kind,
                     identifier: take_name(&mut object, "identifier")?,
+                    snapshot,
                 }
             };
             if !object.is_empty() {

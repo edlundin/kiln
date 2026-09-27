@@ -376,7 +376,7 @@ limits and its lifecycle registry enabled.
 
 Search takes `server_id`, `definition_version`, `kind`, `query`, `offset` and
 positive `limit`. Kind is `tool`, `prompt`, `resource` or `resource_template`.
-It traverses a fresh complete bounded catalogue, matches a lowercase substring
+Without a snapshot it traverses a fresh complete bounded catalogue, matches a lowercase substring
 against identifiers/names/titles/descriptions, sorts by exact identifier and
 returns only identifier/name/title summaries, total matches and `next_offset`.
 Empty query lists all; no schemas or annotations enter search output. Describe
@@ -386,11 +386,31 @@ URIs; template identifiers are the opaque template strings. Missing selections
 fail without executing a tool, reading a resource or retrieving a prompt.
 
 Both results include definition/version, generation, protocol version and kind
-provenance and obey normal output byte/artifact limits. Offsets address the fresh
-traversal, not a stable cross-request snapshot; a changing server can change the
-next page. Generation-indexed caching/invalidation and stable paging remain open.
-Synchronous projection is bounded by metadata budgets but is not CPU-preemptible;
-cancellation and deadline are checked again before accepting its output.
+provenance and obey normal output byte/artifact limits. Both also return
+`catalog_snapshot`. Discovery revision 2 accepts an optional `snapshot` argument;
+nonzero search offset requires it. Pass the returned token to continue search or
+describe the same immutable retained metadata without another MCP list request.
+Omitting it explicitly refreshes that kind. Old revision-1 frozen proposals are
+not silently reinterpreted under revision 2; call remains revision 1.
+
+The cache belongs to one process generation and therefore its server definition,
+owner/auth profile and negotiated protocol. Tokens bind generation, kind and a
+non-wrapping refresh sequence; they confer no authority. It retains at most one
+snapshot per kind. The aggregate encoded metadata charge cannot exceed the host's
+`max_catalog_bytes` (`McpCatalogLimits.max_bytes`), and page/entry/byte budgets are
+rechecked on reuse. Refreshing a kind replaces its old token; other kinds are
+evicted oldest-refresh-first when needed. Notifications, generation loss,
+eviction, replacement or tighter budgets invalidate affected tokens. Unknown or
+invalid tokens fail with `SnapshotUnavailable`; they never trigger silent
+refetch or a tool/resource/prompt operation. Resource notifications invalidate
+both resource and template snapshots.
+
+Snapshots are historical metadata, not a promise that the server has not changed
+silently. Calls always fetch and validate fresh metadata. The cache's byte charge
+is encoded list metadata, not a total heap-memory bound. Synchronous projection
+is bounded by metadata budgets but is not CPU-preemptible; cancellation, deadline
+and the retained snapshot's own notification epoch are checked again before
+accepting its output.
 
 The generation now installs an SDK notification handler for tool, prompt and
 resource list changes. Each channel has an independent generation-local epoch;
@@ -405,9 +425,9 @@ wrapping back to an earlier epoch.
 Search/describe provenance includes `catalog_notification_epoch`, which counts
 observed list-change notifications; it is not a content hash, stable snapshot ID,
 or proof that a server did not change silently. Notifications arriving after the
-final check cannot undo an operation already sent. This constant-size invalidation
-state is a prerequisite for caching; retained catalogue snapshots, stable paging,
-cache hints and durable catalogue invalidation Events remain open.
+final check cannot undo an operation already sent. Cached snapshots are checked
+against these epochs before reuse and before returning output. Server cache hints,
+durable catalogue invalidation Events and result/artifact paging remain open.
 
 Cancellation, deadline expiry during a possible send, unexpected response types,
 and connection loss record an interrupted/unknown outcome and retire the process
@@ -449,6 +469,6 @@ fixture, preserving output bytes and single-send counts. It requires
 are not covered by that fixture.
 
 Remaining broker work includes process recovery, online registration and online
-host-binding/credential administration, catalogue caching/invalidation and stable
-result paging, HTTP/OAuth, mediated server requests, and full conformance. Native
+host-binding/credential administration, server cache hints and durable catalogue
+Events, result/artifact paging, HTTP/OAuth, mediated server requests, and full conformance. Native
 MCP remains disabled unless the host supplies all explicit runtime limits.

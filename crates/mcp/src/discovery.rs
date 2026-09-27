@@ -39,14 +39,19 @@ pub async fn discover_catalog(
     if Instant::now() >= deadline {
         return Err(StdioCallError::Interrupted);
     }
-    result
+    result.map(|catalog| catalog.entries)
+}
+
+pub(crate) struct CollectedCatalog {
+    pub entries: McpCatalogEntries,
+    pub usage: crate::catalog::CatalogUsage,
 }
 
 pub(crate) async fn collect_catalog(
     peer: &Peer<RoleClient>,
     kind: McpCatalogKind,
     limits: McpCatalogLimits,
-) -> Result<McpCatalogEntries, StdioCallError> {
+) -> Result<CollectedCatalog, StdioCallError> {
     let supported = peer.peer_info().is_some_and(|info| match kind {
         McpCatalogKind::Tools => info.capabilities.tools.is_some(),
         McpCatalogKind::Prompts => info.capabilities.prompts.is_some(),
@@ -94,7 +99,10 @@ pub(crate) async fn collect_catalog(
         cursor = append_page(&mut entries, response, &mut budget, &mut identifiers)
             .map_err(StdioCallError::Catalog)?;
         if cursor.is_none() {
-            return Ok(entries);
+            return Ok(CollectedCatalog {
+                entries,
+                usage: budget.usage(),
+            });
         }
     }
     Err(StdioCallError::Catalog(McpCatalogError::LimitExceeded))

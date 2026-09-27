@@ -31,7 +31,7 @@ latency; there are no product defaults.
 | `max_arguments`, `max_argument_bytes`, `max_environment`, `max_endpoint_bytes` | Positive definition argument/environment count and string allowances. |
 | `max_resolved_bytes` | Positive total resolved launch-value byte budget. |
 | `max_frame_bytes`, `max_result_bytes` | Positive MCP wire-frame and encoded response ceilings. |
-| `max_catalog_pages`, `max_catalog_entries`, `max_catalog_bytes` | Positive complete-discovery traversal budgets. |
+| `max_catalog_pages`, `max_catalog_entries`, `max_catalog_bytes` | Positive complete-discovery traversal budgets. The byte ceiling also bounds aggregate retained snapshot metadata per generation. |
 | `max_regex_bytes`, `max_regex_backtracks` | Positive per-pattern compiled/DFA size and backtracking allowances. These do not isolate total validator CPU/memory. |
 | `startup_timeout_ms`, `call_timeout_ms` | Positive relative startup and whole broker-call deadlines, in milliseconds. |
 | `shutdown_grace_ms` | Nonnegative process shutdown grace, in milliseconds. |
@@ -96,7 +96,7 @@ Internal `McpTools` contracts now include `mcp_search` and `mcp_describe` alongs
 `mcp_call`, each with a separate capability and normal durable approval/claim
 checks. Search emits compact identifier/name/title summaries with deterministic
 identifier ordering and explicit offset/limit; describe emits the selected full
-metadata entry and schema. Both use fresh complete bounded discovery and include
+metadata entry and schema. Fresh requests use complete bounded discovery and include
 server definition/version, generation and protocol provenance. For example:
 
 ```json
@@ -106,18 +106,30 @@ server definition/version, generation and protocol provenance. For example:
 The corresponding `mcp_describe` arguments replace query/offset/limit with
 `"identifier":"write_note"`. Kinds also include `resource`, `prompt` and
 `resource_template`; their identifiers are exact URI, prompt name and template
-string respectively. Neither operation executes the selected item. Search pages
-are fresh traversals, not stable snapshots across requests. Generation-indexed
-caching/invalidation and stable paging remain open. The daemon advertises these
-contracts only with the explicit native opt-in above.
+string respectively. Neither operation executes the selected item. Both return
+`catalog_snapshot`; pass it back as `snapshot` for a stable search continuation or
+matching description. A nonzero offset requires that token. Omitting it refreshes
+the selected kind. Search/describe contracts are revision 2; old revision-1 frozen
+proposals are rejected rather than silently reinterpreted. `mcp_call` stays revision 1.
+
+One snapshot per kind is retained within the generation's scope, auth profile and
+protocol. Total encoded snapshot metadata is capped by `max_catalog_bytes`;
+page/entry limits are also rechecked on reuse. Refresh replaces the same kind's
+token; other kinds are evicted oldest-refresh-first when space is needed. Generation
+loss, notification invalidation, replacement, eviction or tightened budgets produce
+an explicit unavailable-snapshot failure without refetching. Snapshot tokens grant
+no authority, and all calls still validate fresh metadata. The daemon advertises
+these contracts only with the explicit native opt-in above.
 
 Generation-owned SDK handlers now observe tool/prompt/resource list-change
 notifications. They reject discovery results or tool/prompt validation that
 crosses an observed change before dispatch; resources and templates share the
 resource epoch. Resource reads still do not require list membership. Search and
 describe include `catalog_notification_epoch` as provenance. It counts observed
-notifications only, not silent server changes or a stable snapshot. Retained
-catalogue caching, stable paging and durable invalidation Event replay remain open.
+notifications only, not silent server changes or a stable snapshot ID. Retained
+snapshots are checked against their own epoch before reuse and before output.
+Server cache hints, durable invalidation Event replay and result/artifact paging
+remain open.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown

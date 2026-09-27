@@ -278,6 +278,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
     };
     let (transport, cleanup) = process.into_managed();
     let catalog_epochs = crate::catalog_state::CatalogEpochs::default();
+    let mut catalog_cache = crate::catalog_cache::CatalogCache::default();
     let startup = tokio::select! {
         biased;
         _ = &mut stop => None,
@@ -372,7 +373,7 @@ async fn run<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore>(
                     _ = &mut call.cancellation => Err(StdioCallError::Interrupted),
                     _ = call.reply.closed() => Err(StdioCallError::Interrupted),
                     _ = tokio::time::sleep_until(call.limits.deadline) => Err(StdioCallError::Interrupted),
-                    result = send_once(&peer, call.permit.request().command(), &call.permit.record().generation, &catalog_epochs, &call.limits) => result,
+                    result = send_once(&peer, call.permit.request().command(), &call.permit.record().generation, &catalog_epochs, &mut catalog_cache, &call.limits) => result,
                 }
             }
         };

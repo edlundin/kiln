@@ -29,7 +29,7 @@ impl CatalogEpochs {
     pub(crate) fn unchanged(&self, kind: McpCatalogKind, expected: Option<u64>) -> bool {
         expected.is_some() && self.version(kind) == expected
     }
-    fn invalidate(&self, kind: McpCatalogKind) {
+    pub(crate) fn invalidate(&self, kind: McpCatalogKind) {
         let _ = self
             .counter(kind)
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {

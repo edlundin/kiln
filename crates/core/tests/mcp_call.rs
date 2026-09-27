@@ -152,3 +152,32 @@ fn discovery_has_distinct_capabilities_and_strict_canonical_shapes() {
         );
     }
 }
+
+#[test]
+fn discovery_continuations_require_a_snapshot_and_a_new_revision() {
+    let resolver = tool(4096);
+    let definition = resolver.catalog().find("mcp_search").unwrap();
+    assert_eq!(definition.revision(), "2");
+    assert!(resolver.definition(MCP_SEARCH_CAPABILITY, "1").is_none());
+    assert_eq!(resolver.catalog().find("mcp_call").unwrap().revision(), "1");
+    let mut args = json!({"server_id":"fixture","definition_version":1,"kind":"tool","query":"","offset":1,"limit":1});
+    assert!(
+        resolver
+            .parse_arguments(definition, &args.to_string())
+            .is_err()
+    );
+    args["snapshot"] = "opaque-snapshot".into();
+    assert!(
+        resolver
+            .parse_arguments(definition, &args.to_string())
+            .is_ok()
+    );
+    for snapshot in [json!(null), json!(""), json!("bad\ntoken"), json!(42)] {
+        args["snapshot"] = snapshot;
+        assert!(
+            resolver
+                .parse_arguments(definition, &args.to_string())
+                .is_err()
+        );
+    }
+}

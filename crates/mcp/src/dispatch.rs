@@ -58,18 +58,40 @@ pub(crate) async fn send_once(
     command: &McpCommand,
     generation: &McpGenerationId,
     epochs: &crate::catalog_state::CatalogEpochs,
+    cache: &mut crate::catalog_cache::CatalogCache,
     limits: &StdioCallLimits,
 ) -> Result<StdioCallResult, StdioCallError> {
     let operation = command.operation();
-    if let McpOperation::Search { kind, .. } | McpOperation::Describe { kind, .. } = operation {
+    cache.prune(epochs, limits.catalog);
+    if let McpOperation::Search { kind, snapshot, .. }
+    | McpOperation::Describe { kind, snapshot, .. } = operation
+    {
         let version = epochs.version(*kind);
         if version.is_none() {
             return Err(StdioCallError::Catalog(
                 crate::McpCatalogError::CatalogChanged,
             ));
         }
-        let entries = crate::discovery::collect_catalog(peer, *kind, limits.catalog).await?;
-        let value = crate::discovery::project_catalog(&entries, operation)
+        let retained = if let Some(token) = snapshot {
+            cache.get(*kind, token).map_err(StdioCallError::Catalog)?
+        } else {
+            let collected = crate::discovery::collect_catalog(peer, *kind, limits.catalog).await?;
+            if !epochs.unchanged(*kind, version) {
+                return Err(StdioCallError::Catalog(
+                    crate::McpCatalogError::CatalogChanged,
+                ));
+            }
+            cache
+                .insert(
+                    generation,
+                    *kind,
+                    version.expect("checked epoch"),
+                    collected,
+                    limits.catalog,
+                )
+                .map_err(StdioCallError::Catalog)?
+        };
+        let value = crate::discovery::project_catalog(&retained.catalog.entries, operation)
             .map_err(StdioCallError::Catalog)?;
         // Projection is synchronous; observe cancellation/deadline again before
         // accepting its result. This does not promise CPU-time preemption.
@@ -77,7 +99,7 @@ pub(crate) async fn send_once(
         if Instant::now() >= limits.deadline {
             return Err(StdioCallError::Interrupted);
         }
-        if !epochs.unchanged(*kind, version) {
+        if !epochs.unchanged(*kind, Some(retained.epoch)) {
             return Err(StdioCallError::Catalog(
                 crate::McpCatalogError::CatalogChanged,
             ));
@@ -89,7 +111,8 @@ pub(crate) async fn send_once(
                 "generation":generation.as_str(),
                 "protocol_version":peer.peer_info().map(|info| info.protocol_version.as_str().to_owned()),
                 "kind":kind.as_str(),
-                "catalog_notification_epoch":version,
+                "catalog_notification_epoch":retained.epoch,
+                "catalog_snapshot":retained.token,
                 "result":value,
             }),
             false,

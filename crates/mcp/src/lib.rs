@@ -9,6 +9,8 @@ mod broker;
 #[cfg(unix)]
 mod catalog;
 #[cfg(unix)]
+mod catalog_cache;
+#[cfg(unix)]
 mod catalog_state;
 
 #[cfg(unix)]

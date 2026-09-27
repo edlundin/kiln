@@ -36,6 +36,9 @@ where
                 Error::Rejected => {
                     "MCP dispatch was rejected before sending the operation request."
                 }
+                Error::Catalog(crate::McpCatalogError::SnapshotUnavailable) => {
+                    "The MCP catalogue snapshot is unavailable or invalidated. Request fresh discovery; no metadata was silently refetched and no tool call, resource read or prompt retrieval was sent."
+                }
                 Error::Catalog(crate::McpCatalogError::CatalogChanged) => {
                     "The MCP catalogue is no longer valid for this request. No tool call, resource read or prompt retrieval was sent."
                 }

@@ -1201,7 +1201,7 @@ for line in sys.stdin:
         with open('discovery', 'a') as log: log.write(method+'\n')
         if method == 'tools/list':
             tools_lists += 1
-            if tools_lists == 9: print(json.dumps({'jsonrpc':'2.0','method':'notifications/tools/list_changed'}), flush=True)
+            if tools_lists == 5: print(json.dumps({'jsonrpc':'2.0','method':'notifications/tools/list_changed'}), flush=True)
             second = bool(request.get('params',{}).get('cursor'))
             result = {'tools':[{'name':'alpha' if second else 'zeta','description':'Write a note','inputSchema':{'type':'object','properties':{'text':{'type':'string'}},'required':['text']}}]}
             if not second: result['nextCursor'] = 'next'
@@ -1286,8 +1286,16 @@ for line in sys.stdin:
             "mcp_search",
             serde_json::json!({"kind":"tool","query":"","offset":0,"limit":1}),
         ),
+        (
+            "mcp_describe",
+            serde_json::json!({"kind":"tool","identifier":"zeta"}),
+        ),
     ];
+    let mut snapshot = String::new();
     for (index, (name, mut arguments)) in cases.into_iter().enumerate() {
+        if matches!(index, 1 | 2 | 11) {
+            arguments["snapshot"] = snapshot.clone().into();
+        }
         let session =
             SessionApplication::new(store.clone(), store.clone(), super::super::UlidIdGenerator)
                 .create_session(session.workspace_id().clone())
@@ -1343,6 +1351,12 @@ for line in sys.stdin:
         );
         if index < 9 {
             let value: serde_json::Value = serde_json::from_str(result.stdout().unwrap()).unwrap();
+            if index == 0 {
+                snapshot = value["catalog_snapshot"].as_str().unwrap().to_owned();
+            }
+            if matches!(index, 1 | 2) {
+                assert_eq!(value["catalog_snapshot"], snapshot);
+            }
             assert_eq!(value["generation"], target.generation.as_str());
             assert_eq!(value["server_id"], "fixture");
             assert_eq!(value["protocol_version"], "2025-11-25");
@@ -1374,6 +1388,10 @@ for line in sys.stdin:
                     .contains("catalogue is no longer valid")
             );
         }
+        if index == 11 {
+            assert!(result.stderr().unwrap().contains("snapshot is unavailable"));
+        }
+
         ProviderApplication::new(store.clone(), super::super::UlidIdGenerator)
             .finish_tool_call(&tool_call_id, &result)
             .await
@@ -1403,13 +1421,10 @@ for line in sys.stdin:
     );
     owner.stop().await.unwrap();
     let wire = std::fs::read_to_string(data.path().join("discovery")).unwrap();
-    assert_eq!(
-        wire.lines().filter(|line| *line == "tools/list").count(),
-        10
-    );
+    assert_eq!(wire.lines().filter(|line| *line == "tools/list").count(), 6);
     assert_eq!(
         wire.lines().count(),
-        16,
-        "fresh list for every approved discovery; no execution methods"
+        12,
+        "snapshot page/describe reuse metadata; fresh requests list and never execute"
     );
 }

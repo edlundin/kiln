@@ -13,7 +13,8 @@ use crate::StdioCallError;
 pub struct McpCatalogLimits {
     pub max_pages: NonZeroUsize,
     pub max_entries: NonZeroUsize,
-    /// Cumulative encoded list result bytes, in addition to frame limits.
+    /// Cumulative encoded list bytes and total retained snapshot bytes per
+    /// generation, in addition to frame limits; not a heap-memory guarantee.
     pub max_bytes: NonZeroUsize,
     /// Per-pattern compiled/DFA size allowance, not total validator memory.
     pub max_regex_bytes: NonZeroUsize,
@@ -26,6 +27,7 @@ pub enum McpCatalogError {
     LimitExceeded,
     InvalidCatalog,
     CatalogChanged,
+    SnapshotUnavailable,
     UnknownTool,
     UnknownPrompt,
     UnknownEntry,
@@ -44,6 +46,20 @@ impl jsonschema::Retrieve for NoRetrieval {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogUsage {
+    pub pages: usize,
+    pub entries: usize,
+    pub bytes: usize,
+}
+impl CatalogUsage {
+    pub fn fits(self, limits: McpCatalogLimits) -> bool {
+        self.pages <= limits.max_pages.get()
+            && self.entries <= limits.max_entries.get()
+            && self.bytes <= limits.max_bytes.get()
+    }
+}
+
 pub(crate) struct PageBudget {
     limits: McpCatalogLimits,
     pages: usize,
@@ -53,6 +69,13 @@ pub(crate) struct PageBudget {
 }
 
 impl PageBudget {
+    pub(crate) fn usage(&self) -> CatalogUsage {
+        CatalogUsage {
+            pages: self.pages,
+            entries: self.entries,
+            bytes: self.bytes,
+        }
+    }
     pub(crate) fn new(limits: McpCatalogLimits) -> Self {
         Self {
             limits,

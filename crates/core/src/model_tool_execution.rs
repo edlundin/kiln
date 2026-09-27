@@ -171,7 +171,11 @@ mod output_page_tests {
             },
         )
         .unwrap();
-        let command = parser.parse_arguments(&parser.catalog().definitions()[0], &serde_json::json!({"tool_call_id":source_id.as_str(),"stream":"stdout","offset":0,"limit":4}).to_string()).unwrap();
+        let mut arguments = serde_json::json!({"tool_call_id":source_id.as_str(),"stream":"stdout","offset":0,"limit":4});
+        arguments.sort_all_objects();
+        let command = parser
+            .parse_arguments(&parser.catalog().definitions()[0], &arguments.to_string())
+            .unwrap();
         let current = ToolCall::new(
             ToolCallId::from_ulid(ulid::Ulid::generate()),
             run.run_id().clone(),

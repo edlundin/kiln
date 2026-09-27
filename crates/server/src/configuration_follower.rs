@@ -124,15 +124,14 @@ where
     if headers.get_all(header::CONTENT_LENGTH).iter().count() > 1 {
         return PublicError::InvalidJson.into_response();
     }
-    if let Some(length) = single_header(headers, header::CONTENT_LENGTH.as_str()) {
-        if length
+    if let Some(length) = single_header(headers, header::CONTENT_LENGTH.as_str())
+        && length
             .to_str()
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .is_none_or(|length| length > CONFIGURATION_FOLLOWER_ENROLLMENT_SUBMISSION_MAX_BYTES)
-        {
-            return PublicError::InvalidJson.into_response();
-        }
+    {
+        return PublicError::InvalidJson.into_response();
     }
 
     let bytes = match to_bytes(
@@ -240,6 +239,10 @@ pub fn configuration_follower_host_authority(
     Ok(format!("{host}:{port}"))
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The HTTP boundary returns the existing Axum response type for a rejected request."
+)]
 fn parse_submission(
     request: SubmitConfigurationFollowerEnrollmentRequest,
 ) -> Result<ConfigurationFollowerEnrollmentRequestSubmission, Response> {

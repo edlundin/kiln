@@ -95,10 +95,10 @@ impl PageBudget {
         };
         serde_json::to_writer(&mut counter, page).map_err(|_| Error::LimitExceeded)?;
         self.bytes = self.limits.max_bytes.get() - counter.remaining;
-        if let Some(cursor) = cursor {
-            if !self.cursors.insert(cursor.to_owned()) {
-                return Err(Error::InvalidCatalog);
-            }
+        if let Some(cursor) = cursor
+            && !self.cursors.insert(cursor.to_owned())
+        {
+            return Err(Error::InvalidCatalog);
         }
         self.pages += 1;
         self.entries += entries;

@@ -1006,92 +1006,71 @@ impl ConfigurationFollowerEnrollmentManager {
 }
 
 impl ConfigurationFollowerEnrollmentAdministration for ConfigurationFollowerEnrollmentManager {
-    fn prepare_configuration_follower_enrollment(
+    async fn prepare_configuration_follower_enrollment(
         &self,
         attempt_id: ConfigurationReadGrantAttemptId,
         choice: ConfigurationFollowerEnrollmentChoice,
-    ) -> impl std::future::Future<
-        Output = Result<ConfigurationFollowerEnrollmentMetadata, CoreError>,
-    > + Send {
-        async move {
-            self.prepare(attempt_id, choice)
-                .await
-                .map_err(map_manager_error)
-        }
+    ) -> Result<ConfigurationFollowerEnrollmentMetadata, CoreError> {
+        self.prepare(attempt_id, choice)
+            .await
+            .map_err(map_manager_error)
     }
 
-    fn list_configuration_follower_enrollments(
+    async fn list_configuration_follower_enrollments(
         &self,
         after: Option<&ConfigurationReadGrantAttemptId>,
         limit: usize,
-    ) -> impl std::future::Future<
-        Output = Result<Vec<ConfigurationFollowerEnrollmentMetadata>, CoreError>,
-    > + Send {
-        async move {
-            if limit == 0 || limit > MAX_PAGE_SIZE as usize {
-                return Err(CoreError::InvalidRequest);
-            }
-            let limit = u32::try_from(limit)
-                .ok()
-                .and_then(NonZeroU32::new)
-                .ok_or(CoreError::InvalidRequest)?;
-            self.list(after, limit).await.map_err(map_manager_error)
+    ) -> Result<Vec<ConfigurationFollowerEnrollmentMetadata>, CoreError> {
+        if limit == 0 || limit > MAX_PAGE_SIZE as usize {
+            return Err(CoreError::InvalidRequest);
         }
+        let limit = u32::try_from(limit)
+            .ok()
+            .and_then(NonZeroU32::new)
+            .ok_or(CoreError::InvalidRequest)?;
+        self.list(after, limit).await.map_err(map_manager_error)
     }
 
-    fn get_configuration_follower_enrollment(
+    async fn get_configuration_follower_enrollment(
         &self,
         attempt_id: &ConfigurationReadGrantAttemptId,
-    ) -> impl std::future::Future<
-        Output = Result<Option<ConfigurationFollowerEnrollmentMetadata>, CoreError>,
-    > + Send {
-        async move {
-            self.get_metadata(attempt_id)
-                .await
-                .map_err(map_manager_error)
-        }
+    ) -> Result<Option<ConfigurationFollowerEnrollmentMetadata>, CoreError> {
+        self.get_metadata(attempt_id)
+            .await
+            .map_err(map_manager_error)
     }
 
-    fn retire_configuration_follower_enrollment(
+    async fn retire_configuration_follower_enrollment(
         &self,
         expected_instance_id: KilnInstanceId,
         attempt_id: ConfigurationReadGrantAttemptId,
-    ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send {
-        async move {
-            self.retire_checked(expected_instance_id, attempt_id)
-                .await
-                .map_err(map_manager_error)
-        }
+    ) -> Result<(), CoreError> {
+        self.retire_checked(expected_instance_id, attempt_id)
+            .await
+            .map_err(map_manager_error)
     }
 
-    fn exchange_configuration_follower_enrollment(
+    async fn exchange_configuration_follower_enrollment(
         &self,
         expected_instance_id: KilnInstanceId,
         attempt_id: ConfigurationReadGrantAttemptId,
         settings: ConfigurationFollowerEnrollmentExchangeSettings,
-    ) -> impl std::future::Future<
-        Output = Result<ConfigurationFollowerEnrollmentMetadata, CoreError>,
-    > + Send {
-        async move {
-            self.exchange(expected_instance_id, attempt_id, settings)
-                .await
-                .map_err(map_manager_error)
-        }
+    ) -> Result<ConfigurationFollowerEnrollmentMetadata, CoreError> {
+        self.exchange(expected_instance_id, attempt_id, settings)
+            .await
+            .map_err(map_manager_error)
     }
 
-    fn fetch_and_apply_configuration_follower_snapshot(
+    async fn fetch_and_apply_configuration_follower_snapshot(
         &self,
         expected_instance_id: KilnInstanceId,
         attempt_id: ConfigurationReadGrantAttemptId,
         settings: ConfigurationFollowerEnrollmentExchangeSettings,
         validate: ConfigurationFollowerSnapshotValidator,
-    ) -> impl std::future::Future<Output = Result<ConfigurationSnapshotMutation, CoreError>> + Send
-    {
-        async move {
-            self.fetch_and_apply_snapshot(expected_instance_id, attempt_id, settings, validate)
-                .await
-                .map_err(map_manager_error)
-        }
+    ) -> Result<ConfigurationSnapshotMutation, CoreError> {
+        self.fetch_and_apply_snapshot(expected_instance_id, attempt_id, settings, validate)
+            .await
+            .map_err(map_manager_error)
     }
 }
 
@@ -1512,6 +1491,10 @@ fn parse_phase(phase: &str) -> Result<ConfigurationFollowerEnrollmentPhase, Erro
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Receipt decoding checks each independent stored identity and version against the expected enrollment."
+)]
 fn decode_observation(
     row: &sqlx::sqlite::SqliteRow,
     attempt_id: &ConfigurationReadGrantAttemptId,

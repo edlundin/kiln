@@ -673,15 +673,13 @@ fn schema() -> String {
             serde_json::to_value(value).expect("schema is serializable"),
         );
     }
-    serde_json::to_string_pretty(&json!({
+    serialize_fixture(&json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": format!("https://kiln.dev/protocol/{PROTOCOL_VERSION}/schema.json"),
         "title": "Kiln daemon protocol",
         "type": "object",
         "$defs": defs,
     }))
-    .expect("schema is serializable")
-        + "\n"
 }
 
 fn typescript() -> String {
@@ -1091,7 +1089,7 @@ fn catalogue() -> String {
                 "operation": REMOVE_MODEL_ACCOUNT_BINDING_OPERATION_ID
             }),
         ]);
-    serde_json::to_string_pretty(&catalogue).expect("catalogue is serializable") + "\n"
+    serialize_fixture(&catalogue)
 }
 
 fn fixture_negotiate_request() -> String {
@@ -1600,7 +1598,11 @@ fn fixture_session_events_response() -> String {
 }
 
 fn serialize_fixture(value: &impl Serialize) -> String {
-    serde_json::to_string_pretty(value).expect("fixture is serializable") + "\n"
+    // Stable artifacts must not depend on another workspace crate enabling
+    // serde_json's preserve_order feature.
+    let mut value = serde_json::to_value(value).expect("fixture is serializable");
+    value.sort_all_objects();
+    serde_json::to_string_pretty(&value).expect("fixture is serializable") + "\n"
 }
 
 fn openapi() -> String {
@@ -3802,6 +3804,7 @@ components:
 fn openapi_schema<T: JsonSchema>() -> Value {
     let mut schema = serde_json::to_value(schema_for!(T)).expect("OpenAPI schema is serializable");
     normalize_openapi_schema(&mut schema);
+    schema.sort_all_objects();
     schema
 }
 

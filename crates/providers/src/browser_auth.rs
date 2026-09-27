@@ -227,10 +227,8 @@ async fn read_callback(
     let mut host = None;
     for header in lines {
         let (name, value) = header.split_once(':')?;
-        if name.eq_ignore_ascii_case("host") {
-            if host.replace(value.trim()).is_some() {
-                return None;
-            }
+        if name.eq_ignore_ascii_case("host") && host.replace(value.trim()).is_some() {
+            return None;
         }
         if name.eq_ignore_ascii_case("transfer-encoding")
             || (name.eq_ignore_ascii_case("content-length") && value.trim() != "0")

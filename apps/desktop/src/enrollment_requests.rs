@@ -20,6 +20,10 @@ use ulid::Ulid;
 
 use crate::{connection, theme};
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The UI event owns its background operation result until the matching state transition consumes it."
+)]
 enum Update {
     Page(Result<Page, String>),
     Loaded(Result<(Request, ConfigurationSyncStatusResponse), String>),

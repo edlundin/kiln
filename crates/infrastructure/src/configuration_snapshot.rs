@@ -216,7 +216,7 @@ async fn apply_configuration_snapshot_inner(
     };
     if let Some(attempt_id) = enrollment_attempt_id {
         super::configuration_enrollment::verify_active_snapshot_credential(
-            &mut *transaction,
+            &mut transaction,
             attempt_id,
             &current,
         )

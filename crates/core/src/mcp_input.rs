@@ -134,11 +134,12 @@ impl McpElicitationForm {
         {
             return Err(McpInvocationError::InvalidRequest);
         }
-        let schema: serde_json::Value =
+        let mut schema: serde_json::Value =
             serde_json::from_str(schema_json).map_err(|_| McpInvocationError::InvalidRequest)?;
         if !schema.is_object() || schema.get("type").and_then(|v| v.as_str()) != Some("object") {
             return Err(McpInvocationError::InvalidRequest);
         }
+        schema.sort_all_objects();
         let form = Self {
             message,
             schema_json: serde_json::to_string(&schema)
@@ -226,7 +227,7 @@ impl McpElicitationDecision {
         if json.len() > max_bytes.get() {
             return Err(McpInvocationError::InvalidRequest);
         }
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_str(json).map_err(|_| McpInvocationError::InvalidRequest)?;
         let fields = value
             .as_object()
@@ -237,6 +238,7 @@ impl McpElicitationDecision {
             Some("decline" | "cancel") if fields.len() == 1 => {}
             _ => return Err(McpInvocationError::InvalidRequest),
         }
+        value.sort_all_objects();
         let decision = Self {
             json: serde_json::to_string(&value).map_err(|_| McpInvocationError::InvalidRequest)?,
         };

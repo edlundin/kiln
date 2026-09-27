@@ -3,7 +3,18 @@
 ## 2026-09-27 — `feat`
 
 - EDL-314: Add opt-in MCP URL elicitation consent mediation for configured
-  library hosts. ([pending])
+  library hosts. ([988c19a](../../commit/988c19a))
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+
+[Commit](../../commit/988c19a)
+
+
+## 2026-09-27 — `chore`
+
+- EDL-314: Keep generated protocol JSON canonical across workspace feature
+  unification and restore workspace-wide verification. ([pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
 

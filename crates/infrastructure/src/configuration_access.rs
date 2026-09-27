@@ -700,6 +700,10 @@ fn read_revocation_flag(row: &SqliteRow, column: &str) -> Result<bool, Error> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Every independent identity and version field is bound into the confirmation fingerprint."
+)]
 fn enrollment_request_fingerprint(
     request_id: &ConfigurationFollowerEnrollmentRequestId,
     attempt_id: &ConfigurationReadGrantAttemptId,

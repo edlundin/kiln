@@ -77,9 +77,7 @@ impl SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        for byte in &mut self.0 {
-            *byte = 0;
-        }
+        self.0.fill(0);
     }
 }
 
@@ -756,6 +754,10 @@ where
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The locked transition keeps the expected credential version explicit alongside the new credential and account snapshot."
+    )]
     async fn connect_provider_account_locked<V: SecretStore>(
         &self,
         secret_store: &V,
@@ -769,12 +771,11 @@ where
         if current.provider_type() != &expected_provider_type {
             return Err(ProviderAccountError::ProviderTypeMismatch);
         }
-        if let Some(expected_secret_ref) = expected_secret_ref {
-            if current.secret_ref() != Some(expected_secret_ref)
-                || current.state() != ProviderAccountState::Connected
-            {
-                return Err(ProviderAccountError::CredentialVersionConflict);
-            }
+        if let Some(expected_secret_ref) = expected_secret_ref
+            && (current.secret_ref() != Some(expected_secret_ref)
+                || current.state() != ProviderAccountState::Connected)
+        {
+            return Err(ProviderAccountError::CredentialVersionConflict);
         }
         if current.state() == ProviderAccountState::Disconnected {
             let connecting =

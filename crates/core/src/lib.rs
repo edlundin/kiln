@@ -1213,6 +1213,10 @@ pub enum ContextManifestEntryInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Manifest entries preserve the existing public owned snapshot representation."
+)]
 pub enum ContextManifestEntry {
     ContinuationReference {
         reference: ModelContinuationReference,
@@ -5531,6 +5535,10 @@ where
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The public child-run API keeps independent approval, scope, input and model policies explicit."
+    )]
     pub async fn start_child_run_with_model_policy(
         &self,
         parent_run_id: RunId,

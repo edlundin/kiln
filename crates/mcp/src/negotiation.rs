@@ -14,6 +14,10 @@ pub use kiln_core::{McpProtocolPolicy as ProtocolPolicy, McpProtocolVersion as P
 /// Negotiate on an already-owned stdio transport. The caller owns the process,
 /// scope, startup deadline and cancellation. This does not start a process or
 /// grant tool authority. HTTP requires a separate unsupported-version policy.
+#[expect(
+    clippy::result_large_err,
+    reason = "The adapter preserves the SDK initialization error contract for callers to classify negotiation failure."
+)]
 pub async fn start_stdio_client<S, T>(
     service: S,
     transport: T,
@@ -139,19 +143,19 @@ impl<T: Transport<RoleClient>> Transport<RoleClient> for GuardedTransport<T> {
                     .zip(self.discover_id.as_ref())
                     .is_some_and(|(received, expected)| expected == received);
         }
-        if let ServerJsonRpcMessage::Response(response) = &message {
-            if let ServerResult::InitializeResult(result) = &response.result {
-                let version = result.protocol_version.as_str();
-                let accepted = match self.policy {
-                    ProtocolPolicy::Auto => {
-                        ProtocolVersion::parse(version).is_ok() && version != "2026-07-28"
-                    }
-                    ProtocolPolicy::Pinned(pin) => version == pin.as_str(),
-                };
-                if !accepted {
-                    let _ = self.inner.close().await;
-                    return None;
+        if let ServerJsonRpcMessage::Response(response) = &message
+            && let ServerResult::InitializeResult(result) = &response.result
+        {
+            let version = result.protocol_version.as_str();
+            let accepted = match self.policy {
+                ProtocolPolicy::Auto => {
+                    ProtocolVersion::parse(version).is_ok() && version != "2026-07-28"
                 }
+                ProtocolPolicy::Pinned(pin) => version == pin.as_str(),
+            };
+            if !accepted {
+                let _ = self.inner.close().await;
+                return None;
             }
         }
         Some(message)

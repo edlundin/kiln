@@ -195,7 +195,7 @@ mod tests {
         for (error, diagnostic) in [
             (
                 StdioCallError::Catalog(crate::McpCatalogError::InvalidArguments),
-                "No operation request was sent",
+                "No tool call, resource read or prompt retrieval was sent",
             ),
             (
                 StdioCallError::InvalidOutput,

@@ -129,10 +129,10 @@ fn validate_sizes(
     if message.len() > limits.max_message_bytes.get() || url.len() > limits.max_url_bytes.get() {
         return Err(McpInvocationError::InvalidRequest);
     }
-    if let McpElicitationUrlContext::Legacy { elicitation_id } = context {
-        if elicitation_id.is_empty() || elicitation_id.len() > limits.max_legacy_id_bytes.get() {
-            return Err(McpInvocationError::InvalidRequest);
-        }
+    if let McpElicitationUrlContext::Legacy { elicitation_id } = context
+        && (elicitation_id.is_empty() || elicitation_id.len() > limits.max_legacy_id_bytes.get())
+    {
+        return Err(McpInvocationError::InvalidRequest);
     }
     Ok(())
 }

@@ -200,29 +200,28 @@ impl<T: Transport<RoleClient>> Transport<RoleClient> for ObservedStartup<T> {
         &mut self,
         message: ClientJsonRpcMessage,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        if let ClientJsonRpcMessage::Request(request) = &message {
-            if matches!(&request.request, ClientRequest::DiscoverRequest(_)) {
-                self.discover_id = Some(request.id.clone());
-                if let Ok(mut evidence) = self.fallback.lock() {
-                    *evidence = None;
-                }
+        if let ClientJsonRpcMessage::Request(request) = &message
+            && matches!(&request.request, ClientRequest::DiscoverRequest(_))
+        {
+            self.discover_id = Some(request.id.clone());
+            if let Ok(mut evidence) = self.fallback.lock() {
+                *evidence = None;
             }
         }
         self.inner.send(message)
     }
     async fn receive(&mut self) -> Option<ServerJsonRpcMessage> {
         let message = self.inner.receive().await?;
-        if let ServerJsonRpcMessage::Error(error) = &message {
-            if error
+        if let ServerJsonRpcMessage::Error(error) = &message
+            && error
                 .id
                 .as_ref()
                 .is_some_and(|id| Some(id) == self.discover_id.as_ref())
-                && error.error.code == ErrorCode::UNSUPPORTED_PROTOCOL_VERSION
-            {
-                let selected = error.error.data.as_ref().and_then(legacy_version);
-                if let Ok(mut evidence) = self.fallback.lock() {
-                    *evidence = selected;
-                }
+            && error.error.code == ErrorCode::UNSUPPORTED_PROTOCOL_VERSION
+        {
+            let selected = error.error.data.as_ref().and_then(legacy_version);
+            if let Ok(mut evidence) = self.fallback.lock() {
+                *evidence = selected;
             }
         }
         Some(message)

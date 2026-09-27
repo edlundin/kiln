@@ -24,9 +24,9 @@ use kiln_protocol::{
     PublishConfigurationSnapshotRequest, RetireMasterIdentityByIdRequest,
     RetireMasterIdentityRequest, SharedConfigurationBundle,
 };
+use sha2::{Digest, Sha256};
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 use ulid::Ulid;
-use sha2::{Digest, Sha256};
 
 use crate::{
     configuration_bundle::{self, BundleSummary},
@@ -54,6 +54,10 @@ struct SnapshotFetchDraft {
     request: FetchConfigurationFollowerSnapshotRequest,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The UI event owns its background operation result until the matching state transition consumes it."
+)]
 enum Update {
     Status(
         Result<
@@ -1953,51 +1957,57 @@ impl Render for ConfigurationSyncSettings {
                                 })),
                         );
                     }
-                    if let Some(attempt_id) = &self.selected_enrollment_attempt {
-                        if let Some(enrollment) = self.follower_enrollments.iter().find(|item| {
+                    if let Some(attempt_id) = &self.selected_enrollment_attempt
+                        && let Some(enrollment) = self.follower_enrollments.iter().find(|item| {
                             item.attempt_id == *attempt_id
                                 && enrollment_matches_follower(item, status)
                                 && item.exchange_result
                                     == Some(ConfigurationFollowerEnrollmentExchangeResult::Approved)
-                        }) {
-                            let blocked = !self.online || self.request.is_some();
-                            content = content
-                                .child(div().text_sm().child(format!(
-                                    "Selected attempt {} is an approval record for {} ({} enrollment).",
-                                    enrollment.attempt_id,
-                                    enrollment.server_name,
-                                    enrollment_phase_label(enrollment.phase)
-                                )))
-                                .child(div().text_sm().text_color(theme::MUTED).child(
+                        })
+                    {
+                        let blocked = !self.online || self.request.is_some();
+                        content = content
+                            .child(div().text_sm().child(format!(
+                                "Selected attempt {} is an approval record for {} ({} enrollment).",
+                                enrollment.attempt_id,
+                                enrollment.server_name,
+                                enrollment_phase_label(enrollment.phase)
+                            )))
+                            .child(
+                                div().text_sm().text_color(theme::MUTED).child(
                                     "The current grant is checked by the master during fetch.",
-                                ))
-                                .child(div().text_sm().child("HTTPS origin"))
-                                .child(
-                                    Input::new(&snapshot_origin_input)
-                                        .aria_label("HTTPS origin for follower snapshot fetch")
-                                        .disabled(blocked),
-                                )
-                                .child(div().text_sm().child("Connection timeout (milliseconds)"))
-                                .child(
-                                    Input::new(&snapshot_connect_timeout_input)
-                                        .aria_label("Follower snapshot connection timeout in milliseconds")
-                                        .disabled(blocked),
-                                )
-                                .child(div().text_sm().child("Request timeout (milliseconds)"))
-                                .child(
-                                    Input::new(&snapshot_request_timeout_input)
-                                        .aria_label("Follower snapshot request timeout in milliseconds")
-                                        .disabled(blocked),
-                                )
-                                .child(
-                                    Button::new("review-follower-snapshot-fetch")
-                                        .label("Review snapshot fetch…")
-                                        .disabled(blocked)
-                                        .on_click(cx.listener(|this, _, _, cx| {
+                                ),
+                            )
+                            .child(div().text_sm().child("HTTPS origin"))
+                            .child(
+                                Input::new(&snapshot_origin_input)
+                                    .aria_label("HTTPS origin for follower snapshot fetch")
+                                    .disabled(blocked),
+                            )
+                            .child(div().text_sm().child("Connection timeout (milliseconds)"))
+                            .child(
+                                Input::new(&snapshot_connect_timeout_input)
+                                    .aria_label(
+                                        "Follower snapshot connection timeout in milliseconds",
+                                    )
+                                    .disabled(blocked),
+                            )
+                            .child(div().text_sm().child("Request timeout (milliseconds)"))
+                            .child(
+                                Input::new(&snapshot_request_timeout_input)
+                                    .aria_label("Follower snapshot request timeout in milliseconds")
+                                    .disabled(blocked),
+                            )
+                            .child(
+                                Button::new("review-follower-snapshot-fetch")
+                                    .label("Review snapshot fetch…")
+                                    .disabled(blocked)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
                                             this.review_snapshot_fetch(cx)
-                                        })),
-                                );
-                        }
+                                        }),
+                                    ),
+                            );
                     }
                 }
             }
@@ -2036,10 +2046,19 @@ impl Render for ConfigurationSyncSettings {
                                 ),
                             )));
                         if identity.phase == kiln_protocol::ConfigurationIdentityPhase::Active {
-                            content = content.child(Button::new("export-master-ca")
-                                .label("Export public CA certificate…")
-                                .disabled(!self.online || self.request.is_some() || self.identity_retirement_confirmation.is_some() || self.pending_identity_retirement.is_some())
-                                .on_click(cx.listener(|this, _, window, cx| this.pick_certificate_export(window, cx))));
+                            content = content.child(
+                                Button::new("export-master-ca")
+                                    .label("Export public CA certificate…")
+                                    .disabled(
+                                        !self.online
+                                            || self.request.is_some()
+                                            || self.identity_retirement_confirmation.is_some()
+                                            || self.pending_identity_retirement.is_some(),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pick_certificate_export(window, cx)
+                                    })),
+                            );
                         }
                         if self.identity_retirement_confirmation.is_some() {
                             content = content
@@ -2093,8 +2112,7 @@ impl Render for ConfigurationSyncSettings {
                                     })),
                             );
                         }
-                    } else if self.identity_confirmation.is_some() {
-                        let command = self.identity_confirmation.as_ref().expect("checked above");
+                    } else if let Some(command) = self.identity_confirmation.as_ref() {
                         content = content
                             .child(div().text_sm().child(format!(
                                 "Create a managed CA and server certificate for {} in group {}? The leaf is valid for {} days and the CA for {} days, starting now. The daemon stores both private keys in its OS vault. This does not start a remote listener.",

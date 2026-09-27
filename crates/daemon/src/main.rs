@@ -559,10 +559,10 @@ async fn main() -> ExitCode {
     let graceful_shutdown = async move {
         shutdown_lifecycle.wait_for_shutdown_request().await;
         shutdown_lifecycle.wait_for_commands().await;
-        if let Some(refresh_done_rx) = refresh_done_rx {
-            if refresh_done_rx.await.is_err() {
-                eprintln!("kilnd: configuration follower refresh task stopped unexpectedly");
-            }
+        if let Some(refresh_done_rx) = refresh_done_rx
+            && refresh_done_rx.await.is_err()
+        {
+            eprintln!("kilnd: configuration follower refresh task stopped unexpectedly");
         }
         if provider_logins.shutdown().await.is_err() {
             eprintln!("kilnd: provider account login cleanup failed");

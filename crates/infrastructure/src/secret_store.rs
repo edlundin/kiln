@@ -429,12 +429,12 @@ impl OsSecretStore {
         {
             let service = self.service.clone();
             let key = key.to_owned();
-            return spawn_blocking(move || {
+            spawn_blocking(move || {
                 security_framework::passwords::get_generic_password(&service, &key)
                     .map_err(map_keychain_error)
             })
             .await
-            .map_err(|_| SecretStoreError::Unavailable)?;
+            .map_err(|_| SecretStoreError::Unavailable)?
         }
         #[cfg(target_os = "linux")]
         {
@@ -458,12 +458,12 @@ impl OsSecretStore {
         {
             let service = self.service.clone();
             let key = key.to_owned();
-            return spawn_blocking(move || {
+            spawn_blocking(move || {
                 security_framework::passwords::delete_generic_password(&service, &key)
                     .map_err(map_keychain_error)
             })
             .await
-            .map_err(|_| SecretStoreError::Unavailable)?;
+            .map_err(|_| SecretStoreError::Unavailable)?
         }
         #[cfg(target_os = "linux")]
         {

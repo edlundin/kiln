@@ -110,10 +110,10 @@ impl Conversation {
             if !seen.insert(run_id) {
                 continue;
             }
-            if depth > 0 {
-                if let Some(run) = self.runs.get(run_id) {
-                    tree.push((run, depth));
-                }
+            if depth > 0
+                && let Some(run) = self.runs.get(run_id)
+            {
+                tree.push((run, depth));
             }
             if let Some(descendants) = children.get(run_id) {
                 stack.extend(

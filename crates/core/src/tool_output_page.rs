@@ -197,7 +197,8 @@ mod tests {
         )
         .unwrap();
         let definition = &tool.catalog().definitions()[0];
-        let valid = json!({"tool_call_id":ToolCallId::from_ulid(ulid::Ulid::generate()).as_str(),"stream":"stdout","offset":0,"limit":4});
+        let mut valid = json!({"tool_call_id":ToolCallId::from_ulid(ulid::Ulid::generate()).as_str(),"stream":"stdout","offset":0,"limit":4});
+        valid.sort_all_objects();
         assert!(tool.parse_arguments(definition, &valid.to_string()).is_ok());
         for (key, value) in [
             ("offset", json!(-1)),
@@ -209,6 +210,7 @@ mod tests {
         ] {
             let mut invalid = valid.clone();
             invalid[key] = value;
+            invalid.sort_all_objects();
             assert!(
                 tool.parse_arguments(definition, &invalid.to_string())
                     .is_err()

@@ -141,10 +141,10 @@ fn parse(bytes: &[u8], budget: usize) -> Result<Request, &'static str> {
     }
     let request: Request =
         serde_json::from_slice(bytes).map_err(|_| "invalid host administration input")?;
-    let canonical = serde_json::to_vec(
-        &serde_json::to_value(&request).map_err(|_| "invalid host administration input")?,
-    )
-    .map_err(|_| "invalid host administration input")?;
+    let mut value =
+        serde_json::to_value(&request).map_err(|_| "invalid host administration input")?;
+    value.sort_all_objects();
+    let canonical = serde_json::to_vec(&value).map_err(|_| "invalid host administration input")?;
     if canonical != bytes {
         return Err(
             "host administration JSON must be canonical, with no duplicate or unknown fields",
@@ -475,7 +475,8 @@ mod tests {
         }
     }
     fn request(key: &McpInstanceKey, action: serde_json::Value) -> Request {
-        let value = serde_json::json!({"key":serde_json::from_str::<serde_json::Value>(key.canonical_json()).unwrap(), "action":action});
+        let mut value = serde_json::json!({"key":serde_json::from_str::<serde_json::Value>(key.canonical_json()).unwrap(), "action":action});
+        value.sort_all_objects();
         parse(value.to_string().as_bytes(), 4096).unwrap()
     }
 

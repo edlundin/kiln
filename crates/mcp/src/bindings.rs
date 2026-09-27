@@ -133,10 +133,10 @@ pub async fn resolve_stdio_launch_from_vault<S: McpSecretStore>(
     // Missing references are rejected before any vault access, including when
     // another field happens to have a matching name in the wrong role.
     for argument in arguments {
-        if let SharedMcpArgument::HostBinding(name) = argument {
-            if !refs.arguments.contains_key(name) {
-                return Err(Error::MissingArgument);
-            }
+        if let SharedMcpArgument::HostBinding(name) = argument
+            && !refs.arguments.contains_key(name)
+        {
+            return Err(Error::MissingArgument);
         }
     }
     if environment

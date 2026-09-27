@@ -66,6 +66,10 @@ pub enum McpBrokerError {
 /// Preparation cancellation can leave shared startup running, but never sends an
 /// invocation. Once claimed, dispatch owns cancellation and uncertain outcomes.
 /// No error or dropped future is permission to replay this request.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The broker keeps independent launch, dispatch and artifact authority explicit in its public API."
+)]
 pub async fn execute_mcp_call<S, V, P, PF, A, AF, E>(
     registry: &StdioRegistry<S>,
     request: ModelToolExecutionRequest<McpCommand>,

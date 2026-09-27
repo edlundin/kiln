@@ -4941,7 +4941,7 @@ async fn validate_child_activity(
             .ok_or(RunStoreError::InvalidChildActivity)?,
     )
     .map_err(|_| RunStoreError::Unavailable)?;
-    if &event_session_id != source_run.session_id() || &activity_run_id != &reference.run_id {
+    if &event_session_id != source_run.session_id() || activity_run_id != reference.run_id {
         return Err(RunStoreError::InvalidChildActivity);
     }
     let descends_from_target = sqlx::query_scalar::<_, bool>(
@@ -5069,7 +5069,7 @@ impl RunStore for SqliteStore {
             .approval_policy()
             .ok_or(RunStoreError::InvalidTransition)?;
         let model_selection =
-            resolve_run_model_selection(&mut *transaction, run, model_policy).await?;
+            resolve_run_model_selection(&mut transaction, run, model_policy).await?;
         let execution_kind = if model_selection.is_some() {
             RunExecutionKind::NativeModel
         } else {
@@ -5106,7 +5106,7 @@ impl RunStore for SqliteStore {
             return Err(RunStoreError::Unavailable);
         }
         if let Some(selection) = model_selection.as_ref() {
-            persist_run_model_selection(&mut *transaction, run.run_id(), selection).await?;
+            persist_run_model_selection(&mut transaction, run.run_id(), selection).await?;
         }
         let stored_events = insert_events(&mut transaction, events).await?;
         sqlx::query(
@@ -5307,7 +5307,7 @@ impl RunStore for SqliteStore {
             .approval_policy()
             .ok_or(RunStoreError::InvalidTransition)?;
         let model_selection =
-            resolve_run_model_selection(&mut *transaction, run, model_policy).await?;
+            resolve_run_model_selection(&mut transaction, run, model_policy).await?;
         let execution_kind = if model_selection.is_some() {
             RunExecutionKind::NativeModel
         } else {
@@ -5332,7 +5332,7 @@ impl RunStore for SqliteStore {
         .await
         .map_err(|_| RunStoreError::Unavailable)?;
         if let Some(selection) = model_selection.as_ref() {
-            persist_run_model_selection(&mut *transaction, run.run_id(), selection).await?;
+            persist_run_model_selection(&mut transaction, run.run_id(), selection).await?;
         }
         if let Some(task) = assigned_task.as_ref() {
             sqlx::query("UPDATE tasks SET assigned_run_id = ? WHERE task_id = ?")
@@ -8482,7 +8482,7 @@ async fn load_snapshot(
                 .ok_or(RunStoreError::Unavailable)?,
         );
     }
-    let model_selection = load_run_model_selection(&mut **transaction, id)
+    let model_selection = load_run_model_selection(transaction, id)
         .await?
         .or_else(|| model_selection_from_invocation_history(&model_invocations));
     Ok(Some(

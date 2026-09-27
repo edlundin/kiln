@@ -788,6 +788,7 @@ async fn working_directory_publication_and_claim_recheck_registered_identity() {
     let mut metadata: serde_json::Value = serde_json::from_str(legacy.metadata_json()).unwrap();
     metadata["working_directory"] =
         serde_json::to_value(McpHostWorkingDirectory::from(&checkout)).unwrap();
+    metadata.sort_all_objects();
     let selected = McpHostBindings::from_metadata_json(
         key.clone(),
         &serde_json::to_vec(&metadata).unwrap(),

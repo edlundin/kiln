@@ -16,8 +16,7 @@ use tokio::{runtime::Runtime, sync::mpsc};
 
 use crate::{
     configuration_sync::ConfigurationSyncSettings, connection,
-    enrollment_requests::EnrollmentRequests,
-    follower_enrollment::FollowerEnrollment,
+    enrollment_requests::EnrollmentRequests, follower_enrollment::FollowerEnrollment,
     model_bindings::ModelBindingSettings, theme,
 };
 

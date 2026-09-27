@@ -44,6 +44,10 @@ pub struct Connected {
     pub initial_events: SessionEventsResponse,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The connection transition owns its negotiated session state until the UI installs it."
+)]
 pub enum ConnectionResult {
     Browse(DaemonConnection),
     Session(Connected),
@@ -203,7 +207,7 @@ pub async fn open_session(
         .await
         .map_err(|error| error_message("workspace lookup", &error))?;
 
-    if workspace.roots.first().is_none() {
+    if workspace.roots.is_empty() {
         return Err("workspace has no repository root".to_owned());
     }
 

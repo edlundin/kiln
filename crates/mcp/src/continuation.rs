@@ -11,6 +11,10 @@ use serde::Deserialize;
 
 use crate::StdioCallError;
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The bounded MRTR map owns each SDK request by value; this adapter preserves that representation."
+)]
 pub(crate) enum Request {
     Sdk(InputRequest),
     Url { message: String, url: String },

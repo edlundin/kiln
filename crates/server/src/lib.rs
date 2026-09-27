@@ -811,6 +811,10 @@ impl<W, S, R> AppState<W, S, R> {
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The public composition API supplies separate authenticated operation services."
+    )]
     pub fn with_usage_operations<U>(
         store: StoreMetadata,
         bound_addr: SocketAddr,
@@ -850,6 +854,10 @@ impl<W, S, R> AppState<W, S, R> {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The public composition API supplies separate authenticated operation services."
+    )]
     pub fn with_provider_account_operations<U>(
         store: StoreMetadata,
         bound_addr: SocketAddr,

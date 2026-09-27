@@ -126,6 +126,10 @@ impl McpDispatchPermit {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The claim transfers an owned single-dispatch permit; retain its public by-value ownership contract."
+)]
 pub enum McpDispatchClaim {
     Acquired(McpDispatchPermit),
     Existing(McpInvocationRecord),

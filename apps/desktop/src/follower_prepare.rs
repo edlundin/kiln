@@ -18,6 +18,10 @@ use ulid::Ulid;
 
 use crate::{connection, theme};
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The UI event owns its background operation result until the matching state transition consumes it."
+)]
 enum Update {
     Draft(Result<(Prepare, String), String>),
     Prepared(Result<kiln_protocol::ConfigurationFollowerEnrollmentResponse, String>),

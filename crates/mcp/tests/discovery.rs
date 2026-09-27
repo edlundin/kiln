@@ -34,15 +34,15 @@ impl Transport<RoleClient> for Fixture {
         message: ClientJsonRpcMessage,
     ) -> impl Future<Output = Result<(), Infallible>> + Send + 'static {
         let message = serde_json::to_value(message).unwrap();
-        if let Some(id) = message.get("id") {
-            if let Some(result) = self.replies.pop_front() {
-                self.tx
-                    .send(
-                        serde_json::from_value(json!({"jsonrpc":"2.0","id":id,"result":result}))
-                            .unwrap(),
-                    )
-                    .unwrap();
-            }
+        if let Some(id) = message.get("id")
+            && let Some(result) = self.replies.pop_front()
+        {
+            self.tx
+                .send(
+                    serde_json::from_value(json!({"jsonrpc":"2.0","id":id,"result":result}))
+                        .unwrap(),
+                )
+                .unwrap();
         }
         self.sent.lock().unwrap().push(message);
         std::future::ready(Ok(()))

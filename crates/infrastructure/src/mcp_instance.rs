@@ -97,17 +97,17 @@ impl McpInstanceStore for SqliteStore {
             }
             _ => return Err(Error::BindingChanged),
         }
-        if let Some(current) = load_current(&mut tx, key).await? {
-            if current.observed.is_active() || current.observed == McpObservedState::Interrupted {
-                if current.definition_version != expected_definition_version {
-                    return Err(Error::DefinitionChanged);
-                }
-                if current.host_binding_version.as_ref() != host_binding_version {
-                    return Err(Error::BindingChanged);
-                }
-                tx.commit().await.map_err(|_| Error::Unavailable)?;
-                return Ok(McpInstanceClaim::Existing(current));
+        if let Some(current) = load_current(&mut tx, key).await?
+            && (current.observed.is_active() || current.observed == McpObservedState::Interrupted)
+        {
+            if current.definition_version != expected_definition_version {
+                return Err(Error::DefinitionChanged);
             }
+            if current.host_binding_version.as_ref() != host_binding_version {
+                return Err(Error::BindingChanged);
+            }
+            tx.commit().await.map_err(|_| Error::Unavailable)?;
+            return Ok(McpInstanceClaim::Existing(current));
         }
         let used: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM mcp_instance_generations WHERE generation_id = ?)",

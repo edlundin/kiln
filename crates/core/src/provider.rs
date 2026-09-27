@@ -38,6 +38,10 @@ impl ProviderRequest {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Claims carry the owned request or durable duplicate receipt as an existing public by-value contract."
+)]
 pub enum ProviderClaim {
     Applied {
         request: ProviderRequest,

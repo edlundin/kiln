@@ -1241,6 +1241,10 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
             SESSION_MESSAGES_PATH.replace("{session_id}", &sessions[session_index].session_id);
         let response = http
             .post(format!("http://{}{}", daemon.address, path))
+            .header(
+                IDEMPOTENCY_KEY_HEADER,
+                format!("append-{session_index}-{content}"),
+            )
             .json(&AppendMessageRequest {
                 content: content.to_owned(),
                 attachments: Vec::new(),
@@ -1427,6 +1431,7 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
             "http://{}{}",
             daemon.address, missing_session_messages
         ))
+        .header(IDEMPOTENCY_KEY_HEADER, "missing-session-append")
         .json(&AppendMessageRequest {
             content: "message".to_owned(),
             attachments: Vec::new(),
@@ -1443,6 +1448,7 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
         SESSION_MESSAGES_PATH.replace("{session_id}", &sessions[0].session_id);
     assert_problem(
         http.post(format!("http://{}{}", daemon.address, first_messages_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "empty-message-append")
             .json(&AppendMessageRequest {
                 content: "  \n".to_owned(),
                 attachments: Vec::new(),
@@ -1470,6 +1476,7 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
 
     assert_problem(
         http.post(format!("http://{}{}", daemon.address, first_messages_path))
+            .header(IDEMPOTENCY_KEY_HEADER, "invalid-event-append")
             .json(&serde_json::json!({"content": "message", "event_type": "custom"}))
             .send()
             .await
@@ -4180,6 +4187,7 @@ async fn complete_first_vertical_slice() {
     let messages_path = SESSION_MESSAGES_PATH.replace("{session_id}", &session.session_id);
     let response = http
         .post(format!("http://{}{}", daemon.address, messages_path))
+        .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-append-message")
         .json(&AppendMessageRequest {
             content: "Run the complete deterministic vertical slice".to_owned(),
             attachments: Vec::new(),

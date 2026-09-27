@@ -90,10 +90,10 @@ fn launch(key: McpInstanceKey, path: &Path, script: &str) -> StdioGenerationLaun
 async fn pid(path: &Path) -> Pid {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Ok(value) = std::fs::read_to_string(path.join("pid")) {
-                if let Ok(value) = value.parse() {
-                    return Pid::from_raw(value).unwrap();
-                }
+            if let Ok(value) = std::fs::read_to_string(path.join("pid"))
+                && let Ok(value) = value.parse()
+            {
+                return Pid::from_raw(value).unwrap();
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -105,10 +105,10 @@ async fn pid(path: &Path) -> Pid {
 async fn stopped(store: &SqliteStore, key: &McpInstanceKey) -> McpInstanceRecord {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(record) = store.get_mcp_instance(key).await.unwrap() {
-                if record.observed == McpObservedState::Stopped {
-                    return record;
-                }
+            if let Some(record) = store.get_mcp_instance(key).await.unwrap()
+                && record.observed == McpObservedState::Stopped
+            {
+                return record;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

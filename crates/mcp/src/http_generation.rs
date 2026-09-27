@@ -240,12 +240,11 @@ impl GenerationGuard {
             return Err(failure(McpHttpError::GenerationClosed));
         }
         if let ServerJsonRpcMessage::Response(response) = message {
-            if let ServerResult::InitializeResult(result) = &response.result {
-                if self.protocol == ProtocolVersion::V20260728
-                    || result.protocol_version.as_str() != self.protocol.as_str()
-                {
-                    return Err(self.retire(McpHttpError::ProtocolViolation));
-                }
+            if let ServerResult::InitializeResult(result) = &response.result
+                && (self.protocol == ProtocolVersion::V20260728
+                    || result.protocol_version.as_str() != self.protocol.as_str())
+            {
+                return Err(self.retire(McpHttpError::ProtocolViolation));
             }
             if let ServerResult::ListToolsResult(result) = &response.result {
                 let mut counter = CountBytes {
@@ -400,13 +399,12 @@ impl StreamableHttpClient for GenerationClient {
         let startup = matches!(&message, ClientJsonRpcMessage::Request(request)
             if matches!(&request.request, ClientRequest::InitializeRequest(_) | ClientRequest::DiscoverRequest(_)));
         let expected = if let ClientJsonRpcMessage::Request(request) = &message {
-            if let ClientRequest::InitializeRequest(initialize) = &request.request {
-                if self.guard.protocol == ProtocolVersion::V20260728
+            if let ClientRequest::InitializeRequest(initialize) = &request.request
+                && (self.guard.protocol == ProtocolVersion::V20260728
                     || initialize.params.protocol_version.as_str() != self.guard.protocol.as_str()
-                    || self.guard.initialized.swap(true, Ordering::AcqRel)
-                {
-                    return Err(self.guard.retire(McpHttpError::ProtocolViolation));
-                }
+                    || self.guard.initialized.swap(true, Ordering::AcqRel))
+            {
+                return Err(self.guard.retire(McpHttpError::ProtocolViolation));
             }
             Some(request.id.clone())
         } else {

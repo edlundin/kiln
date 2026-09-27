@@ -222,6 +222,7 @@ enum ChangeDiffState {
     },
 }
 
+#[derive(Default)]
 struct UsageState {
     entries: Vec<UsageLedgerEntryResponse>,
     next_cursor: Option<String>,
@@ -233,23 +234,6 @@ struct UsageState {
     request_id: u64,
     destination_generation: u64,
     expanded: std::collections::BTreeSet<String>,
-}
-
-impl Default for UsageState {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            next_cursor: None,
-            loading: false,
-            loading_more: false,
-            has_loaded: false,
-            error: None,
-            retry_after: None,
-            request_id: 0,
-            destination_generation: 0,
-            expanded: std::collections::BTreeSet::new(),
-        }
-    }
 }
 
 impl UsageState {
@@ -721,7 +705,7 @@ impl Desktop {
                     DraftAttachmentState::Local,
                     media_type
                         .starts_with("image/")
-                        .then(|| AttachmentThumbnail::Icon(IconName::File)),
+                        .then_some(AttachmentThumbnail::Icon(IconName::File)),
                 )
             };
             self.attachments.push(DraftAttachment {
@@ -782,11 +766,9 @@ impl Desktop {
                 ClipboardEntry::String(_) => {}
             }
         }
-        if !attached {
-            if let Some(text) = item.text() {
-                self.composer
-                    .update(cx, |input, cx| input.insert(text, window, cx));
-            }
+        if !attached && let Some(text) = item.text() {
+            self.composer
+                .update(cx, |input, cx| input.insert(text, window, cx));
         }
         cx.notify();
     }
@@ -837,10 +819,10 @@ impl Desktop {
     }
 
     fn retry_attachment(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(attachment) = self.attachments.get_mut(index) {
-            if matches!(attachment.state, DraftAttachmentState::Failed(_)) {
-                attachment.state = DraftAttachmentState::Local;
-            }
+        if let Some(attachment) = self.attachments.get_mut(index)
+            && matches!(attachment.state, DraftAttachmentState::Failed(_))
+        {
+            attachment.state = DraftAttachmentState::Local;
         }
         self.submit(window, cx);
     }
@@ -1461,13 +1443,13 @@ impl Desktop {
     }
 
     fn ensure_account_settings(&mut self, cx: &mut Context<Self>) {
-        if self.account_settings.is_none() && self.online {
-            if let Some(daemon) = &self.daemon {
-                let client = daemon.client.clone();
-                let runtime = self.runtime.clone();
-                self.account_settings =
-                    Some(cx.new(|cx| AccountSettings::new(client, runtime, cx)));
-            }
+        if self.account_settings.is_none()
+            && self.online
+            && let Some(daemon) = &self.daemon
+        {
+            let client = daemon.client.clone();
+            let runtime = self.runtime.clone();
+            self.account_settings = Some(cx.new(|cx| AccountSettings::new(client, runtime, cx)));
         }
     }
 
@@ -2557,12 +2539,10 @@ impl Desktop {
                         error,
                     },
                 };
-                let current = self.change_diff_state.as_ref().and_then(|state| {
-                    Some(match state {
-                        ChangeDiffState::Loading { path, .. }
-                        | ChangeDiffState::Ready { path, .. }
-                        | ChangeDiffState::Failed { path, .. } => path.as_str(),
-                    })
+                let current = self.change_diff_state.as_ref().map(|state| match state {
+                    ChangeDiffState::Loading { path, .. }
+                    | ChangeDiffState::Ready { path, .. }
+                    | ChangeDiffState::Failed { path, .. } => path.as_str(),
                 });
                 if current == Some(path.as_str()) {
                     self.change_diff_state = Some(state);
@@ -2714,7 +2694,7 @@ impl Desktop {
             let open_run_id = run_id.clone();
             let title = self
                 .conversation
-                .task_for_run(&run)
+                .task_for_run(run)
                 .map_or("Delegated Run".to_owned(), |task| task.objective.clone());
             let detail = format!(
                 "{} · {} · Level {}",

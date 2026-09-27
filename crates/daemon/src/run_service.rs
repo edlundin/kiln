@@ -1036,10 +1036,10 @@ impl RunService {
         }
         self.wait_until_idle().await;
         #[cfg(unix)]
-        if let Some(registry) = &self.mcp_registry {
-            if registry.shutdown().await.iter().any(Result::is_err) {
-                first_error.get_or_insert(RunError::CancellationFailed);
-            }
+        if let Some(registry) = &self.mcp_registry
+            && registry.shutdown().await.iter().any(Result::is_err)
+        {
+            first_error.get_or_insert(RunError::CancellationFailed);
         }
         if let Some(error) = *self.active.failure.lock().await {
             first_error.get_or_insert(error);
@@ -1283,7 +1283,7 @@ impl ArtifactOperations for RunService {
     ) -> impl Future<Output = Result<kiln_core::Artifact, ArtifactUploadError>> + Send {
         let service = self.clone();
         async move {
-            let probe_hash = ContentHash::parse(&"0".repeat(64))
+            let probe_hash = ContentHash::parse("0".repeat(64))
                 .map_err(|_| ArtifactUploadError::InvalidMediaType)?;
             Artifact::new(
                 probe_hash,

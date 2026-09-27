@@ -226,11 +226,14 @@ where
     ))
 }
 
+type CertificateFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, ConfigurationStateError>> + Send + 'a>>;
+
 pub(super) trait ConfigurationIdentityStatusOperations: Send + Sync {
     fn certificate(
         &self,
         identity_id: kiln_core::ConfigurationMasterIdentityId,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, ConfigurationStateError>> + Send + '_>>;
+    ) -> CertificateFuture<'_>;
     fn status(
         &self,
     ) -> Pin<
@@ -248,11 +251,14 @@ impl<T: ConfigurationIdentityStatusStore> ConfigurationIdentityStatusOperations
     fn certificate(
         &self,
         identity_id: kiln_core::ConfigurationMasterIdentityId,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, ConfigurationStateError>> + Send + '_>> {
+    ) -> CertificateFuture<'_> {
         Box::pin(async move {
-            self.0.get_configuration_identity_certificate(
-                &identity_id, kiln_protocol::CONFIGURATION_IDENTITY_CERTIFICATE_MAX_BYTES,
-            ).await
+            self.0
+                .get_configuration_identity_certificate(
+                    &identity_id,
+                    kiln_protocol::CONFIGURATION_IDENTITY_CERTIFICATE_MAX_BYTES,
+                )
+                .await
         })
     }
     fn status(

@@ -68,6 +68,10 @@ impl ProviderContextAttachment {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Context entries preserve the existing public owned snapshot representation."
+)]
 pub enum ProviderContextEntry {
     Continuation {
         reference: crate::ModelContinuationReference,

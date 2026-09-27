@@ -61,6 +61,15 @@ impl McpInputMutation {
 }
 
 pub trait McpInputStore: Send + Sync {
+    /// Identify the live interaction owner without creating or approving input.
+    /// Interactive Runs own their input; read-only children route to their
+    /// interactive root in the same Session. This snapshot is not authority to
+    /// publish a prompt or execute sampling; writers must revalidate ownership.
+    fn mcp_input_interaction_run(
+        &self,
+        expected: &McpInputRecord,
+    ) -> impl Future<Output = Result<crate::RunId, McpInvocationError>> + Send;
+
     /// Resolve the one directory already approved for this live roots input.
     /// Includes the approved relative scope, never the broader workspace root.
     /// A path is metadata, not filesystem access or authority to send a response;

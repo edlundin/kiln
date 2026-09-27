@@ -3,6 +3,167 @@ use kiln_core::*;
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 #[tokio::test]
+async fn mcp_input_interaction_owner_follows_live_same_session_ancestry() {
+    for mode in [RunInputMode::ReadOnly, RunInputMode::Interactive] {
+        let (_data, store, session) = seeded_session().await;
+        let target = ready(&store, McpInstanceOwner::Core).await;
+        let runs = RunApplication::new(store.clone(), super::super::UlidIdGenerator);
+        let root = runs
+            .start_root_run(
+                session.id().clone(),
+                "interaction-root".into(),
+                ApprovalPolicy::Ask,
+                test_scope(),
+            )
+            .await
+            .unwrap();
+        let root_id = root.value.run().run_id().clone();
+        let parent = runs
+            .start_child_run(
+                root_id.clone(),
+                None,
+                RunInputMode::ReadOnly,
+                "parent".into(),
+                ApprovalPolicy::Ask,
+                test_scope(),
+            )
+            .await
+            .unwrap();
+        let parent_id = parent.value.run().run_id().clone();
+        let child = runs
+            .start_child_run(
+                parent_id.clone(),
+                None,
+                mode,
+                "child".into(),
+                ApprovalPolicy::Ask,
+                test_scope(),
+            )
+            .await
+            .unwrap();
+        let child_id = child.value.run().run_id().clone();
+        let request = request_on_run(&store, child_id.clone(), "child-input", "mcp_call", serde_json::json!({
+            "server_id":"fixture","definition_version":1,"operation":{"kind":"tool","name":"write","arguments":{}}
+        }), test_scope()).await;
+        let McpDispatchClaim::Acquired(permit) =
+            claim_mcp_dispatch(&store, request, &target, limits())
+                .await
+                .unwrap()
+        else {
+            panic!()
+        };
+        let McpInputMutation::Applied(input) = store
+            .require_mcp_input(
+                permit.record(),
+                std::num::NonZeroU64::new(1).unwrap(),
+                McpInputKind::Elicitation,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        let wake = store.subscribe_mcp_invocation_events();
+        assert_eq!(
+            store.mcp_input_interaction_run(&input).await.unwrap(),
+            if mode == RunInputMode::ReadOnly {
+                root_id.clone()
+            } else {
+                child_id.clone()
+            }
+        );
+        assert!(!wake.has_changed().unwrap());
+        let mut wrong = input.clone();
+        wrong.kind = McpInputKind::Roots;
+        assert_eq!(
+            store.mcp_input_interaction_run(&wrong).await.err(),
+            Some(McpInvocationError::InvalidRequest)
+        );
+        // Corrupt cycle must terminate without routing to an unrelated live root.
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET parent_run_id=? WHERE run_id=?")
+                .bind(child_id.as_str())
+                .bind(parent_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.mcp_input_interaction_run(&input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET parent_run_id=? WHERE run_id=?")
+                .bind(root_id.as_str())
+                .bind(parent_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        let other_session =
+            SessionApplication::new(store.clone(), store.clone(), super::super::UlidIdGenerator)
+                .create_session(session.workspace_id().clone())
+                .await
+                .unwrap();
+        let other = runs
+            .start_root_run(
+                other_session.id().clone(),
+                "other".into(),
+                ApprovalPolicy::Ask,
+                test_scope(),
+            )
+            .await
+            .unwrap();
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET parent_run_id=? WHERE run_id=?")
+                .bind(other.value.run().run_id().as_str())
+                .bind(parent_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.mcp_input_interaction_run(&input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        {
+            let mut sql = store.connection.lock().await;
+            sqlx::query("UPDATE runs SET parent_run_id=? WHERE run_id=?")
+                .bind(root_id.as_str())
+                .bind(parent_id.as_str())
+                .execute(&mut *sql)
+                .await
+                .unwrap();
+        }
+        store.resolve_mcp_input(&input).await.unwrap();
+        assert_eq!(
+            store.mcp_input_interaction_run(&input).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+        let McpInputMutation::Applied(sampling) = store
+            .require_mcp_input(
+                permit.record(),
+                std::num::NonZeroU64::new(2).unwrap(),
+                McpInputKind::Sampling,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(store.mcp_input_interaction_run(&sampling).await.is_ok());
+        runs.request_cancellation(root_id).await.unwrap();
+        assert_eq!(
+            store.mcp_input_interaction_run(&sampling).await.err(),
+            Some(McpInvocationError::Conflict)
+        );
+    }
+}
+
+#[tokio::test]
 async fn mcp_roots_input_reveals_only_live_bound_approval_directory() {
     let (_data, store, session) = seeded_session().await;
     let key = register(&store, McpInstanceOwner::Core, McpProtocolPolicy::Auto).await;
@@ -516,6 +677,19 @@ async fn request_native_scoped(
         .await
         .unwrap();
     let run_id = run.value.run().run_id().clone();
+    request_on_run(store, run_id, key, name, arguments, scope).await
+}
+
+async fn request_on_run(
+    store: &super::super::SqliteStore,
+    run_id: RunId,
+    key: &str,
+    name: &str,
+    arguments: serde_json::Value,
+    scope: WorkspacePathScope,
+) -> ModelToolExecutionRequest<McpCommand> {
+    let ids = super::super::UlidIdGenerator;
+    let runs = RunApplication::new(store.clone(), ids);
     let manifest = ContextManifestApplication::new(store.clone(), ids)
         .create_context_manifest(CreateContextManifest {
             run_id: run_id.clone(),

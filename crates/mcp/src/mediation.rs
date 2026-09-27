@@ -180,6 +180,12 @@ mod tests {
         resolved: AtomicUsize,
     }
     impl McpInputStore for Store {
+        async fn mcp_input_interaction_run(
+            &self,
+            _: &McpInputRecord,
+        ) -> Result<kiln_core::RunId, McpInvocationError> {
+            panic!("roots must not request user interaction")
+        }
         async fn require_mcp_input(
             &self,
             invocation: &McpInvocationRecord,

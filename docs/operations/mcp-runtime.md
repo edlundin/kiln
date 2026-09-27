@@ -189,6 +189,16 @@ Stale registered directory metadata, lost readiness, cancellation and resolved
 inputs reject the lookup. This reads metadata only: it neither resolves the
 input nor sends an MCP response, and it performs no filesystem or vault access.
 
+For pending sampling or elicitation input, the internal interaction-owner lookup
+keeps an interactive Run as its own target and routes a read-only child to its
+interactive root. It validates the current input, invocation and generation plus
+the complete live ancestry in the same Session. Cancelled/terminal ancestors,
+cycles, cross-Session links and resolved input reject the lookup. The result is
+a read-only ownership snapshot, not permission to publish a prompt, approve an
+action or execute a provider request; those writers must revalidate ownership.
+Sampling/elicitation runtime handlers and the user interaction surface are still
+unimplemented.
+
 
 Native file reading remains independently configurable. The daemon freezes one
 combined native catalogue and routes each approved command through a consuming

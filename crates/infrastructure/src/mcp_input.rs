@@ -9,6 +9,49 @@ use sqlx::{Connection, Row, SqliteConnection};
 use super::SqliteStore;
 
 impl McpInputStore for SqliteStore {
+    async fn mcp_input_interaction_run(
+        &self,
+        expected: &McpInputRecord,
+    ) -> Result<kiln_core::RunId, Error> {
+        if !matches!(
+            expected.kind,
+            McpInputKind::Sampling | McpInputKind::Elicitation
+        ) || expected.state != McpInputState::Required
+        {
+            return Err(Error::InvalidRequest);
+        }
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
+        let invocation = current_invocation(&mut tx, &expected.invocation).await?;
+        let current = load(&mut tx, invocation, expected.ordinal)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if current.kind != expected.kind || current.state != McpInputState::Required {
+            return Err(Error::Conflict);
+        }
+        validate_live(&mut tx, &current.invocation).await?;
+        // UNION, rather than UNION ALL, makes corrupt cycles terminate without
+        // an arbitrary ancestry-depth limit. Any broken chain fails closed.
+        let owner: Option<String> = sqlx::query_scalar("WITH RECURSIVE
+            source AS (SELECT r.* FROM runs r JOIN tool_calls t ON t.run_id = r.run_id WHERE t.tool_call_id = ?),
+            lineage(run_id,parent_run_id,session_id,user_input_mode,state) AS (
+                SELECT run_id,parent_run_id,session_id,user_input_mode,state FROM source
+                UNION
+                SELECT r.run_id,r.parent_run_id,r.session_id,r.user_input_mode,r.state
+                FROM runs r JOIN lineage c ON r.run_id = c.parent_run_id
+            )
+            SELECT CASE WHEN source.user_input_mode = 'interactive' THEN source.run_id ELSE root.run_id END
+            FROM source JOIN lineage root ON root.parent_run_id IS NULL
+            WHERE root.user_input_mode = 'interactive'
+              AND NOT EXISTS (SELECT 1 FROM lineage a WHERE a.session_id != source.session_id
+                OR a.state NOT IN ('queued','running','waiting_for_approval'))")
+            .bind(current.invocation.tool_call_id.as_str()).fetch_optional(&mut *tx).await.map_err(|_| Error::Unavailable)?;
+        let owner = kiln_core::RunId::parse(owner.ok_or(Error::Conflict)?)
+            .map_err(|_| Error::IntegrityViolation)?;
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(owner)
+    }
+
     async fn mcp_input_root(
         &self,
         expected: &McpInputRecord,

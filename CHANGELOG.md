@@ -2,6 +2,16 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add a read-only lookup for pending sampling/elicitation interaction
+  owners across live same-Session Run ancestry. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Enable bounded roots mediation for live host-bound MCP calls and
   supported modern stateful continuations. ([pending])
 

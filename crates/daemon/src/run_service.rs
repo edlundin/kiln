@@ -56,6 +56,8 @@ pub(crate) struct RunService {
     native_model: Option<crate::native_model::NativeModelSelection>,
     provider_registry: Arc<ProviderRegistry>,
     native_file_read: Option<Arc<kiln_core::WorkspaceFileReadTool>>,
+    #[cfg(unix)]
+    mcp_registry: Option<Arc<kiln_mcp::StdioRegistry<SqliteStore>>>,
     events: EventBroadcaster,
     commit_sequence: Arc<Mutex<()>>,
     active: Arc<ActiveRuns>,
@@ -78,6 +80,8 @@ impl RunService {
             native_model: None,
             provider_registry: Arc::new(ProviderRegistry::new()),
             native_file_read: None,
+            #[cfg(unix)]
+            mcp_registry: None,
             events,
             commit_sequence: Arc::new(Mutex::new(())),
             active: Arc::new(ActiveRuns::default()),
@@ -92,6 +96,15 @@ impl RunService {
         selection: Option<crate::native_model::NativeModelSelection>,
     ) -> Self {
         self.native_model = selection;
+        self
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_mcp_registry(
+        mut self,
+        registry: Option<Arc<kiln_mcp::StdioRegistry<SqliteStore>>>,
+    ) -> Self {
+        self.mcp_registry = registry;
         self
     }
 
@@ -970,6 +983,12 @@ impl RunService {
             }
         }
         self.wait_until_idle().await;
+        #[cfg(unix)]
+        if let Some(registry) = &self.mcp_registry {
+            if registry.shutdown().await.iter().any(Result::is_err) {
+                first_error.get_or_insert(RunError::CancellationFailed);
+            }
+        }
         if let Some(error) = *self.active.failure.lock().await {
             first_error.get_or_insert(error);
         }

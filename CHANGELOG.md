@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add opt-in daemon recovery and orderly shutdown for scoped MCP
+  generation owners.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Retain scoped MCP generation owners across waiters and reuse them
   after durable readiness and local binding revalidation.
 

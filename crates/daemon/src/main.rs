@@ -50,6 +50,8 @@ use crate::run_service::RunService;
 mod account_import;
 mod configuration_enrollment;
 mod configuration_refresh;
+#[cfg(unix)]
+mod mcp_runtime;
 mod native_model;
 mod provider_login;
 mod run_service;
@@ -215,6 +217,14 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    #[cfg(unix)]
+    let mcp_registry = match mcp_runtime::configured_registry(&store).await {
+        Ok(registry) => registry,
+        Err(error) => {
+            eprintln!("kilnd: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Identity creation is idempotent. Startup never designates a master or enrolls
     // a follower implicitly, including after configuration/network failures.
     let configuration_state = match store
@@ -319,6 +329,8 @@ async fn main() -> ExitCode {
     .with_native_model(native_selection)
     .with_native_file_read(native_file_read)
     .with_provider_registry(provider_registry);
+    #[cfg(unix)]
+    let runs = runs.with_mcp_registry(mcp_registry.clone());
 
     if let Err(error) = runs.reconcile_deterministic_model_runs().await {
         eprintln!("kilnd: cannot reconcile deterministic native Runs: {error:?}");
@@ -516,7 +528,7 @@ async fn main() -> ExitCode {
             std::future::pending::<()>().await;
         }
         if let Err(error) = runs.shutdown().await {
-            eprintln!("kilnd: graceful shutdown could not persist all terminal Runs: {error:?}");
+            eprintln!("kilnd: graceful shutdown could not drain Runs and MCP owners: {error:?}");
             std::future::pending::<()>().await;
         }
     };
@@ -524,6 +536,14 @@ async fn main() -> ExitCode {
     let server_result = serve_with_shutdown(listener, state, graceful_shutdown).await;
     lifecycle.request_shutdown();
     lifecycle.wait_for_commands().await;
+    // A listener failure can drop the graceful-shutdown future. Retain and drain
+    // MCP ownership here too; a normal drain is idempotent.
+    #[cfg(unix)]
+    let mcp_cleanup_failed = if let Some(registry) = mcp_registry {
+        registry.shutdown().await.iter().any(Result::is_err)
+    } else {
+        false
+    };
     if let Some(refresh_task) = refresh_task
         && refresh_task.await.is_err()
     {
@@ -535,6 +555,11 @@ async fn main() -> ExitCode {
         eprintln!("kilnd: configuration follower TLS supervisor task failed");
     }
 
+    #[cfg(unix)]
+    if mcp_cleanup_failed {
+        eprintln!("kilnd: MCP process cleanup or lifecycle journaling failed");
+        return ExitCode::FAILURE;
+    }
     match server_result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

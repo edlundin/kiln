@@ -3748,6 +3748,7 @@ dependencies = [
  "kiln-client",
  "kiln-core",
  "kiln-infrastructure",
+ "kiln-mcp",
  "kiln-protocol",
  "kiln-providers",
  "kiln-server",

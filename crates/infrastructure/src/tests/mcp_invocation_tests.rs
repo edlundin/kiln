@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 
 #[tokio::test]
 async fn mcp_input_journal_keeps_dispatch_owned_and_interrupts_pending_input() {
-    let (_data, store, session) = seeded_session().await;
+    let (data, store, session) = seeded_session().await;
     let target = ready(&store, McpInstanceOwner::Core).await;
     let request = request(&store, &session, "input").await;
     let McpDispatchClaim::Acquired(permit) = claim_mcp_dispatch(&store, request, &target, limits())
@@ -15,6 +15,7 @@ async fn mcp_input_journal_keeps_dispatch_owned_and_interrupts_pending_input() {
     };
     let one = std::num::NonZeroU64::new(1).unwrap();
     let two = std::num::NonZeroU64::new(2).unwrap();
+    let mut wake = store.subscribe_mcp_invocation_events();
     let McpInputMutation::Applied(first) = store
         .require_mcp_input(permit.record(), one, McpInputKind::Roots)
         .await
@@ -23,6 +24,8 @@ async fn mcp_input_journal_keeps_dispatch_owned_and_interrupts_pending_input() {
         panic!("fresh input must be applied")
     };
     assert_eq!(first.state, McpInputState::Required);
+    assert!(wake.has_changed().unwrap());
+    wake.borrow_and_update();
     assert_eq!(
         store
             .require_mcp_input(permit.record(), one, McpInputKind::Roots)
@@ -30,6 +33,7 @@ async fn mcp_input_journal_keeps_dispatch_owned_and_interrupts_pending_input() {
             .unwrap(),
         McpInputMutation::Existing(first.clone())
     );
+    assert!(!wake.has_changed().unwrap());
     assert_eq!(
         store
             .require_mcp_input(permit.record(), one, McpInputKind::Sampling)
@@ -104,6 +108,63 @@ async fn mcp_input_journal_keeps_dispatch_owned_and_interrupts_pending_input() {
             .await
             .unwrap();
     assert_eq!(states, ["required", "resolved", "required", "interrupted"]);
+    drop(sql);
+    drop(store);
+    let store = super::super::SqliteStore::open(data.path()).await.unwrap();
+    let page = store
+        .list_session_events(session.id(), EventCursor::zero())
+        .await
+        .unwrap();
+    let inputs: Vec<_> = page
+        .events()
+        .iter()
+        .filter_map(|event| {
+            if let SessionEventPayload::McpInputStateChanged {
+                run_id,
+                tool_call_id,
+                generation,
+                ordinal,
+                kind,
+                state,
+            } = event.payload()
+            {
+                assert_eq!(run_id, permit.request().tool_call().run_id());
+                assert_eq!(tool_call_id, &permit.record().tool_call_id);
+                assert_eq!(generation, &target.generation);
+                Some((event.cursor(), ordinal.get(), *kind, *state))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        inputs
+            .iter()
+            .map(|(_, ordinal, kind, state)| (*ordinal, *kind, *state))
+            .collect::<Vec<_>>(),
+        [
+            (1, McpInputKind::Roots, McpInputState::Required),
+            (1, McpInputKind::Roots, McpInputState::Resolved),
+            (2, McpInputKind::Elicitation, McpInputState::Required),
+            (2, McpInputKind::Elicitation, McpInputState::Interrupted),
+        ]
+    );
+    let replay = store
+        .list_session_events(session.id(), inputs[2].0)
+        .await
+        .unwrap();
+    assert_eq!(
+        replay
+            .events()
+            .iter()
+            .filter(|event| matches!(
+                event.payload(),
+                SessionEventPayload::McpInputStateChanged { .. }
+            ))
+            .count(),
+        1
+    );
+    assert!(!format!("{inputs:?}").contains("private-payload"));
 }
 
 #[tokio::test]
@@ -131,7 +192,7 @@ async fn mcp_input_journal_rolls_back_and_rejects_lost_ownership() {
     );
     {
         let mut sql = store.connection.lock().await;
-        sqlx::query("CREATE TRIGGER fixture_input_failure BEFORE INSERT ON mcp_input_events BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END").execute(&mut *sql).await.unwrap();
+        sqlx::query("CREATE TRIGGER fixture_input_failure BEFORE INSERT ON session_events WHEN NEW.event_type = 'mcp.input_state_changed' BEGIN SELECT RAISE(ABORT, 'fixture rollback'); END").execute(&mut *sql).await.unwrap();
     }
     assert_eq!(
         store

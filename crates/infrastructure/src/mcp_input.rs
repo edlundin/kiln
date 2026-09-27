@@ -49,6 +49,7 @@ impl McpInputStore for SqliteStore {
             .execute(&mut *tx).await.map_err(|_| Error::Unavailable)?;
         append_event(&mut tx, &current, number, "required").await?;
         tx.commit().await.map_err(|_| Error::Unavailable)?;
+        self.mcp_invocation_events.send_replace(());
         Ok(McpInputMutation::Applied(McpInputRecord {
             invocation: current,
             ordinal,
@@ -92,6 +93,7 @@ impl McpInputStore for SqliteStore {
         .map_err(|_| Error::Unavailable)?;
         append_event(&mut tx, &current.invocation, number, "resolved").await?;
         tx.commit().await.map_err(|_| Error::Unavailable)?;
+        self.mcp_invocation_events.send_replace(());
         current.state = McpInputState::Resolved;
         Ok(McpInputMutation::Applied(current))
     }
@@ -186,8 +188,88 @@ async fn append_event(
         .bind(invocation.tool_call_id.as_str())
         .bind(ordinal)
         .bind(state)
-        .execute(connection)
+        .execute(&mut *connection)
         .await
         .map_err(|_| Error::Unavailable)?;
+    publish_events(connection, &invocation.tool_call_id).await?;
     Ok(())
+}
+
+/// Also drains input interruption events inserted by the invocation-end trigger.
+/// Every projection is committed with the journal mutation and uses Kiln IDs.
+pub(super) async fn publish_events(
+    connection: &mut SqliteConnection,
+    id: &kiln_core::ToolCallId,
+) -> Result<(), Error> {
+    loop {
+        let sequence: Option<i64> = sqlx::query_scalar(
+            "SELECT e.sequence FROM mcp_input_events e
+            LEFT JOIN session_events s ON s.mcp_input_sequence = e.sequence
+            WHERE e.tool_call_id = ? AND s.cursor IS NULL ORDER BY e.sequence LIMIT 1",
+        )
+        .bind(id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| Error::Unavailable)?;
+        let Some(sequence) = sequence else {
+            return Ok(());
+        };
+        let inserted = sqlx::query("INSERT INTO session_events(event_id, session_id, event_type, run_id, tool_call_id, mcp_input_sequence)
+            SELECT ?, r.session_id, 'mcp.input_state_changed', r.run_id, t.tool_call_id, ?
+            FROM tool_calls t JOIN runs r ON r.run_id = t.run_id WHERE t.tool_call_id = ?")
+            .bind(kiln_core::EventId::from_ulid(ulid::Ulid::generate()).as_str())
+            .bind(sequence).bind(id.as_str()).execute(&mut *connection).await.map_err(|_| Error::Unavailable)?;
+        if inserted.rows_affected() != 1 {
+            return Err(Error::IntegrityViolation);
+        }
+    }
+}
+
+pub(super) async fn load_event(
+    connection: &mut SqliteConnection,
+    sequence: i64,
+) -> Result<(kiln_core::SessionId, kiln_core::SessionEventPayload), kiln_core::StoreError> {
+    use kiln_core::{
+        McpGenerationId, RunId, SessionEventPayload, SessionId, StoreError, ToolCallId,
+    };
+    let row = sqlx::query("SELECT r.session_id, r.run_id, e.tool_call_id, i.generation_id, e.ordinal, p.kind, e.state
+        FROM mcp_input_events e JOIN mcp_inputs p ON p.tool_call_id = e.tool_call_id AND p.ordinal = e.ordinal
+        JOIN mcp_invocations i ON i.tool_call_id = e.tool_call_id
+        JOIN tool_calls t ON t.tool_call_id = e.tool_call_id JOIN runs r ON r.run_id = t.run_id
+        WHERE e.sequence = ?").bind(sequence).fetch_one(connection).await.map_err(|_| StoreError::Unavailable)?;
+    let string = |name| {
+        row.try_get::<String, _>(name)
+            .map_err(|_| StoreError::Unavailable)
+    };
+    let kind = match string("kind")?.as_str() {
+        "roots" => McpInputKind::Roots,
+        "sampling" => McpInputKind::Sampling,
+        "elicitation" => McpInputKind::Elicitation,
+        _ => return Err(StoreError::Unavailable),
+    };
+    let state = match string("state")?.as_str() {
+        "required" => McpInputState::Required,
+        "resolved" => McpInputState::Resolved,
+        "interrupted" => McpInputState::Interrupted,
+        _ => return Err(StoreError::Unavailable),
+    };
+    let ordinal = row
+        .try_get::<i64, _>("ordinal")
+        .ok()
+        .and_then(|v| u64::try_from(v).ok())
+        .and_then(NonZeroU64::new)
+        .ok_or(StoreError::Unavailable)?;
+    Ok((
+        SessionId::parse(string("session_id")?).map_err(|_| StoreError::Unavailable)?,
+        SessionEventPayload::McpInputStateChanged {
+            run_id: RunId::parse(string("run_id")?).map_err(|_| StoreError::Unavailable)?,
+            tool_call_id: ToolCallId::parse(string("tool_call_id")?)
+                .map_err(|_| StoreError::Unavailable)?,
+            generation: McpGenerationId::parse(string("generation_id")?)
+                .map_err(|_| StoreError::Unavailable)?,
+            ordinal,
+            kind,
+            state,
+        },
+    ))
 }

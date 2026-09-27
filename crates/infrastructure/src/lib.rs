@@ -1689,7 +1689,7 @@ macro_rules! event_select {
        e.model_capability_vision, e.model_capability_structured_output,
        e.model_purpose, e.model_retry_of, e.model_invocation_state,
        e.model_completion_kind, e.model_terminal_reason, e.usage_observation_id,
-       e.output_chunk_id, e.mcp_invocation_sequence,
+       e.output_chunk_id, e.mcp_invocation_sequence, e.mcp_input_sequence,
        cm.session_id AS manifest_session_id,
        cm.run_id AS manifest_run_id,
        cm.content_hash AS manifest_content_hash,
@@ -2536,6 +2536,32 @@ async fn parse_event_rows(
         .map_err(|_| StoreError::Unavailable)?;
 
         let event = match event_type.as_str() {
+            "mcp.input_state_changed" => {
+                let sequence = row
+                    .try_get::<i64, _>("mcp_input_sequence")
+                    .map_err(|_| StoreError::Unavailable)?;
+                let (owner_session, payload) = mcp_input::load_event(transaction, sequence).await?;
+                let SessionEventPayload::McpInputStateChanged {
+                    run_id: owner_run,
+                    tool_call_id,
+                    ..
+                } = &payload
+                else {
+                    return Err(StoreError::Unavailable);
+                };
+                if owner_session != stored_session_id
+                    || run_id.as_deref() != Some(owner_run.as_str())
+                    || row
+                        .try_get::<Option<String>, _>("tool_call_id")
+                        .map_err(|_| StoreError::Unavailable)?
+                        .as_deref()
+                        != Some(tool_call_id.as_str())
+                {
+                    return Err(StoreError::Unavailable);
+                }
+                StoredSessionEvent::from_parts(event_id, stored_session_id, cursor, payload)
+                    .map_err(|_| StoreError::Unavailable)?
+            }
             "mcp.invocation_state_changed" => {
                 let sequence = row
                     .try_get::<i64, _>("mcp_invocation_sequence")
@@ -4881,7 +4907,7 @@ async fn validate_child_activity(
                     ) THEN e.assigned_run_id
                     WHEN e.event_type = 'run.child_added' THEN e.child_run_id
                     WHEN e.event_type IN (
-                        'model_invocation.output', 'usage.observed', 'mcp.invocation_state_changed',
+                        'model_invocation.output', 'usage.observed', 'mcp.invocation_state_changed', 'mcp.input_state_changed',
                         'model_invocation.created', 'model_invocation.state_changed',
                         'context.manifest_created', 'run.created', 'run.queued',
                         'run.state_changed', 'run.cancellation_requested',
@@ -7426,6 +7452,7 @@ fn run_event_columns(event: &SessionEvent) -> Result<RunEventColumns<'_>, RunSto
         | SessionEventPayload::UsageObserved { .. }
         | SessionEventPayload::ModelOutputRecorded { .. }
         | SessionEventPayload::McpInvocationStateChanged { .. }
+        | SessionEventPayload::McpInputStateChanged { .. }
         | SessionEventPayload::TaskCreated { .. }
         | SessionEventPayload::TaskUpdated { .. }
         | SessionEventPayload::TaskAssigned { .. }

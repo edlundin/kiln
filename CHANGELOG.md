@@ -2,6 +2,16 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Publish durable MCP input mediation transitions as replayable session
+  events, with interruption recorded before invocation termination. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Journal bodyless MCP input mediation receipts against the original
   dispatch invocation with durable interruption and retry dispositions. ([pending])
 

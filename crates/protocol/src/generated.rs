@@ -624,6 +624,8 @@ fn schema() -> String {
             schema_for!(ModelInvocationFailureReason),
         ),
         ("McpInvocationState", schema_for!(crate::McpInvocationState)),
+        ("McpInputKind", schema_for!(crate::McpInputKind)),
+        ("McpInputState", schema_for!(crate::McpInputState)),
         ("ModelOutputStream", schema_for!(ModelOutputStream)),
         (
             "ModelOutputRecordedResponse",
@@ -781,6 +783,8 @@ fn typescript() -> String {
         ModelInvocationCompletionKind::decl(&config),
         ModelInvocationFailureReason::decl(&config),
         crate::McpInvocationState::decl(&config),
+        crate::McpInputKind::decl(&config),
+        crate::McpInputState::decl(&config),
         ModelOutputStream::decl(&config),
         ModelOutputRecordedResponse::decl(&config),
         UsageCompleteness::decl(&config),
@@ -3641,6 +3645,8 @@ components:
             "McpInvocationState",
             openapi_schema::<crate::McpInvocationState>(),
         ),
+        ("McpInputKind", openapi_schema::<crate::McpInputKind>()),
+        ("McpInputState", openapi_schema::<crate::McpInputState>()),
         ("ModelOutputStream", openapi_schema::<ModelOutputStream>()),
         (
             "ModelOutputRecordedResponse",

@@ -2940,6 +2940,29 @@ fn session_event_response(event: &StoredSessionEvent) -> SessionEventResponse {
             }),
             requested_scope: requested_scope.as_ref().map(scope_response),
         },
+        SessionEventPayload::McpInputStateChanged {
+            run_id,
+            tool_call_id,
+            generation,
+            ordinal,
+            kind,
+            state,
+        } => SessionEventDataResponse::McpInputStateChanged {
+            run_id: run_id.as_str().to_owned(),
+            tool_call_id: tool_call_id.as_str().to_owned(),
+            generation_id: generation.as_str().to_owned(),
+            ordinal: ordinal.to_string(),
+            kind: match kind {
+                kiln_core::McpInputKind::Roots => kiln_protocol::McpInputKind::Roots,
+                kiln_core::McpInputKind::Sampling => kiln_protocol::McpInputKind::Sampling,
+                kiln_core::McpInputKind::Elicitation => kiln_protocol::McpInputKind::Elicitation,
+            },
+            state: match state {
+                kiln_core::McpInputState::Required => kiln_protocol::McpInputState::Required,
+                kiln_core::McpInputState::Resolved => kiln_protocol::McpInputState::Resolved,
+                kiln_core::McpInputState::Interrupted => kiln_protocol::McpInputState::Interrupted,
+            },
+        },
         SessionEventPayload::McpInvocationStateChanged { run_id, invocation } => {
             SessionEventDataResponse::McpInvocationStateChanged {
                 run_id: run_id.as_str().to_owned(),
@@ -4395,6 +4418,46 @@ mod tests {
         assert_eq!(response.tool_calls[0].stdout.as_deref(), Some("stdout"));
         assert_eq!(response.tool_calls[0].stderr.as_deref(), Some("stderr"));
         assert_eq!(response.tool_calls[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn mcp_input_events_expose_only_mediation_metadata() {
+        for (kind, state) in [
+            (
+                kiln_core::McpInputKind::Roots,
+                kiln_core::McpInputState::Required,
+            ),
+            (
+                kiln_core::McpInputKind::Sampling,
+                kiln_core::McpInputState::Resolved,
+            ),
+            (
+                kiln_core::McpInputKind::Elicitation,
+                kiln_core::McpInputState::Interrupted,
+            ),
+        ] {
+            let event = stored_event(
+                1,
+                SessionEventPayload::McpInputStateChanged {
+                    run_id: run_id(),
+                    tool_call_id: tool_call_id(),
+                    generation: kiln_core::McpGenerationId::parse("mcg_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                        .unwrap(),
+                    ordinal: std::num::NonZeroU64::new(i64::MAX as u64).unwrap(),
+                    kind,
+                    state,
+                },
+            );
+            let response = session_event_response(&event);
+            assert_eq!(
+                serde_json::to_value(response.event).unwrap(),
+                serde_json::json!({
+                    "type":"mcp.input_state_changed", "run_id":RUN_ID, "tool_call_id":TOOL_CALL_ID,
+                    "generation_id":"mcg_01ARZ3NDEKTSV4RRFFQ69G5FAV", "ordinal":i64::MAX.to_string(),
+                    "kind":kind.as_str(), "state":state.as_str(),
+                })
+            );
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.44.0";
+pub const PROTOCOL_VERSION: &str = "0.45.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -1815,6 +1815,16 @@ pub struct ModelOutputRecordedResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum SessionEventDataResponse {
+    #[serde(rename = "mcp.input_state_changed")]
+    McpInputStateChanged {
+        run_id: String,
+        tool_call_id: String,
+        generation_id: String,
+        /// Decimal string preserves the SQLite ordinal beyond JavaScript's safe integer range.
+        ordinal: String,
+        kind: McpInputKind,
+        state: McpInputState,
+    },
     #[serde(rename = "mcp.invocation_state_changed")]
     McpInvocationStateChanged {
         run_id: String,
@@ -1912,6 +1922,22 @@ pub enum McpInvocationState {
     Completed,
     Failed,
     Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpInputKind {
+    Roots,
+    Sampling,
+    Elicitation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpInputState {
+    Required,
+    Resolved,
     Interrupted,
 }
 

@@ -160,8 +160,9 @@ interruption atomically interrupt any pending input. Exact receipt retries do
 not authorize provider calls, responses or operation replay. New input and
 resolution require the original live native claim and ready generation at the
 current definition version. Bodies, server request IDs, responses and opaque
-request state are not stored in this journal. Runtime mediation, interaction
-routing and public session-event projection are not yet connected.
+request state are not stored in this journal. Input transitions now project into
+public session events; runtime mediation and interaction routing are not yet
+connected.
 
 
 Native file reading remains independently configurable. The daemon freezes one
@@ -267,10 +268,22 @@ contains no MCP frame, result body, credential or live server session ID.
 Duplicate receipt transitions create no extra event or wakeup. Clients use normal
 durable cursors and event IDs; notifications only wake the replay reader.
 
+Protocol `0.45.0` adds `mcp.input_state_changed` for mediation receipts. Its
+payload contains `run_id`, `tool_call_id`, `generation_id`, a decimal-string
+`ordinal`, `kind` (`roots`, `sampling`, `elicitation`) and `state` (`required`,
+`resolved`, `interrupted`). The ordinal is a string to preserve exact values in
+JavaScript. Each fresh input mutation commits its event atomically. Invocation
+termination publishes input interruption before the invocation terminal event.
+Exact receipt retries add no event or wakeup. Event replay loads the historical
+input state, independently of the invocation's later outcome. This metadata does
+not grant approval or authorize another MCP request.
+
 The migration preserves existing event identities, cursors, cursor high-water
 marks and incoming references. Older private MCP audit rows are not retroactively
-inserted into the public timeline. Definition, instance, negotiation, authentication,
-catalogue and server-request lifecycle events remain separate follow-up work.
+inserted into the public timeline. Previously private input rows are projected
+when that invocation next mutates; terminal historical invocations remain private.
+Definition, instance, negotiation, authentication and catalogue events remain
+separate follow-up work.
 
 The artifact store has a bounded byte-page primitive for result paging.
 It scans and hashes the complete file on every read, retaining only the requested

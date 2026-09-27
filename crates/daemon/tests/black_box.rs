@@ -282,6 +282,7 @@ fn event_kind(event: &SessionEventResponse) -> &'static str {
         SessionEventDataResponse::McpInvocationStateChanged { .. } => {
             "mcp.invocation_state_changed"
         }
+        SessionEventDataResponse::McpInputStateChanged { .. } => "mcp.input_state_changed",
         SessionEventDataResponse::ModelOutputRecorded(_) => "model_invocation.output",
         SessionEventDataResponse::UsageObserved(_) => "usage.observed",
         SessionEventDataResponse::ContextManifestCreated(_) => "context.manifest_created",
@@ -327,6 +328,7 @@ fn event_belongs_to_run(event: &SessionEventResponse, expected_run_id: &str) -> 
             manifest.run_id == expected_run_id
         }
         SessionEventDataResponse::McpInvocationStateChanged { run_id, .. }
+        | SessionEventDataResponse::McpInputStateChanged { run_id, .. }
         | SessionEventDataResponse::RunCreated { run_id, .. }
         | SessionEventDataResponse::RunQueued { run_id }
         | SessionEventDataResponse::RunStateChanged { run_id, .. }
@@ -2301,10 +2303,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .json()
         .await
         .expect("second child JSON");
-    assert_eq!(
-        second.parent_run_id.as_deref(),
-        Some(root.run_id.as_str())
-    );
+    assert_eq!(second.parent_run_id.as_deref(), Some(root.run_id.as_str()));
     receive_run_events(&mut socket, &second.run_id, RunState::WaitingForApproval).await;
     assert_ne!(first.run_id, second.run_id);
 
@@ -2664,12 +2663,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .await
         .expect("first child approval response");
     assert_eq!(first_approval.status(), StatusCode::OK);
-    receive_run_events(
-        &mut cancellation_socket,
-        &first.run_id,
-        RunState::Completed,
-    )
-    .await;
+    receive_run_events(&mut cancellation_socket, &first.run_id, RunState::Completed).await;
 
     let root_path = RUN_PATH.replace("{run_id}", &root.run_id);
     let waiting_root: RunResponse = restarted_http
@@ -2696,12 +2690,7 @@ async fn child_runs_list_replay_and_recover_as_one_session_tree() {
         .await
         .expect("root approval response");
     assert_eq!(root_approval.status(), StatusCode::OK);
-    receive_run_events(
-        &mut cancellation_socket,
-        &root.run_id,
-        RunState::Completed,
-    )
-    .await;
+    receive_run_events(&mut cancellation_socket, &root.run_id, RunState::Completed).await;
 
     let completed_root: RunResponse = restarted_http
         .post(format!(
@@ -4276,7 +4265,12 @@ async fn complete_first_vertical_slice() {
         rejected_child.parent_run_id.as_deref(),
         Some(queued.run_id.as_str())
     );
-    receive_run_events(&mut socket, &rejected_child.run_id, RunState::WaitingForApproval).await;
+    receive_run_events(
+        &mut socket,
+        &rejected_child.run_id,
+        RunState::WaitingForApproval,
+    )
+    .await;
     let child_waiting = http
         .get(format!(
             "http://{}{}",
@@ -4290,10 +4284,8 @@ async fn complete_first_vertical_slice() {
         .await
         .expect("vertical-slice rejected child state JSON");
     assert_eq!(child_waiting.state, RunState::WaitingForApproval);
-    let child_approval_path = TOOL_CALL_APPROVAL_PATH.replace(
-        "{tool_call_id}",
-        &child_waiting.tool_calls[0].tool_call_id,
-    );
+    let child_approval_path = TOOL_CALL_APPROVAL_PATH
+        .replace("{tool_call_id}", &child_waiting.tool_calls[0].tool_call_id);
     let response = http
         .post(format!("http://{}{}", daemon.address, child_approval_path))
         .header(IDEMPOTENCY_KEY_HEADER, "vertical-slice-reject-decision")

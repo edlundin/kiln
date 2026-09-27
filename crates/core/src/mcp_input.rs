@@ -26,6 +26,15 @@ pub enum McpInputState {
     Resolved,
     Interrupted,
 }
+impl McpInputState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Resolved => "resolved",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
 
 /// An ordinal belongs to one invocation, across all legacy requests/MRTR rounds.
 /// Resolution records completed mediation, not permission to retry the operation.

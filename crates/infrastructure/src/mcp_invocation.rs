@@ -247,6 +247,7 @@ async fn append_event(
     connection: &mut SqliteConnection,
     record: &McpInvocationRecord,
 ) -> Result<(), Error> {
+    super::mcp_input::publish_events(connection, &record.tool_call_id).await?;
     let sequence: i64 = sqlx::query_scalar(
         "INSERT INTO mcp_invocation_events (tool_call_id, state) VALUES (?, ?) RETURNING sequence",
     )

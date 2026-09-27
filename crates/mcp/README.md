@@ -171,6 +171,13 @@ The caller supplies a nonsecret local binding revision and must change it whenev
 resolved executable, arguments, environment, credentials, directory authorization
 or launch policy changes. Changed revisions or definitions require an explicit
 scope stop before reuse. The registry does not resolve or persist these bindings.
+It also retains a close-on-exec descriptor for the admitted working directory and
+compares device/inode identity on every demand. A different directory is rejected
+even with an unchanged revision; a non-directory descriptor is rejected before
+startup or reuse. This protects broader lifecycle scopes from silently inheriting
+another caller's cwd. It does not establish scope authorization or constrain a
+server that changes its own cwd. Directory policy still needs durable host and
+approved-scope integration.
 Scope stop retains its owner until cleanup completes. Shutdown seals the registry,
 signals every owner before waiting, and can be awaited again after caller
 cancellation. Dropping the registry requests stop but cannot prove completion;

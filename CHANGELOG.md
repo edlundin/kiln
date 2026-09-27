@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Pin MCP generation working-directory identity across registry reuse
+  and require explicit stop before adopting a replacement directory.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/9d137a9)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Capture MCP dispatch responses as normal ToolCall results, keeping
   small output inline and archiving larger output without redispatch.
 

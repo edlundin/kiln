@@ -328,6 +328,37 @@ async fn registry_reuses_one_owner_and_rejects_changed_bindings_and_definitions(
             .err(),
         Some(StdioRegistryError::BindingChanged)
     );
+    let other_directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        registry
+            .ensure_ready(
+                launch(key.clone(), other_directory.path(), READY),
+                1.try_into().unwrap()
+            )
+            .await
+            .err(),
+        Some(StdioRegistryError::DirectoryChanged)
+    );
+    assert!(!other_directory.path().join("pid").exists());
+    let mut invalid = launch(key.clone(), directory.path(), READY);
+    invalid.process.working_directory = std::fs::File::open(directory.path().join("pid"))
+        .unwrap()
+        .into();
+    assert_eq!(
+        registry
+            .ensure_ready(invalid, 1.try_into().unwrap())
+            .await
+            .err(),
+        Some(StdioRegistryError::InvalidDirectory)
+    );
+    // A different spelling of the same pinned directory remains reusable.
+    let alias = other_directory.path().join("alias");
+    std::os::unix::fs::symlink(directory.path(), &alias).unwrap();
+    registry
+        .ensure_ready(launch(key.clone(), &alias, READY), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(pid(directory.path()).await, process);
     store
         .register_mcp_definition(&definition(false), 1, "disable", limits())
         .await
@@ -356,6 +387,45 @@ async fn registry_reuses_one_owner_and_rejects_changed_bindings_and_definitions(
             .err(),
         Some(StdioRegistryError::Closed)
     );
+}
+
+#[tokio::test]
+async fn registry_keeps_directory_identity_after_path_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let (store, key) = setup(directory.path()).await;
+    let cwd = directory.path().join("cwd");
+    let moved = directory.path().join("moved");
+    std::fs::create_dir(&cwd).unwrap();
+    let registry = StdioRegistry::new(store, NonZeroUsize::new(1).unwrap());
+    let first = registry
+        .ensure_ready(launch(key.clone(), &cwd, READY), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    let process = pid(&cwd).await;
+    std::fs::rename(&cwd, &moved).unwrap();
+    std::fs::create_dir(&cwd).unwrap();
+    assert_eq!(
+        registry
+            .ensure_ready(launch(key.clone(), &cwd, READY), 1.try_into().unwrap())
+            .await
+            .err(),
+        Some(StdioRegistryError::DirectoryChanged)
+    );
+    let reused = registry
+        .ensure_ready(launch(key.clone(), &moved, READY), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(first.generation, reused.generation);
+    assert!(!cwd.join("pid").exists());
+    registry.stop(&key).await.unwrap().unwrap();
+    assert_eq!(test_kill_process(process), Err(Errno::SRCH));
+    // A completed stop permits a fresh owner at the replacement directory.
+    let replacement = registry
+        .ensure_ready(launch(key, &cwd, READY), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    assert_ne!(first.generation, replacement.generation);
+    assert!(registry.shutdown().await.into_iter().all(|r| r.is_ok()));
 }
 
 #[tokio::test]

@@ -36,6 +36,12 @@ vault port; it is not installed at daemon startup and does not authorize launch.
 Durable reference reservation and snapshot publication are available internally;
 credential import/removal uses the offline administration command below.
 
+The registry independently checks the pinned directory's device/inode identity
+before reuse, including for session, workspace and core owners. A different
+directory requires an explicit stop; an unchanged binding revision cannot bypass
+this check. This is a runtime consistency guard, not launch authorization or a
+filesystem sandbox. Durable cwd policy and approved-scope launch wiring remain open.
+
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown
 waiter can await those same owners again. The daemon retains another reference to

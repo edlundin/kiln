@@ -24,6 +24,8 @@ pub enum StdioRegistryError {
     Capacity,
     Stopping,
     BindingChanged,
+    InvalidDirectory,
+    DirectoryChanged,
 }
 
 impl From<StdioGenerationError> for StdioRegistryError {
@@ -36,6 +38,9 @@ struct Entry {
     owner: StdioGeneration,
     definition_version: u64,
     binding_revision: NonZeroU64,
+    // Keep the inode pinned while this owner is cached, even if the server
+    // changes its own cwd or the original path is removed and recreated.
+    directory: rustix::fd::OwnedFd,
     stopping: bool,
 }
 
@@ -75,6 +80,12 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
         let key = launch.key.clone();
         let definition_version = launch.definition_version;
         let host_binding_version = launch.host_binding_version.clone();
+        let directory = rustix::fs::fstat(&launch.process.working_directory)
+            .map_err(|_| StdioRegistryError::InvalidDirectory)?;
+        if rustix::fs::FileType::from_raw_mode(directory.st_mode) != rustix::fs::FileType::Directory
+        {
+            return Err(StdioRegistryError::InvalidDirectory);
+        }
         if host_binding_version
             .as_ref()
             .is_some_and(|v| v.revision != binding_revision)
@@ -105,11 +116,19 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
                 if entry.binding_revision != binding_revision {
                     return Err(StdioRegistryError::BindingChanged);
                 }
+                let existing = rustix::fs::fstat(&entry.directory)
+                    .map_err(|_| StdioRegistryError::InvalidDirectory)?;
+                if existing.st_dev != directory.st_dev || existing.st_ino != directory.st_ino {
+                    return Err(StdioRegistryError::DirectoryChanged);
+                }
                 entry.owner.observer()
             } else {
                 if state.entries.len() >= self.capacity.get() {
                     return Err(StdioRegistryError::Capacity);
                 }
+                let directory =
+                    rustix::io::fcntl_dupfd_cloexec(&launch.process.working_directory, 0)
+                        .map_err(|_| StdioRegistryError::InvalidDirectory)?;
                 let owner = StdioGeneration::spawn(self.store.clone(), launch);
                 let observer = owner.observer();
                 state.entries.insert(
@@ -118,6 +137,7 @@ impl<S: McpInstanceStore + McpDefinitionStore + McpInvocationStore + 'static> St
                         owner,
                         definition_version,
                         binding_revision,
+                        directory,
                         stopping: false,
                     },
                 );

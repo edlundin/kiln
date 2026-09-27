@@ -31,6 +31,16 @@ error downgrade prevention, exact legacy pins, modern startup, and rejection of
 draft/incorrect-era results. Run `cargo test -p kiln-mcp` from the workspace.
 These in-memory fixtures are not the official MCP conformance suite.
 
+`StdioTransport` provides newline-delimited JSON framing with an explicit positive
+caller-supplied wire budget, including the newline. It rejects oversized input
+while reading, without waiting for EOF, and stops on malformed or incomplete
+frames. Outgoing serialization obeys the same budget before writing any bytes.
+Cancellation preserves a partial receive; cancelling a partial write closes the
+writer so another request cannot append to the damaged frame. It logs no raw
+frames. This deliberately stricter transport avoids the SDK's unbounded
+`read_until` buffer and malformed-input recovery behavior. It supplies no default
+frame limit; the host must choose one from its resource budget.
+
 Remaining broker work includes scoped process ownership and explicit environment,
 registration and host binding resolution, durable lifecycle and invocation
 events, Kiln grants/approvals, catalogue/result paging, interruption/recovery,

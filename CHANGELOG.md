@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Add bounded newline-delimited stdio framing with caller-supplied
+  limits and safe cancellation behavior.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add the `kiln-mcp` stdio client negotiation boundary with pinned
   protocol versions and guarded fallback.
 

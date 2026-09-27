@@ -3803,6 +3803,7 @@ dependencies = [
 name = "kiln-mcp"
 version = "0.1.0"
 dependencies = [
+ "kiln-core",
  "rmcp",
  "rustix",
  "serde_json",

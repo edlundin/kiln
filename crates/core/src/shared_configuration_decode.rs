@@ -123,7 +123,7 @@ fn decode_settings(
         }),
     })
 }
-fn decode_mcp(
+pub(crate) fn decode_mcp(
     value: &Value,
     limits: SharedConfigurationLimits,
 ) -> Result<SharedMcpServerInput, Error> {

@@ -9,40 +9,7 @@ use rmcp::{
     transport::Transport,
 };
 
-/// Only final versions accepted by the Kiln lifecycle contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtocolVersion {
-    V20241105,
-    V20250326,
-    V20250618,
-    V20251125,
-    V20260728,
-}
-
-impl ProtocolVersion {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::V20241105 => "2024-11-05",
-            Self::V20250326 => "2025-03-26",
-            Self::V20250618 => "2025-06-18",
-            Self::V20251125 => "2025-11-25",
-            Self::V20260728 => "2026-07-28",
-        }
-    }
-
-    fn accepts(value: &str) -> bool {
-        matches!(
-            value,
-            "2024-11-05" | "2025-03-26" | "2025-06-18" | "2025-11-25" | "2026-07-28"
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProtocolPolicy {
-    Auto,
-    Pinned(ProtocolVersion),
-}
+pub use kiln_core::{McpProtocolPolicy as ProtocolPolicy, McpProtocolVersion as ProtocolVersion};
 
 /// Negotiate on an already-owned stdio transport. The caller owns the process,
 /// scope, startup deadline and cancellation. This does not start a process or
@@ -177,7 +144,7 @@ impl<T: Transport<RoleClient>> Transport<RoleClient> for GuardedTransport<T> {
                 let version = result.protocol_version.as_str();
                 let accepted = match self.policy {
                     ProtocolPolicy::Auto => {
-                        ProtocolVersion::accepts(version) && version != "2026-07-28"
+                        ProtocolVersion::parse(version).is_ok() && version != "2026-07-28"
                     }
                     ProtocolPolicy::Pinned(pin) => version == pin.as_str(),
                 };

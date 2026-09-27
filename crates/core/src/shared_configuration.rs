@@ -273,7 +273,7 @@ fn settings_json(
     };
     Ok(json!({"model_defaults":model}))
 }
-fn mcp_json(
+pub(crate) fn mcp_json(
     server: &mut SharedMcpServerInput,
     limits: SharedConfigurationLimits,
 ) -> Result<Value, SharedConfigurationError> {

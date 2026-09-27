@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `feat`
+
+- EDL-314: Add canonical inert MCP definition metadata and transactional local
+  version registration with exact retries and metadata-only audit records.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
 ## 2026-09-27 — `fix`
 
 - EDL-314: Pin the MCP child working directory with an owned descriptor so

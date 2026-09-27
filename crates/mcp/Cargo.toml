@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+kiln-core = { path = "../core" }
 rmcp = { version = "=3.4.1", default-features = false, features = ["client"] }
 tokio = { workspace = true, features = ["io-util"] }
 serde_json.workspace = true

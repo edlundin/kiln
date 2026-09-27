@@ -68,8 +68,27 @@ idempotent close/reaping, EOF shutdown, descendant cleanup, malformed output,
 startup cancellation, and directory-path replacement after pinning. These are local macOS observations; Linux
 execution and full MCP conformance remain unverified.
 
+Core `McpServerDefinition` validates canonical local registration metadata using
+the same transport-field validation as shared snapshots. It records a source of
+`local`, an exact final protocol pin or `auto`, lifecycle scope (default
+`workspace_checkout`), optional host-local auth profile, enablement, and the
+`kiln_mediated_serial` trust policy. Transport metadata contains host-binding
+references; registration resolves no path or credential and grants no execution
+authority. Protocol policy types are shared with this SDK adapter.
+
+Infrastructure migration 51 stores immutable definition versions, the current
+version, exact command retry receipts, and metadata-only registration audit rows
+in one transaction. Registration requires the expected current version (zero for
+an unseen ID). Replaying an earlier command returns its original record without
+changing the current version. Reusing a command key with changed content or
+preconditions conflicts. Reads preflight stored metadata size in SQLite using
+caller-provided definition budgets. There is no default definition size limit.
+The internal store port has no public registration API, shared-source ingestion,
+or process-start side effect yet. Audit rows are not yet exposed through client
+event replay.
+
 Remaining broker work includes scoped instance ownership,
-registration and host binding resolution, durable lifecycle and invocation
+public registration and host binding resolution, durable lifecycle and invocation
 events, Kiln grants/approvals, catalogue/result paging, interruption/recovery,
 HTTP/OAuth, mediated server requests, and full conformance. No MCP operation is
 offered to models until it is connected to the normal durable ToolCall boundary.

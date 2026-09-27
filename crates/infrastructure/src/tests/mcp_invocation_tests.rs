@@ -3,6 +3,160 @@ use kiln_core::*;
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 #[tokio::test]
+async fn mcp_roots_input_reveals_only_live_bound_approval_directory() {
+    let (_data, store, session) = seeded_session().await;
+    let key = register(&store, McpInstanceOwner::Core, McpProtocolPolicy::Auto).await;
+    let instance = KilnInstanceId::from_ulid(ulid::Ulid::generate());
+    store
+        .initialize_configuration_instance(instance.clone())
+        .await
+        .unwrap();
+    let scope =
+        WorkspacePathScope::new(test_scope().workspace_root_id().clone(), "approved/subdir")
+            .unwrap();
+    let directory = WorkspaceCheckout::from_resolved_paths(
+        session.workspace_id().clone(),
+        scope.workspace_root_id().clone(),
+        scope.relative_directory(),
+        "/main",
+        "/main/.git",
+        FilesystemIdentity::new("test:/main").unwrap(),
+    )
+    .unwrap();
+    let bindings = McpHostBindings::new(
+        key.clone(),
+        McpHostBindingInput {
+            instance_id: instance.clone(),
+            definition_version: 1,
+            runtime_binding: SharedConfigurationKey::parse("runtime", 64).unwrap(),
+            executable: "/bin/true".into(),
+            working_directory: Some((&directory).into()),
+            arguments: BTreeMap::new(),
+            environment: BTreeMap::new(),
+        },
+        limits(),
+    )
+    .unwrap();
+    let host = store
+        .publish_mcp_host_bindings(&bindings, 0, limits())
+        .await
+        .unwrap();
+    let McpInstanceClaim::Acquired(starting) = store
+        .claim_mcp_instance_with_host_bindings(
+            &key,
+            1,
+            &McpGenerationId::from_ulid(ulid::Ulid::generate()),
+            Some(&McpHostBindingVersion {
+                instance_id: instance,
+                revision: host.revision,
+            }),
+            limits(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let target = store
+        .transition_mcp_instance(
+            &starting,
+            McpInstanceTransition::Ready(McpProtocolVersion::V20260728),
+        )
+        .await
+        .unwrap();
+    let request = request_native_scoped(&store,&session,"roots","mcp_call",serde_json::json!({
+        "server_id":"fixture","definition_version":1,"operation":{"kind":"tool","name":"write","arguments":{}}
+    }),scope).await;
+    let McpDispatchClaim::Acquired(permit) = claim_mcp_dispatch(&store, request, &target, limits())
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let McpInputMutation::Applied(input) = store
+        .require_mcp_input(
+            permit.record(),
+            std::num::NonZeroU64::new(1).unwrap(),
+            McpInputKind::Roots,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    let wake = store.subscribe_mcp_invocation_events();
+    assert_eq!(
+        store.mcp_input_root(&input, limits()).await.unwrap(),
+        std::path::Path::new("/main/approved/subdir")
+    );
+    assert!(
+        !wake.has_changed().unwrap(),
+        "lookup does not resolve or emit an event"
+    );
+    let mut wrong = input.clone();
+    wrong.kind = McpInputKind::Sampling;
+    assert_eq!(
+        store.mcp_input_root(&wrong, limits()).await.err(),
+        Some(McpInvocationError::InvalidRequest)
+    );
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("UPDATE workspace_roots SET filesystem_identity='changed'")
+            .execute(&mut *sql)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.mcp_input_root(&input, limits()).await.err(),
+        Some(McpInvocationError::ScopeMismatch)
+    );
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("UPDATE workspace_roots SET filesystem_identity='test:/main'")
+            .execute(&mut *sql)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE tool_calls SET effective_relative_directory='' WHERE tool_call_id=?")
+            .bind(permit.record().tool_call_id.as_str())
+            .execute(&mut *sql)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        store.mcp_input_root(&input, limits()).await.err(),
+        Some(McpInvocationError::ScopeMismatch)
+    );
+    {
+        let mut sql = store.connection.lock().await;
+        sqlx::query("UPDATE tool_calls SET effective_relative_directory='approved/subdir' WHERE tool_call_id=?").bind(permit.record().tool_call_id.as_str()).execute(&mut *sql).await.unwrap();
+    }
+    store.resolve_mcp_input(&input).await.unwrap();
+    assert_eq!(
+        store.mcp_input_root(&input, limits()).await.err(),
+        Some(McpInvocationError::Conflict)
+    );
+    let McpInputMutation::Applied(next) = store
+        .require_mcp_input(
+            permit.record(),
+            std::num::NonZeroU64::new(2).unwrap(),
+            McpInputKind::Roots,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    RunApplication::new(store.clone(), super::super::UlidIdGenerator)
+        .request_cancellation(permit.request().tool_call().run_id().clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.mcp_input_root(&next, limits()).await.err(),
+        Some(McpInvocationError::Conflict)
+    );
+}
+
+#[tokio::test]
 async fn mcp_input_journal_keeps_dispatch_owned_and_interrupts_pending_input() {
     let (data, store, session) = seeded_session().await;
     let target = ready(&store, McpInstanceOwner::Core).await;
@@ -339,6 +493,17 @@ async fn request_native(
     name: &str,
     arguments: serde_json::Value,
 ) -> ModelToolExecutionRequest<McpCommand> {
+    request_native_scoped(store, session, key, name, arguments, test_scope()).await
+}
+
+async fn request_native_scoped(
+    store: &super::super::SqliteStore,
+    session: &Session,
+    key: &str,
+    name: &str,
+    arguments: serde_json::Value,
+    scope: WorkspacePathScope,
+) -> ModelToolExecutionRequest<McpCommand> {
     let ids = super::super::UlidIdGenerator;
     let runs = RunApplication::new(store.clone(), ids);
     let run = runs
@@ -346,7 +511,7 @@ async fn request_native(
             session.id().clone(),
             key.into(),
             ApprovalPolicy::Ask,
-            test_scope(),
+            scope.clone(),
         )
         .await
         .unwrap();
@@ -453,7 +618,7 @@ async fn request_native(
         .await
         .unwrap();
     let adopted = app
-        .adopt_tool_request(&batch.prepare_adoption(0, test_scope()).unwrap())
+        .adopt_tool_request(&batch.prepare_adoption(0, scope).unwrap())
         .await
         .unwrap();
     assert!(

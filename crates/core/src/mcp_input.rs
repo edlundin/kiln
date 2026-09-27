@@ -61,6 +61,16 @@ impl McpInputMutation {
 }
 
 pub trait McpInputStore: Send + Sync {
+    /// Resolve the one directory already approved for this live roots input.
+    /// Includes the approved relative scope, never the broader workspace root.
+    /// A path is metadata, not filesystem access or authority to send a response;
+    /// resolution must still be journaled against the live claim before sending.
+    fn mcp_input_root(
+        &self,
+        expected: &McpInputRecord,
+        limits: crate::McpDefinitionLimits,
+    ) -> impl Future<Output = Result<std::path::PathBuf, McpInvocationError>> + Send;
+
     /// Record the next input before invoking any provider or interaction path.
     /// Only one input can remain pending per invocation; exact retries return a
     /// receipt, including after interruption, and never grant execution authority.

@@ -420,7 +420,7 @@ impl kiln_core::McpLaunchStore for SqliteStore {
     }
 }
 
-async fn current_host(
+pub(super) async fn current_host(
     connection: &mut SqliteConnection,
     key: &McpInstanceKey,
     definition_version: u64,

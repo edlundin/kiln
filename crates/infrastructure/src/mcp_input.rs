@@ -9,6 +9,76 @@ use sqlx::{Connection, Row, SqliteConnection};
 use super::SqliteStore;
 
 impl McpInputStore for SqliteStore {
+    async fn mcp_input_root(
+        &self,
+        expected: &McpInputRecord,
+        limits: kiln_core::McpDefinitionLimits,
+    ) -> Result<std::path::PathBuf, Error> {
+        limits.validate().map_err(|_| Error::InvalidRequest)?;
+        if expected.kind != McpInputKind::Roots || expected.state != McpInputState::Required {
+            return Err(Error::InvalidRequest);
+        }
+        let mut connection = self.connection.lock().await;
+        let mut tx = connection.begin().await.map_err(|_| Error::Unavailable)?;
+        let invocation = current_invocation(&mut tx, &expected.invocation).await?;
+        let input = load(&mut tx, invocation, expected.ordinal)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if input.kind != McpInputKind::Roots || input.state != McpInputState::Required {
+            return Err(Error::Conflict);
+        }
+        validate_live(&mut tx, &input.invocation).await?;
+        let row = sqlx::query("SELECT g.instance_key, g.definition_version, g.host_instance_id, g.host_binding_revision,
+            s.workspace_id, t.effective_workspace_root_id, t.effective_relative_directory
+            FROM mcp_instance_generations g JOIN mcp_invocations i ON i.generation_id = g.generation_id
+            JOIN tool_calls t ON t.tool_call_id = i.tool_call_id JOIN runs r ON r.run_id = t.run_id
+            JOIN sessions s ON s.session_id = r.session_id WHERE i.tool_call_id = ?")
+            .bind(input.invocation.tool_call_id.as_str()).fetch_one(&mut *tx).await.map_err(|_| Error::Unavailable)?;
+        let string = |name| {
+            row.try_get::<String, _>(name)
+                .map_err(|_| Error::ScopeMismatch)
+        };
+        let key = kiln_core::McpInstanceKey::from_canonical_json(
+            string("instance_key")?.as_bytes(),
+            limits.max_metadata_bytes,
+        )
+        .map_err(|_| Error::IntegrityViolation)?;
+        let version = u64::try_from(
+            row.try_get::<i64, _>("definition_version")
+                .map_err(|_| Error::IntegrityViolation)?,
+        )
+        .map_err(|_| Error::IntegrityViolation)?;
+        let host = super::mcp_invocation::current_host(&mut tx, &key, version, limits).await?;
+        let revision = row
+            .try_get::<i64, _>("host_binding_revision")
+            .map_err(|_| Error::ScopeMismatch)?;
+        if host.bindings.instance_id().as_str() != string("host_instance_id")?
+            || host.revision.get()
+                != u64::try_from(revision).map_err(|_| Error::IntegrityViolation)?
+        {
+            return Err(Error::GenerationChanged);
+        }
+        let directory = host
+            .bindings
+            .working_directory()
+            .ok_or(Error::ScopeMismatch)?;
+        if directory.workspace_id().as_str() != string("workspace_id")?
+            || directory.workspace_root_id().as_str() != string("effective_workspace_root_id")?
+            || directory.relative_directory() != string("effective_relative_directory")?
+        {
+            return Err(Error::ScopeMismatch);
+        }
+        super::mcp_host_binding::validate_directory(&mut tx, &host.bindings)
+            .await
+            .map_err(|_| Error::ScopeMismatch)?;
+        let path = std::path::Path::new(directory.root_path()).join(directory.relative_directory());
+        if !path.is_absolute() {
+            return Err(Error::ScopeMismatch);
+        }
+        tx.commit().await.map_err(|_| Error::Unavailable)?;
+        Ok(path)
+    }
+
     async fn require_mcp_input(
         &self,
         invocation: &McpInvocationRecord,

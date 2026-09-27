@@ -164,6 +164,14 @@ request state are not stored in this journal. Input transitions now project into
 public session events; runtime mediation and interaction routing are not yet
 connected.
 
+The internal roots lookup accepts only a pending roots input on a live invocation.
+It resolves the generation's exact local host revision and compares its directory
+to the ToolCall's approved workspace, root and relative scope. The returned path
+includes that relative scope; it does not expose the enclosing workspace root.
+Stale registered directory metadata, lost readiness, cancellation and resolved
+inputs reject the lookup. This reads metadata only: it neither resolves the
+input nor sends an MCP response, and it performs no filesystem or vault access.
+
 
 Native file reading remains independently configurable. The daemon freezes one
 combined native catalogue and routes each approved command through a consuming

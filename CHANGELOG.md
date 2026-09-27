@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `feat`
+
+- EDL-314: Add pinned and modern-first HTTP MCP startup negotiation with
+  structured downgrade evidence and joined worker cleanup. ([pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](../../commit/pending)
+
 ## 2026-09-27 — `docs`
 
 - EDL-314: Clarify that only guard-detected HTTP failures close generation

@@ -1,6 +1,6 @@
 use kiln_mcp::{
-    McpHttpGenerationConfig, McpHttpLimits, ProtocolPolicy, ProtocolVersion,
-    http_generation_transport, start_stdio_client,
+    McpHttpGenerationConfig, McpHttpLimits, McpHttpStartError, ProtocolPolicy, ProtocolVersion,
+    http_generation_transport, start_http_client, start_stdio_client,
 };
 use rmcp::{ClientLifecycleMode, model::DiscoverResult, serve_client_with_lifecycle};
 use serde_json::{Value, json};
@@ -25,12 +25,77 @@ enum Mode {
     AcceptedRequest,
     UncorrelatedJson,
     LegacyResume,
+    Startup(StartupCase),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StartupCase {
+    ModernSse,
+    UnsupportedJson,
+    UnsupportedSse,
+    Auth,
+    ServerFailure,
+    PlainBadRequest,
+    WrongId,
+    WrongRequested,
+    MethodNotFound,
+    IncompatibleDiscovery,
+    Malformed,
+    Stall,
+}
+
+fn discovery_reply(case: StartupCase, id: &Value) -> (&'static str, &'static str, String) {
+    use StartupCase::*;
+    let mut response = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32022,"message":"fixture","data":{"requested":"2026-07-28","supported":["2025-03-26","2025-11-25"]}}});
+    match case {
+        ModernSse | IncompatibleDiscovery => {
+            let version = if matches!(case, ModernSse) {
+                rmcp::model::ProtocolVersion::V_2026_07_28
+            } else {
+                rmcp::model::ProtocolVersion::V_2025_11_25
+            };
+            response = json!({"jsonrpc":"2.0","id":id,"result":DiscoverResult::new(vec![version],Default::default())});
+        }
+        WrongId => response["id"] = json!("unrelated"),
+        WrongRequested => response["error"]["data"]["requested"] = json!("2099-01-01"),
+        MethodNotFound => response["error"]["code"] = json!(-32601),
+        PlainBadRequest => {
+            return (
+                "400 Bad Request",
+                "text/plain",
+                "private-rejection".to_owned(),
+            );
+        }
+        Malformed => {
+            return (
+                "400 Bad Request",
+                "application/json",
+                "private-malformed-body".to_owned(),
+            );
+        }
+        _ => {}
+    }
+    if matches!(case, ModernSse | UnsupportedSse) {
+        return (
+            "200 OK",
+            "text/event-stream",
+            format!("id: startup\n\ndata: {response}\n\n"),
+        );
+    }
+    let status = match case {
+        Auth => "401 Unauthorized",
+        ServerFailure => "500 Internal Server Error",
+        IncompatibleDiscovery => "200 OK",
+        _ => "400 Bad Request",
+    };
+    (status, "application/json", response.to_string())
 }
 
 struct Fixture {
     endpoint: String,
     received: Arc<Mutex<Vec<(String, Value)>>>,
     task: tokio::task::JoinHandle<()>,
+    release: Option<Arc<tokio::sync::Notify>>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -48,6 +113,9 @@ impl Fixture {
         let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
         let received = Arc::new(Mutex::new(Vec::new()));
         let requests = received.clone();
+        let release = matches!(mode, Mode::Startup(StartupCase::Stall))
+            .then(|| Arc::new(tokio::sync::Notify::new()));
+        let gate = release.clone();
         let task = tokio::spawn(async move {
             let mut pending_id = Value::Null;
             loop {
@@ -104,15 +172,31 @@ impl Fixture {
                     String::new()
                 } else {
                     match message["method"].as_str().unwrap() {
-                    "server/discover" => json!({"jsonrpc":"2.0","id":message["id"],"result":DiscoverResult::new(vec![rmcp::model::ProtocolVersion::V_2026_07_28],Default::default())}).to_string(),
-                    "initialize" => {
-                        extra = "Mcp-Session-Id: fixture-session\r\n";
-                        json!({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":message["params"]["protocolVersion"],"capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}).to_string()
-                    },
-                    "notifications/initialized" | "notifications/cancelled" => { status = "202 Accepted"; String::new() },
+                        "server/discover" => {
+                            if let Some(gate) = &gate {
+                                gate.notified().await;
+                            }
+                            if let Mode::Startup(case) = mode {
+                                let reply = discovery_reply(case, &message["id"]);
+                                status = reply.0;
+                                mime = reply.1;
+                                reply.2
+                            } else {
+                                json!({"jsonrpc":"2.0","id":message["id"],"result":DiscoverResult::new(vec![rmcp::model::ProtocolVersion::V_2026_07_28],Default::default())}).to_string()
+                            }
+                        }
+                        "initialize" => {
+                            extra = "Mcp-Session-Id: fixture-session\r\n";
+                            json!({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":message["params"]["protocolVersion"],"capabilities":{},"serverInfo":{"name":"fixture","version":"1"}}}).to_string()
+                        }
+                        "notifications/initialized" | "notifications/cancelled" => {
+                            status = "202 Accepted";
+                            String::new()
+                        }
                         "tools/list" | "ping" => match mode {
                             Mode::UncorrelatedJson => {
-                                json!({"jsonrpc":"2.0","id":"unrelated","result":catalog()}).to_string()
+                                json!({"jsonrpc":"2.0","id":"unrelated","result":catalog()})
+                                    .to_string()
                             }
                             Mode::AcceptedRequest => {
                                 status = "202 Accepted";
@@ -122,18 +206,32 @@ impl Fixture {
                                 pending_id = message["id"].clone();
                                 mime = "text/event-stream";
                                 "id: cursor\nretry: 0\n\n".to_owned()
-                            },
-                        Mode::Expired => { status = "404 Not Found"; String::new() },
-                        Mode::BrokenStream => { mime = "text/event-stream"; "id: cursor\nretry: 0\n\ndata: {incomplete".to_owned() },
-                        Mode::CorruptStream => { mime = "text/event-stream"; "id: cursor\n\ndata: secret-invalid-json\n\n".to_owned() },
-                        Mode::JsonCatalog | Mode::SseCatalog => {
-                            let response = json!({"jsonrpc":"2.0","id":message["id"],"result":catalog()});
-                            if matches!(mode, Mode::SseCatalog) { mime = "text/event-stream"; format!("data: {response}\n\n") }
-                            else { response.to_string() }
+                            }
+                            Mode::Expired => {
+                                status = "404 Not Found";
+                                String::new()
+                            }
+                            Mode::BrokenStream => {
+                                mime = "text/event-stream";
+                                "id: cursor\nretry: 0\n\ndata: {incomplete".to_owned()
+                            }
+                            Mode::CorruptStream => {
+                                mime = "text/event-stream";
+                                "id: cursor\n\ndata: secret-invalid-json\n\n".to_owned()
+                            }
+                            Mode::JsonCatalog | Mode::SseCatalog | Mode::Startup(_) => {
+                                let response =
+                                    json!({"jsonrpc":"2.0","id":message["id"],"result":catalog()});
+                                if matches!(mode, Mode::SseCatalog) {
+                                    mime = "text/event-stream";
+                                    format!("data: {response}\n\n")
+                                } else {
+                                    response.to_string()
+                                }
+                            }
                         },
-                    },
-                    method => panic!("unexpected fixture method: {method}"),
-                }
+                        method => panic!("unexpected fixture method: {method}"),
+                    }
                 };
                 let response = format!(
                     "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n{extra}\r\n{body}",
@@ -147,6 +245,7 @@ impl Fixture {
             endpoint,
             received,
             task,
+            release,
         }
     }
 
@@ -215,6 +314,150 @@ fn modern() -> ClientLifecycleMode {
     ClientLifecycleMode::Discover {
         preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
     }
+}
+
+#[tokio::test]
+async fn http_startup_modern_pins_and_structured_fallback() {
+    for case in [
+        StartupCase::ModernSse,
+        StartupCase::UnsupportedJson,
+        StartupCase::UnsupportedSse,
+    ] {
+        let fixture = Fixture::new(Mode::Startup(case)).await;
+        let mut config = fixture.config(ProtocolVersion::V20260728);
+        config.legacy_resume_delay = Some(Duration::ZERO);
+        let client = start_http_client(
+            (),
+            config,
+            ProtocolPolicy::Auto,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let expected = if matches!(case, StartupCase::ModernSse) {
+            "2026-07-28"
+        } else {
+            "2025-11-25"
+        };
+        assert_eq!(
+            client.peer_info().unwrap().protocol_version.as_str(),
+            expected
+        );
+        client.cancel().await.unwrap();
+        let requests = fixture.received.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, value)| value["method"] == "server/discover")
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, value)| value["method"] == "initialize")
+                .count(),
+            usize::from(expected != "2026-07-28")
+        );
+    }
+    for protocol in [
+        ProtocolVersion::V20250326,
+        ProtocolVersion::V20250618,
+        ProtocolVersion::V20251125,
+        ProtocolVersion::V20260728,
+    ] {
+        let fixture = Fixture::new(Mode::JsonCatalog).await;
+        let client = start_http_client(
+            (),
+            fixture.config(protocol),
+            ProtocolPolicy::Pinned(protocol),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            client.peer_info().unwrap().protocol_version.as_str(),
+            protocol.as_str()
+        );
+        client.cancel().await.unwrap();
+        let requests = fixture.received.lock().unwrap();
+        assert_eq!(
+            requests[0].1["method"],
+            if protocol == ProtocolVersion::V20260728 {
+                "server/discover"
+            } else {
+                "initialize"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_startup_never_downgrades_without_exact_evidence() {
+    for case in [
+        StartupCase::Auth,
+        StartupCase::ServerFailure,
+        StartupCase::PlainBadRequest,
+        StartupCase::WrongId,
+        StartupCase::WrongRequested,
+        StartupCase::MethodNotFound,
+        StartupCase::IncompatibleDiscovery,
+        StartupCase::Malformed,
+    ] {
+        let fixture = Fixture::new(Mode::Startup(case)).await;
+        let result = start_http_client(
+            (),
+            fixture.config(ProtocolVersion::V20260728),
+            ProtocolPolicy::Auto,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(McpHttpStartError::Negotiation)),
+            "{case:?}"
+        );
+        assert_eq!(fixture.received.lock().unwrap().len(), 1, "{case:?}");
+    }
+    let fixture = Fixture::new(Mode::Startup(StartupCase::UnsupportedJson)).await;
+    assert!(matches!(
+        start_http_client(
+            (),
+            fixture.config(ProtocolVersion::V20260728),
+            ProtocolPolicy::Pinned(ProtocolVersion::V20260728),
+            tokio::time::Instant::now() + Duration::from_secs(5)
+        )
+        .await,
+        Err(McpHttpStartError::Negotiation)
+    ));
+    assert_eq!(fixture.received.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn http_startup_deadline_waits_for_worker_shutdown() {
+    let fixture = Fixture::new(Mode::Startup(StartupCase::Stall)).await;
+    let config = fixture.config(ProtocolVersion::V20260728);
+    // The response is deliberately gated past this deadline, but within the
+    // fixture's five-second I/O timeout. Returning early would detach the worker.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let startup = tokio::spawn(start_http_client(
+        (),
+        config,
+        ProtocolPolicy::Auto,
+        deadline,
+    ));
+    tokio::time::sleep_until(deadline + Duration::from_millis(10)).await;
+    assert_eq!(fixture.received.lock().unwrap().len(), 1);
+    assert!(
+        !startup.is_finished(),
+        "startup returned before the in-flight worker joined"
+    );
+    fixture.release.as_ref().unwrap().notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), startup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(McpHttpStartError::Deadline)));
+    assert_eq!(fixture.received.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

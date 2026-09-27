@@ -206,7 +206,7 @@ impl BoundedHttpClient {
         Ok(response)
     }
 
-    async fn post(
+    pub(crate) async fn post(
         &self,
         uri: Arc<str>,
         message: ClientJsonRpcMessage,
@@ -214,7 +214,7 @@ impl BoundedHttpClient {
         auth: Option<String>,
         custom: HashMap<HeaderName, HeaderValue>,
         event_limit: usize,
-    ) -> Result<StreamableHttpPostResponse, HttpError> {
+    ) -> Result<(StreamableHttpPostResponse, StatusCode), HttpError> {
         let mut body = BoundedBody {
             bytes: Vec::new(),
             limit: self.limits.max_request_bytes.get(),
@@ -229,7 +229,7 @@ impl BoundedHttpClient {
             return Err(StreamableHttpError::SessionExpired);
         }
         if status == StatusCode::ACCEPTED {
-            return Ok(StreamableHttpPostResponse::Accepted);
+            return Ok((StreamableHttpPostResponse::Accepted, status));
         }
         let session = response
             .headers()
@@ -244,13 +244,16 @@ impl BoundedHttpClient {
             })
             .transpose()?;
         if content_type(&response, "text/event-stream") && status.is_success() {
-            return Ok(StreamableHttpPostResponse::Sse(
-                crate::http_sse::response_stream(
-                    response,
-                    event_limit.min(self.limits.max_event_bytes.get()),
-                    self.limits.max_stream_bytes.get(),
+            return Ok((
+                StreamableHttpPostResponse::Sse(
+                    crate::http_sse::response_stream(
+                        response,
+                        event_limit.min(self.limits.max_event_bytes.get()),
+                        self.limits.max_stream_bytes.get(),
+                    ),
+                    session,
                 ),
-                session,
+                status,
             ));
         }
         if !content_type(&response, "application/json") {
@@ -271,7 +274,7 @@ impl BoundedHttpClient {
                 return Err(failure(McpHttpError::HttpStatus(status.as_u16())));
             }
         }
-        Ok(StreamableHttpPostResponse::Json(parsed, session))
+        Ok((StreamableHttpPostResponse::Json(parsed, session), status))
     }
 
     async fn stream(
@@ -334,6 +337,7 @@ impl StreamableHttpClient for BoundedHttpClient {
             self.limits.max_event_bytes.get(),
         )
         .await
+        .map(|(response, _)| response)
     }
     async fn post_message_with_max_sse_event_size(
         &self,
@@ -344,7 +348,9 @@ impl StreamableHttpClient for BoundedHttpClient {
         custom: HashMap<HeaderName, HeaderValue>,
         max: usize,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
-        self.post(uri, message, session, auth, custom, max).await
+        self.post(uri, message, session, auth, custom, max)
+            .await
+            .map(|(response, _)| response)
     }
     async fn get_stream(
         &self,

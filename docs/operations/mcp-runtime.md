@@ -48,10 +48,32 @@ malformed or over-budget streams cannot. Modern HTTP requires that option unset
 and has an I/O guard because SDK `NeverRetry` alone does not prevent every resume.
 The 2024 HTTP+SSE adapter is separate and remains unimplemented.
 
-HTTP startup negotiation, durable lifecycle/host-binding and broker integration,
-OAuth, live credential administration and official HTTP conformance remain open.
-Tests use local HTTP socket fixtures and the real SDK worker, not remote services
-or real OAuth credentials.
+`start_http_client` now supports exact 2025/2026 pins and modern-first Auto startup.
+Auto requires a correlated `UnsupportedProtocolVersionError` (`-32022`) naming
+the requested modern version and a supported legacy Streamable HTTP revision.
+It selects the newest mutually supported legacy revision and makes at most one
+legacy attempt. A plain HTTP 400, method-not-found, authentication/server failure,
+malformed or uncorrelated response, or an incompatible discovery success cannot
+authorize fallback. The configured startup deadline covers both attempts.
+Structured startup errors arriving over SSE are preserved before the SDK can
+discard or log those frames. Server-request mediation before startup completes
+is not yet supported.
+
+This deliberately follows EDL-247's stricter fallback rule. The upstream 2026
+HTTP compatibility guidance also permits legacy detection from non-modern HTTP
+400 bodies; Kiln rejects that automatic path. Such servers need an explicit legacy
+pin. This policy difference is not a claim of full upstream conformance.
+
+`McpHttpTransport` owns the SDK worker through shutdown. Startup failure or timeout
+waits for the old worker to join before returning or starting a fallback. Dropping
+the transport or cancelling a close waiter still leaves an owned cleanup task.
+The startup deadline does not truncate cleanup; shutdown may therefore finish
+after it. Completion proves local worker termination, not remote session deletion
+or cleanup of a session created by a malformed handshake.
+
+Durable HTTP lifecycle/host-binding and broker integration, OAuth, live credential
+administration and official HTTP conformance remain open. Tests use local HTTP
+socket fixtures and the real SDK worker, not remote services or real credentials.
 
 ### Stdio lifecycle settings
 

@@ -28,6 +28,7 @@ use std::{
 
 /// Already-authorized, host-local inputs for one protocol-pinned HTTP generation.
 /// No Debug/serialization: endpoint, headers and bearer token may be sensitive.
+#[derive(Clone)]
 pub struct McpHttpGenerationConfig {
     pub endpoint: String,
     pub protocol: ProtocolVersion,
@@ -52,7 +53,7 @@ pub struct McpHttpGenerationConfig {
 /// The 2024 HTTP+SSE adapter is separate and is not supplied by this constructor.
 pub fn http_generation_transport(
     config: McpHttpGenerationConfig,
-) -> Result<impl Transport<RoleClient, Error = StreamableHttpError<McpHttpError>>, McpHttpError> {
+) -> Result<McpHttpTransport, McpHttpError> {
     if config.protocol == ProtocolVersion::V20241105
         || config.protocol == ProtocolVersion::V20260728 && config.legacy_resume_delay.is_some()
     {
@@ -102,7 +103,94 @@ pub fn http_generation_transport(
         HeaderName::from_static("mcp-protocol-version"),
         HeaderValue::from_static(config.protocol.as_str()),
     );
-    Ok(StreamableHttpClientTransport::with_client(client, sdk))
+    let (cleanup_sender, cleanup) = tokio::sync::watch::channel(None);
+    Ok(McpHttpTransport {
+        inner: Some(StreamableHttpClientTransport::with_client(client, sdk)),
+        cleanup_sender: Some(cleanup_sender),
+        cleanup,
+        runtime: tokio::runtime::Handle::current(),
+    })
+}
+
+/// Owns and joins the SDK worker, including when a startup future is dropped.
+/// Completion means local worker shutdown, not proof that remote DELETE succeeded.
+pub struct McpHttpTransport {
+    inner: Option<StreamableHttpClientTransport<GenerationClient>>,
+    cleanup_sender: Option<tokio::sync::watch::Sender<Option<bool>>>,
+    cleanup: tokio::sync::watch::Receiver<Option<bool>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl McpHttpTransport {
+    pub(crate) fn cleanup_receiver(&self) -> tokio::sync::watch::Receiver<Option<bool>> {
+        self.cleanup.clone()
+    }
+
+    fn start_close(&mut self) {
+        if let Some(mut inner) = self.inner.take() {
+            let sender = self
+                .cleanup_sender
+                .take()
+                .expect("worker owns completion sender");
+            // Moving the worker into this task makes close cancellation-safe:
+            // dropping an awaiting caller cannot drop its join handle halfway.
+            self.runtime.spawn(async move {
+                sender.send_replace(Some(inner.close().await.is_ok()));
+            });
+        }
+    }
+}
+
+impl Drop for McpHttpTransport {
+    fn drop(&mut self) {
+        self.start_close();
+    }
+}
+
+pub(crate) async fn wait_http_cleanup(
+    mut receiver: tokio::sync::watch::Receiver<Option<bool>>,
+) -> bool {
+    loop {
+        if let Some(result) = *receiver.borrow_and_update() {
+            return result;
+        }
+        if receiver.changed().await.is_err() {
+            return false;
+        }
+    }
+}
+
+impl Transport<RoleClient> for McpHttpTransport {
+    type Error = StreamableHttpError<McpHttpError>;
+
+    fn send(
+        &mut self,
+        message: ClientJsonRpcMessage,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let send = self.inner.as_mut().map(|inner| inner.send(message));
+        async move {
+            match send {
+                Some(send) => send.await,
+                None => Err(failure(McpHttpError::GenerationClosed)),
+            }
+        }
+    }
+
+    async fn receive(&mut self) -> Option<ServerJsonRpcMessage> {
+        match self.inner.as_mut() {
+            Some(inner) => inner.receive().await,
+            None => None,
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.start_close();
+        if wait_http_cleanup(self.cleanup.clone()).await {
+            Ok(())
+        } else {
+            Err(failure(McpHttpError::Network))
+        }
+    }
 }
 
 struct GenerationGuard {
@@ -309,6 +397,8 @@ impl StreamableHttpClient for GenerationClient {
         if self.guard.protocol == ProtocolVersion::V20260728 && session.is_some() {
             return Err(self.guard.retire(McpHttpError::ProtocolViolation));
         }
+        let startup = matches!(&message, ClientJsonRpcMessage::Request(request)
+            if matches!(&request.request, ClientRequest::InitializeRequest(_) | ClientRequest::DiscoverRequest(_)));
         let expected = if let ClientJsonRpcMessage::Request(request) = &message {
             if let ClientRequest::InitializeRequest(initialize) = &request.request {
                 if self.guard.protocol == ProtocolVersion::V20260728
@@ -322,11 +412,36 @@ impl StreamableHttpClient for GenerationClient {
         } else {
             None
         };
-        let response = self.guard.finish(
+        let (response, status) = self.guard.finish(
             self.inner
-                .post_message_with_max_sse_event_size(uri, message, session, auth, headers, max)
+                .post(uri, message, session, auth, headers, max)
                 .await,
         )?;
+        // Structured negotiation evidence is meaningful on protocol responses,
+        // not redirects, rate limits or server failures with JSON-looking bodies.
+        if startup && !(status.is_success() || status == reqwest::StatusCode::BAD_REQUEST) {
+            return Err(self.guard.retire(McpHttpError::HttpStatus(status.as_u16())));
+        }
+        let response = match response {
+            StreamableHttpPostResponse::Sse(mut stream, session) if startup => {
+                // rmcp's startup helper discards/logs SSE error frames. Preserve
+                // a correlated protocol error exactly as a JSON response instead.
+                // Pre-startup server-request mediation is not implemented here.
+                let message = loop {
+                    let Some(event) = stream.next().await else {
+                        return Err(self.guard.retire(McpHttpError::InvalidResponse));
+                    };
+                    let event = self.guard.finish(event.map_err(StreamableHttpError::Sse))?;
+                    let Some(data) = event.data else {
+                        continue;
+                    };
+                    break serde_json::from_str::<ServerJsonRpcMessage>(&data)
+                        .map_err(|_| self.guard.retire(McpHttpError::InvalidResponse))?;
+                };
+                StreamableHttpPostResponse::Json(message, session)
+            }
+            other => other,
+        };
         match response {
             StreamableHttpPostResponse::Json(message, session) => {
                 if self.guard.protocol == ProtocolVersion::V20260728 && session.is_some() {

@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Define compact MCP call proposals and durable single-attempt
+  dispatch claims without enabling live transport dispatch.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Add offline, locked local MCP definition registration and inspection
   with explicit budgets and idempotent compare-and-set updates.
 

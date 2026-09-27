@@ -328,7 +328,7 @@ async fn append_event(
             .map_err(|_|Error::Unavailable)?;
     Ok(())
 }
-async fn validate_owner(
+pub(super) async fn validate_owner(
     connection: &mut SqliteConnection,
     owner: &McpInstanceOwner,
 ) -> Result<(), Error> {

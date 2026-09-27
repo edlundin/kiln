@@ -15,8 +15,10 @@ setting is supplied. There are no product defaults.
 
 Startup runs recovery after acquiring the daemon's exclusive store lock and
 before serving requests. It marks active generations interrupted in batches,
-retaining desired state and last negotiated protocol. It does not adopt or kill
-orphan processes and does not replay invocations. An interrupted generation stays
+retaining desired state and last negotiated protocol. It then marks unfinished
+MCP invocation claims interrupted using the same transaction batch budget. Those
+records represent unknown external outcomes and never authorize redispatch.
+Startup does not adopt or kill orphan processes and does not replay invocations. An interrupted generation stays
 blocked against replacement until cleanup is confirmed; enabling this runtime
 does not by itself make crash recovery complete.
 

@@ -207,8 +207,33 @@ dispatch under the store lock; its Run-service shutdown drains registry owners.
 An additional listener-exit drain covers a dropped graceful-shutdown future.
 This lifecycle wiring does not yet expose an MCP launch or invocation endpoint.
 
-Remaining broker work includes process recovery, public registration and persistent
-host-binding/credential administration, durable
-ToolCall lifecycle and invocation events, Kiln grants/approvals, catalogue/result
-paging, HTTP/OAuth, mediated server requests, and full conformance. No MCP operation
+Core now defines the compact `mcp_call` native proposal contract for tool calls,
+resource reads and prompt retrieval. Each proposal pins a server definition ID and
+version, and retains the complete operation and arguments for approval inspection.
+Its caller supplies a positive whole-request byte budget; that budget is part of
+the frozen catalogue definition. Parsing rejects unknown fields, noncanonical or
+duplicate keys, invalid versions, control characters in targets, and non-string
+prompt argument values. It resolves no server, schema reference or credential.
+
+Migration 53 records one MCP dispatch claim per already-running native ToolCall.
+The store rechecks the frozen proposal, live Run/ToolCall scope, current enabled
+definition and ready generation in one transaction. A partial unique index
+serializes dispatch per generation regardless of annotations. Only a fresh native
+claim plus a newly inserted record yields a non-cloneable `McpDispatchPermit`;
+existing records, including interrupted ones, yield receipts only. Outcomes and
+metadata-only audit rows commit together; exact terminal retries are no-ops and
+conflicting outcomes fail. Startup interrupts unfinished invocation records after
+interrupting generations. `dispatching` means a send may have occurred, not proof
+that a server accepted or completed it. Dropping a permit grants no replay.
+
+These are internal prerequisites: the daemon does not advertise `mcp_call` yet,
+and no SDK invocation consumes the permit. Catalogue/schema validation, effective
+host authorization and pinning, transport cancellation/result capture, and normal
+ToolCall finalization still need to be connected before enabling the operation.
+Invocation audit rows are not yet in public Event replay.
+
+Remaining broker work includes process recovery, online registration and persistent
+host-binding/credential administration, transport dispatch through the durable
+ToolCall boundary, catalogue/result paging, HTTP/OAuth, mediated server requests,
+and full conformance. No MCP operation
 is offered to models until it is connected to the normal durable ToolCall boundary.

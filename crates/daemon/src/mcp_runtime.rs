@@ -1,6 +1,6 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-use kiln_core::McpInstanceStore;
+use kiln_core::{McpInstanceStore, McpInvocationStore};
 use kiln_infrastructure::SqliteStore;
 use kiln_mcp::StdioRegistry;
 
@@ -40,6 +40,15 @@ async fn recover(store: &SqliteStore, batch_size: NonZeroUsize) -> Result<(), &'
             .interrupt_mcp_instances_after_restart(batch_size)
             .await
             .map_err(|_| "cannot record interrupted MCP generations")?;
+        if count < batch_size.get() {
+            break;
+        }
+    }
+    loop {
+        let count = store
+            .interrupt_mcp_invocations(None, batch_size)
+            .await
+            .map_err(|_| "cannot record interrupted MCP invocations")?;
         if count < batch_size.get() {
             return Ok(());
         }

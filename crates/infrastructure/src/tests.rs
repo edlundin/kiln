@@ -1,3 +1,5 @@
+mod mcp_invocation_tests;
+
 use std::{path::Path, process::Command};
 
 use kiln_core::{

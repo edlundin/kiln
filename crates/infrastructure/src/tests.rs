@@ -987,6 +987,7 @@ async fn event_insert_failure_rolls_back_message_insert() {
                 EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
                 first.clone(),
             ),
+            first.id().as_str(),
         )
         .await
         .unwrap();
@@ -1003,6 +1004,7 @@ async fn event_insert_failure_rolls_back_message_insert() {
                     EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
                     second.clone(),
                 ),
+                second.id().as_str(),
             )
             .await,
         Err(kiln_core::StoreError::Unavailable)
@@ -1100,6 +1102,7 @@ async fn cursors_are_global_but_event_queries_are_session_filtered() {
                 EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAX").unwrap(),
                 first_message.clone(),
             ),
+            first_message.id().as_str(),
         )
         .await
         .unwrap();
@@ -1882,6 +1885,7 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
         .unwrap();
 
     let first_command = SendRunInput {
+        attachments: Vec::new(),
         run_id: run_id.clone(),
         content: "first guidance".to_owned(),
         delivery_mode: MessageDeliveryMode::Queued,
@@ -1906,6 +1910,7 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
 
     let second = app
         .send_run_input(SendRunInput {
+            attachments: Vec::new(),
             run_id: run_id.clone(),
             content: "urgent guidance".to_owned(),
             delivery_mode: MessageDeliveryMode::Interrupt,
@@ -1919,6 +1924,7 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
     ));
     let third = app
         .send_run_input(SendRunInput {
+            attachments: Vec::new(),
             run_id: run_id.clone(),
             content: "third guidance".to_owned(),
             delivery_mode: MessageDeliveryMode::Queued,
@@ -1939,6 +1945,7 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
     );
     assert_eq!(
         app.send_run_input(SendRunInput {
+            attachments: Vec::new(),
             run_id: read_only.value.run().run_id().clone(),
             content: "not permitted".to_owned(),
             delivery_mode: MessageDeliveryMode::Queued,
@@ -1964,6 +1971,7 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
                     EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FCE").unwrap(),
                     forged_message.clone(),
                 ),
+                forged_message.id().as_str(),
             )
             .await,
         Err(kiln_core::StoreError::Unavailable)
@@ -2062,6 +2070,7 @@ async fn targeted_run_input_is_atomic_idempotent_fifo_and_recovers() {
     );
     assert_eq!(
         app.send_run_input(SendRunInput {
+            attachments: Vec::new(),
             run_id: run_id.clone(),
             content: "late guidance".to_owned(),
             delivery_mode: MessageDeliveryMode::Queued,
@@ -2151,6 +2160,7 @@ async fn context_manifests_validate_sources_hash_atomically_and_survive_terminat
                 EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap(),
                 session_message.clone(),
             ),
+            session_message.id().as_str(),
         )
         .await
         .unwrap();
@@ -2181,11 +2191,13 @@ async fn context_manifests_validate_sources_hash_atomically_and_survive_terminat
                 EventId::parse("evt_01ARZ3NDEKTSV4RRFFQ69G5FAY").unwrap(),
                 other_message.clone(),
             ),
+            other_message.id().as_str(),
         )
         .await
         .unwrap();
     let targeted = run_app
         .send_run_input(SendRunInput {
+            attachments: Vec::new(),
             run_id: run_id.clone(),
             content: "delivered guidance".to_owned(),
             delivery_mode: MessageDeliveryMode::Queued,

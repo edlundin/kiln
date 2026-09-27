@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-27 — `test`
+
+- EDL-322: Repair infrastructure library test fixtures so targeted storage and
+  Run-input tests compile and pass again.
+
+EDL-322: https://linear.app/edlundin/issue/EDL-322
+
+[Commit](pending)
+
 ## 2026-09-27 — `feat`
 
 - EDL-314: Add bounded newline-delimited stdio framing with caller-supplied

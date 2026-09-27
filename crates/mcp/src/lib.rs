@@ -7,5 +7,5 @@ mod stdio;
 
 pub use negotiation::{ProtocolPolicy, ProtocolVersion, start_stdio_client};
 #[cfg(unix)]
-pub use process::{StdioProcess, StdioProcessConfig};
+pub use process::{ManagedStdioProcess, StdioProcess, StdioProcessCleanup, StdioProcessConfig};
 pub use stdio::StdioTransport;

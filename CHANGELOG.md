@@ -2,6 +2,15 @@
 
 ## 2026-09-27 — `feat`
 
+- EDL-314: Return SDK-owned MCP processes to a single-use cleanup receipt so
+  failed or cancelled startup can be explicitly closed and reaped.
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314/implement-mcp-broker-and-conformance-server
+
+[Commit](pending)
+
+## 2026-09-27 — `feat`
+
 - EDL-314: Journal scoped MCP instance generations with atomic claims,
   compare-and-set transitions, and restart interruption records.
 

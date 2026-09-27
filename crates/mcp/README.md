@@ -68,6 +68,19 @@ idempotent close/reaping, EOF shutdown, descendant cleanup, malformed output,
 startup cancellation, and directory-path replacement after pinning. These are local macOS observations; Linux
 execution and full MCP conformance remain unverified.
 
+`StdioProcess::into_managed` transfers the transport to the SDK while retaining a
+single-use cleanup receipt. Once startup has failed/been cancelled or the running
+service has stopped, `StdioProcessCleanup::finish` obtains the returned process
+and explicitly closes/reaps it. This allows a lifecycle owner to require observed
+cleanup before recording a terminal generation. Dropping either side provides
+only the forced-cleanup backstop, never a successful cleanup receipt. The owner
+must stop the SDK before awaiting the receipt; it does not interrupt a live SDK
+service itself. Canceling `StdioProcess::close` while retaining the process object
+retains its child handle for a later close retry; the single-use cleanup receipt
+must itself be awaited to completion to establish cleanup. Real-process fixtures
+verify the receipt after successful service cancellation, malformed startup, and
+caller-cancelled startup.
+
 Core `McpServerDefinition` validates canonical local registration metadata using
 the same transport-field validation as shared snapshots. It records a source of
 `local`, an exact final protocol pin or `auto`, lifecycle scope (default

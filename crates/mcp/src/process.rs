@@ -12,7 +12,10 @@ use rustix::{
     io::Errno,
     process::{Pid, Signal, kill_process_group},
 };
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::{
+    process::{Child, ChildStdin, ChildStdout, Command},
+    sync::oneshot,
+};
 
 use crate::StdioTransport;
 
@@ -43,7 +46,81 @@ pub struct StdioProcess {
     exit_status: Option<std::process::ExitStatus>,
 }
 
+/// Retains cleanup ownership after the SDK takes the transport. Call `finish`
+/// after dropping a failed/cancelled startup future or stopping the SDK service.
+/// Merely dropping this receipt is not evidence that cleanup completed.
+pub struct StdioProcessCleanup {
+    returned: oneshot::Receiver<StdioProcess>,
+}
+
+impl StdioProcessCleanup {
+    pub async fn finish(mut self) -> io::Result<()> {
+        let mut process = (&mut self.returned)
+            .await
+            .map_err(|_| io::Error::other("MCP process ownership was lost"))?;
+        process.close().await
+    }
+}
+
+/// SDK transport that returns the process to its lifecycle owner on every exit,
+/// including negotiation failure. It does not expose a second process handle.
+pub struct ManagedStdioProcess {
+    process: Option<StdioProcess>,
+    returned: Option<oneshot::Sender<StdioProcess>>,
+}
+
+impl Drop for ManagedStdioProcess {
+    fn drop(&mut self) {
+        if let (Some(process), Some(returned)) = (self.process.take(), self.returned.take()) {
+            // If the owner disappeared, send returns ownership and the process
+            // drop backstop still kills its group. No cleanup success is claimed.
+            let _ = returned.send(process);
+        }
+    }
+}
+
+impl Transport<RoleClient> for ManagedStdioProcess {
+    type Error = io::Error;
+
+    fn send(
+        &mut self,
+        message: ClientJsonRpcMessage,
+    ) -> impl Future<Output = io::Result<()>> + Send + 'static {
+        self.process
+            .as_mut()
+            .expect("owned MCP process")
+            .send(message)
+    }
+
+    async fn receive(&mut self) -> Option<ServerJsonRpcMessage> {
+        self.process
+            .as_mut()
+            .expect("owned MCP process")
+            .receive()
+            .await
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        self.process
+            .as_mut()
+            .expect("owned MCP process")
+            .close()
+            .await
+    }
+}
+
 impl StdioProcess {
+    pub fn into_managed(self) -> (ManagedStdioProcess, StdioProcessCleanup) {
+        let (returned, receiver) = oneshot::channel();
+        (
+            ManagedStdioProcess {
+                process: Some(self),
+                returned: Some(returned),
+            },
+            StdioProcessCleanup { returned: receiver },
+        )
+    }
+
     pub fn spawn(config: StdioProcessConfig) -> io::Result<Self> {
         if !config.executable.is_absolute() {
             return Err(io::Error::new(
@@ -182,8 +259,11 @@ impl Transport<RoleClient> for StdioProcess {
             tokio::time::sleep_until(deadline).await;
         }
         self.stop_group()?;
-        if let Some(mut child) = self.child.take() {
+        if let Some(child) = self.child.as_mut() {
+            // Keep ownership across the cancellation point. A cancelled close
+            // must still be able to retry the reap and cannot report success.
             self.exit_status = Some(child.wait().await?);
+            self.child = None;
         }
         close_result
     }

@@ -43,6 +43,7 @@ async fn real_process_negotiates_with_explicit_environment_and_directory() {
     "#;
     let process = StdioProcess::spawn(config(script)).unwrap();
     let pid = Pid::from_raw(process.process_id().unwrap() as i32).unwrap();
+    let (process, cleanup) = process.into_managed();
     let client = start_stdio_client(
         (),
         process,
@@ -51,6 +52,48 @@ async fn real_process_negotiates_with_explicit_environment_and_directory() {
     .await
     .unwrap();
     client.cancel().await.unwrap();
+    cleanup.finish().await.unwrap();
+    assert_eq!(test_kill_process(pid), Err(Errno::SRCH));
+}
+
+#[tokio::test]
+async fn managed_startup_failure_returns_process_for_verified_cleanup() {
+    let process = StdioProcess::spawn(config("printf 'invalid\\n'; exec /bin/sleep 60")).unwrap();
+    let pid = Pid::from_raw(process.process_id().unwrap() as i32).unwrap();
+    let (transport, cleanup) = process.into_managed();
+    assert!(
+        start_stdio_client(
+            (),
+            transport,
+            ProtocolPolicy::Pinned(ProtocolVersion::V20260728)
+        )
+        .await
+        .is_err()
+    );
+    cleanup.finish().await.unwrap();
+    assert_eq!(test_kill_process(pid), Err(Errno::SRCH));
+}
+
+#[tokio::test]
+async fn managed_startup_cancellation_returns_process_for_verified_cleanup() {
+    let process = StdioProcess::spawn(config("exec /bin/sleep 60")).unwrap();
+    let pid = Pid::from_raw(process.process_id().unwrap() as i32).unwrap();
+    let (transport, cleanup) = process.into_managed();
+    // The silent fixture cannot negotiate. This only schedules cancellation;
+    // cleanup itself must await reaping, without a polling-based assertion.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(10),
+            start_stdio_client(
+                (),
+                transport,
+                ProtocolPolicy::Pinned(ProtocolVersion::V20260728)
+            )
+        )
+        .await
+        .is_err()
+    );
+    cleanup.finish().await.unwrap();
     assert_eq!(test_kill_process(pid), Err(Errno::SRCH));
 }
 

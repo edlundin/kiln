@@ -28,6 +28,8 @@ mod native_tools;
 #[cfg(unix)]
 pub(crate) use native_mcp::{NativeMcp, configured_native_mcp};
 pub(crate) use native_tools::configured_file_read;
+mod native_output_page;
+pub(crate) use native_output_page::configured_output_page;
 
 fn legacy_subprocess_is_proven(snapshot: &RunSnapshot) -> bool {
     // Before execution_kind was persisted, the durable deterministic tool
@@ -60,6 +62,7 @@ pub(crate) struct RunService {
     native_model: Option<crate::native_model::NativeModelSelection>,
     provider_registry: Arc<ProviderRegistry>,
     native_file_read: Option<Arc<kiln_core::WorkspaceFileReadTool>>,
+    native_output_page: Option<Arc<kiln_core::ToolOutputPageTool>>,
     #[cfg(unix)]
     mcp_registry: Option<Arc<kiln_mcp::StdioRegistry<SqliteStore>>>,
     #[cfg(unix)]
@@ -86,6 +89,7 @@ impl RunService {
             native_model: None,
             provider_registry: Arc::new(ProviderRegistry::new()),
             native_file_read: None,
+            native_output_page: None,
             #[cfg(unix)]
             mcp_registry: None,
             #[cfg(unix)]
@@ -126,6 +130,14 @@ impl RunService {
         tool: Option<kiln_core::WorkspaceFileReadTool>,
     ) -> Self {
         self.native_file_read = tool.map(Arc::new);
+        self
+    }
+
+    pub(crate) fn with_native_output_page(
+        mut self,
+        tool: Option<kiln_core::ToolOutputPageTool>,
+    ) -> Self {
+        self.native_output_page = tool.map(Arc::new);
         self
     }
 

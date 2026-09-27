@@ -21,9 +21,10 @@ impl RunService {
         kiln_core::NativeTools::new(
             self.native_file_read.as_deref(),
             mcp,
+            self.native_output_page.as_deref(),
             kiln_core::ModelToolCatalogLimits {
-                // Four locally constructed fixed definitions, no server schemas.
-                max_tools: 4,
+                // Five locally constructed fixed definitions, no server schemas.
+                max_tools: 5,
                 max_definition_bytes: usize::MAX,
                 max_total_definition_bytes: usize::MAX,
             },
@@ -168,6 +169,9 @@ impl RunService {
                 // input is delivered at the next generation boundary, after
                 // this accepted sequential batch has terminal results.
                 let result = match request.into_native() {
+                    kiln_core::NativeToolExecutionRequest::ToolOutputPage(request) => {
+                        self.execute_output_page(request, cancellation).await?
+                    }
                     kiln_core::NativeToolExecutionRequest::FileRead(request) => {
                         execute_workspace_file_read(request, &root, self.artifacts.clone(), async {
                             let _ = (&mut *cancellation).await;

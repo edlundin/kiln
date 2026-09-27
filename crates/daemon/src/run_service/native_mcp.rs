@@ -298,12 +298,15 @@ for line in sys.stdin:
         result = {'tools':[{'name':'write','inputSchema':{'type':'object'}}]}
     elif method == 'tools/call':
         with open('calls','a') as log: log.write('call\n')
-        result = {'content':[{'type':'text','text':'remote output'}]}
+        result = {'content':[{'type':'text','text':'remote output' * 500}]}
     else: continue
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}),flush=True)
 "#).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let config: NativeMcpLimits = serde_json::from_value(limits_json()).unwrap();
+        let mut config: NativeMcpLimits = serde_json::from_value(limits_json()).unwrap();
+        // This fixture's repeated output exercises artifact paging after completion.
+        config.max_frame_bytes = NonZeroUsize::new(16384).unwrap();
+        config.max_result_bytes = NonZeroUsize::new(16384).unwrap();
         let definitions = config.broker_limits().unwrap().definition;
         let definition = McpServerDefinition::new(
             SharedMcpServerInput {
@@ -376,6 +379,21 @@ for line in sys.stdin:
             .unwrap(),
         ))
         .with_mcp_registry(Some(registry))
+        .with_native_output_page(Some(
+            ToolOutputPageTool::new(
+                ToolOutputPageLimits {
+                    max_request_bytes: 1024,
+                    max_artifact_bytes: 16384,
+                    max_page_bytes: 640,
+                },
+                ModelToolCatalogLimits {
+                    max_tools: 1,
+                    max_definition_bytes: 4096,
+                    max_total_definition_bytes: 4096,
+                },
+            )
+            .unwrap(),
+        ))
         .with_native_mcp(Some(NativeMcp::new(config).unwrap()))
         .unwrap();
         assert!(
@@ -441,7 +459,13 @@ for line in sys.stdin:
                 .iter()
                 .map(|d| d.name())
                 .collect::<Vec<_>>(),
-            ["read_file", "mcp_call", "mcp_search", "mcp_describe"]
+            [
+                "read_file",
+                "mcp_call",
+                "mcp_search",
+                "mcp_describe",
+                "read_tool_output"
+            ]
         );
         store
             .attach_model_tool_catalog(invocation.invocation_id(), tools.catalog())
@@ -536,7 +560,18 @@ for line in sys.stdin:
         for (index, id) in ids.iter().enumerate() {
             let (_, tool) = store.get_tool_call(id).await.unwrap().unwrap();
             assert_eq!(tool.state(), ToolCallState::Completed);
-            let output = tool.stdout().unwrap();
+            let output = if let Some(artifact) = tool.stdout_artifact() {
+                String::from_utf8(
+                    service
+                        .artifacts
+                        .read(artifact.content_hash())
+                        .unwrap()
+                        .unwrap(),
+                )
+                .unwrap()
+            } else {
+                tool.stdout().unwrap().to_owned()
+            };
             assert!(output.contains(
                 [
                     "local file output",
@@ -549,6 +584,172 @@ for line in sys.stdin:
         assert!(matches!(
             service
                 .execute_native_tools(&invocation, &mut cancelled)
+                .await
+                .unwrap(),
+            super::super::native_tools::NativeToolBatchOutcome::Completed(_)
+        ));
+        let page_manifest = ContextManifestApplication::new(store.clone(), UlidIdGenerator)
+            .create_context_manifest(CreateContextManifest {
+                run_id: run_id.clone(),
+                entries: vec![ContextManifestEntryInput::ToolExchange {
+                    tool_call_id: ids[3].clone(),
+                }],
+                idempotency_key: "page-context".into(),
+            })
+            .await
+            .unwrap()
+            .value;
+        let page_invocation = ModelInvocationApplication::new(store.clone(), UlidIdGenerator)
+            .create_model_invocation(CreateModelInvocation {
+                run_id: run_id.clone(),
+                context_manifest_id: page_manifest.context_manifest_id().clone(),
+                context_manifest_hash: page_manifest.content_hash().clone(),
+                provider_account_id: invocation.provider_account_id().clone(),
+                settings: invocation.settings().clone(),
+                capabilities: invocation.capabilities().clone(),
+                purpose: ModelInvocationPurpose::Generation,
+                retry_of: None,
+                idempotency_key: "page".into(),
+            })
+            .await
+            .unwrap()
+            .value;
+        store
+            .attach_model_tool_catalog(page_invocation.invocation_id(), tools.catalog())
+            .await
+            .unwrap();
+        let ProviderClaim::Applied {
+            request: page_request,
+            ..
+        } = app
+            .claim(page_invocation.invocation_id().clone())
+            .await
+            .unwrap()
+        else {
+            panic!("page claim was not fresh")
+        };
+        let context = page_request
+            .assemble_context(
+                &kiln_infrastructure::StoredProviderContextReader::new(
+                    store.clone(),
+                    service.artifacts.clone(),
+                ),
+                ProviderContextLimits {
+                    max_text_bytes: 16384,
+                    max_attachment_bytes: 1,
+                    max_total_attachment_bytes: 1,
+                    max_continuation_bytes: 1,
+                    max_total_continuation_bytes: 1,
+                },
+            )
+            .await
+            .unwrap();
+        let ProviderContextEntry::ToolExchange {
+            exchange,
+            stdout_artifact,
+            stderr_artifact,
+        } = &context.entries()[0]
+        else {
+            panic!("missing exchange")
+        };
+        assert!(stdout_artifact.is_none() && stderr_artifact.is_none());
+        assert!(exchange.tool_call().stdout_artifact().unwrap().size() > 4096);
+        let page_invocation = store
+            .get_model_invocation(page_invocation.invocation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = ModelToolRequestBatch::new(
+            page_invocation.invocation_id().clone(),
+            vec![ModelToolRequestInput {
+                provider_call_id: "page".into(),
+                name: "read_tool_output".into(),
+                arguments:
+                    json!({"tool_call_id":ids[3].as_str(),"stream":"stdout","offset":0,"limit":640})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+            }],
+            ModelToolRequestLimits {
+                max_requests: 1,
+                max_provider_call_id_bytes: 64,
+                max_name_bytes: 64,
+                max_arguments_bytes: 1024,
+                max_total_arguments_bytes: 1024,
+            },
+        )
+        .unwrap();
+        let usage = ProviderUsageUpdate::new(
+            ProviderUsageMetadata {
+                update_id: "page".into(),
+                provider_account_id: page_invocation.provider_account_id().clone(),
+                work_id: page_invocation.work_id().clone(),
+                model_invocation_id: page_invocation.invocation_id().clone(),
+                accounting: UsageAccounting::Cumulative,
+                finality: UsageFinality::Final,
+                completeness: UsageCompleteness::Unknown,
+                observed_at_unix_ms: 2,
+                request_id: None,
+                resolved_model: None,
+                service_tier: None,
+                source: UsageSource::NativeProvider,
+            },
+            vec![],
+        )
+        .unwrap();
+        app.record_tool_requests(&page_invocation, &requests, &usage)
+            .await
+            .unwrap();
+        let approve_page = async {
+            loop {
+                let snapshot = service.runs.get_run(run_id.clone()).await.unwrap();
+                if let Some(approval) = snapshot
+                    .approvals()
+                    .iter()
+                    .find(|a| a.state() == ApprovalState::Pending)
+                {
+                    let tool = snapshot.tool_call(approval.tool_call_id()).unwrap();
+                    assert_eq!(tool.capability(), TOOL_OUTPUT_PAGE_CAPABILITY);
+                    assert!(tool.stdout().is_none());
+                    let mutation = service
+                        .runs
+                        .decide_approval(
+                            approval.approval_id().clone(),
+                            ApprovalState::Approved,
+                            "approve-page".into(),
+                        )
+                        .await
+                        .unwrap();
+                    service.events.publish(mutation.events);
+                    service.active.changed.notify_waiters();
+                    break;
+                }
+                wake.recv().await.unwrap();
+            }
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                service.execute_native_tools(&page_invocation, &mut cancelled),
+                approve_page
+            )
+        })
+        .await
+        .unwrap();
+        let super::super::native_tools::NativeToolBatchOutcome::Completed(page_ids) =
+            result.unwrap()
+        else {
+            panic!("page batch failed")
+        };
+        let (_, page) = store.get_tool_call(&page_ids[0]).await.unwrap().unwrap();
+        assert_eq!(page.state(), ToolCallState::Completed);
+        assert!(page.stdout_artifact().is_none());
+        let value: serde_json::Value = serde_json::from_str(page.stdout().unwrap()).unwrap();
+        assert!(value["text"].as_str().unwrap().contains("remote output"));
+        assert_eq!(value["next_offset"], 640);
+        assert_eq!(value["eof"], false);
+        assert!(matches!(
+            service
+                .execute_native_tools(&page_invocation, &mut cancelled)
                 .await
                 .unwrap(),
             super::super::native_tools::NativeToolBatchOutcome::Completed(_)

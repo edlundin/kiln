@@ -39,6 +39,7 @@ mod run_model_selection;
 mod shared_configuration;
 mod shared_configuration_decode;
 mod shared_skill;
+mod tool_output_page;
 mod usage;
 mod usage_store;
 mod workspace_file_read;
@@ -76,6 +77,7 @@ pub use provider_context::*;
 pub use run_model_selection::*;
 pub use shared_configuration::*;
 pub use shared_skill::*;
+pub use tool_output_page::*;
 pub use usage::*;
 pub use usage_store::*;
 pub use workspace_file_read::*;
@@ -7649,11 +7651,12 @@ mod tests {
 
         async fn append_message(
             &self,
-            _message: &Message,
+            message: &Message,
             event: &SessionEvent,
-        ) -> Result<(), StoreError> {
+            _idempotency_key: &str,
+        ) -> Result<Message, StoreError> {
             self.events.lock().unwrap().push(event.clone());
-            Ok(())
+            Ok(message.clone())
         }
 
         async fn list_session_events(
@@ -7725,6 +7728,8 @@ mod tests {
                 .append_message(AppendMessage {
                     session_id: session_id.clone(),
                     content: "message".to_owned(),
+                    attachments: Vec::new(),
+                    idempotency_key: "missing".into(),
                 })
                 .await,
             Err(SessionError::SessionNotFound)
@@ -7752,6 +7757,8 @@ mod tests {
             .append_message(AppendMessage {
                 session_id: session.id().clone(),
                 content: "hello".to_owned(),
+                attachments: Vec::new(),
+                idempotency_key: "hello".into(),
             })
             .await
             .unwrap();
@@ -7777,6 +7784,8 @@ mod tests {
             app.append_message(AppendMessage {
                 session_id: session.id().clone(),
                 content: " \n\t ".to_owned(),
+                attachments: Vec::new(),
+                idempotency_key: "blank".into(),
             })
             .await,
             Err(SessionError::MessageContentRequired)
@@ -8177,10 +8186,11 @@ mod run_tests {
 
         async fn append_message(
             &self,
-            _message: &Message,
+            message: &Message,
             _event: &SessionEvent,
-        ) -> Result<(), StoreError> {
-            Ok(())
+            _idempotency_key: &str,
+        ) -> Result<Message, StoreError> {
+            Ok(message.clone())
         }
 
         async fn list_session_events(
@@ -8548,6 +8558,7 @@ mod run_tests {
             scope(),
         );
         let tool_call = match tool_state {
+            ToolCallState::Denied => tool_call.transition(ToolCallState::Denied).unwrap(),
             ToolCallState::Ready => tool_call.with_effective_scope(scope()).unwrap(),
             ToolCallState::Running => tool_call
                 .with_effective_scope(scope())
@@ -8683,11 +8694,20 @@ mod run_tests {
 
     #[tokio::test]
     async fn queued_and_running_cancellation_have_durable_event_order() {
-        for (state, expected_state) in [
-            (RunState::Queued, RunState::Cancelled),
-            (RunState::Running, RunState::Cancelling),
+        for (state, tool_state, expected_state) in [
+            (RunState::Queued, ToolCallState::Denied, RunState::Cancelled),
+            (
+                RunState::Queued,
+                ToolCallState::Requested,
+                RunState::Cancelling,
+            ),
+            (
+                RunState::Running,
+                ToolCallState::Requested,
+                RunState::Cancelling,
+            ),
         ] {
-            let store = run_test_store(state, ToolCallState::Requested);
+            let store = run_test_store(state, tool_state);
             let events = store.events.clone();
             let app = RunApplication::new(store, RunTestIds);
             let mutation = app

@@ -107,6 +107,15 @@ impl ModelToolExecutionRequest<crate::NativeToolCommand> {
             command,
         } = self;
         match command {
+            crate::NativeToolCommand::ToolOutputPage(command) => {
+                crate::NativeToolExecutionRequest::ToolOutputPage(ModelToolExecutionRequest {
+                    invocation_id,
+                    provider_call_id,
+                    tool_call,
+                    scope,
+                    command,
+                })
+            }
             crate::NativeToolCommand::FileRead(command) => {
                 crate::NativeToolExecutionRequest::FileRead(ModelToolExecutionRequest {
                     invocation_id,
@@ -125,6 +134,135 @@ impl ModelToolExecutionRequest<crate::NativeToolCommand> {
                     command,
                 })
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_page_tests {
+    use super::*;
+    use crate::*;
+
+    #[test]
+    fn output_pages_require_same_session_terminal_source_and_contained_scope() {
+        let scope =
+            WorkspacePathScope::new(WorkspaceRootId::from_ulid(ulid::Ulid::generate()), "src")
+                .unwrap();
+        let session = SessionId::from_ulid(ulid::Ulid::generate());
+        let run = Run::new(
+            RunId::from_ulid(ulid::Ulid::generate()),
+            session.clone(),
+            ApprovalPolicy::Ask,
+            scope.clone(),
+        )
+        .transition(RunState::Running)
+        .unwrap();
+        let source_id = ToolCallId::from_ulid(ulid::Ulid::generate());
+        let parser = ToolOutputPageTool::new(
+            ToolOutputPageLimits {
+                max_request_bytes: 1024,
+                max_artifact_bytes: 10000,
+                max_page_bytes: 640,
+            },
+            ModelToolCatalogLimits {
+                max_tools: 1,
+                max_definition_bytes: 4096,
+                max_total_definition_bytes: 4096,
+            },
+        )
+        .unwrap();
+        let command = parser.parse_arguments(&parser.catalog().definitions()[0], &serde_json::json!({"tool_call_id":source_id.as_str(),"stream":"stdout","offset":0,"limit":4}).to_string()).unwrap();
+        let current = ToolCall::new(
+            ToolCallId::from_ulid(ulid::Ulid::generate()),
+            run.run_id().clone(),
+            TOOL_OUTPUT_PAGE_CAPABILITY.into(),
+            scope.clone(),
+        )
+        .with_effective_scope(scope.clone())
+        .unwrap()
+        .transition(ToolCallState::Running)
+        .unwrap();
+        let request = ModelToolExecutionRequest {
+            invocation_id: ModelInvocationId::from_ulid(ulid::Ulid::generate()),
+            provider_call_id: "page".into(),
+            tool_call: current,
+            scope: scope.clone(),
+            command,
+        };
+        let artifact = Artifact::new(
+            ContentHash::parse("a".repeat(64)).unwrap(),
+            TOOL_OUTPUT_MEDIA_TYPE,
+            5000,
+        )
+        .unwrap();
+        for (source_session, source_scope, terminal, allowed) in [
+            (session.clone(), scope.clone(), true, true),
+            (
+                session.clone(),
+                WorkspacePathScope::new(scope.workspace_root_id().clone(), "src/child").unwrap(),
+                true,
+                true,
+            ),
+            (
+                SessionId::from_ulid(ulid::Ulid::generate()),
+                scope.clone(),
+                true,
+                false,
+            ),
+            (
+                session.clone(),
+                WorkspacePathScope::new(scope.workspace_root_id().clone(), "src-other").unwrap(),
+                true,
+                false,
+            ),
+            (
+                session.clone(),
+                WorkspacePathScope::new(scope.workspace_root_id().clone(), "").unwrap(),
+                true,
+                false,
+            ),
+            (
+                session.clone(),
+                WorkspacePathScope::new(WorkspaceRootId::from_ulid(ulid::Ulid::generate()), "src")
+                    .unwrap(),
+                true,
+                false,
+            ),
+            (session.clone(), scope.clone(), false, false),
+        ] {
+            let source_run = Run::new(
+                RunId::from_ulid(ulid::Ulid::generate()),
+                source_session,
+                ApprovalPolicy::Ask,
+                source_scope.clone(),
+            );
+            let source = ToolCall::new(
+                source_id.clone(),
+                source_run.run_id().clone(),
+                MCP_CALL_CAPABILITY.into(),
+                source_scope.clone(),
+            )
+            .with_effective_scope(source_scope)
+            .unwrap()
+            .transition(ToolCallState::Running)
+            .unwrap();
+            let source = if terminal {
+                let mut output = SubprocessOutput::success("", "", 0);
+                output.stdout_artifact = Some(artifact.clone());
+                source
+                    .with_result(
+                        &ToolCallResult::from_subprocess(ToolCallState::Completed, output).unwrap(),
+                    )
+                    .unwrap()
+            } else {
+                source
+            };
+            assert_eq!(
+                request
+                    .source_artifact(&run, &source_run, &source)
+                    .is_some(),
+                allowed
+            );
         }
     }
 }

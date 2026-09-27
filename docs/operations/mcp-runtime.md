@@ -128,16 +128,38 @@ resource epoch. Resource reads still do not require list membership. Search and
 describe include `catalog_notification_epoch` as provenance. It counts observed
 notifications only, not silent server changes or a stable snapshot ID. Retained
 snapshots are checked against their own epoch before reuse and before output.
-Server cache hints, durable invalidation Event replay and result/artifact paging
-remain open.
+Server cache hints and durable invalidation Event replay remain open.
 
-The artifact store has a bounded byte-page primitive for result-paging integration.
+The artifact store has a bounded byte-page primitive for result paging.
 It scans and hashes the complete file on every read, retaining only the requested
 page plus fixed scratch space. A caller-supplied total artifact-size limit bounds
 that scan; corruption anywhere in the file rejects the page. Returned bytes may
-split UTF-8 code points. This primitive grants no access by itself: a model-facing
-adapter still needs trusted metadata, session ownership and normal native approval
-checks. It is not yet advertised as a model tool.
+split UTF-8 code points. This primitive grants no access by itself.
+
+Set `KILN_NATIVE_TOOL_OUTPUT_PAGE_LIMITS` to a JSON object containing
+`max_request_bytes`, `max_artifact_bytes` and `max_page_bytes` to enable
+`read_tool_output` (`kiln.artifact.read_tool_output`, revision 1). All fields are
+required; unknown/duplicate fields fail startup. Request and artifact limits must
+be positive; page bytes must be 4–640. The upper bound reserves space for the JSON
+envelope and worst-case escaping within the existing 4096-byte inline output
+limit. This opt-in is independent of MCP and can page any terminal ToolCall's text
+artifact in the current Session whose effective directory is contained in the
+page ToolCall's approved directory, on the same Workspace root.
+
+Arguments are `tool_call_id`, `stream` (`stdout` or `stderr`), byte `offset`, and
+byte `limit`. Start at zero, then use `next_offset` until `eof` is true. Results
+contain `content_hash`, `offset`, `next_offset`, `eof` and `text`. The adapter keeps
+complete UTF-8 characters at page boundaries; invalid starting offsets and binary
+pages fail. Inline source outputs are already available and are not paged. Normal
+native adoption, approval, a fresh claim and persisted completion apply; a repeated
+completed request does not execute again. Cancellation joins the bounded scan
+before completing and does not promise a hard deadline for filesystem I/O.
+
+When this tool is in the invocation's frozen catalogue, provider context assembly
+keeps ToolCall artifact metadata without eagerly loading those output bytes.
+Explicit message attachments still load normally. Without this tool, existing
+eager ToolCall output assembly remains in effect. Binary output paging, arbitrary
+attachment paging and full provider/network acceptance remain open.
 
 Run-service shutdown cancels and drains Runs, then seals and drains MCP owners.
 The registry signals all owners before awaiting cleanup, and a cancelled shutdown

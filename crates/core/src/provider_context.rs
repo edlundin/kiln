@@ -171,11 +171,19 @@ impl ProviderRequest {
             }
         }
         let mut attachment_bytes = 0_u64;
+        // The frozen catalogue explicitly opts into deferred tool-output reads.
+        // Preserve artifact metadata in exchanges; message attachments still load
+        // normally. Without this native tool, retain eager output assembly.
+        let page_tool_outputs = self.tool_catalog().definitions().iter().any(|definition| {
+            definition.capability() == crate::TOOL_OUTPUT_PAGE_CAPABILITY
+                && definition.name() == "read_tool_output"
+                && definition.revision() == "1"
+        });
         let tool_artifacts = manifest
             .entries()
             .iter()
             .flat_map(|entry| match entry {
-                ContextManifestEntry::ToolExchangeSnapshot { exchange } => [
+                ContextManifestEntry::ToolExchangeSnapshot { exchange } if !page_tool_outputs => [
                     exchange.tool_call().stdout_artifact(),
                     exchange.tool_call().stderr_artifact(),
                 ],
@@ -216,18 +224,26 @@ impl ProviderRequest {
                     }
                 }
                 ContextManifestEntry::ToolExchangeSnapshot { exchange } => {
-                    let stdout_artifact = load_optional_artifact(
-                        reader,
-                        exchange.tool_call().stdout_artifact(),
-                        limits.max_attachment_bytes,
-                    )
-                    .await?;
-                    let stderr_artifact = load_optional_artifact(
-                        reader,
-                        exchange.tool_call().stderr_artifact(),
-                        limits.max_attachment_bytes,
-                    )
-                    .await?;
+                    let stdout_artifact = if page_tool_outputs {
+                        None
+                    } else {
+                        load_optional_artifact(
+                            reader,
+                            exchange.tool_call().stdout_artifact(),
+                            limits.max_attachment_bytes,
+                        )
+                        .await?
+                    };
+                    let stderr_artifact = if page_tool_outputs {
+                        None
+                    } else {
+                        load_optional_artifact(
+                            reader,
+                            exchange.tool_call().stderr_artifact(),
+                            limits.max_attachment_bytes,
+                        )
+                        .await?
+                    };
                     ProviderContextEntry::ToolExchange {
                         exchange: exchange.clone(),
                         stdout_artifact,

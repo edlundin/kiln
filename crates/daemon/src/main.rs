@@ -157,6 +157,13 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let native_output_page = match run_service::configured_output_page() {
+        Ok(tool) => tool,
+        Err(error) => {
+            eprintln!("kilnd: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let subprocess_outcome = match configured_subprocess_outcome() {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -343,6 +350,7 @@ async fn main() -> ExitCode {
     )
     .with_native_model(native_selection)
     .with_native_file_read(native_file_read)
+    .with_native_output_page(native_output_page)
     .with_provider_registry(provider_registry);
     #[cfg(unix)]
     let runs = {

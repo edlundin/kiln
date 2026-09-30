@@ -651,6 +651,10 @@ impl Desktop {
         if self.busy || !self.online || self.switching_session.is_some() || self.pending.is_some() {
             return;
         }
+        let Some(session_id) = self.active_session_id().map(str::to_owned) else {
+            return;
+        };
+        let generation = self.event_generation;
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -662,6 +666,16 @@ impl Desktop {
                 return;
             };
             let _ = this.update_in(cx, |this, _window, cx| {
+                // The native dialog can outlive its Session or daemon connection.
+                if this.event_generation != generation
+                    || this.active_session_id() != Some(session_id.as_str())
+                    || this.busy
+                    || !this.online
+                    || this.switching_session.is_some()
+                    || this.pending.is_some()
+                {
+                    return;
+                }
                 this.add_attachment_paths(paths);
                 cx.notify();
             });
@@ -670,7 +684,7 @@ impl Desktop {
     }
 
     fn add_attachment_paths(&mut self, paths: Vec<PathBuf>) {
-        if self.pending.is_some() {
+        if self.busy || self.switching_session.is_some() || self.pending.is_some() {
             return;
         }
         for path in paths {
@@ -773,8 +787,16 @@ impl Desktop {
         cx.notify();
     }
 
+    fn attachment_edits_blocked(&self) -> bool {
+        self.busy
+            || self.switching_session.is_some()
+            || self.pending.as_ref().is_some_and(|submission| {
+                submission.message_appended || submission.append_uncertain
+            })
+    }
+
     fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.attachments.len() {
+        if self.attachment_edits_blocked() || index >= self.attachments.len() {
             return;
         }
         let removed = self.attachments.remove(index);
@@ -819,6 +841,9 @@ impl Desktop {
     }
 
     fn retry_attachment(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.attachment_edits_blocked() || !self.online {
+            return;
+        }
         if let Some(attachment) = self.attachments.get_mut(index)
             && matches!(attachment.state, DraftAttachmentState::Failed(_))
         {
@@ -859,7 +884,9 @@ impl Desktop {
                     label: label.into(),
                     thumbnail: attachment.thumbnail.clone(),
                     retry,
+                    retry_disabled: self.attachment_edits_blocked() || !self.online,
                     remove: on_remove,
+                    remove_disabled: self.attachment_edits_blocked(),
                 }
             })
             .collect()

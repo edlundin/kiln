@@ -394,6 +394,24 @@ The desktop retrieves the Session and its Workspace, restores the Session's Run
 tree, loads stored Session events from the start, and then subscribes after the
 returned event cursor. The connection view shows the resulting Session ID.
 
+## Composer attachments
+
+Use **Attach**, file drag and drop, or image/file paste to add attachments. Each
+file is limited to 64 MiB. The desktop accepts regular files and rejects symlinks
+and special files when reading an upload. It rechecks the file at send time, so a
+changed source can fail even after selection.
+
+Attachments stay in the draft for their Session. A picker result is discarded
+if its Session or daemon connection changes before the dialog finishes. **Retry**
+retains successful uploads after a later file fails; **Remove** removes a file
+from an unsent request. Attachment edits are disabled while a request is in
+flight or its message is already appended or has an uncertain outcome. Reconnect
+and review history before deciding how to recover an uncertain submission.
+
+Attachment-only messages are supported. Blank messages without attachments are
+rejected. [EDL-308 evidence](../learning/edl-308.md) distinguishes public-protocol
+checks from observed native behavior and remaining acceptance.
+
 ## Browse saved Workspaces and Sessions
 
 After the daemon connection succeeds, the Workspace navigator lists saved

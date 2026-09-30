@@ -27,7 +27,9 @@ pub struct AttachmentChip {
     pub label: SharedString,
     pub thumbnail: Option<AttachmentThumbnail>,
     pub retry: Option<ClickHandler>,
+    pub retry_disabled: bool,
     pub remove: ClickHandler,
+    pub remove_disabled: bool,
 }
 
 #[derive(IntoElement)]
@@ -700,46 +702,50 @@ impl RenderOnce for Composer {
                 .disabled(self.disabled)
                 .on_click(move |event, window, cx| on_attach(event, window, cx))
         });
-        let attachment_list =
-            self.attachments
-                .iter()
-                .fold(div().flex().flex_wrap().gap_1(), |row, attachment| {
-                    let remove = attachment.remove.clone();
-                    let thumbnail = attachment
-                        .thumbnail
-                        .clone()
-                        .map(|thumbnail| match thumbnail {
-                            AttachmentThumbnail::Icon(icon) => Icon::new(icon),
-                        });
-                    row.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_1()
-                            .border_1()
-                            .border_color(theme::BORDER)
-                            .rounded(theme::RADIUS_SMALL)
-                            .when_some(thumbnail, |chip, thumbnail| chip.child(thumbnail.size_8()))
-                            .child(attachment.label.clone())
-                            .when_some(attachment.retry.clone(), |chip, retry| {
-                                chip.child(
-                                    Button::new("retry-attachment")
-                                        .label("Retry")
-                                        .small()
-                                        .on_click(move |event, window, cx| {
-                                            retry(event, window, cx)
-                                        }),
-                                )
-                            })
-                            .child(
-                                Button::new("remove-attachment")
-                                    .label("Remove")
-                                    .small()
-                                    .on_click(move |event, window, cx| remove(event, window, cx)),
-                            ),
-                    )
-                });
+        let attachment_list = self.attachments.iter().enumerate().fold(
+            div().flex().flex_wrap().gap_1(),
+            |row, (index, attachment)| {
+                let remove = attachment.remove.clone();
+                let thumbnail = attachment
+                    .thumbnail
+                    .clone()
+                    .map(|thumbnail| match thumbnail {
+                        AttachmentThumbnail::Icon(icon) => Icon::new(icon),
+                    });
+                row.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_1()
+                        .border_1()
+                        .border_color(theme::BORDER)
+                        .rounded(theme::RADIUS_SMALL)
+                        .when_some(thumbnail, |chip, thumbnail| chip.child(thumbnail.size_8()))
+                        .child(attachment.label.clone())
+                        .when_some(attachment.retry.clone(), |chip, retry| {
+                            chip.child(
+                                Button::new(SharedString::from(format!(
+                                    "retry-attachment-{index}"
+                                )))
+                                .label("Retry")
+                                .accessibility_label(format!("Retry {}", attachment.label))
+                                .small()
+                                .disabled(attachment.retry_disabled)
+                                .on_click(move |event, window, cx| retry(event, window, cx)),
+                            )
+                        })
+                        .child(
+                            Button::new(SharedString::from(format!("remove-attachment-{index}")))
+                                .label("Remove")
+                                .accessibility_label(format!("Remove {}", attachment.label))
+                                .small()
+                                .disabled(attachment.remove_disabled)
+                                .on_click(move |event, window, cx| remove(event, window, cx)),
+                        ),
+                )
+            },
+        );
         let on_drop = self.on_drop;
         let on_paste = self.on_paste;
         let composer = div()

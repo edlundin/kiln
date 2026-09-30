@@ -1488,6 +1488,311 @@ async fn real_daemon_persists_sessions_messages_and_ordered_events() {
 }
 
 #[tokio::test]
+async fn real_daemon_preserves_attachment_messages_and_guidance_across_restart() {
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let sandbox = tempfile::tempdir().expect("temporary attachment directory");
+    let repositories = sandbox.path().join("repositories");
+    std::fs::create_dir(&repositories).expect("attachment repository parent");
+    let data_directory = sandbox.path().join("data");
+    let daemon = Daemon::start(binary, &data_directory);
+    let http = daemon.client();
+    let session = create_run_session(&http, &daemon.address, &repositories).await;
+    let client = kiln_client::Client::new(daemon.address.parse().unwrap(), &daemon.token).unwrap();
+    let bytes = b"Persist this attachment across daemon restart.";
+    let artifact = client
+        .upload_artifact(&session.session_id, bytes.to_vec(), "text/plain")
+        .await
+        .expect("attachment upload");
+    assert_eq!(
+        artifact.content_hash,
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(artifact.size, bytes.len().to_string());
+
+    let attachment_only = AppendMessageRequest {
+        content: String::new(),
+        attachments: vec![artifact.clone()],
+    };
+    let mut messages = Vec::new();
+    for (key, content) in [
+        ("attachment-only", ""),
+        ("text-attachment", "Read the attachment."),
+    ] {
+        messages.push(
+            client
+                .append_message(
+                    &session.session_id,
+                    key,
+                    &AppendMessageRequest {
+                        content: content.to_owned(),
+                        attachments: vec![artifact.clone()],
+                    },
+                )
+                .await
+                .expect("append attachment Message"),
+        );
+    }
+    assert_eq!(messages[0].content, "");
+    assert_eq!(messages[1].content, "Read the attachment.");
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.attachments == [artifact.clone()])
+    );
+
+    let mut socket = open_event_socket(&daemon).await;
+    let root = client
+        .start_run(
+            &session.session_id,
+            "attachment-root",
+            &session.request_with_policy(ApprovalPolicy::Ask),
+        )
+        .await
+        .expect("waiting attachment Run");
+    receive_run_events(&mut socket, &root.run_id, RunState::WaitingForApproval).await;
+    let input = SendRunInputRequest {
+        content: " \n ".to_owned(),
+        attachments: vec![artifact.clone()],
+        delivery_mode: MessageDeliveryMode::Queued,
+    };
+    let delivery = client
+        .send_run_input(&root.run_id, "attachment-guidance", &input)
+        .await
+        .expect("attachment-only guidance");
+    assert_eq!(delivery.message.content, input.content);
+    assert_eq!(delivery.message.attachments, [artifact.clone()]);
+    assert_eq!(delivery.state, MessageDeliveryState::Queued);
+    messages.push(delivery.message.clone());
+
+    let child = client
+        .start_child_run(
+            &root.run_id,
+            "attachment-child",
+            &StartChildRunRequest {
+                approval_policy: ApprovalPolicy::Ask,
+                workspace_root_id: session.workspace_root_id.clone(),
+                relative_directory: ".".to_owned(),
+                user_input_mode: RunInputMode::Interactive,
+                task_id: None,
+            },
+        )
+        .await
+        .expect("waiting child Run");
+    receive_run_events(&mut socket, &child.run_id, RunState::WaitingForApproval).await;
+    let events = client
+        .list_session_events(&session.session_id, None)
+        .await
+        .unwrap();
+    let child_event = events.events.iter().find(|event| {
+        matches!(&event.event, SessionEventDataResponse::RunCreated { run_id, .. } if run_id == &child.run_id)
+    }).expect("child creation Event");
+    let reaction_request = kiln_protocol::ReactToRunActivityRequest {
+        content: String::new(),
+        attachments: vec![artifact.clone()],
+        child_activity: kiln_protocol::ChildActivityReference {
+            run_id: child.run_id.clone(),
+            event_id: child_event.event_id.clone(),
+        },
+    };
+    let reaction = client
+        .react_to_run_activity(&root.run_id, "attachment-reaction", &reaction_request)
+        .await
+        .expect("attachment-only child reaction");
+    assert_eq!(reaction.message.attachments, [artifact.clone()]);
+    assert_eq!(
+        reaction.message.child_activity.as_ref(),
+        Some(&reaction_request.child_activity)
+    );
+    messages.push(reaction.message.clone());
+
+    let session_response = client.get_session(&session.session_id).await.unwrap();
+    let other = client
+        .create_session(&session_response.workspace_id)
+        .await
+        .unwrap();
+    let mut wrong_size = artifact.clone();
+    wrong_size.size = (bytes.len() + 1).to_string();
+    let mut wrong_media_type = artifact.clone();
+    wrong_media_type.media_type = "application/json".to_owned();
+    let mut unknown_hash = artifact.clone();
+    unknown_hash.content_hash = "0".repeat(64);
+    for (key, session_id, attachments) in [
+        (
+            "foreign-attachment",
+            other.session_id.as_str(),
+            vec![artifact.clone()],
+        ),
+        (
+            "duplicate-attachment",
+            session.session_id.as_str(),
+            vec![artifact.clone(), artifact.clone()],
+        ),
+        ("wrong-size", session.session_id.as_str(), vec![wrong_size]),
+        (
+            "wrong-media-type",
+            session.session_id.as_str(),
+            vec![wrong_media_type],
+        ),
+        (
+            "unknown-hash",
+            session.session_id.as_str(),
+            vec![unknown_hash],
+        ),
+    ] {
+        let error = client
+            .append_message(
+                session_id,
+                key,
+                &AppendMessageRequest {
+                    content: String::new(),
+                    attachments,
+                },
+            )
+            .await
+            .expect_err("invalid attachment must not append a Message");
+        assert!(
+            matches!(error, kiln_client::Error::Api { status: 500, problem }
+            if problem.code == error_code::SESSION_STORE_UNAVAILABLE)
+        );
+    }
+    let empty_error = client
+        .append_message(
+            &session.session_id,
+            "empty-message",
+            &AppendMessageRequest {
+                content: " \n ".to_owned(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("blank attachment-free Message is invalid");
+    assert!(
+        matches!(empty_error, kiln_client::Error::Api { status: 400, problem }
+        if problem.code == error_code::MESSAGE_CONTENT_REQUIRED)
+    );
+    let empty_input = client
+        .send_run_input(
+            &root.run_id,
+            "empty-guidance",
+            &SendRunInputRequest {
+                attachments: Vec::new(),
+                ..input.clone()
+            },
+        )
+        .await
+        .expect_err("blank attachment-free guidance is invalid");
+    assert!(
+        matches!(empty_input, kiln_client::Error::Api { status: 400, problem }
+        if problem.code == error_code::MESSAGE_CONTENT_REQUIRED)
+    );
+
+    // Exercise the maximum body and reject an oversized declared upload before sending it.
+    let largest = client
+        .upload_artifact(
+            &session.session_id,
+            vec![0; kiln_protocol::MAX_ARTIFACT_UPLOAD_BYTES],
+            "application/octet-stream",
+        )
+        .await
+        .expect("upload at the 64 MiB ceiling");
+    assert_eq!(
+        largest.size,
+        kiln_protocol::MAX_ARTIFACT_UPLOAD_BYTES.to_string()
+    );
+    let oversized = http
+        .post(format!(
+            "http://{}{}",
+            daemon.address,
+            kiln_protocol::ARTIFACTS_PATH
+        ))
+        .header(kiln_protocol::ARTIFACT_SESSION_HEADER, &session.session_id)
+        .header(
+            reqwest::header::CONTENT_LENGTH,
+            (kiln_protocol::MAX_ARTIFACT_UPLOAD_BYTES + 1).to_string(),
+        )
+        .body(Vec::new())
+        .send()
+        .await
+        .expect("oversized upload response");
+    assert_problem(
+        oversized,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        error_code::INVALID_REQUEST,
+    )
+    .await;
+
+    let history = client
+        .list_session_events(&session.session_id, None)
+        .await
+        .unwrap();
+    let appended: Vec<_> = history
+        .events
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEventDataResponse::MessageAppended { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(appended, messages);
+    let other_history = client
+        .list_session_events(&other.session_id, None)
+        .await
+        .unwrap();
+    assert_eq!(other_history.events.len(), 1);
+
+    drop(socket);
+    drop(daemon);
+    let daemon = Daemon::start(binary, &data_directory);
+    let client = kiln_client::Client::new(daemon.address.parse().unwrap(), &daemon.token).unwrap();
+    assert_eq!(
+        client
+            .list_session_events(&session.session_id, None)
+            .await
+            .unwrap(),
+        history
+    );
+    assert_eq!(
+        client
+            .get_artifact(&artifact.content_hash)
+            .await
+            .unwrap()
+            .bytes,
+        bytes
+    );
+    assert_eq!(
+        client
+            .append_message(&session.session_id, "attachment-only", &attachment_only)
+            .await
+            .unwrap(),
+        messages[0]
+    );
+    assert_eq!(
+        client
+            .send_run_input(&root.run_id, "attachment-guidance", &input)
+            .await
+            .unwrap(),
+        delivery
+    );
+    assert_eq!(
+        client
+            .react_to_run_activity(&root.run_id, "attachment-reaction", &reaction_request)
+            .await
+            .unwrap(),
+        reaction
+    );
+    assert_eq!(
+        client
+            .list_session_events(&session.session_id, None)
+            .await
+            .unwrap(),
+        history
+    );
+}
+
+#[tokio::test]
 async fn real_daemon_creates_idempotent_task_hierarchy_and_recovers_it() {
     let binary = env!("CARGO_BIN_EXE_kilnd");
     let sandbox = tempfile::tempdir().expect("temporary Task test directory");

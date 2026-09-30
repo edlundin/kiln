@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-30 — `fix`
+
+- EDL-308: Persist attachment-only messages and safely recover native multi-file
+  attachments. ([pending])
+
+EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
+
+[Commit](../../commit/pending)
+
+
 ## 2026-09-27 — `feat`
 
 - EDL-314: Add opt-in MCP URL elicitation consent mediation for configured

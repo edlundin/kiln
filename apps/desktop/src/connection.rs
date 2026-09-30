@@ -98,7 +98,17 @@ fn read_attachment_file(path: &Path) -> io::Result<Vec<u8>> {
         return Err(invalid_attachment_source());
     }
 
-    let mut file = File::open(path)?;
+    // Do not follow a symlink substituted after the picker or metadata check.
+    // NONBLOCK also lets the descriptor check reject a substituted FIFO.
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    let mut file = File::from(descriptor);
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(invalid_attachment_source());

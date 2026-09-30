@@ -1,13 +1,23 @@
 # Changelog
 
-## 2026-09-30 — `fix`
+## 2026-10-01 — `fix`
 
-- EDL-308: Persist attachment-only messages and safely recover native multi-file
-  attachments. ([pending])
+- EDL-308: Paste copied files and images as attachments while preserving plain
+  text editing and undo. ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 
 [Commit](../../commit/pending)
+
+
+## 2026-09-30 — `fix`
+
+- EDL-308: Cover attachment-only message persistence and safely recover native
+  multi-file attachments. ([31180bf](../../commit/31180bf))
+
+EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
+
+[Commit](../../commit/31180bf)
 
 
 ## 2026-09-27 — `feat`

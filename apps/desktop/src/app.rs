@@ -7,7 +7,7 @@ use gpui::{
 use gpui_component::{
     Disableable, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
-    input::{Input, InputEvent, InputState, TextareaState},
+    input::{Input, InputEvent, InputState, Paste, TextareaState},
 };
 use kiln_protocol::{
     ApprovalDecision, ApprovalDecisionRequest, ApprovalState, ArtifactResponse,
@@ -20,7 +20,6 @@ use kiln_protocol::{
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
 use crate::{
-    PasteAttachments,
     accounts::AccountSettings,
     components::{
         ApprovalPanel, AttachmentChip, AttachmentThumbnail, ChildRunRow, ClickHandler, Composer,
@@ -756,11 +755,12 @@ impl Desktop {
 
     fn paste_from_clipboard(
         &mut self,
-        _action: &PasteAttachments,
-        window: &mut Window,
+        _action: &Paste,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.busy || !self.online || self.switching_session.is_some() || self.pending.is_some() {
+            cx.stop_propagation();
             return;
         }
         let Some(item) = cx.read_from_clipboard() else {
@@ -780,11 +780,10 @@ impl Desktop {
                 ClipboardEntry::String(_) => {}
             }
         }
-        if !attached && let Some(text) = item.text() {
-            self.composer
-                .update(cx, |input, cx| input.insert(text, window, cx));
+        if attached {
+            cx.stop_propagation();
+            cx.notify();
         }
-        cx.notify();
     }
 
     fn attachment_edits_blocked(&self) -> bool {
@@ -4447,7 +4446,7 @@ impl Render for Desktop {
                 this.add_attachment_paths(paths.paths().to_vec());
             cx.notify();
         }))
-        .on_paste(cx.listener(|this, action: &PasteAttachments, window, cx| {
+        .on_paste(cx.listener(|this, action: &Paste, window, cx| {
             this.paste_from_clipboard(action, window, cx);
         }))
                 .when_some(self.reaction.as_ref(), |composer, draft| composer.reference(

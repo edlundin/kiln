@@ -401,6 +401,10 @@ file is limited to 64 MiB. The desktop accepts regular files and rejects symlink
 and special files when reading an upload. It rechecks the file at send time, so a
 changed source can fail even after selection.
 
+Pasting copied files or image content into the composer adds attachments without
+inserting a filename as message text. Plain-text paste uses normal text editing
+and undo.
+
 Attachments stay in the draft for their Session. A picker result is discarded
 if its Session or daemon connection changes before the dialog finishes. **Retry**
 retains successful uploads after a later file fails; **Remove** removes a file

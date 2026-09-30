@@ -7,15 +7,15 @@ use gpui::{
 use gpui_component::{
     Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
-    input::{Textarea, TextareaState},
+    input::{Paste, Textarea, TextareaState},
 };
 use kiln_protocol::{RunState, TaskState};
 
-use crate::{PasteAttachments, theme};
+use crate::theme;
 
 pub type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 pub type DropHandler = Rc<dyn Fn(&ExternalPaths, &mut Window, &mut App)>;
-pub type PasteHandler = Rc<dyn Fn(&PasteAttachments, &mut Window, &mut App)>;
+pub type PasteHandler = Rc<dyn Fn(&Paste, &mut Window, &mut App)>;
 
 #[derive(Clone)]
 pub enum AttachmentThumbnail {
@@ -662,10 +662,7 @@ impl Composer {
         self
     }
 
-    pub fn on_paste(
-        mut self,
-        on_paste: impl Fn(&PasteAttachments, &mut Window, &mut App) + 'static,
-    ) -> Self {
+    pub fn on_paste(mut self, on_paste: impl Fn(&Paste, &mut Window, &mut App) + 'static) -> Self {
         self.on_paste = Some(Rc::new(on_paste));
         self
     }
@@ -749,14 +746,14 @@ impl RenderOnce for Composer {
         let on_drop = self.on_drop;
         let on_paste = self.on_paste;
         let composer = div()
-            .key_context("KilnComposer")
             .when_some(on_drop, |composer, on_drop| {
                 composer.on_drop(move |paths: &ExternalPaths, window, cx| {
                     on_drop(paths, window, cx);
                 })
             })
             .when_some(on_paste, |composer, on_paste| {
-                composer.on_action(move |action: &PasteAttachments, window, cx| {
+                // The focused input consumes Paste during bubbling.
+                composer.capture_action(move |action: &Paste, window, cx| {
                     on_paste(action, window, cx);
                 })
             })

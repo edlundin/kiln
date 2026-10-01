@@ -29,9 +29,13 @@
 - EDL-322: Document deterministic follower execution from shared defaults,
   restart persistence and credential cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [065288c](../../commit/065288c))
 - EDL-322: Document automatic follower refresh, offline recovery, later
-  publication and restart rechecks. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+  publication and restart rechecks. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [15aff4d](../../commit/15aff4d))
 - EDL-322: Update the follower listener and refresh guides with verified scope
-  and limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+  and limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [15aff4d](../../commit/15aff4d))
+- EDL-322: Document listener expiry, pending-handshake closure and credential
+  cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+- EDL-322: Update the listener guide with verified lifecycle scope and
+  remaining limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

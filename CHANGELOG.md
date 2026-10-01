@@ -37,6 +37,8 @@
 - EDL-322: Update the listener guide with verified lifecycle scope and
   remaining limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [056e9ab](../../commit/056e9ab))
 - EDL-322: Document pinned TLS rejection of wrong peers and safe retry
+  evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [3c3c3b7](../../commit/3c3c3b7))
+- EDL-322: Document portable MCP and skill bundle delivery and validation
   evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314

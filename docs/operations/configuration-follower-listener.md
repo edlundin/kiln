@@ -61,5 +61,7 @@ offline recovery and listener closure after identity retirement and leaf
 certificate expiry, including one pending TLS handshake. A separate same-host
 wrong-CA fixture rejected enrollment and acquisition while preserving the
 intended follower state. Native interaction, real providers, MCP/skill
-consumers, abnormal cancellation/role-loss and remaining expiry races remain
-unverified.
+runtime consumers, abnormal cancellation/role-loss and remaining expiry races
+remain unverified. Portable MCP definitions and explicit skill package files
+were delivered, updated, disabled and removed coherently with shared settings;
+delivery does not activate those consumers.

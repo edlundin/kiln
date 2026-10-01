@@ -342,6 +342,22 @@ entries after restart. The migration cannot recover entries orphaned by earlier
 versions. Refresh after an error to
 check the current account state; disconnect requests are never automatically retried.
 
+Connected Codex subscription accounts also offer **Refresh credentials**. OpenAI
+API accounts do not. Refresh is explicit and disabled while Settings is busy or
+offline. Protocol `0.48.0` sends
+`POST /v1/provider-accounts/{provider_account_id}/refresh` with the account's
+required `expected_updated_at_unix_ms` value. The daemon compares that timestamp
+before rotating credentials and returns only a safe account summary with
+no-store semantics. A stale account snapshot fails with
+`provider_account_invalid_state` (`409`); reload accounts before trying again.
+
+Settings announces **Refreshing credentials…** while the request is active and
+**Credential refresh completed.** on success. It never automatically retries an
+uncertain refresh. After an error, reload accounts to inspect the current state;
+if reauthentication is required, disconnect the account and sign in again.
+See [EDL-341 evidence](../learning/edl-341.md#native-browser-sign-in-and-explicit-refresh)
+for the observed OAuth, Keychain rotation, stale-timestamp and restart results.
+
 Closing Settings does not cancel sign-in. Reconnecting the desktop discards its
 connection-scoped attempt display; refresh the accounts to recover the durable
 state. An unfinished connecting or disconnected account can start a replacement
@@ -357,14 +373,14 @@ redirect, S256, state/challenge shape, and expected scope/parameters before open
 a link. It never opens a returned URL automatically or prints the browser query.
 The protocol Debug representation redacts browser authorization URLs.
 
-Compilation and source checks passed, and the global Settings layout/account-list
-empty state was inspected in the native app against an isolated local daemon.
-Browser preparation and cancellation were also inspected in the native app:
-the pending layout displayed correctly, cancellation feedback appeared, and
-sign-in controls became available again. Process inspection observed the loopback
-listener during the attempt and its closure after cancellation. No browser
-authorization page was opened. Live OAuth, credential-vault operations, other
-terminal states, callback parsing, and minimum-window layout remain runtime-unverified.
+Earlier native checks inspected the global Settings layout, account-list empty
+state, browser preparation and cancellation against an isolated local daemon.
+They did not open an authorization page. Later isolated macOS acceptance
+completed real browser sign-in and explicit credential refresh; see
+[EDL-341 evidence](../learning/edl-341.md#native-browser-sign-in-and-explicit-refresh).
+Failure-state layout, disconnect/Keep account/reauthentication, actual
+invalid/expired credentials, unavailable OS vault and minimum-window layout
+remain unverified.
 
 The local disconnect continuation was also inspected against an isolated daemon
 with an empty account: confirmation, Keep account, and successful disconnect with

@@ -39,7 +39,11 @@
 - EDL-322: Document pinned TLS rejection of wrong peers and safe retry
   evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [3c3c3b7](../../commit/3c3c3b7))
 - EDL-322: Document portable MCP and skill bundle delivery and validation
-  evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+  evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [dd91159](../../commit/dd91159))
+- EDL-341: Let connected Codex accounts refresh credentials explicitly in
+  Settings. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
+- EDL-341: Reject stale credential snapshots and resolve pending vault cleanup
+  before provider I/O. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

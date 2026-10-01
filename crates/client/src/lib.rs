@@ -1085,6 +1085,26 @@ impl Client {
         .await
     }
 
+    /// Refreshes credentials only for the inspected account snapshot. Never
+    /// retry automatically: a lost response may conceal a committed rotation.
+    pub async fn refresh_provider_account(
+        &self,
+        provider_account_id: &str,
+        request: &kiln_protocol::RefreshProviderAccountRequest,
+    ) -> Result<ProviderAccountResponse, Error> {
+        let path = path_with_segment(
+            kiln_protocol::PROVIDER_ACCOUNT_REFRESH_PATH,
+            "{provider_account_id}",
+            "provider_account_id",
+            provider_account_id,
+        )?;
+        self.send_json(
+            kiln_protocol::REFRESH_PROVIDER_ACCOUNT_OPERATION_ID,
+            self.http.post(self.http_url(&path)).json(request),
+        )
+        .await
+    }
+
     pub async fn start_provider_account_login(
         &self,
         provider_account_id: &str,

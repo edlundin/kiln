@@ -222,6 +222,10 @@ pub enum ProviderAccountOperationError {
     LoginFailed,
     #[error("the provider account login was cancelled")]
     Cancelled,
+    #[error("provider account credential refresh is temporarily unavailable")]
+    RefreshUnavailable,
+    #[error("provider account credentials require sign-in again")]
+    ReauthRequired,
 }
 
 impl From<ProviderAccountError> for ProviderAccountOperationError {
@@ -255,6 +259,18 @@ impl From<ProviderAccountError> for ProviderAccountOperationError {
 }
 
 pub trait ProviderAccountOperations: Send + Sync {
+    fn refresh_provider_account(
+        &self,
+        _account_id: ProviderAccountId,
+        _expected_updated_at_unix_ms: u64,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ProviderAccount, ProviderAccountOperationError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async { Err(ProviderAccountOperationError::RefreshUnavailable) })
+    }
+
     fn disconnect_provider_account(
         &self,
         _account_id: ProviderAccountId,
@@ -1156,6 +1172,10 @@ where
         )
         .route(PROVIDER_ACCOUNT_PATH, get(get_provider_account))
         .route(
+            kiln_protocol::PROVIDER_ACCOUNT_REFRESH_PATH,
+            post(refresh_provider_account),
+        )
+        .route(
             kiln_protocol::PROVIDER_ACCOUNT_DISCONNECT_PATH,
             post(disconnect_provider_account),
         )
@@ -1471,6 +1491,43 @@ where
         .await
         .map_err(PublicError::from)?;
     Ok(Json(provider_account_response(&account)))
+}
+
+async fn refresh_provider_account<W, S, R>(
+    State(state): State<AppState<W, S, R>>,
+    Path(provider_account_id): Path<String>,
+    body: Result<
+        Json<kiln_protocol::RefreshProviderAccountRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Result<impl IntoResponse, PublicError>
+where
+    W: WorkspaceOperations + 'static,
+    S: SessionOperations + 'static,
+    R: RunOperations + 'static,
+{
+    let command = state.lifecycle.begin_command()?;
+    let request = body
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?
+        .0;
+    let account_id = ProviderAccountId::parse(provider_account_id)
+        .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::InvalidRequest))?;
+    let operations = Arc::clone(&state.provider_account_operations);
+    // A caller disconnect must not abandon a provider rotation or its owned
+    // vault cleanup. Shutdown retains the permit until the whole refresh ends.
+    let account = tokio::spawn(async move {
+        let _command = command;
+        operations
+            .refresh_provider_account(account_id, request.expected_updated_at_unix_ms)
+            .await
+    })
+    .await
+    .map_err(|_| PublicError::ProviderAccount(ProviderAccountOperationError::StoreUnavailable))?
+    .map_err(PublicError::from)?;
+    Ok((
+        [(CACHE_CONTROL, "no-store")],
+        Json(provider_account_response(&account)),
+    ))
 }
 
 async fn disconnect_provider_account<W, S, R>(
@@ -4412,6 +4469,16 @@ impl PublicError {
                     StatusCode::CONFLICT,
                     error_code::PROVIDER_ACCOUNT_INVALID_STATE,
                     "Provider account login cancelled",
+                ),
+                ProviderAccountOperationError::RefreshUnavailable => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::PROVIDER_ACCOUNT_REFRESH_UNAVAILABLE,
+                    "Credential refresh unavailable; refresh account status before retrying",
+                ),
+                ProviderAccountOperationError::ReauthRequired => (
+                    StatusCode::CONFLICT,
+                    error_code::PROVIDER_ACCOUNT_REAUTH_REQUIRED,
+                    "Credentials expired or invalid; disconnect, then sign in again",
                 ),
             },
             Self::HostModelAccountBinding(error) => match error {

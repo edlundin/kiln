@@ -108,6 +108,9 @@ enum Update {
         account_id: String,
         result: Result<ProviderAccountResponse, String>,
     },
+    Refreshed {
+        result: Result<ProviderAccountResponse, String>,
+    },
     Status {
         result: Result<ProviderAccountLoginResponse, String>,
         inactive: bool,
@@ -127,6 +130,7 @@ pub struct AccountSettings {
     busy: bool,
     online: bool,
     error: Option<String>,
+    feedback: Option<String>,
     // Retained across failed requests so a lost create response cannot create another account.
     create_key: String,
     login: Option<Login>,
@@ -165,6 +169,7 @@ impl AccountSettings {
             busy: false,
             online: true,
             error: None,
+            feedback: None,
             create_key: ulid::Ulid::generate().to_string(),
             login: None,
             login_state: None,
@@ -189,6 +194,7 @@ impl AccountSettings {
             .update(cx, |settings, cx| settings.set_online(online, cx));
         if !online {
             self.confirm_disconnect = None;
+            self.feedback = None;
         }
         cx.notify();
     }
@@ -200,6 +206,7 @@ impl AccountSettings {
         self.busy = true;
         self.confirm_disconnect = None;
         self.error = None;
+        self.feedback = None;
         let client = self.client.clone();
         let updates = self.updates.clone();
         self.runtime.spawn(async move {
@@ -305,12 +312,52 @@ impl AccountSettings {
         cx.notify();
     }
 
+    fn refresh_credentials(&mut self, account: ProviderAccountResponse, cx: &mut Context<Self>) {
+        if self.busy
+            || !self.online
+            || !self.loaded
+            || self.confirm_disconnect.is_some()
+            || account.provider_type != CODEX_PROVIDER
+            || account.state != "connected"
+        {
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        self.feedback = Some("Refreshing credentials…".to_owned());
+        if self
+            .login
+            .as_ref()
+            .is_some_and(|login| login.account.provider_account_id == account.provider_account_id)
+        {
+            self.login = None;
+            self.login_state = None;
+            self.login_failure = None;
+        }
+        let client = self.client.clone();
+        let updates = self.updates.clone();
+        self.runtime.spawn(async move {
+            let result = client
+                .refresh_provider_account(
+                    &account.provider_account_id,
+                    &kiln_protocol::RefreshProviderAccountRequest {
+                        expected_updated_at_unix_ms: account.updated_at_unix_ms,
+                    },
+                )
+                .await
+                .map_err(|error| connection::error_message("Refresh account credentials", &error));
+            let _ = updates.send(Update::Refreshed { result });
+        });
+        cx.notify();
+    }
+
     fn disconnect(&mut self, account_id: String, cx: &mut Context<Self>) {
         if self.busy || !self.online || self.confirm_disconnect.as_ref() != Some(&account_id) {
             return;
         }
         self.busy = true;
         self.error = None;
+        self.feedback = None;
         let client = self.client.clone();
         let updates = self.updates.clone();
         self.runtime.spawn(async move {
@@ -378,6 +425,23 @@ impl AccountSettings {
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
         self.busy = false;
         match update {
+            Update::Refreshed { result } => {
+                self.feedback = None;
+                match result {
+                    Ok(account) => {
+                        self.upsert(account);
+                        self.feedback = Some("Credential refresh completed.".to_owned());
+                    }
+                    Err(error) => {
+                        // A lost response can hide a committed rotation. Reload
+                        // metadata before enabling another explicit refresh.
+                        self.loaded = false;
+                        self.error = Some(format!(
+                            "{error} Refresh accounts to inspect the current state. If sign-in is required, disconnect, then sign in again."
+                        ));
+                    }
+                }
+            }
             Update::Disconnected { account_id, result } => {
                 // The daemon cancels sign-in before disconnecting. Even an error
                 // can mean partial progress; stop presenting the old user code.
@@ -507,6 +571,9 @@ impl Render for AccountSettings {
             .when_some(self.error.clone(), |view, error| view.child(div()
                 .id("provider-account-error").role(gpui::Role::Alert).aria_label(error.clone())
                 .text_sm().text_color(theme::DANGER).child(error)))
+            .when_some(self.feedback.clone(), |view, feedback| view.child(div()
+                .id("provider-account-refresh-feedback").role(gpui::Role::Alert).aria_label(feedback.clone())
+                .text_sm().text_color(theme::MUTED).child(feedback)))
             .child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("refresh-accounts").label(if self.busy { "Working…" } else { "Refresh accounts" })
                     .disabled(disabled).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))))
@@ -566,6 +633,13 @@ impl Render for AccountSettings {
                             .text_color(theme::MUTED)
                             .child(format!("{provider} · {state}")),
                     )
+                    .when(account.provider_type == CODEX_PROVIDER && account.state == "connected", |view| {
+                        let target = account.clone();
+                        view.child(Button::new(SharedString::from(format!("refresh-account-credentials-{account_id}")))
+                            .label("Refresh credentials")
+                            .disabled(disabled || !self.loaded || self.confirm_disconnect.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| this.refresh_credentials(target.clone(), cx))))
+                    })
                     .when(account.state != "disconnected" || confirm || cleanup_pending || self.cleanup_accounts.contains(&account_id), |view| {
                         if confirm {
                             let target = account_id.clone();

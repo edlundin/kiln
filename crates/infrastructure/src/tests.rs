@@ -20,6 +20,107 @@ use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use tempfile::TempDir;
 
 #[tokio::test]
+async fn provider_refresh_blocks_on_pending_vault_cleanup_before_provider_io() {
+    use kiln_core::*;
+    use std::collections::BTreeMap;
+
+    struct UnavailableVault;
+    impl SecretStore for UnavailableVault {
+        async fn put_at(
+            &self,
+            _: &ProviderType,
+            _: &ProviderAccountId,
+            _: &SecretRef,
+            _: SecretValue,
+        ) -> Result<(), SecretStoreError> {
+            panic!("blocked refresh must not write credentials")
+        }
+
+        async fn get(
+            &self,
+            _: &ProviderType,
+            _: &ProviderAccountId,
+            _: &SecretRef,
+        ) -> Result<SecretValue, SecretStoreError> {
+            panic!("pending cleanup must precede reading active credentials")
+        }
+
+        async fn delete(
+            &self,
+            _: &ProviderType,
+            _: &ProviderAccountId,
+            _: &SecretRef,
+        ) -> Result<(), SecretStoreError> {
+            Err(SecretStoreError::Unavailable)
+        }
+    }
+
+    struct UnexpectedRefresh;
+    impl ProviderCredentialRefresher for UnexpectedRefresh {
+        async fn refresh(
+            &self,
+            _: &ProviderType,
+            _: &ProviderAccountId,
+            _: SecretValue,
+        ) -> Result<SecretValue, ProviderCredentialRefreshError> {
+            panic!("pending cleanup must prevent upstream rotation")
+        }
+    }
+
+    let data = TempDir::new().unwrap();
+    let store = super::SqliteStore::open(data.path()).await.unwrap();
+    let provider = ProviderType::parse("codex_subscription").unwrap();
+    let current_ref = SecretRef::from_ulid(ulid::Ulid::generate());
+    let pending_ref = SecretRef::from_ulid(ulid::Ulid::generate());
+    let account = ProviderAccount::new(
+        ProviderAccountId::from_ulid(ulid::Ulid::generate()),
+        provider.clone(),
+        "Cleanup fixture".into(),
+        None,
+        Some(current_ref.clone()),
+        ProviderAccountState::Connected,
+        1,
+        1,
+        None,
+        None,
+        BTreeMap::new(),
+    )
+    .unwrap();
+    store.create_provider_account(&account, &[]).await.unwrap();
+    store
+        .reserve_provider_account_secret(&account, &pending_ref)
+        .await
+        .unwrap();
+    let application = ProviderAccountApplication::new(store.clone(), super::UlidIdGenerator);
+    let result = application
+        .refresh_provider_account(
+            &UnavailableVault,
+            &UnexpectedRefresh,
+            account.id().clone(),
+            provider,
+            current_ref,
+            2,
+        )
+        .await;
+    assert_eq!(
+        result,
+        Err(ProviderAccountError::CredentialCleanupRequired {
+            secret_ref: pending_ref.clone(),
+        })
+    );
+    assert_eq!(
+        store.get_provider_account(account.id()).await.unwrap(),
+        Some(account.clone())
+    );
+    assert_eq!(
+        store
+            .pending_provider_account_secret_cleanup(account.id())
+            .await
+            .unwrap(),
+        vec![pending_ref]
+    );
+}
+#[tokio::test]
 async fn native_tool_inspection_is_bounded_hash_checked_and_does_not_approve() {
     use kiln_core::*;
     use std::num::NonZeroUsize;

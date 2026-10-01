@@ -7,14 +7,15 @@ use std::{
 
 use kiln_core::{
     CreateProviderAccount, ProviderAccount, ProviderAccountApplication, ProviderAccountError,
-    ProviderAccountId, ProviderAccountState, ProviderType,
+    ProviderAccountId, ProviderAccountRefresh, ProviderAccountState,
+    ProviderCredentialRefreshError, ProviderType,
 };
 use kiln_infrastructure::{OsSecretStore, SqliteStore, UlidIdGenerator};
 use kiln_protocol::{ProviderAccountLoginFailure, ProviderAccountLoginState};
 use kiln_providers::{
     CodexBrowserAuthorization, CodexBrowserLoginClient, CodexBrowserLoginError,
     CodexDeviceAuthorization, CodexDeviceLoginClient, CodexDeviceLoginError,
-    OPENAI_CODEX_SUBSCRIPTION_PROVIDER_TYPE,
+    CodexSubscriptionCredentialRefresher, OPENAI_CODEX_SUBSCRIPTION_PROVIDER_TYPE,
 };
 use kiln_server::{
     ProviderAccountCreateCommand, ProviderAccountLoginStart, ProviderAccountLoginStatus,
@@ -531,6 +532,72 @@ fn now_millis() -> Result<u64, ProviderAccountLoginError> {
 }
 
 impl ProviderAccountOperations for ProviderAccountLoginCoordinator {
+    fn refresh_provider_account(
+        &self,
+        account_id: ProviderAccountId,
+        expected_updated_at_unix_ms: u64,
+    ) -> Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProviderAccount, ProviderAccountOperationError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let control = self.control.lock().await;
+            if *control {
+                return Err(ProviderAccountOperationError::InvalidState);
+            }
+            let account = self
+                .application
+                .get_provider_account(account_id.clone())
+                .await?;
+            if account.provider_type().as_str() != OPENAI_CODEX_SUBSCRIPTION_PROVIDER_TYPE
+                || account.state() != ProviderAccountState::Connected
+                || account.updated_at_unix_ms() != expected_updated_at_unix_ms
+            {
+                return Err(ProviderAccountOperationError::InvalidState);
+            }
+            let expected_secret_ref = account
+                .secret_ref()
+                .cloned()
+                .ok_or(ProviderAccountOperationError::InvalidState)?;
+            let refresher = CodexSubscriptionCredentialRefresher::new(account_id.clone())
+                .map_err(|_| ProviderAccountOperationError::RefreshUnavailable)?;
+            let next_timestamp = account
+                .updated_at_unix_ms()
+                .checked_add(1)
+                .ok_or(ProviderAccountOperationError::InvalidState)?;
+            let updated_at = now_millis()
+                .map_err(ProviderAccountOperationError::from)?
+                .max(next_timestamp);
+            let result = self
+                .application
+                .refresh_provider_account(
+                    &self.secret_store,
+                    &refresher,
+                    account_id,
+                    account.provider_type().clone(),
+                    expected_secret_ref,
+                    updated_at,
+                )
+                .await;
+            match result {
+                Ok(
+                    ProviderAccountRefresh::Rotated(account)
+                    | ProviderAccountRefresh::ReusedCommittedRotation(account),
+                ) => Ok(account),
+                Err(ProviderAccountError::CredentialRefresh(
+                    ProviderCredentialRefreshError::Transient,
+                )) => Err(ProviderAccountOperationError::RefreshUnavailable),
+                Err(ProviderAccountError::CredentialRefresh(
+                    ProviderCredentialRefreshError::Permanent,
+                )) => Err(ProviderAccountOperationError::ReauthRequired),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
     fn disconnect_provider_account(
         &self,
         account_id: ProviderAccountId,

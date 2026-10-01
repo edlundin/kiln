@@ -874,6 +874,10 @@ where
             return Ok(ProviderAccountRefresh::ReusedCommittedRotation(current));
         }
 
+        // Resolve prior cleanup before spending an upstream credential rotation.
+        self.cleanup_pending_secrets_locked(secret_store, &current)
+            .await?;
+
         let current_secret = secret_store
             .get(&expected_provider_type, &id, &expected_secret_ref)
             .await

@@ -4960,6 +4960,93 @@ async fn complete_first_vertical_slice() {
 }
 
 #[tokio::test]
+async fn real_daemon_rejects_unsafe_account_refresh_before_provider_io() {
+    use kiln_protocol::{
+        CreateProviderAccountRequest, PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNT_REFRESH_PATH,
+        PROVIDER_ACCOUNTS_PATH, ProviderAccountResponse, RefreshProviderAccountRequest,
+    };
+
+    let data = tempfile::tempdir().expect("temporary data directory");
+    let mut daemon = Daemon::start(env!("CARGO_BIN_EXE_kilnd"), data.path());
+    let http = daemon.client();
+    let account: ProviderAccountResponse = http
+        .post(format!("http://{}{PROVIDER_ACCOUNTS_PATH}", daemon.address))
+        .header(IDEMPOTENCY_KEY_HEADER, "refresh-guard-account")
+        .json(&CreateProviderAccountRequest {
+            provider_type: "openai_codex_subscription".to_owned(),
+            label: "Refresh guard fixture".to_owned(),
+            workspace_ids: Vec::new(),
+        })
+        .send()
+        .await
+        .expect("create response")
+        .error_for_status()
+        .expect("account created")
+        .json()
+        .await
+        .expect("account JSON");
+    let path = PROVIDER_ACCOUNT_REFRESH_PATH
+        .replace("{provider_account_id}", &account.provider_account_id);
+    let url = format!("http://{}{path}", daemon.address);
+    let request = RefreshProviderAccountRequest {
+        expected_updated_at_unix_ms: account.updated_at_unix_ms,
+    };
+    let unauthenticated = reqwest::Client::new()
+        .post(&url)
+        .json(&request)
+        .send()
+        .await
+        .expect("unauthenticated response");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    for body in [
+        serde_json::json!({}),
+        serde_json::json!({
+            "expected_updated_at_unix_ms": account.updated_at_unix_ms,
+            "credential": "must-not-be-accepted",
+        }),
+    ] {
+        let response = http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .expect("strict body response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let problem: ProblemDetails = response.json().await.expect("strict body problem");
+        assert_eq!(problem.code, error_code::PROVIDER_ACCOUNT_INVALID);
+    }
+    let response = http
+        .post(&url)
+        .json(&request)
+        .send()
+        .await
+        .expect("connecting refresh response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let problem: ProblemDetails = response.json().await.expect("connecting refresh problem");
+    assert_eq!(problem.code, error_code::PROVIDER_ACCOUNT_INVALID_STATE);
+    let current: ProviderAccountResponse = http
+        .get(format!(
+            "http://{}{}",
+            daemon.address,
+            PROVIDER_ACCOUNT_PATH.replace("{provider_account_id}", &account.provider_account_id)
+        ))
+        .send()
+        .await
+        .expect("account response")
+        .json()
+        .await
+        .expect("account JSON");
+    assert_eq!(current, account);
+    daemon.signal("TERM");
+    assert!(
+        daemon
+            .wait_for_exit_within(Duration::from_secs(5))
+            .await
+            .success()
+    );
+}
+
+#[tokio::test]
 async fn real_daemon_recovers_browser_login_after_decline_cancel_and_restart() {
     use kiln_protocol::{
         CreateProviderAccountRequest, ListProviderAccountsResponse,

@@ -58,6 +58,8 @@ remote-route isolation and explicit credential cleanup. See
 [EDL-322 evidence](../learning/edl-322.md). Later fixtures also exercised
 nonempty shared model defaults with deterministic Runs, automatic refresh,
 offline recovery and listener closure after identity retirement and leaf
-certificate expiry, including one pending TLS handshake. Native interaction,
-real providers, MCP/skill consumers, abnormal cancellation/role-loss and
-remaining expiry races remain unverified.
+certificate expiry, including one pending TLS handshake. A separate same-host
+wrong-CA fixture rejected enrollment and acquisition while preserving the
+intended follower state. Native interaction, real providers, MCP/skill
+consumers, abnormal cancellation/role-loss and remaining expiry races remain
+unverified.

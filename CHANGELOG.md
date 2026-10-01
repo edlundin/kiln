@@ -7,7 +7,9 @@
 - EDL-308: Keep attachment controls usable as the composer narrows and expose
   the full scope on hover. ([92f271d](../../commit/92f271d))
 - EDL-341: Explain failed sign-ins with safe, actionable recovery guidance.
-  ([pending])
+  ([1094c98](../../commit/1094c98))
+- EDL-341: Scroll Settings to the provider account section and its sign-in
+  controls. ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 EDL-341: https://linear.app/edlundin/issue/EDL-341

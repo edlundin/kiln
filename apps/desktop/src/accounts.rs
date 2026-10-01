@@ -724,6 +724,8 @@ impl Render for AccountSettings {
             .min_h_0()
             .overflow_y_scroll()
             .flex()
+            // Preserve the content height so the scroll range includes all settings.
+            .items_start()
             .justify_center()
             .px_6()
             .py_6()

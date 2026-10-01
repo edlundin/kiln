@@ -366,6 +366,12 @@ terminal-error fixtures checked expiry and vault/storage failure mapping.
 Native failure layout and live OAuth/vault acceptance remain unverified; see
 [the EDL-341 evidence and isolated scenario](../learning/edl-341.md).
 
+Settings preserves its full content height when centered, allowing the provider
+section to be reached by scrolling. Native sign-in preparation and access to
+the pending controls were observed at 1060 by 832 pixels after this repair.
+Cancellation removed the pending controls from accessibility state; terminal
+feedback rendering and live sign-in/vault behavior still require acceptance.
+
 ## Import an OpenAI API key locally
 
 OpenAI API billing and credentials are separate from Codex subscription access.

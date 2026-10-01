@@ -15,7 +15,9 @@
 - EDL-308: Keep submission warnings and Retry/Reconnect controls visible in
   the verified narrow view. ([f0c944a](../../commit/f0c944a))
 - EDL-341: Document native callback recovery and the remaining account
-  acceptance limits. ([pending])
+  acceptance limits. ([0eb3009](../../commit/0eb3009))
+- EDL-341: Shut down gracefully after terminal provider sign-in failures while
+  preserving credential-cleanup safeguards. ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 EDL-341: https://linear.app/edlundin/issue/EDL-341

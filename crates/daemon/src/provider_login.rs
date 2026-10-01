@@ -314,7 +314,15 @@ impl ProviderAccountLoginCoordinator {
         let mut first_error = None;
         for (account_id, attempt) in attempts {
             match join_attempt(&attempt).await {
-                Ok(_) | Err(ProviderAccountLoginError::Cancelled) => {}
+                // Provider failures finish before any account credential write.
+                Ok(_)
+                | Err(
+                    ProviderAccountLoginError::Cancelled
+                    | ProviderAccountLoginError::Declined
+                    | ProviderAccountLoginError::Expired
+                    | ProviderAccountLoginError::DeviceUnavailable
+                    | ProviderAccountLoginError::DeviceFailed,
+                ) => {}
                 Err(error) if first_error.is_none() => first_error = Some(error),
                 Err(_) => {}
             }
@@ -712,6 +720,61 @@ impl From<ProviderAccountLoginError> for ProviderAccountOperationError {
 mod tests {
     use super::*;
     use kiln_core::{SecretRef, SecretStoreError};
+
+    #[tokio::test]
+    async fn shutdown_drains_provider_failures_but_preserves_credential_cleanup_failures() {
+        let data = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(data.path()).await.unwrap();
+        let application = Arc::new(ProviderAccountApplication::new(store, UlidIdGenerator));
+        let coordinator = ProviderAccountLoginCoordinator::new(
+            Arc::clone(&application),
+            OsSecretStore::open_default(),
+        )
+        .unwrap();
+        for error in [
+            ProviderAccountLoginError::Declined,
+            ProviderAccountLoginError::Expired,
+            ProviderAccountLoginError::DeviceUnavailable,
+            ProviderAccountLoginError::DeviceFailed,
+        ] {
+            let (cancellation, _) = watch::channel(false);
+            coordinator.attempts.lock().await.insert(
+                ProviderAccountId::from_ulid(Ulid::generate()),
+                Arc::new(LoginAttempt {
+                    id: "fixture-attempt".to_owned(),
+                    cancellation,
+                    task: Mutex::new(AttemptTask::Complete(Err(error))),
+                }),
+            );
+        }
+        coordinator.shutdown().await.unwrap();
+        assert!(coordinator.attempts.lock().await.is_empty());
+
+        let coordinator =
+            ProviderAccountLoginCoordinator::new(application, OsSecretStore::open_default())
+                .unwrap();
+        let (cancellation, _) = watch::channel(false);
+        coordinator.attempts.lock().await.insert(
+            ProviderAccountId::from_ulid(Ulid::generate()),
+            Arc::new(LoginAttempt {
+                id: "fixture-cleanup".to_owned(),
+                cancellation,
+                task: Mutex::new(AttemptTask::Complete(Err(
+                    ProviderAccountLoginError::Account(
+                        ProviderAccountError::CredentialCleanupRequired {
+                            secret_ref: SecretRef::from_ulid(Ulid::generate()),
+                        },
+                    ),
+                ))),
+            }),
+        );
+        assert!(matches!(
+            coordinator.shutdown().await,
+            Err(ProviderAccountLoginError::Account(
+                ProviderAccountError::CredentialCleanupRequired { .. }
+            ))
+        ));
+    }
 
     #[tokio::test]
     async fn failed_login_status_preserves_safe_recovery_categories() {

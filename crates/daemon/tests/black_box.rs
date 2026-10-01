@@ -5103,7 +5103,7 @@ async fn real_daemon_recovers_browser_login_after_decline_cancel_and_restart() {
         .expect("unfinished attempt JSON");
     daemon.signal("TERM");
     assert!(daemon.wait_for_exit().success());
-    let restarted = Daemon::start(binary, data.path());
+    let mut restarted = Daemon::start(binary, data.path());
     let http = restarted.client();
     let accounts: ListProviderAccountsResponse = http
         .get(format!(
@@ -5159,4 +5159,34 @@ async fn real_daemon_recovers_browser_login_after_decline_cancel_and_restart() {
         account.provider_account_id
     );
     assert_eq!(recovered.account.state, "connecting");
+    let authorization = reqwest::Url::parse(&recovered.authorization_url).expect("recovery URL");
+    let pairs: std::collections::HashMap<_, _> = authorization.query_pairs().collect();
+    let redirect = pairs.get("redirect_uri").expect("recovery redirect");
+    let state = pairs.get("state").expect("recovery state");
+    callback
+        .get(format!("{redirect}?state={state}&error=access_denied"))
+        .send()
+        .await
+        .expect("recovery declined callback")
+        .error_for_status()
+        .expect("recovery decline accepted");
+    let recovered_path = PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH
+        .replace("{provider_account_id}", &account.provider_account_id)
+        .replace("{attempt_id}", &recovered.attempt_id);
+    let failed: ProviderAccountLoginResponse = http
+        .post(format!("http://{}{recovered_path}", restarted.address))
+        .send()
+        .await
+        .expect("join recovered decline")
+        .json()
+        .await
+        .expect("recovered decline JSON");
+    assert_eq!(failed.failure, Some(ProviderAccountLoginFailure::Declined));
+    restarted.signal("TERM");
+    assert!(
+        restarted
+            .wait_for_exit_within(Duration::from_secs(5))
+            .await
+            .success()
+    );
 }

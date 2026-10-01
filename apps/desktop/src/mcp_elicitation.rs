@@ -584,6 +584,7 @@ impl Render for ElicitationPanel {
                                 "Include field"
                             })
                             .selected(field.included)
+                            .toggled(field.included)
                             .disabled(locked)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(form) = &mut this.form {
@@ -605,6 +606,7 @@ impl Render for ElicitationPanel {
                                     )))
                                     .label(label.clone())
                                     .selected(field.selected.contains(&option_index))
+                                    .toggled(field.selected.contains(&option_index))
                                     .disabled(locked || !field.included)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if let Some(form) = &mut this.form {

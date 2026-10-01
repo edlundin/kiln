@@ -602,6 +602,8 @@ accepting interaction. Replay reconstructs pending identities, not form contents
 
 The card supports text, integer/number, boolean, labelled or unlabelled single
 choices and multiple choices. Fields have visible labels and constraint hints.
+Choice buttons and optional-field controls expose their pressed state to
+assistive technology as well as showing a visual selection.
 Optional fields are omitted unless explicitly included; server defaults are never
 filled. Empty strings remain strings, and whole numbers retain their exact JSON
 integer representation. Local schema validation checks required fields, formats
@@ -626,3 +628,5 @@ The daemon must enable form mediation and per-call input quotas as described in
 [MCP runtime](mcp-runtime.md). URL-mode elicitation and sampling have no UI yet.
 Native form layout, keyboard/screen-reader behavior and live reconnect interaction
 remain unverified; compilation and focused model tests alone do not establish them.
+See [EDL-314 evidence](../learning/edl-314.md) for the selection-state repair,
+observed API boundary and native automation limitation.

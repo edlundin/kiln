@@ -19,7 +19,11 @@
 - EDL-341: Shut down gracefully after terminal provider sign-in failures while
   preserving credential-cleanup safeguards. ([afb5df1](../../commit/afb5df1))
 - EDL-308 and EDL-341: Clarify retained-session recovery and record the
-  remaining native acceptance gates. ([pending])
+  remaining native acceptance gates. ([289bb70](../../commit/289bb70))
+- EDL-314: Expose MCP form choice and optional-field selection state to
+  assistive technology. ([EDL-314](https://linear.app/edlundin/issue/EDL-314), [pending])
+
+EDL-314: https://linear.app/edlundin/issue/EDL-314
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 EDL-341: https://linear.app/edlundin/issue/EDL-341

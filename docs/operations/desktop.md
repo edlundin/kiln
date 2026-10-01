@@ -368,6 +368,14 @@ leaving the original Keychain entry intact; it does not establish system-wide
 Keychain unavailability or other vault failure modes. See the
 [EDL-341 denial evidence](../learning/edl-341.md#controlled-macos-credential-vault-denial).
 
+If refresh returns `provider_account_reauth_required`, Settings explains that
+the credentials are no longer valid and sign-in is needed. Refresh accounts to
+inspect the durable state; once it is `reauth_required`, **Refresh credentials**
+is no longer available. Choose **Disconnect**, then start a new sign-in. Native
+acceptance exercised this path with a never-issued synthetic token against the
+provider endpoint; it does not demonstrate expiry of a previously valid grant.
+See [EDL-341 invalid-token evidence](../learning/edl-341.md#native-cancellation-and-invalid-token-recovery).
+
 Closing Settings does not cancel sign-in. Reconnecting the desktop discards its
 connection-scoped attempt display; refresh the accounts to recover the durable
 state. An unfinished connecting or disconnected account can start a replacement

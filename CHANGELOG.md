@@ -47,7 +47,9 @@
 - EDL-341: Document native Keep, Disconnect, credential cleanup and
   same-account reauthentication across restart. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [e3db66c](../../commit/e3db66c))
 - EDL-341: Distinguish unavailable credential vault access and show native
-  recovery guidance. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
+  recovery guidance. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [079b77b](../../commit/079b77b))
+- EDL-341: Explain invalid credential recovery in Settings and document native
+  cancellation, reauthentication and cleanup evidence. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

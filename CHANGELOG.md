@@ -25,7 +25,9 @@
 - EDL-322: Distinguish closed enrollment preparations from credential
   retirement and make cleanup actions explicit. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [0256f61](../../commit/0256f61))
 - EDL-322: Allow deterministic Runs to execute validated shared model
-  defaults. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+  defaults. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [ba95d4e](../../commit/ba95d4e))
+- EDL-322: Document deterministic follower execution from shared defaults,
+  restart persistence and credential cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

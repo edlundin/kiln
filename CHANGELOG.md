@@ -11,7 +11,9 @@
 - EDL-341: Scroll Settings to the provider account section and its sign-in
   controls. ([6f1e228](../../commit/6f1e228))
 - EDL-308: Retry uncertain submissions explicitly after refreshing history,
-  without duplicating a saved Message. ([pending])
+  without duplicating a saved Message. ([0424155](../../commit/0424155))
+- EDL-308: Keep submission warnings and Retry/Reconnect controls visible in
+  the verified narrow view. ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 EDL-341: https://linear.app/edlundin/issue/EDL-341

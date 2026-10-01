@@ -1817,7 +1817,7 @@ impl Desktop {
         {
             pending.append_retry_ready = true;
             self.error = Some(
-                "Message submission was uncertain. History is refreshed; review it, then Retry the same submission."
+                "Submission uncertain. Review refreshed history, then Retry the same submission."
                     .to_owned(),
             );
         }
@@ -4337,13 +4337,14 @@ impl Render for Desktop {
                         .role(gpui::Role::Alert)
                         .aria_label(error.clone())
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap_3()
                         .px_5()
                         .py_3()
                         .text_sm()
                         .text_color(theme::DANGER)
-                        .child(div().flex_1().child(error))
+                        .child(div().min_w_0().w_full().child(error))
                         .when(
                             self.pending.as_ref().is_some_and(|pending| {
                                 !pending.append_uncertain || pending.append_retry_ready
@@ -4351,7 +4352,8 @@ impl Render for Desktop {
                             |row| {
                                 row.child(
                                     Button::new("retry-command")
-                                        .label(
+                                        .label("Retry")
+                                        .accessibility_label(
                                             if self
                                                 .pending
                                                 .as_ref()

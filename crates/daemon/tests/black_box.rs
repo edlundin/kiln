@@ -4958,3 +4958,205 @@ async fn complete_first_vertical_slice() {
         "EDL-216 metrics: idle_rss_kb={idle_rss_kb} streaming_peak_rss_kb={streaming_peak_rss_kb} reconnect_ms={reconnect_ms:.3} cancellation_ms={cancellation_ms:.3} shutdown_ms={shutdown_ms:.3}"
     );
 }
+
+#[tokio::test]
+async fn real_daemon_recovers_browser_login_after_decline_cancel_and_restart() {
+    use kiln_protocol::{
+        CreateProviderAccountRequest, ListProviderAccountsResponse,
+        PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH, PROVIDER_ACCOUNT_DISCONNECT_PATH,
+        PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNTS_PATH, ProviderAccountLoginFailure,
+        ProviderAccountLoginResponse, ProviderAccountLoginState, ProviderAccountResponse,
+        StartProviderAccountBrowserLoginResponse,
+    };
+
+    let binary = env!("CARGO_BIN_EXE_kilnd");
+    let data = tempfile::tempdir().expect("temporary data directory");
+    let mut daemon = Daemon::start(binary, data.path());
+    let http = daemon.client();
+    let account: ProviderAccountResponse = http
+        .post(format!("http://{}{PROVIDER_ACCOUNTS_PATH}", daemon.address))
+        .header(IDEMPOTENCY_KEY_HEADER, "browser-recovery-account")
+        .json(&CreateProviderAccountRequest {
+            provider_type: "openai_codex_subscription".to_owned(),
+            label: "Browser recovery fixture".to_owned(),
+            workspace_ids: Vec::new(),
+        })
+        .send()
+        .await
+        .expect("create response")
+        .error_for_status()
+        .expect("account created")
+        .json()
+        .await
+        .expect("account JSON");
+    let browser_path = PROVIDER_ACCOUNT_BROWSER_LOGIN_PATH
+        .replace("{provider_account_id}", &account.provider_account_id);
+    let browser_url = format!("http://{}{browser_path}", daemon.address);
+    let started: StartProviderAccountBrowserLoginResponse = http
+        .post(&browser_url)
+        .send()
+        .await
+        .expect("browser preparation response")
+        .error_for_status()
+        .expect("callback listener available")
+        .json()
+        .await
+        .expect("browser preparation JSON");
+    let authorization = reqwest::Url::parse(&started.authorization_url).expect("authorization URL");
+    let pairs: std::collections::HashMap<_, _> = authorization.query_pairs().collect();
+    let redirect = pairs.get("redirect_uri").expect("redirect");
+    let state = pairs.get("state").expect("state");
+    let attempt_path = PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH
+        .replace("{provider_account_id}", &account.provider_account_id)
+        .replace("{attempt_id}", &started.attempt_id);
+    let attempt_url = format!("http://{}{attempt_path}", daemon.address);
+    // No request reaches OpenAI: a local rejected callback exercises the real listener.
+    let callback = reqwest::Client::new();
+    let invalid = callback
+        .get(format!("{redirect}?state=wrong&error=access_denied"))
+        .send()
+        .await
+        .expect("invalid callback response");
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let pending: ProviderAccountLoginResponse = http
+        .get(&attempt_url)
+        .send()
+        .await
+        .expect("pending response")
+        .json()
+        .await
+        .expect("pending JSON");
+    assert_eq!(pending.state, ProviderAccountLoginState::Pending);
+    assert_eq!(pending.failure, None);
+    let declined = callback
+        .get(format!("{redirect}?state={state}&error=access_denied"))
+        .send()
+        .await
+        .expect("declined callback response");
+    assert_eq!(declined.status(), StatusCode::OK);
+    assert!(
+        !declined
+            .text()
+            .await
+            .expect("callback text")
+            .contains(state.as_ref())
+    );
+    // Cancellation joins terminal work, avoiding a timing-based status assertion.
+    let failed: ProviderAccountLoginResponse = http
+        .post(&attempt_url)
+        .send()
+        .await
+        .expect("join declined attempt")
+        .json()
+        .await
+        .expect("failed JSON");
+    assert_eq!(failed.state, ProviderAccountLoginState::Failed);
+    assert_eq!(failed.failure, Some(ProviderAccountLoginFailure::Declined));
+    assert_eq!(failed.account.state, "connecting");
+    let public = serde_json::to_string(&failed).expect("public status");
+    assert!(!public.contains(state.as_ref()));
+    assert!(!public.contains("authorization_url"));
+    assert!(!public.contains("secret_ref"));
+
+    let replacement: StartProviderAccountBrowserLoginResponse = http
+        .post(&browser_url)
+        .send()
+        .await
+        .expect("replacement response")
+        .json()
+        .await
+        .expect("replacement JSON");
+    assert_eq!(
+        replacement.account.provider_account_id,
+        account.provider_account_id
+    );
+    assert_ne!(replacement.attempt_id, started.attempt_id);
+    assert_eq!(
+        http.get(&attempt_url)
+            .send()
+            .await
+            .expect("stale attempt response")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let replacement_path = PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH
+        .replace("{provider_account_id}", &account.provider_account_id)
+        .replace("{attempt_id}", &replacement.attempt_id);
+    let cancelled: ProviderAccountLoginResponse = http
+        .post(format!("http://{}{replacement_path}", daemon.address))
+        .send()
+        .await
+        .expect("cancellation response")
+        .json()
+        .await
+        .expect("cancellation JSON");
+    assert_eq!(cancelled.state, ProviderAccountLoginState::Cancelled);
+    assert_eq!(cancelled.failure, None);
+
+    let unfinished: StartProviderAccountBrowserLoginResponse = http
+        .post(&browser_url)
+        .send()
+        .await
+        .expect("unfinished attempt response")
+        .json()
+        .await
+        .expect("unfinished attempt JSON");
+    daemon.signal("TERM");
+    assert!(daemon.wait_for_exit().success());
+    let restarted = Daemon::start(binary, data.path());
+    let http = restarted.client();
+    let accounts: ListProviderAccountsResponse = http
+        .get(format!(
+            "http://{}{PROVIDER_ACCOUNTS_PATH}",
+            restarted.address
+        ))
+        .send()
+        .await
+        .expect("recovered accounts response")
+        .json()
+        .await
+        .expect("recovered accounts JSON");
+    assert_eq!(accounts.provider_accounts.len(), 1);
+    assert_eq!(
+        accounts.provider_accounts[0].provider_account_id,
+        account.provider_account_id
+    );
+    assert_eq!(accounts.provider_accounts[0].state, "connecting");
+    let lost_path = PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH
+        .replace("{provider_account_id}", &account.provider_account_id)
+        .replace("{attempt_id}", &unfinished.attempt_id);
+    assert_eq!(
+        http.get(format!("http://{}{lost_path}", restarted.address))
+            .send()
+            .await
+            .expect("lost attempt response")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let disconnect_path = PROVIDER_ACCOUNT_DISCONNECT_PATH
+        .replace("{provider_account_id}", &account.provider_account_id);
+    let disconnected: ProviderAccountResponse = http
+        .post(format!("http://{}{disconnect_path}", restarted.address))
+        .send()
+        .await
+        .expect("disconnect response")
+        .json()
+        .await
+        .expect("disconnect JSON");
+    assert_eq!(disconnected.state, "disconnected");
+    let recovered: StartProviderAccountBrowserLoginResponse = http
+        .post(format!("http://{}{browser_path}", restarted.address))
+        .send()
+        .await
+        .expect("reauthentication response")
+        .error_for_status()
+        .expect("reauthentication prepared")
+        .json()
+        .await
+        .expect("reauthentication JSON");
+    assert_eq!(
+        recovered.account.provider_account_id,
+        account.provider_account_id
+    );
+    assert_eq!(recovered.account.state, "connecting");
+}

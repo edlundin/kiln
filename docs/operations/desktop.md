@@ -310,6 +310,14 @@ before starting again. A cleanup-required result is shown explicitly and blocks
 another attempt in that view. Choose **Disconnect** on the account to retry local
 cleanup. The daemon rejects replacement while a retained cleanup failure remains.
 
+Failed attempts distinguish declined sign-in, expiry, unavailable sign-in service,
+unavailable credential vault and unavailable account storage. Settings shows the
+corresponding recovery action as an accessible alert. Unknown failures ask you to
+refresh the account state before retrying. These categories contain no provider
+response text, callback codes or vault references. Protocol `0.47.0` adds the
+optional `failure` category to login status; pending, connected, cancelled and
+cleanup-required attempts omit it.
+
 **Disconnect** asks for confirmation, cancels active sign-in, and removes credentials
 from this Kiln instance. It does not revoke access at OpenAI. After success, the
 account list refreshes and **Sign in with browser** can reuse the same account. For
@@ -349,6 +357,14 @@ The local disconnect continuation was also inspected against an isolated daemon
 with an empty account: confirmation, Keep account, and successful disconnect with
 account refresh were observed. Credential deletion, concurrent cancellation, and
 failure/retry layouts were not exercised at runtime.
+
+The EDL-341 continuation exercised the real daemon's local callback listener:
+invalid state remained pending, a matching declined callback reported `declined`,
+replacement rejected the stale attempt, cancellation remained distinct, and
+restart preserved the account for disconnect and reauthentication. Focused
+terminal-error fixtures checked expiry and vault/storage failure mapping.
+Native failure layout and live OAuth/vault acceptance remain unverified; see
+[the EDL-341 evidence and isolated scenario](../learning/edl-341.md).
 
 ## Import an OpenAI API key locally
 

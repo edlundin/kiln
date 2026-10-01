@@ -64,10 +64,10 @@ use kiln_protocol::{
     MAX_ARTIFACT_UPLOAD_BYTES, MessageDeliveryMode, MessageDeliveryResponse, MessageDeliveryState,
     MessageResponse, MessageRole, NEGOTIATE_PATH, NegotiateRequest, NegotiateResponse,
     PROTOCOL_VERSION, PROVIDER_ACCOUNT_LOGIN_ATTEMPT_PATH, PROVIDER_ACCOUNT_LOGIN_PATH,
-    PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginResponse,
-    ProviderAccountLoginState, ProviderAccountResponse, RUN_CANCEL_PATH, RUN_CHILDREN_PATH,
-    RUN_INPUT_PATH, RUN_MODEL_SELECTION_PATH, RUN_PATH, RUN_REACTIONS_PATH,
-    ReactToRunActivityRequest, RunInputMode, RunModelSelectionResponse,
+    PROVIDER_ACCOUNT_PATH, PROVIDER_ACCOUNTS_PATH, ProblemDetails, ProviderAccountLoginFailure,
+    ProviderAccountLoginResponse, ProviderAccountLoginState, ProviderAccountResponse,
+    RUN_CANCEL_PATH, RUN_CHILDREN_PATH, RUN_INPUT_PATH, RUN_MODEL_SELECTION_PATH, RUN_PATH,
+    RUN_REACTIONS_PATH, ReactToRunActivityRequest, RunInputMode, RunModelSelectionResponse,
     RunModelSelectionSourceResponse, RunResponse, RunState, SESSION_CHANGE_DIFF_PATH,
     SESSION_CHANGES_PATH, SESSION_EVENTS_PATH, SESSION_MESSAGES_PATH, SESSION_PATH,
     SESSION_RUNS_PATH, SESSION_TASKS_PATH, SendRunInputRequest, SessionChangeDiffContent,
@@ -190,6 +190,7 @@ pub struct ProviderAccountBrowserLoginStart {
 pub struct ProviderAccountLoginStatus {
     pub attempt_id: String,
     pub state: ProviderAccountLoginState,
+    pub failure: Option<ProviderAccountLoginFailure>,
     pub account: ProviderAccount,
 }
 
@@ -1626,6 +1627,7 @@ fn provider_account_login_response(
     ProviderAccountLoginResponse {
         attempt_id: login.attempt_id.clone(),
         state: login.state,
+        failure: login.failure,
         account: provider_account_response(&login.account),
     }
 }

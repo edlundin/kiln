@@ -9,8 +9,8 @@ use gpui_component::{
 };
 use kiln_client::Client;
 use kiln_protocol::{
-    CreateProviderAccountRequest, ProviderAccountLoginResponse, ProviderAccountLoginState,
-    ProviderAccountResponse,
+    CreateProviderAccountRequest, ProviderAccountLoginFailure, ProviderAccountLoginResponse,
+    ProviderAccountLoginState, ProviderAccountResponse,
 };
 use tokio::{runtime::Runtime, sync::mpsc};
 
@@ -131,6 +131,7 @@ pub struct AccountSettings {
     create_key: String,
     login: Option<Login>,
     login_state: Option<ProviderAccountLoginState>,
+    login_failure: Option<ProviderAccountLoginFailure>,
     copied: bool,
     confirm_disconnect: Option<String>,
     cleanup_accounts: HashSet<String>,
@@ -167,6 +168,7 @@ impl AccountSettings {
             create_key: ulid::Ulid::generate().to_string(),
             login: None,
             login_state: None,
+            login_failure: None,
             copied: false,
             confirm_disconnect: None,
             cleanup_accounts: HashSet::new(),
@@ -386,6 +388,7 @@ impl AccountSettings {
                 {
                     self.login = None;
                     self.login_state = None;
+                    self.login_failure = None;
                 }
                 match result {
                     Ok(account) => {
@@ -423,6 +426,7 @@ impl AccountSettings {
             } => {
                 self.upsert(login.account.clone());
                 self.login_state = Some(ProviderAccountLoginState::Pending);
+                self.login_failure = None;
                 self.copied = false;
                 if !login.url_allowed() {
                     self.error = Some("The daemon returned an unexpected sign-in address. Cancel this attempt and reconnect.".to_owned());
@@ -449,6 +453,7 @@ impl AccountSettings {
                 }) {
                     self.upsert(response.account);
                     self.login_state = Some(response.state);
+                    self.login_failure = response.failure;
                 }
             }
             Update::Status {
@@ -457,6 +462,7 @@ impl AccountSettings {
             } => {
                 self.login = None;
                 self.login_state = None;
+                self.login_failure = None;
                 self.loaded = false;
                 self.error = Some("This sign-in attempt is no longer active. Refresh accounts before starting another attempt.".to_owned());
             }
@@ -588,9 +594,26 @@ impl Render for AccountSettings {
             let message = match self.login_state {
                 Some(ProviderAccountLoginState::Connected) => "Codex account connected.",
                 Some(ProviderAccountLoginState::Cancelled) => "Sign-in cancelled.",
-                Some(ProviderAccountLoginState::Failed) => {
-                    "Sign-in failed or expired. You can start a new attempt."
-                }
+                Some(ProviderAccountLoginState::Failed) => match self.login_failure {
+                    Some(ProviderAccountLoginFailure::Declined) => {
+                        "Sign-in was declined. Start a new attempt when you are ready."
+                    }
+                    Some(ProviderAccountLoginFailure::Expired) => {
+                        "Sign-in expired. Start a new attempt and finish it before it expires."
+                    }
+                    Some(ProviderAccountLoginFailure::ProviderUnavailable) => {
+                        "Sign-in is unavailable. Check your network connection and local callback, then start a new attempt."
+                    }
+                    Some(ProviderAccountLoginFailure::CredentialStoreUnavailable) => {
+                        "Credentials could not be saved in this host’s vault. Check vault access, then start a new attempt. If cleanup is required, disconnect first."
+                    }
+                    Some(ProviderAccountLoginFailure::AccountStoreUnavailable) => {
+                        "The account could not be saved. Refresh accounts to check its current state before trying again."
+                    }
+                    None => {
+                        "Sign-in failed. Refresh accounts to check the current state, then try again."
+                    }
+                },
                 Some(ProviderAccountLoginState::CleanupRequired) => {
                     "Credential cleanup is required. Choose Disconnect on this account to retry local cleanup before signing in again."
                 }
@@ -599,12 +622,20 @@ impl Render for AccountSettings {
                 }
                 _ => "Open the verification page, enter this code, then check sign-in status.",
             };
-            let mut progress = div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .py_3()
-                .child(div().text_sm().child(message));
+            let mut progress = div().flex().flex_col().gap_3().py_3().child(
+                div()
+                    .id("provider-login-status")
+                    .text_sm()
+                    .when(
+                        self.login_state == Some(ProviderAccountLoginState::Failed),
+                        |view| {
+                            view.role(gpui::Role::Alert)
+                                .aria_label(message)
+                                .text_color(theme::DANGER)
+                        },
+                    )
+                    .child(message),
+            );
             if self.login_state == Some(ProviderAccountLoginState::Pending) {
                 let url_allowed = login.url_allowed();
                 let url = login.url.clone();

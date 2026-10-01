@@ -5,9 +5,12 @@
 - EDL-308: Paste copied files and images as attachments while preserving plain
   text editing and undo. ([72408de](../../commit/72408de))
 - EDL-308: Keep attachment controls usable as the composer narrows and expose
-  the full scope on hover. ([pending])
+  the full scope on hover. ([92f271d](../../commit/92f271d))
+- EDL-341: Explain failed sign-ins with safe, actionable recovery guidance.
+  ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
+EDL-341: https://linear.app/edlundin/issue/EDL-341
 
 [Commit](../../commit/pending)
 

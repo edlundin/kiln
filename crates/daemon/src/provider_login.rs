@@ -10,7 +10,7 @@ use kiln_core::{
     ProviderAccountId, ProviderAccountState, ProviderType,
 };
 use kiln_infrastructure::{OsSecretStore, SqliteStore, UlidIdGenerator};
-use kiln_protocol::ProviderAccountLoginState;
+use kiln_protocol::{ProviderAccountLoginFailure, ProviderAccountLoginState};
 use kiln_providers::{
     CodexBrowserAuthorization, CodexBrowserLoginClient, CodexBrowserLoginError,
     CodexDeviceAuthorization, CodexDeviceLoginClient, CodexDeviceLoginError,
@@ -62,6 +62,8 @@ pub(crate) enum ProviderAccountLoginError {
     Account(ProviderAccountError),
     DeviceUnavailable,
     DeviceFailed,
+    Declined,
+    Expired,
     InvalidProvider,
     InvalidState,
     AttemptNotFound,
@@ -352,6 +354,9 @@ impl ProviderAccountLoginCoordinator {
         attempt: Arc<LoginAttempt>,
     ) -> Result<ProviderAccountLoginStatus, ProviderAccountLoginError> {
         let (state, completed) = poll_attempt(&attempt).await;
+        let failure = completed
+            .as_ref()
+            .and_then(|outcome| outcome.as_ref().err().and_then(login_failure));
         let account = match completed {
             Some(Ok(account)) => account,
             Some(Err(_)) | None => self
@@ -363,6 +368,7 @@ impl ProviderAccountLoginCoordinator {
         Ok(ProviderAccountLoginStatus {
             attempt_id,
             state,
+            failure,
             account,
         })
     }
@@ -469,10 +475,30 @@ async fn run_attempt(
 fn map_device_error(error: CodexDeviceLoginError) -> ProviderAccountLoginError {
     match error {
         CodexDeviceLoginError::Cancelled => ProviderAccountLoginError::Cancelled,
+        CodexDeviceLoginError::Rejected => ProviderAccountLoginError::Declined,
+        CodexDeviceLoginError::Expired => ProviderAccountLoginError::Expired,
         CodexDeviceLoginError::Unavailable | CodexDeviceLoginError::Transport => {
             ProviderAccountLoginError::DeviceUnavailable
         }
         _ => ProviderAccountLoginError::DeviceFailed,
+    }
+}
+
+fn login_failure(error: &ProviderAccountLoginError) -> Option<ProviderAccountLoginFailure> {
+    match error {
+        ProviderAccountLoginError::Declined => Some(ProviderAccountLoginFailure::Declined),
+        ProviderAccountLoginError::Expired => Some(ProviderAccountLoginFailure::Expired),
+        ProviderAccountLoginError::DeviceUnavailable => {
+            Some(ProviderAccountLoginFailure::ProviderUnavailable)
+        }
+        ProviderAccountLoginError::Account(
+            ProviderAccountError::CredentialStore(_)
+            | ProviderAccountError::CredentialStoreRequired,
+        ) => Some(ProviderAccountLoginFailure::CredentialStoreUnavailable),
+        ProviderAccountLoginError::Account(ProviderAccountError::StoreUnavailable) => {
+            Some(ProviderAccountLoginFailure::AccountStoreUnavailable)
+        }
+        _ => None,
     }
 }
 
@@ -674,8 +700,64 @@ impl From<ProviderAccountLoginError> for ProviderAccountOperationError {
             ProviderAccountLoginError::Cancelled => Self::Cancelled,
             ProviderAccountLoginError::DeviceUnavailable => Self::LoginUnavailable,
             ProviderAccountLoginError::DeviceFailed
+            | ProviderAccountLoginError::Declined
+            | ProviderAccountLoginError::Expired
             | ProviderAccountLoginError::ClockUnavailable
             | ProviderAccountLoginError::TaskFailed => Self::LoginFailed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiln_core::{SecretRef, SecretStoreError};
+
+    #[tokio::test]
+    async fn failed_login_status_preserves_safe_recovery_categories() {
+        for (error, expected) in [
+            (
+                map_device_error(CodexDeviceLoginError::Expired),
+                Some(ProviderAccountLoginFailure::Expired),
+            ),
+            (
+                map_browser_error(CodexBrowserLoginError::Login(
+                    CodexDeviceLoginError::Rejected,
+                )),
+                Some(ProviderAccountLoginFailure::Declined),
+            ),
+            (
+                map_device_error(CodexDeviceLoginError::Transport),
+                Some(ProviderAccountLoginFailure::ProviderUnavailable),
+            ),
+            (
+                ProviderAccountLoginError::Account(ProviderAccountError::CredentialStore(
+                    SecretStoreError::Unavailable,
+                )),
+                Some(ProviderAccountLoginFailure::CredentialStoreUnavailable),
+            ),
+            (
+                ProviderAccountLoginError::Account(ProviderAccountError::StoreUnavailable),
+                Some(ProviderAccountLoginFailure::AccountStoreUnavailable),
+            ),
+            (ProviderAccountLoginError::DeviceFailed, None),
+        ] {
+            let (cancellation, _) = watch::channel(false);
+            let attempt = Arc::new(LoginAttempt {
+                id: "fixture-attempt".to_owned(),
+                cancellation,
+                task: Mutex::new(AttemptTask::Complete(Err(error))),
+            });
+            let (state, outcome) = poll_attempt(&attempt).await;
+            assert_eq!(state, ProviderAccountLoginState::Failed);
+            assert_eq!(login_failure(&outcome.unwrap().unwrap_err()), expected);
+        }
+        // Cleanup keeps its distinct state and never exports its private reference.
+        let error =
+            ProviderAccountLoginError::Account(ProviderAccountError::CredentialCleanupRequired {
+                secret_ref: SecretRef::from_ulid(Ulid::generate()),
+            });
+        assert_eq!(login_failure(&error), None);
+        assert_eq!(login_failure(&ProviderAccountLoginError::Cancelled), None);
     }
 }

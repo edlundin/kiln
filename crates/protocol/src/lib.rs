@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.46.0";
+pub const PROTOCOL_VERSION: &str = "0.47.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -1206,11 +1206,25 @@ pub enum ProviderAccountLoginState {
     CleanupRequired,
 }
 
+/// Safe recovery categories. Never includes provider text, codes or vault references.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAccountLoginFailure {
+    Declined,
+    Expired,
+    ProviderUnavailable,
+    CredentialStoreUnavailable,
+    AccountStoreUnavailable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderAccountLoginResponse {
     pub attempt_id: String,
     pub state: ProviderAccountLoginState,
+    /// Present only for a failed attempt with a known recovery category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ProviderAccountLoginFailure>,
     pub account: ProviderAccountResponse,
 }
 

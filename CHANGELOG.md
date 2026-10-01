@@ -3,7 +3,9 @@
 ## 2026-10-01 — `fix`
 
 - EDL-308: Paste copied files and images as attachments while preserving plain
-  text editing and undo. ([pending])
+  text editing and undo. ([72408de](../../commit/72408de))
+- EDL-308: Keep attachment controls usable as the composer narrows and expose
+  the full scope on hover. ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 

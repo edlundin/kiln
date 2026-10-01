@@ -8,6 +8,7 @@ use gpui_component::{
     Disableable, Icon, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     input::{Paste, Textarea, TextareaState},
+    tooltip::Tooltip,
 };
 use kiln_protocol::{RunState, TaskState};
 
@@ -700,7 +701,7 @@ impl RenderOnce for Composer {
                 .on_click(move |event, window, cx| on_attach(event, window, cx))
         });
         let attachment_list = self.attachments.iter().enumerate().fold(
-            div().flex().flex_wrap().gap_1(),
+            div().min_w_0().max_w_full().flex().flex_wrap().gap_1(),
             |row, (index, attachment)| {
                 let remove = attachment.remove.clone();
                 let thumbnail = attachment
@@ -711,7 +712,10 @@ impl RenderOnce for Composer {
                     });
                 row.child(
                     div()
+                        .min_w_0()
+                        .max_w_full()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .px_1()
@@ -719,7 +723,7 @@ impl RenderOnce for Composer {
                         .border_color(theme::BORDER)
                         .rounded(theme::RADIUS_SMALL)
                         .when_some(thumbnail, |chip, thumbnail| chip.child(thumbnail.size_8()))
-                        .child(attachment.label.clone())
+                        .child(div().min_w_0().max_w_full().child(attachment.label.clone()))
                         .when_some(attachment.retry.clone(), |chip, retry| {
                             chip.child(
                                 Button::new(SharedString::from(format!(
@@ -759,7 +763,7 @@ impl RenderOnce for Composer {
             })
             .w_full()
             .max_w(theme::TRANSCRIPT_WIDTH)
-            .h(px(164.0))
+            .min_h(px(164.0))
             .flex()
             .flex_col()
             .gap_2()
@@ -770,7 +774,7 @@ impl RenderOnce for Composer {
             .rounded(theme::RADIUS_MEDIUM)
             .child(
                 Textarea::new(&self.input)
-                    .min_h_0()
+                    .min_h(px(80.0))
                     .flex_1()
                     .aria_label("Message to root Run")
                     .disabled(self.disabled),
@@ -778,6 +782,7 @@ impl RenderOnce for Composer {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .when_some(attachment_button, |row, button| row.child(button))
@@ -795,14 +800,23 @@ impl RenderOnce for Composer {
                             .id("composer-scope")
                             .role(Role::Label)
                             .aria_label(format!("Target: Root Run. Scope: {}", self.scope))
+                            .flex_1()
                             .min_w_0()
+                            .truncate()
                             .font_family(theme::MONO_FONT)
                             .text_size(px(12.0))
                             .line_height(px(18.0))
                             .text_color(theme::FAINT)
+                            .tooltip({
+                                let scope = self.scope.clone();
+                                move |window, cx| {
+                                    Tooltip::new(format!("Root Run · Scope: {scope}"))
+                                        .build(window, cx)
+                                }
+                            })
                             .child(format!("Root Run · Scope: {}", self.scope)),
                     )
-                    .child(action),
+                    .child(div().flex_none().child(action)),
             );
         div()
             .w_full()

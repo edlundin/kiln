@@ -405,6 +405,10 @@ Pasting copied files or image content into the composer adds attachments without
 inserting a filename as message text. Plain-text paste uses normal text editing
 and undo.
 
+Attachment labels and controls wrap as the composer narrows, and the message
+field retains a minimum height. Hover over a shortened scope label to read its
+full path; the accessibility label also retains the full scope.
+
 Attachments stay in the draft for their Session. A picker result is discarded
 if its Session or daemon connection changes before the dialog finishes. **Retry**
 retains successful uploads after a later file fails; **Remove** removes a file

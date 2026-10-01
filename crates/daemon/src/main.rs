@@ -630,7 +630,7 @@ fn deterministic_provider_registry() -> Result<ProviderRegistry, &'static str> {
     });
     let mut registry = ProviderRegistry::new();
     registry
-        .register(provider_type, model_id, account_id, provider)
+        .register_run_scoped_adapter(provider_type, model_id, account_id, provider)
         .map_err(|_| "duplicate provider registration")?;
     Ok(registry)
 }

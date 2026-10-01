@@ -23,7 +23,9 @@
 - EDL-314: Expose MCP form choice and optional-field selection state to
   assistive technology. ([EDL-314](https://linear.app/edlundin/issue/EDL-314), [543c79a](../../commit/543c79a))
 - EDL-322: Distinguish closed enrollment preparations from credential
-  retirement and make cleanup actions explicit. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+  retirement and make cleanup actions explicit. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [0256f61](../../commit/0256f61))
+- EDL-322: Allow deterministic Runs to execute validated shared model
+  defaults. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

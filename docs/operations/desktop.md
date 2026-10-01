@@ -295,6 +295,11 @@ write. A disconnected request may still finish in the daemon. Stale responses
 cannot restore editing state after reconnect. Sign in to an account below and
 reload the binding if no connected account is available.
 
+The deterministic executor can consume validated shared defaults for acceptance.
+The [EDL-322 fixture](../learning/edl-322.md#shared-default-consumer-continuation)
+checks binding failures and saved selection persistence with synthetic account
+metadata; it does not establish real provider-account acceptance.
+
 ## Provider accounts
 
 After connecting to the daemon, open **Settings** in the global toolbar. Provider

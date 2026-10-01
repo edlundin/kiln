@@ -1,6 +1,7 @@
 //! Direct model adapters. The first adapter is an explicit deterministic runtime.
 
 mod browser_auth;
+mod chatgpt_identity;
 mod codex_subscription_auth;
 mod device_code_auth;
 mod openai_api_auth;
@@ -13,6 +14,7 @@ mod responses_sse;
 mod responses_stream;
 
 pub use browser_auth::*;
+pub use chatgpt_identity::*;
 pub use codex_subscription_auth::*;
 pub use device_code_auth::*;
 pub use openai_api_auth::*;

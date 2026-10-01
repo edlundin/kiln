@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 base64 = "0.22.1"
 getrandom = "0.4.3"
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
 sha2.workspace = true
 kiln-core = { path = "../core" }
 reqwest.workspace = true

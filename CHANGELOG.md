@@ -5,7 +5,9 @@
 - EDL-308: Paste copied files and images as attachments while preserving plain
   text editing and undo. ([72408de](../../commit/72408de))
 - EDL-308: Document native file-drop and attachment-only submission acceptance
-  with exact stored-artifact verification. ([EDL-308](https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance), [3ef0a95](../../commit/3ef0a95))
+  with exact stored-artifact verification. ([EDL-308](https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance), [3ef0a95](../../commit/31b4c59))
+- EDL-342: Add bounded verification for direct ChatGPT ID-token identities.
+  ([EDL-342](https://linear.app/edlundin/issue/EDL-342/complete-a-text-only-codex-subscription-run), [pending])
 - EDL-308: Keep attachment controls usable as the composer narrows and expose
   the full scope on hover. ([92f271d](../../commit/92f271d))
 - EDL-341: Explain failed sign-ins with safe, actionable recovery guidance.
@@ -23,37 +25,37 @@
 - EDL-308 and EDL-341: Clarify retained-session recovery and record the
   remaining native acceptance gates. ([289bb70](../../commit/289bb70))
 - EDL-314: Expose MCP form choice and optional-field selection state to
-  assistive technology. ([EDL-314](https://linear.app/edlundin/issue/EDL-314), [543c79a](../../commit/543c79a))
+  assistive technology. ([EDL-314](https://linear.app/edlundin/issue/EDL-314), [543c79a](../../commit/5200461))
 - EDL-322: Distinguish closed enrollment preparations from credential
-  retirement and make cleanup actions explicit. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [0256f61](../../commit/0256f61))
+  retirement and make cleanup actions explicit. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [0256f61](../../commit/1d07805))
 - EDL-322: Allow deterministic Runs to execute validated shared model
-  defaults. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [ba95d4e](../../commit/ba95d4e))
+  defaults. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [ba95d4e](../../commit/bc3a027))
 - EDL-322: Document deterministic follower execution from shared defaults,
-  restart persistence and credential cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [065288c](../../commit/065288c))
+  restart persistence and credential cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [065288c](../../commit/459521d))
 - EDL-322: Document automatic follower refresh, offline recovery, later
-  publication and restart rechecks. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [15aff4d](../../commit/15aff4d))
+  publication and restart rechecks. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [15aff4d](../../commit/d81b6f7))
 - EDL-322: Update the follower listener and refresh guides with verified scope
-  and limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [15aff4d](../../commit/15aff4d))
+  and limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [15aff4d](../../commit/d81b6f7))
 - EDL-322: Document listener expiry, pending-handshake closure and credential
-  cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [056e9ab](../../commit/056e9ab))
+  cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [056e9ab](../../commit/bd1a4de))
 - EDL-322: Update the listener guide with verified lifecycle scope and
-  remaining limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [056e9ab](../../commit/056e9ab))
+  remaining limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [056e9ab](../../commit/bd1a4de))
 - EDL-322: Document pinned TLS rejection of wrong peers and safe retry
-  evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [3c3c3b7](../../commit/3c3c3b7))
+  evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [3c3c3b7](../../commit/4f11903))
 - EDL-322: Document portable MCP and skill bundle delivery and validation
-  evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [dd91159](../../commit/dd91159))
+  evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [dd91159](../../commit/ebdec23))
 - EDL-341: Let connected Codex accounts refresh credentials explicitly in
-  Settings. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [a74e859](../../commit/a74e859))
+  Settings. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [a74e859](../../commit/b6969ea))
 - EDL-341: Reject stale credential snapshots and resolve pending vault cleanup
-  before provider I/O. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [a74e859](../../commit/a74e859))
+  before provider I/O. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [a74e859](../../commit/b6969ea))
 - EDL-341: Document native Keep, Disconnect, credential cleanup and
-  same-account reauthentication across restart. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [e3db66c](../../commit/e3db66c))
+  same-account reauthentication across restart. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [e3db66c](../../commit/b7f01f2))
 - EDL-341: Distinguish unavailable credential vault access and show native
-  recovery guidance. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [079b77b](../../commit/079b77b))
+  recovery guidance. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [079b77b](../../commit/03c930e))
 - EDL-341: Explain invalid credential recovery in Settings and document native
-  cancellation, reauthentication and cleanup evidence. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [217b09a](../../commit/217b09a))
+  cancellation, reauthentication and cleanup evidence. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [217b09a](../../commit/ab7d5fe))
 - EDL-341: Map documented permanent refresh-token errors to reauthentication
-  while preserving transient provider failures. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
+  while preserving transient provider failures. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [5a55f3d](../../commit/9ce65f8))
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

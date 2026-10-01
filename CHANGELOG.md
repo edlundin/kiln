@@ -27,7 +27,11 @@
 - EDL-322: Allow deterministic Runs to execute validated shared model
   defaults. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [ba95d4e](../../commit/ba95d4e))
 - EDL-322: Document deterministic follower execution from shared defaults,
-  restart persistence and credential cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+  restart persistence and credential cleanup evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [065288c](../../commit/065288c))
+- EDL-322: Document automatic follower refresh, offline recovery, later
+  publication and restart rechecks. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
+- EDL-322: Update the follower listener and refresh guides with verified scope
+  and limitations. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

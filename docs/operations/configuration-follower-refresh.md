@@ -59,3 +59,9 @@ matching observed/applied revisions do not substitute for a successful check.
 
 See the [configuration synchronization contract](../spec/configuration-sync.md)
 for the authority, enrollment, validation and application rules.
+
+A disposable macOS fixture exercised automatic nonempty snapshot application,
+offline stale status and recovery, later publication, restart rechecks, grant
+revocation and inactive retirement over pinned TLS with real configuration
+Keychain entries. See [EDL-322 evidence](../learning/edl-322.md) for the explicit
+fixture settings and remaining native, provider and platform limitations.

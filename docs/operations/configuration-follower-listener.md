@@ -55,5 +55,8 @@ before store teardown.
 A disposable macOS two-instance fixture exercised pinned TLS enrollment,
 OS-vault persistence across restart, snapshot application, grant revocation,
 remote-route isolation and explicit credential cleanup. See
-[EDL-322 evidence](../learning/edl-322.md). Native interaction, nonempty shared
-content consumers and abnormal listener-lifecycle cases remain unverified.
+[EDL-322 evidence](../learning/edl-322.md). Later fixtures also exercised
+nonempty shared model defaults with deterministic Runs, automatic refresh,
+offline recovery and listener closure after identity retirement. Native
+interaction, real providers, MCP/skill consumers and abnormal
+cancellation/expiry/role-loss remain unverified.

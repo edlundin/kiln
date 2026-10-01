@@ -316,7 +316,8 @@ fn phase_label(phase: Phase) -> &'static str {
     match phase {
         Phase::Reserved => "Preparation incomplete",
         Phase::Prepared => "Prepared",
-        Phase::Retired => "Retired",
+        // Approval closes preparation while retaining the active credential.
+        Phase::Retired => "Preparation closed",
     }
 }
 
@@ -400,13 +401,21 @@ impl Render for FollowerEnrollment {
                     "Pinned CA fingerprint",
                     enrollment.certificate_authority_fingerprint.clone(),
                 ),
-                ("Enrollment phase", phase_label(enrollment.phase).to_owned()),
+                (
+                    "Preparation phase",
+                    phase_label(enrollment.phase).to_owned(),
+                ),
                 (
                     "Last exchange result",
                     exchange_label(enrollment.exchange_result).to_owned(),
                 ),
             ] {
                 view = view.child(div().text_sm().child(format!("{label}: {value}")));
+            }
+            if enrollment.phase == Phase::Retired {
+                view = view.child(div().text_sm().text_color(theme::MUTED).child(
+                    "A closed preparation may still have an active credential after approval. Retire it explicitly, or retry any outstanding cleanup.",
+                ));
             }
             if let Some(receipt) = &enrollment.last_observed_receipt {
                 let fingerprint = receipt.credential_fingerprint.clone();
@@ -480,7 +489,7 @@ impl Render for FollowerEnrollment {
                 view = view.child(
                     Button::new("retire-follower-enrollment")
                         .label(if enrollment.phase == Phase::Retired {
-                            "Retry credential cleanup…"
+                            "Retire enrollment / retry cleanup…"
                         } else {
                             "Retire enrollment…"
                         })

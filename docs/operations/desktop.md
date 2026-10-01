@@ -225,14 +225,22 @@ snapshot. Reload the attempt to see its receipt and **Copy request fingerprint**
 compare that fingerprint on the master before approving, then exchange again to
 observe approval. Refresh the configuration status section after a role change.
 
+**Preparation closed** describes a finalized preparation, not the current
+credential or grant. Approval closes preparation while retaining a credential
+for snapshot reads. The stored approval remains historical after revocation or
+local credential retirement.
+
 **Retire enrollment…** permanently retires the attempt and deletes its local vault
 credential after confirmation. This does not leave an existing follower role,
-remove a stored snapshot, or revoke the master’s grant. **Retry credential
-cleanup…** remains available on retired attempts for uncertain or failed vault
-deletion. After any uncertain operation, reload the same attempt before retrying.
+remove a stored snapshot, or revoke the master’s grant. **Retire enrollment /
+retry cleanup…** remains available on closed preparations to explicitly retire
+an active credential or retry uncertain or failed deletion. After any uncertain
+operation, reload the same attempt before retrying.
 Disconnect discards unsubmitted confirmation and ignores stale replies, but an
 accepted daemon operation may still finish. Receipt status is historical; it does
 not prove current connectivity or that a grant has not subsequently been revoked.
+See [EDL-322 evidence](../learning/edl-322.md) for the observed two-instance
+TLS/vault path and remaining native acceptance limits.
 
 ## Master enrollment decisions
 

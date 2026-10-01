@@ -21,9 +21,12 @@
 - EDL-308 and EDL-341: Clarify retained-session recovery and record the
   remaining native acceptance gates. ([289bb70](../../commit/289bb70))
 - EDL-314: Expose MCP form choice and optional-field selection state to
-  assistive technology. ([EDL-314](https://linear.app/edlundin/issue/EDL-314), [pending])
+  assistive technology. ([EDL-314](https://linear.app/edlundin/issue/EDL-314), [543c79a](../../commit/543c79a))
+- EDL-322: Distinguish closed enrollment preparations from credential
+  retirement and make cleanup actions explicit. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
+EDL-322: https://linear.app/edlundin/issue/EDL-322
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 EDL-341: https://linear.app/edlundin/issue/EDL-341

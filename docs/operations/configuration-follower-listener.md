@@ -52,5 +52,8 @@ daemon command permit as local writes. Canceling the network handler therefore
 does not cancel the accepted storage operation; shutdown waits for that permit
 before store teardown.
 
-The daemon's TLS composition and lifecycle are compile-checked, but live TLS,
-vault, and remote HTTP behavior have not been exercised.
+A disposable macOS two-instance fixture exercised pinned TLS enrollment,
+OS-vault persistence across restart, snapshot application, grant revocation,
+remote-route isolation and explicit credential cleanup. See
+[EDL-322 evidence](../learning/edl-322.md). Native interaction, nonempty shared
+content consumers and abnormal listener-lifecycle cases remain unverified.

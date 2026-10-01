@@ -374,6 +374,10 @@ inspect the durable state; once it is `reauth_required`, **Refresh credentials**
 is no longer available. Choose **Disconnect**, then start a new sign-in. Native
 acceptance exercised this path with a never-issued synthetic token against the
 provider endpoint; it does not demonstrate expiry of a previously valid grant.
+OpenAI documents `invalid_refresh_token` and `token_expired` as permanent refresh
+errors; Kiln maps them to this reauthentication path. The focused expiry fixtures
+also ensure `invalid_client`, `temporarily_unavailable`, and `unknown_error` do
+not invalidate the grant. See [the EDL-341 code-mapping and recovery evidence](../learning/edl-341.md#documented-permanent-refresh-error-codes).
 See [EDL-341 invalid-token evidence](../learning/edl-341.md#native-cancellation-and-invalid-token-recovery).
 
 Closing Settings does not cancel sign-in. Reconnecting the desktop discards its
@@ -397,9 +401,12 @@ They did not open an authorization page. Later isolated macOS acceptance
 completed real browser sign-in, explicit credential refresh, confirmed
 disconnect and same-account reauthentication; see
 [EDL-341 evidence](../learning/edl-341.md#native-keep-disconnect-and-same-account-reauthentication).
-The disconnected terminal visual state, actual invalid/expired credentials,
-broader OS-vault failure modes and minimum-window layout remain unverified. A
-controlled process-scoped vault denial is recorded in the EDL-341 evidence note.
+Natural expiry of a previously valid credential, broader OS-vault failure
+modes and minimum-window layout remain unverified. Synthetic invalid-token
+recovery and the focused documented-code fixtures are recorded in the EDL-341
+evidence note; the fixture choice satisfies
+the scoped expiry-mapping gate without claiming natural grant expiry. A
+controlled process-scoped vault denial is also recorded there.
 
 On the isolated connected account, **Keep account** dismissed the confirmation
 without changing the account or Session Events. Confirmed **Disconnect** removed

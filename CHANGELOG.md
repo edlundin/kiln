@@ -5,7 +5,7 @@
 - EDL-308: Paste copied files and images as attachments while preserving plain
   text editing and undo. ([72408de](../../commit/72408de))
 - EDL-308: Document native file-drop and attachment-only submission acceptance
-  with exact stored-artifact verification. ([EDL-308](https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance), [pending])
+  with exact stored-artifact verification. ([EDL-308](https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance), [3ef0a95](../../commit/3ef0a95))
 - EDL-308: Keep attachment controls usable as the composer narrows and expose
   the full scope on hover. ([92f271d](../../commit/92f271d))
 - EDL-341: Explain failed sign-ins with safe, actionable recovery guidance.
@@ -52,6 +52,8 @@
   recovery guidance. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [079b77b](../../commit/079b77b))
 - EDL-341: Explain invalid credential recovery in Settings and document native
   cancellation, reauthentication and cleanup evidence. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [217b09a](../../commit/217b09a))
+- EDL-341: Map documented permanent refresh-token errors to reauthentication
+  while preserving transient provider failures. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

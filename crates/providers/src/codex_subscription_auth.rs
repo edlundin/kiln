@@ -336,12 +336,36 @@ fn valid_token(value: &str) -> bool {
 
 fn is_permanent_error_code(code: &str) -> bool {
     [
+        "invalid_refresh_token",
+        "token_expired",
         "refresh_token_expired",
         "refresh_token_reused",
         "refresh_token_invalidated",
     ]
     .iter()
     .any(|expected| code.eq_ignore_ascii_case(expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_permanent_error_code;
+
+    #[test]
+    fn documented_unusable_refresh_tokens_require_reauthentication() {
+        for code in [
+            "invalid_refresh_token",
+            "token_expired",
+            "refresh_token_expired",
+            "refresh_token_reused",
+            "refresh_token_invalidated",
+        ] {
+            assert!(is_permanent_error_code(code), "{code}");
+        }
+        // Client configuration and service failures must not invalidate a grant.
+        for code in ["invalid_client", "temporarily_unavailable", "unknown_error"] {
+            assert!(!is_permanent_error_code(code), "{code}");
+        }
+    }
 }
 
 fn validate_id_token_account(

@@ -45,7 +45,9 @@
 - EDL-341: Reject stale credential snapshots and resolve pending vault cleanup
   before provider I/O. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [a74e859](../../commit/a74e859))
 - EDL-341: Document native Keep, Disconnect, credential cleanup and
-  same-account reauthentication across restart. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
+  same-account reauthentication across restart. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [e3db66c](../../commit/e3db66c))
+- EDL-341: Distinguish unavailable credential vault access and show native
+  recovery guidance. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

@@ -358,6 +358,16 @@ if reauthentication is required, disconnect the account and sign in again.
 See [EDL-341 evidence](../learning/edl-341.md#native-browser-sign-in-and-explicit-refresh)
 for the observed OAuth, Keychain rotation, stale-timestamp and restart results.
 
+If the daemon reports `provider_account_credential_store_unavailable`, restore
+vault access on the daemon host, then choose **Refresh accounts** to inspect the
+current account state. Credential actions remain disabled until that reload
+completes. If the refreshed state requires sign-in, disconnect the account and
+sign in again. A controlled macOS test denied the restricted daemon's
+`com.apple.SecurityServer` lookup and verified this 503 recovery path while
+leaving the original Keychain entry intact; it does not establish system-wide
+Keychain unavailability or other vault failure modes. See the
+[EDL-341 denial evidence](../learning/edl-341.md#controlled-macos-credential-vault-denial).
+
 Closing Settings does not cancel sign-in. Reconnecting the desktop discards its
 connection-scoped attempt display; refresh the accounts to recover the durable
 state. An unfinished connecting or disconnected account can start a replacement
@@ -380,7 +390,8 @@ completed real browser sign-in, explicit credential refresh, confirmed
 disconnect and same-account reauthentication; see
 [EDL-341 evidence](../learning/edl-341.md#native-keep-disconnect-and-same-account-reauthentication).
 The disconnected terminal visual state, actual invalid/expired credentials,
-unavailable OS vault and minimum-window layout remain unverified.
+broader OS-vault failure modes and minimum-window layout remain unverified. A
+controlled process-scoped vault denial is recorded in the EDL-341 evidence note.
 
 On the isolated connected account, **Keep account** dismissed the confirmation
 without changing the account or Session Events. Confirmed **Disconnect** removed

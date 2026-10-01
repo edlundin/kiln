@@ -345,7 +345,15 @@ impl AccountSettings {
                     },
                 )
                 .await
-                .map_err(|error| connection::error_message("Refresh account credentials", &error));
+                .map_err(|error| match &error {
+                    kiln_client::Error::Api { problem, .. }
+                        if problem.code
+                            == kiln_protocol::error_code::PROVIDER_ACCOUNT_CREDENTIAL_STORE_UNAVAILABLE =>
+                    {
+                        "Credential vault unavailable on the daemon host. Restore vault access.".to_owned()
+                    }
+                    _ => connection::error_message("Refresh account credentials", &error),
+                });
             let _ = updates.send(Update::Refreshed { result });
         });
         cx.notify();

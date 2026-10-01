@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub const PROTOCOL_VERSION: &str = "0.48.0";
+pub const PROTOCOL_VERSION: &str = "0.49.0";
 pub const WEBSOCKET_CAPABILITY: &str = "kiln.events.websocket";
 pub const DETERMINISTIC_SUBPROCESS_CAPABILITY: &str = "kiln.deterministic.subprocess";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
@@ -322,6 +322,8 @@ pub mod error_code {
     pub const PROVIDER_ACCOUNT_LOGIN_FAILED: &str = "provider_account_login_failed";
     pub const PROVIDER_ACCOUNT_CLEANUP_REQUIRED: &str = "provider_account_cleanup_required";
     pub const PROVIDER_ACCOUNT_REFRESH_UNAVAILABLE: &str = "provider_account_refresh_unavailable";
+    pub const PROVIDER_ACCOUNT_CREDENTIAL_STORE_UNAVAILABLE: &str =
+        "provider_account_credential_store_unavailable";
     pub const PROVIDER_ACCOUNT_REAUTH_REQUIRED: &str = "provider_account_reauth_required";
 
     pub const ALL: &[&str] = &[
@@ -429,6 +431,7 @@ pub mod error_code {
         PROVIDER_ACCOUNT_LOGIN_FAILED,
         PROVIDER_ACCOUNT_CLEANUP_REQUIRED,
         PROVIDER_ACCOUNT_REFRESH_UNAVAILABLE,
+        PROVIDER_ACCOUNT_CREDENTIAL_STORE_UNAVAILABLE,
         PROVIDER_ACCOUNT_REAUTH_REQUIRED,
     ];
 }

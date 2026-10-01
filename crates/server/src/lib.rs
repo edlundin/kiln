@@ -4436,8 +4436,8 @@ impl PublicError {
                     "Provider account store unavailable",
                 ),
                 ProviderAccountOperationError::CredentialStoreUnavailable => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    error_code::PROVIDER_ACCOUNT_STORE_UNAVAILABLE,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_code::PROVIDER_ACCOUNT_CREDENTIAL_STORE_UNAVAILABLE,
                     "Provider account credential store unavailable",
                 ),
                 ProviderAccountOperationError::CleanupRequired => (

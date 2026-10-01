@@ -376,24 +376,28 @@ The protocol Debug representation redacts browser authorization URLs.
 Earlier native checks inspected the global Settings layout, account-list empty
 state, browser preparation and cancellation against an isolated local daemon.
 They did not open an authorization page. Later isolated macOS acceptance
-completed real browser sign-in and explicit credential refresh; see
-[EDL-341 evidence](../learning/edl-341.md#native-browser-sign-in-and-explicit-refresh).
-Failure-state layout, disconnect/Keep account/reauthentication, actual
-invalid/expired credentials, unavailable OS vault and minimum-window layout
-remain unverified.
+completed real browser sign-in, explicit credential refresh, confirmed
+disconnect and same-account reauthentication; see
+[EDL-341 evidence](../learning/edl-341.md#native-keep-disconnect-and-same-account-reauthentication).
+The disconnected terminal visual state, actual invalid/expired credentials,
+unavailable OS vault and minimum-window layout remain unverified.
 
-The local disconnect continuation was also inspected against an isolated daemon
-with an empty account: confirmation, Keep account, and successful disconnect with
-account refresh were observed. Credential deletion, concurrent cancellation, and
-failure/retry layouts were not exercised at runtime.
+On the isolated connected account, **Keep account** dismissed the confirmation
+without changing the account or Session Events. Confirmed **Disconnect** removed
+the daemon's credential reference and the local Keychain entry without revoking
+provider access. A new browser sign-in reused the same account ID and restored its
+connected state. Credential deletion and same-account reauthentication are
+recorded in [EDL-341 evidence](../learning/edl-341.md#native-keep-disconnect-and-same-account-reauthentication).
+Concurrent cancellation and failure/retry layouts remain unverified.
 
 The EDL-341 continuation exercised the real daemon's local callback listener:
 invalid state remained pending, a matching declined callback reported `declined`,
 replacement rejected the stale attempt, cancellation remained distinct, and
 restart preserved the account for disconnect and reauthentication. Focused
 terminal-error fixtures checked expiry and vault/storage failure mapping.
-Native failure layout and live OAuth/vault acceptance remain unverified; see
-[the EDL-341 evidence and isolated scenario](../learning/edl-341.md).
+At that earlier callback checkpoint, native failure layout and live OAuth/vault
+acceptance remained unverified; later live evidence is recorded in
+[the EDL-341 learning note](../learning/edl-341.md).
 
 Settings preserves its full content height when centered, allowing the provider
 section to be reached by scrolling. Native sign-in preparation and access to

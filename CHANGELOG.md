@@ -41,9 +41,11 @@
 - EDL-322: Document portable MCP and skill bundle delivery and validation
   evidence. ([EDL-322](https://linear.app/edlundin/issue/EDL-322), [dd91159](../../commit/dd91159))
 - EDL-341: Let connected Codex accounts refresh credentials explicitly in
-  Settings. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
+  Settings. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [a74e859](../../commit/a74e859))
 - EDL-341: Reject stale credential snapshots and resolve pending vault cleanup
-  before provider I/O. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
+  before provider I/O. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [a74e859](../../commit/a74e859))
+- EDL-341: Document native Keep, Disconnect, credential cleanup and
+  same-account reauthentication across restart. ([EDL-341](https://linear.app/edlundin/issue/EDL-341), [pending])
 
 EDL-314: https://linear.app/edlundin/issue/EDL-314
 EDL-322: https://linear.app/edlundin/issue/EDL-322

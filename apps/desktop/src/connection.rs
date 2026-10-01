@@ -64,6 +64,7 @@ pub struct Submission {
     pub child_activity: Option<kiln_protocol::ChildActivityReference>,
     pub message_appended: bool,
     pub append_uncertain: bool,
+    pub append_retry_ready: bool,
 }
 
 #[derive(Clone)]
@@ -379,7 +380,10 @@ pub async fn submit(
             )
             .await;
         match append_result {
-            Ok(_) => submission.message_appended = true,
+            Ok(_) => {
+                submission.message_appended = true;
+                submission.append_uncertain = false;
+            }
             Err(error) if append_result_is_uncertain(&error) => {
                 submission.append_uncertain = true;
                 return Err(

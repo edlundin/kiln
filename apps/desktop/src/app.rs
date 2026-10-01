@@ -566,7 +566,7 @@ impl Desktop {
         if self
             .pending
             .as_ref()
-            .is_some_and(|pending| pending.append_uncertain)
+            .is_some_and(|pending| pending.append_uncertain && !pending.append_retry_ready)
         {
             return;
         }
@@ -618,7 +618,10 @@ impl Desktop {
             child_activity: self.reaction.as_ref().map(|draft| draft.reference.clone()),
             message_appended: false,
             append_uncertain: false,
+            append_retry_ready: false,
         });
+        // Each uncertain append needs a fresh history load before an exact retry.
+        submission.append_retry_ready = false;
         let client = connected.client.clone();
         let session = session_id.clone();
         let root = connected.workspace.roots[0].workspace_root_id.clone();
@@ -1807,6 +1810,17 @@ impl Desktop {
         self.focused_run = None;
         self.show_runs = false;
         self.error = None;
+        if let Some(pending) = self
+            .pending
+            .as_mut()
+            .filter(|pending| pending.append_uncertain)
+        {
+            pending.append_retry_ready = true;
+            self.error = Some(
+                "Message submission was uncertain. History is refreshed; review it, then Retry the same submission."
+                    .to_owned(),
+            );
+        }
         self.event_generation = self.event_generation.wrapping_add(1);
         self.request_sessions(workspace_id);
         self.subscribe(self.event_generation);
@@ -4331,14 +4345,23 @@ impl Render for Desktop {
                         .text_color(theme::DANGER)
                         .child(div().flex_1().child(error))
                         .when(
-                            self.pending
-                                .as_ref()
-                                .is_some_and(|pending| !pending.append_uncertain)
-                                || self.pending_child_start.is_some(),
+                            self.pending.as_ref().is_some_and(|pending| {
+                                !pending.append_uncertain || pending.append_retry_ready
+                            }) || self.pending_child_start.is_some(),
                             |row| {
                                 row.child(
                                     Button::new("retry-command")
-                                        .label("Retry")
+                                        .label(
+                                            if self
+                                                .pending
+                                                .as_ref()
+                                                .is_some_and(|pending| pending.append_uncertain)
+                                            {
+                                                "Retry same submission"
+                                            } else {
+                                                "Retry"
+                                            },
+                                        )
                                         .disabled(self.busy || !self.online)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.retry(window, cx)

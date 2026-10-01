@@ -9,7 +9,9 @@
 - EDL-341: Explain failed sign-ins with safe, actionable recovery guidance.
   ([1094c98](../../commit/1094c98))
 - EDL-341: Scroll Settings to the provider account section and its sign-in
-  controls. ([pending])
+  controls. ([6f1e228](../../commit/6f1e228))
+- EDL-308: Retry uncertain submissions explicitly after refreshing history,
+  without duplicating a saved Message. ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 EDL-341: https://linear.app/edlundin/issue/EDL-341

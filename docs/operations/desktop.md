@@ -436,7 +436,11 @@ if its Session or daemon connection changes before the dialog finishes. **Retry*
 retains successful uploads after a later file fails; **Remove** removes a file
 from an unsent request. Attachment edits are disabled while a request is in
 flight or its message is already appended or has an uncertain outcome. Reconnect
-and review history before deciding how to recover an uncertain submission.
+and review the refreshed history, then use **Retry same submission** to recover an
+uncertain append. This reuses the original content, attachments and idempotency
+key; it does not append a second Message if the first attempt was saved. Draft
+edits stay locked until the append is confirmed. Reconnect never retries a
+submission automatically.
 
 Attachment-only messages are supported. Blank messages without attachments are
 rejected. [EDL-308 evidence](../learning/edl-308.md) distinguishes public-protocol

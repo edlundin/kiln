@@ -17,7 +17,9 @@
 - EDL-341: Document native callback recovery and the remaining account
   acceptance limits. ([0eb3009](../../commit/0eb3009))
 - EDL-341: Shut down gracefully after terminal provider sign-in failures while
-  preserving credential-cleanup safeguards. ([pending])
+  preserving credential-cleanup safeguards. ([afb5df1](../../commit/afb5df1))
+- EDL-308 and EDL-341: Clarify retained-session recovery and record the
+  remaining native acceptance gates. ([pending])
 
 EDL-308: https://linear.app/edlundin/issue/EDL-308/resolve-attachment-only-persistence-and-finish-attachment-acceptance
 EDL-341: https://linear.app/edlundin/issue/EDL-341

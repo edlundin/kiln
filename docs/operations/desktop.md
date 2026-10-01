@@ -518,7 +518,8 @@ delivered reaction also includes a stored projection of the selected Event.
 The projection does not copy the full child transcript or artifact bytes. The
 replayed reaction shows its source Run and Event. A failed submission keeps its
 original root, text, reference, and idempotency key for Retry; it never silently
-targets a new root. Reconnect clears the pending root submission and selection.
+targets a new root. Reconnect to the same Session and daemon store retains the
+pending submission and reference.
 
 New child starts an unlinked interactive child under the active root. It
 inherits the root's requested repository scope and uses `ask` approval policy.
@@ -544,19 +545,19 @@ The desktop does not retry commands automatically. A failed message submission
 or Run start that is safe to retry keeps its pending submission and original
 idempotency key, and shows Retry. Failed cancellation and approval commands do
 not show Retry. If appending a new user message ends with a transport or decode
-error, its result is uncertain: the daemon might have stored it. Retry is
-disabled in this case. Reconnect and review the restored history before you
-send another message.
+error, its result is uncertain: the daemon might have stored it. Retry stays
+disabled until Reconnect successfully reloads the history. Review that history,
+then use **Retry** to recover the same submission with its original payload and
+idempotency key. Draft edits remain locked until append confirmation. Another
+uncertain append requires another history refresh before Retry becomes available.
 
 If the event stream closes or reports an error, the daemon and Run continue.
-Use Reconnect. Reconnection reloads the Session history, clears any pending
-root submission and child-activity reference, and opens a new event subscription.
-It retains a pending child
-start only for the same Session and daemon store identity. Child guidance
-drafts and retry requests remain in memory when reconnecting to that same
-Session and store. Switching Sessions keeps them under their original Session
-ID while the daemon store is unchanged. Switching to a different daemon store
-clears them.
+Use Reconnect. Reconnection reloads the Session history and opens a new event
+subscription. Pending submissions, attachment drafts, child-activity references,
+child starts and guidance remain in memory under their original Session ID when
+reconnecting to the same daemon store. Switching Sessions restores only that
+Session's saved draft and retry state. Switching to a different daemon store
+clears this state. Reconnect never submits or retries a command automatically.
 
 ## Current boundaries
 
